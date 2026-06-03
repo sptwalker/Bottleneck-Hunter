@@ -1,0 +1,28 @@
+{
+  "sector": "人形机器人",
+  "end_product": "人形机器人",
+  "max_depth": 4,
+  "nodes": [
+    {"name": "人形机器人", "description": "通用人形机器人整机", "layer": 0, "layer_type": "end_product"},
+    {"name": "伺服电机", "description": "关节驱动核心部件", "layer": 1, "layer_type": "component"},
+    {"name": "减速器", "description": "精密传动装置", "layer": 1, "layer_type": "component"},
+    {"name": "力传感器", "description": "六维力/力矩传感", "layer": 1, "layer_type": "component"},
+    {"name": "灵巧手", "description": "仿人手末端执行器", "layer": 1, "layer_type": "assembly"},
+    {"name": "视觉系统", "description": "3D视觉感知模块", "layer": 1, "layer_type": "component"},
+    {"name": "电机磁体", "description": "高性能钕铁硼永磁材料", "layer": 2, "layer_type": "material"},
+    {"name": "精密轴承", "description": "高精度轴承钢", "layer": 2, "layer_type": "sub_component"},
+    {"name": "柔性触觉传感器", "description": "灵巧手触觉感知", "layer": 2, "layer_type": "sub_component"},
+    {"name": "稀土原料", "description": "钕铁硼上游稀土元素", "layer": 3, "layer_type": "raw_material"}
+  ],
+  "links": [
+    {"upstream": "伺服电机", "downstream": "人形机器人", "dependency": 0.9, "alternatives": 1},
+    {"upstream": "减速器", "downstream": "人形机器人", "dependency": 0.95, "alternatives": 0},
+    {"upstream": "力传感器", "downstream": "人形机器人", "dependency": 0.8, "alternatives": 2},
+    {"upstream": "灵巧手", "downstream": "人形机器人", "dependency": 0.85, "alternatives": 1},
+    {"upstream": "视觉系统", "downstream": "人形机器人", "dependency": 0.7, "alternatives": 2},
+    {"upstream": "电机磁体", "downstream": "伺服电机", "dependency": 0.9, "alternatives": 0},
+    {"upstream": "精密轴承", "downstream": "减速器", "dependency": 0.85, "alternatives": 1},
+    {"upstream": "柔性触觉传感器", "downstream": "灵巧手", "dependency": 0.9, "alternatives": 0},
+    {"upstream": "稀土原料", "downstream": "电机磁体", "dependency": 1.0, "alternatives": 0}
+  ]
+}

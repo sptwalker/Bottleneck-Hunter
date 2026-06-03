@@ -1,0 +1,26 @@
+{
+  "sector": "商业航天",
+  "end_product": "商业运载火箭",
+  "max_depth": 4,
+  "nodes": [
+    {"name": "商业运载火箭", "description": "可重复使用商业运载火箭", "layer": 0, "layer_type": "end_product"},
+    {"name": "液体火箭发动机", "description": "主动力发动机", "layer": 1, "layer_type": "component"},
+    {"name": "航天电子设备", "description": "飞行控制和遥测系统", "layer": 1, "layer_type": "component"},
+    {"name": "复合材料壳段", "description": "轻量化箭体结构", "layer": 1, "layer_type": "component"},
+    {"name": "推进剂贮箱", "description": "低温燃料储罐", "layer": 1, "layer_type": "component"},
+    {"name": "涡轮泵", "description": "发动机核心精密部件", "layer": 2, "layer_type": "sub_component"},
+    {"name": "抗辐射芯片", "description": "航天级高可靠芯片", "layer": 2, "layer_type": "sub_component"},
+    {"name": "碳纤维预浸料", "description": "复合材料基材", "layer": 2, "layer_type": "material"},
+    {"name": "高温合金", "description": "发动机燃烧室材料", "layer": 2, "layer_type": "material"}
+  ],
+  "links": [
+    {"upstream": "液体火箭发动机", "downstream": "商业运载火箭", "dependency": 0.95, "alternatives": 0},
+    {"upstream": "航天电子设备", "downstream": "商业运载火箭", "dependency": 0.8, "alternatives": 1},
+    {"upstream": "复合材料壳段", "downstream": "商业运载火箭", "dependency": 0.7, "alternatives": 2},
+    {"upstream": "推进剂贮箱", "downstream": "商业运载火箭", "dependency": 0.85, "alternatives": 1},
+    {"upstream": "涡轮泵", "downstream": "液体火箭发动机", "dependency": 0.95, "alternatives": 0},
+    {"upstream": "抗辐射芯片", "downstream": "航天电子设备", "dependency": 0.9, "alternatives": 1},
+    {"upstream": "碳纤维预浸料", "downstream": "复合材料壳段", "dependency": 0.85, "alternatives": 1},
+    {"upstream": "高温合金", "downstream": "液体火箭发动机", "dependency": 0.9, "alternatives": 0}
+  ]
+}

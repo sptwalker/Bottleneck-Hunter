@@ -1,0 +1,28 @@
+{
+  "sector": "GPU/AI算力",
+  "end_product": "GPU",
+  "max_depth": 4,
+  "nodes": [
+    {"name": "GPU", "description": "AI训练/推理用GPU芯片", "layer": 0, "layer_type": "end_product"},
+    {"name": "HBM高带宽内存", "description": "GPU与内存间高速数据通道", "layer": 1, "layer_type": "assembly"},
+    {"name": "光模块", "description": "数据中心光电信号转换", "layer": 1, "layer_type": "component"},
+    {"name": "芯片封装测试", "description": "先进封装(如CoWoS)", "layer": 1, "layer_type": "component"},
+    {"name": "PCB/高速覆铜板", "description": "高速信号传输基板", "layer": 1, "layer_type": "component"},
+    {"name": "高速激光器", "description": "光模块核心发光器件", "layer": 2, "layer_type": "sub_component"},
+    {"name": "磷化铟衬底", "description": "激光器和探测器基底材料", "layer": 3, "layer_type": "material"},
+    {"name": "TSV硅通孔", "description": "HBM 3D堆叠互连技术", "layer": 2, "layer_type": "sub_component"},
+    {"name": "光刻胶", "description": "芯片制造光刻用感光材料", "layer": 2, "layer_type": "material"},
+    {"name": "TEC热电制冷器", "description": "光模块温控器件", "layer": 2, "layer_type": "sub_component"}
+  ],
+  "links": [
+    {"upstream": "HBM高带宽内存", "downstream": "GPU", "dependency": 0.9, "alternatives": 1},
+    {"upstream": "光模块", "downstream": "GPU", "dependency": 0.85, "alternatives": 0},
+    {"upstream": "芯片封装测试", "downstream": "GPU", "dependency": 0.9, "alternatives": 2},
+    {"upstream": "PCB/高速覆铜板", "downstream": "GPU", "dependency": 0.6, "alternatives": 3},
+    {"upstream": "高速激光器", "downstream": "光模块", "dependency": 0.95, "alternatives": 0},
+    {"upstream": "磷化铟衬底", "downstream": "高速激光器", "dependency": 1.0, "alternatives": 0},
+    {"upstream": "TSV硅通孔", "downstream": "HBM高带宽内存", "dependency": 0.9, "alternatives": 1},
+    {"upstream": "光刻胶", "downstream": "芯片封装测试", "dependency": 0.7, "alternatives": 2},
+    {"upstream": "TEC热电制冷器", "downstream": "光模块", "dependency": 0.7, "alternatives": 1}
+  ]
+}
