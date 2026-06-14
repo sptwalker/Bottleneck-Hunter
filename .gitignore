@@ -12,3 +12,5 @@ venv/
 .mypy_cache/
 output/
 results/
+data/
+.claude/

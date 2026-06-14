@@ -140,6 +140,18 @@ class SupplierScorecard(BaseModel):
     strengths: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(default_factory=list)
 
+    def model_dump(self, **kwargs) -> dict:
+        d = super().model_dump(**kwargs)
+        # 前端 dashboard.js 需要 dimension_scores 嵌套字典
+        d["dimension_scores"] = {
+            "position": self.market_position,
+            "customer": self.customer_validation,
+            "capacity": self.capacity_status,
+            "financial": self.financial_health,
+            "valuation": self.valuation,
+        }
+        return d
+
 
 class ValidationResult(str, Enum):
     PASS = "pass"

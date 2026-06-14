@@ -14,6 +14,8 @@ from typing import Sequence
 
 import akshare as ak
 import pandas as pd
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from bottleneck_hunter.chain.models import (
     BottleneckReport,
@@ -225,20 +227,31 @@ class SupplierSearcher:
         max_market_cap_yi: float | None = 200,
         max_results: int = 20,
         language: str = "zh",
+        llm: BaseChatModel | None = None,
     ):
         self.market = market
         self.max_market_cap_yi = max_market_cap_yi
         self.max_results = max_results
         self.language = language
+        self.llm = llm
 
     async def search(
         self, bottleneck: BottleneckReport, keywords: list[str] | None = None
     ) -> list[SupplierInfo]:
         """Search for suppliers related to a bottleneck node."""
-        # Use node name + provided keywords as search terms
-        terms = keywords or [bottleneck.node_name]
-        # Add some derived keywords from the node description
-        terms.append(bottleneck.node_name)
+        # 使用 LLM 扩展关键词，提高东方财富板块匹配率
+        if keywords:
+            terms = list(keywords)
+        elif self.llm:
+            terms = await self._expand_keywords(bottleneck)
+        else:
+            terms = [bottleneck.node_name]
+
+        # 始终包含原始节点名作为兜底搜索词
+        if bottleneck.node_name not in terms:
+            terms.append(bottleneck.node_name)
+
+        logger.info(f"搜索供应商 [{bottleneck.node_name}]，关键词: {terms}")
 
         suppliers: list[SupplierInfo] = []
 
@@ -258,15 +271,57 @@ class SupplierSearcher:
                 seen.add(s.ticker)
                 unique.append(s)
 
+        if not unique:
+            logger.warning(f"未找到任何供应商: {bottleneck.node_name}（关键词: {terms}）")
+
         return unique[: self.max_results]
+
+    async def _expand_keywords(self, bottleneck: BottleneckReport) -> list[str]:
+        """使用 LLM 将瓶颈环节名称扩展为多个东方财富板块搜索关键词。"""
+        prompt = f"""你是 A 股市场研究助手。给定一个产业链瓶颈环节，请生成 3-5 个关键词用于在东方财富网的概念板块和行业板块中搜索相关上市公司。
+
+关键词要求：
+1. 每个关键词是 2-4 个汉字，尽量短
+2. 应该是东方财富板块名称中可能包含的子串
+3. 覆盖不同角度：材料名、技术名、应用领域、行业分类
+4. 不要太具体也不要太宽泛
+
+瓶颈环节名称: {bottleneck.node_name}
+环节描述: {bottleneck.node_description}
+关键洞察: {', '.join(bottleneck.key_insights[:3]) if bottleneck.key_insights else '无'}
+
+请直接返回一个 JSON 数组，例如: ["光模块", "光通信", "半导体"]
+不要返回其他内容。"""
+
+        try:
+            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            text = response.content.strip()
+            # 剥离 markdown code fence
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(lines[1:])
+                if text.endswith("```"):
+                    text = text[:-3].strip()
+            import json
+            keywords = json.loads(text)
+            if isinstance(keywords, list) and all(isinstance(k, str) for k in keywords):
+                logger.info(f"LLM 关键词扩展 [{bottleneck.node_name}] → {keywords}")
+                return keywords
+        except Exception:
+            logger.warning(f"LLM 关键词扩展失败 [{bottleneck.node_name}]，回退到原始名称")
+        return [bottleneck.node_name]
 
     async def _search_a_stock(self, terms: list[str]) -> list[SupplierInfo]:
         """Search A-stock market for suppliers."""
         all_suppliers: list[SupplierInfo] = []
 
         for term in terms:
+            matched_any = False
             # Search concept boards
             concepts = search_a_stock_concepts(term)
+            if concepts:
+                matched_any = True
+                logger.debug(f"关键词 [{term}] 匹配到概念板块: {concepts}")
             for concept in concepts:
                 df = get_concept_constituents(concept)
                 if not df.empty:
@@ -275,11 +330,17 @@ class SupplierSearcher:
 
             # Search industry boards
             industries = search_a_stock_industries(term)
+            if industries:
+                matched_any = True
+                logger.debug(f"关键词 [{term}] 匹配到行业板块: {industries}")
             for industry in industries:
                 df = get_industry_constituents(industry)
                 if not df.empty:
                     suppliers = _a_stock_df_to_suppliers(df, self.max_market_cap_yi)
                     all_suppliers.extend(suppliers)
+
+            if not matched_any:
+                logger.warning(f"关键词 [{term}] 未匹配到任何概念或行业板块")
 
         # Enrich with fundamentals
         enriched = await self._enrich_a_stocks(all_suppliers)

@@ -62,6 +62,25 @@ def hot():
     _show_hot_sectors()
 
 
+@app.command()
+def serve(
+    port: int = typer.Option(8000, help="Server port"),
+    host: str = typer.Option("127.0.0.1", help="Server host"),
+):
+    """Start the web UI server."""
+    import uvicorn
+
+    from bottleneck_hunter.web.app import create_app
+
+    console.print(Panel(
+        f"[bold cyan]BottleneckHunter Web UI[/bold cyan]\n"
+        f"http://{host}:{port}",
+        style="cyan",
+    ))
+    web_app = create_app()
+    uvicorn.run(web_app, host=host, port=port)
+
+
 def _show_hot_sectors() -> None:
     """Fetch and display hot sector rankings without LLM analysis."""
     console.print(Panel(

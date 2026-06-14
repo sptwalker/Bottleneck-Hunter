@@ -204,6 +204,7 @@ async def run_screening(
         max_market_cap_yi=max_market_cap_yi,
         max_results=max_suppliers,
         language=language,
+        llm=deep_llm,
     )
     evaluator = SupplierEvaluator(llm=deep_llm, language=language)
     validator = CrossValidator(validation_models=validation_models or [], language=language) if validation_models else None
