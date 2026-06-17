@@ -175,3 +175,44 @@ class AnalysisStore:
         if deleted:
             logger.info(f"分析已删除: {analysis_id}")
         return deleted
+
+    def update_cross_validations(
+        self, analysis_id: str, cross_validations: list[dict]
+    ) -> bool:
+        """更新指定记录的交叉验证结果，同时重新计算 top_picks。"""
+        record = self.get(analysis_id)
+        if not record:
+            return False
+
+        result = record["result_json"]
+        result["cross_validations"] = cross_validations
+
+        # 重新计算 top_picks
+        top_picks = []
+        scorecards = result.get("supplier_scorecards", [])
+        for cv in cross_validations:
+            if cv.get("consensus") in ("pass", "concern"):
+                top_picks.append(cv.get("ticker", ""))
+        if not top_picks:
+            for sc in scorecards[:5]:
+                score = sc.get("overall_score", 0)
+                ticker = sc.get("supplier", {}).get("ticker", sc.get("ticker", ""))
+                if score >= 6 and ticker:
+                    top_picks.append(ticker)
+        result["top_picks"] = top_picks
+
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE analyses
+                   SET result_json = ?, top_picks = ?
+                   WHERE id = ?""",
+                (
+                    json.dumps(result, ensure_ascii=False, default=str),
+                    json.dumps(top_picks, ensure_ascii=False),
+                    analysis_id,
+                ),
+            )
+            conn.commit()
+
+        logger.info(f"交叉验证已更新: {analysis_id}")
+        return True

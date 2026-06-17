@@ -6,8 +6,9 @@
 import { setPanelDisabled } from './panel.js';
 import {
   renderChain, renderBottlenecks, renderSuppliers,
-  renderValidation, renderPicks, showError,
+  renderValidation, renderPicks, renderShortlist, showError,
 } from './dashboard.js';
+import { disposeAllCharts } from './charts.js';
 
 let abortController = null;
 
@@ -15,6 +16,62 @@ let abortController = null;
 let timerInterval = null;
 let timerStart = null;
 let timerBaseText = '';
+
+/* ── 实时日志面板 ─────────────────────────────────────── */
+const STEP_LOG_CONTAINERS = {
+  decompose: 'chart-chain',
+  bottleneck: 'chart-bottleneck',
+  supplier_search: 'table-suppliers',
+  supplier_eval: 'table-suppliers',
+};
+
+function _ensureLogPanel(step) {
+  const containerId = STEP_LOG_CONTAINERS[step];
+  if (!containerId) return null;
+  const chartEl = document.getElementById(containerId);
+  if (!chartEl) return null;
+  const parent = chartEl.parentElement;
+
+  let panel = parent.querySelector('.progress-log');
+  if (!panel) {
+    chartEl.classList.remove('skeleton');
+    chartEl.style.display = 'none';
+    panel = document.createElement('div');
+    panel.className = 'progress-log';
+    parent.insertBefore(panel, chartEl);
+  }
+  return panel;
+}
+
+function _removeLogPanel(step) {
+  const containerId = STEP_LOG_CONTAINERS[step];
+  if (!containerId) return;
+  const chartEl = document.getElementById(containerId);
+  if (!chartEl) return;
+  const parent = chartEl.parentElement;
+  const panel = parent.querySelector('.progress-log');
+  if (panel) panel.remove();
+  chartEl.style.display = '';
+}
+
+function _appendLog(step, message) {
+  const panel = _ensureLogPanel(step);
+  if (!panel) return;
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  line.textContent = `[${time}] ${message}`;
+  // 根据前缀设置颜色
+  if (message.startsWith('✓') || message.startsWith('──')) {
+    line.classList.add('log-ok');
+  } else if (message.startsWith('⚠')) {
+    line.classList.add('log-warn');
+  } else if (message.startsWith('✗')) {
+    line.classList.add('log-err');
+  }
+  panel.appendChild(line);
+  panel.scrollTop = panel.scrollHeight;
+}
 
 function setStepState(step, state) {
   const el = document.querySelector(`.pipeline-step[data-step="${step}"]`);
@@ -76,9 +133,13 @@ function resetPipeline() {
   document.getElementById('pipeline-status').textContent = '';
   document.getElementById('dashboard-actions').style.display = 'none';
   document.getElementById('card-picks').style.display = 'none';
+  const shortlistCard = document.getElementById('card-shortlist');
+  if (shortlistCard) shortlistCard.style.display = 'none';
+
+  disposeAllCharts();
 
   // Restore skeleton placeholders
-  ['chart-chain', 'chart-bottleneck', 'table-suppliers', 'table-validation'].forEach(id => {
+  ['chart-chain', 'chart-bottleneck', 'table-suppliers'].forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.classList.add('skeleton'); el.innerHTML = ''; }
   });
@@ -117,27 +178,60 @@ function handleEvent(evt, state) {
   if (event === 'step_start') {
     document.getElementById('pipeline-status').textContent = data.message || '';
     setStepState(data.step, 'running');
+    if (STEP_LOG_CONTAINERS[data.step]) {
+      _appendLog(data.step, data.message || '');
+    }
   }
 
   if (event === 'step_progress') {
-    updateTimerText(data.message || '');
+    // log=true 的消息只进日志面板，不刷新计时器文字
+    if (data.log && STEP_LOG_CONTAINERS[data.step]) {
+      _appendLog(data.step, data.message || '');
+    } else {
+      updateTimerText(data.message || '');
+      // 层级进度也追加到日志面板
+      if (STEP_LOG_CONTAINERS[data.step]) {
+        _appendLog(data.step, data.message || '');
+      }
+    }
   }
 
   if (event === 'step_done') {
+    _removeLogPanel(data.step);
     setStepState(data.step, 'done');
     state.results[data.step] = data.result;
 
     if (data.step === 'decompose') renderChain(data.result);
     if (data.step === 'bottleneck') renderBottlenecks(data.result);
     if (data.step === 'supplier_eval') renderSuppliers(data.result);
-    if (data.step === 'cross_validate' && !data.skipped) renderValidation(data.result);
+    if (data.step === 'cross_validate') renderValidation(data.skipped ? [] : data.result);
   }
 
   if (event === 'complete') {
     stopTimer();
-    document.getElementById('pipeline-status').textContent = '分析完成';
+    // 确保所有步骤（含 save）都标记为完成
+    document.querySelectorAll('.pipeline-step').forEach(el => {
+      if (!el.classList.contains('error')) {
+        el.className = 'pipeline-step done';
+      }
+    });
+    document.querySelectorAll('.pipeline-connector').forEach(el => {
+      el.classList.add('done');
+    });
+
+    // 显示完成状态（含失败统计）
+    let statusText = '分析完成';
+    const failures = data.llm_failures || 0;
+    const retries = data.llm_retries || 0;
+    if (failures > 0) {
+      statusText += ` | LLM 调用: ${failures} 次失败, ${retries} 次重试`;
+    }
+    document.getElementById('pipeline-status').textContent = statusText;
+
     renderPicks(data.top_picks, state.results.supplier_eval, state.results.cross_validate);
+    renderShortlist(state.results.supplier_eval);
     state.reportPath = data.report_path || '';
+    window.appState.analysisId = data.analysis_id || '';
     document.getElementById('dashboard-actions').style.display = '';
     window.appState.running = false;
     setPanelDisabled(false);
@@ -160,6 +254,7 @@ export async function startScreening(config) {
 
   window.appState.running = true;
   window.appState.results = {};
+  window.appState.config = { ...config };
   setPanelDisabled(true);
 
   abortController = new AbortController();

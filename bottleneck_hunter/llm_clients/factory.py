@@ -1,6 +1,6 @@
 """LLM client factory for BottleneckHunter.
 
-Supports: openai, anthropic, deepseek, google, qwen, glm, ollama, openrouter
+Supports: openai, anthropic, deepseek, google, qwen, glm, ollama, openrouter, siliconflow, agnes
 """
 
 from __future__ import annotations
@@ -58,16 +58,20 @@ def create_llm(provider: str, model: str, **kwargs) -> BaseChatModel:
         )
 
     # Generic OpenAI-compatible endpoint
-    if provider in ("qwen", "glm", "siliconflow"):
+    if provider in ("qwen", "glm", "siliconflow", "agnes", "kimi"):
         base_urls = {
             "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "glm": "https://open.bigmodel.cn/api/paas/v4",
             "siliconflow": "https://api.siliconflow.cn/v1",
+            "agnes": "https://apihub.agnes-ai.com/v1",
+            "kimi": "https://api.moonshot.cn/v1",
         }
         key_map = {
             "qwen": "DASHSCOPE_API_KEY",
             "glm": "ZHIPU_API_KEY",
             "siliconflow": "SILICONFLOW_API_KEY",
+            "agnes": "AGNES_API_KEY",
+            "kimi": "MOONSHOT_API_KEY",
         }
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(

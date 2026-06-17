@@ -117,23 +117,22 @@ def _report_zh(result: ScreeningResult, lines: list[str]) -> None:
         lines.append("## 5. 多模型交叉验证\n")
 
         # Summary table
-        lines.append("| 公司 | 代码 | 共识 | 通过率 |")
-        lines.append("|------|------|------|--------|")
+        lines.append("| 公司 | 代码 | AI 均分 |")
+        lines.append("|------|------|---------|")
         for cv in result.cross_validations:
-            icon = {"pass": "✅", "concern": "⚠️", "fail": "❌"}.get(cv.consensus, "?")
-            lines.append(f"| {cv.supplier_name} | {cv.ticker} | {icon} {cv.consensus} | {cv.pass_rate:.0%} |")
+            lines.append(f"| {cv.supplier_name} | {cv.ticker} | {cv.avg_score:.1f}/10 |")
         lines.append("")
 
         # Detailed per-supplier
         for cv in result.cross_validations:
             lines.append(f"### {cv.supplier_name} ({cv.ticker})\n")
             for v in cv.validations:
-                icon = {"pass": "✅", "concern": "⚠️", "fail": "❌"}.get(v.result, "?")
-                lines.append(f"- {icon} **{v.model_name}**: {v.reasoning}")
+                score_icon = "🟢" if v.score >= 7 else ("🟡" if v.score >= 5 else "🔴")
+                lines.append(f"- {score_icon} **{v.model_name}** ({v.score:.0f}/10): {v.reasoning}")
                 if v.concerns:
                     for c in v.concerns:
                         lines.append(f"  - ⚡ {c}")
-            lines.append(f"\n> **共识**: {cv.consensus_reasoning} (通过率: {cv.pass_rate:.0%})\n")
+            lines.append(f"\n> **共识**: {cv.consensus_reasoning}\n")
 
     # --- 6. Final recommendations ---
     if result.top_picks:
@@ -151,8 +150,7 @@ def _report_zh(result: ScreeningResult, lines: list[str]) -> None:
             cv = cv_map.get(ticker)
             if cv:
                 name = cv.supplier_name
-                icon = {"pass": "✅", "concern": "⚠️", "fail": "❌"}.get(cv.consensus, "?")
-                consensus_str = f"{icon} {cv.consensus} ({cv.pass_rate:.0%})"
+                consensus_str = f"{cv.avg_score:.1f}/10"
             else:
                 sc = sc_map.get(ticker)
                 if sc:
@@ -217,9 +215,9 @@ def _report_en(result: ScreeningResult, lines: list[str]) -> None:
         for cv in result.cross_validations:
             lines.append(f"### {cv.supplier_name} ({cv.ticker})\n")
             for v in cv.validations:
-                icon = {"pass": "✅", "concern": "⚠️", "fail": "❌"}.get(v.result, "?")
-                lines.append(f"- {icon} **{v.model_name}**: {v.reasoning}")
-            lines.append(f"\n> **Consensus**: {cv.consensus_reasoning} (pass rate: {cv.pass_rate:.0%})\n")
+                score_icon = "🟢" if v.score >= 7 else ("🟡" if v.score >= 5 else "🔴")
+                lines.append(f"- {score_icon} **{v.model_name}** ({v.score:.0f}/10): {v.reasoning}")
+            lines.append(f"\n> **Consensus**: {cv.consensus_reasoning}\n")
 
     # Final picks
     if result.top_picks:

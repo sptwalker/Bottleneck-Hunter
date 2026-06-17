@@ -236,13 +236,13 @@ async def run_screening(
     top_picks = []
     cross_validations = final_state.get("cross_validations", [])
     for cv in cross_validations:
-        if cv.consensus in ("pass", "concern"):
+        if cv.consensus_score >= 5:
             top_picks.append(cv.ticker)
 
     # Fallback: if no cross-validation, pick from scorecards
     if not top_picks:
         for sc in final_state.get("supplier_scorecards", [])[:5]:
-            if sc.overall_score >= 6:
+            if sc.overall_score >= 5:
                 top_picks.append(sc.supplier.ticker)
 
     return ScreeningResult(

@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections import Counter
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
@@ -19,7 +18,6 @@ from bottleneck_hunter.chain.models import (
     CrossValidationReport,
     ModelValidation,
     SupplierScorecard,
-    ValidationResult,
 )
 from bottleneck_hunter.llm_clients.factory import create_llm
 
@@ -27,14 +25,12 @@ logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-ADVERSARIAL_QUESTIONS = [
-    "这个稀缺性是真的唯一吗？还是存在你不知道的替代方案？",
-    "技术路线是否会被颠覆？新一代技术是否会绕过这个环节？",
-    "产能不足的判断是否可靠？扩产周期是否比预期短？",
-    "客户验证信息是否过时？大客户是否可能自研替代？",
-    "有没有地缘政治风险？贸易限制或制裁是否影响供应？",
-    "估值是否已经反映了这些利好？市场是否已经充分认知？",
-    "行业周期是否见顶？需求增长是否可持续？",
+EVALUATION_QUESTIONS = [
+    "核心竞争优势（技术壁垒、客户粘性、稀缺资源）是否真实且可持续？",
+    "行业供需格局和成长空间的判断是否合理？有无被忽视的替代方案？",
+    "公司的市场地位和客户关系是否稳固？是否存在大客户自研替代风险？",
+    "当前估值相对于成长性和行业地位是否合理？",
+    "主要风险（技术路线变化、政策变动、周期性）是否可控？",
 ]
 
 
@@ -74,8 +70,8 @@ class CrossValidator:
             try:
                 llm = create_llm(provider, model, temperature=0.3)
                 llms.append((name, llm))
-            except Exception:
-                logger.warning(f"Failed to create LLM for {name}, skipping")
+            except Exception as e:
+                logger.warning(f"Failed to create LLM for {name}: {e}")
         return llms
 
     async def validate_supplier(
@@ -109,43 +105,44 @@ class CrossValidator:
 - 优势: {', '.join(scorecard.strengths)}
 - 风险: {', '.join(scorecard.weaknesses)}
 
-## 反面拷问角度
-请从以下角度逐一质疑投资逻辑:
-{chr(10).join(f'{i+1}. {q}' for i, q in enumerate(ADVERSARIAL_QUESTIONS))}
+## 请从以下维度独立评估
+{chr(10).join(f'{i+1}. {q}' for i, q in enumerate(EVALUATION_QUESTIONS))}
 
 ## 输出要求
-综合判断后给出最终结论。返回严格 JSON:
+综合评估后给出 1-10 分的推荐评分。返回严格 JSON（不要包含其他文字）:
 {{
-  "result": "pass" 或 "concern" 或 "fail",
-  "reasoning": "综合判断理由（2-3句话）",
+  "score": <1-10 整数>,
+  "reasoning": "评分理由（2-3句话）",
   "concerns": ["具体顾虑1", "具体顾虑2"]
 }}
 
-- "pass": 投资逻辑成立，核心论点经得起质疑
-- "concern": 存在值得关注的顾虑，需要进一步研究
-- "fail": 投资逻辑存在重大缺陷，不推荐"""
+评分标准:
+- 8-10: 投资逻辑成立，核心优势明确，风险可控
+- 5-7: 存在值得关注的顾虑，但非致命，需进一步研究
+- 1-4: 发现重大逻辑缺陷或致命风险，不推荐
+
+注意：请基于事实做出独立判断。如果公司确实具备明确的竞争优势和合理的估值，应该给出高分。"""
 
         async def _validate_one(name: str, llm: BaseChatModel) -> ModelValidation:
             try:
-                response = await llm.ainvoke(
-                    [
-                        SystemMessage(content=self._system_prompt),
-                        HumanMessage(content=user_prompt),
-                    ]
+                response = await asyncio.wait_for(
+                    llm.ainvoke(
+                        [
+                            SystemMessage(content=self._system_prompt),
+                            HumanMessage(content=user_prompt),
+                        ]
+                    ),
+                    timeout=120,
                 )
                 text = response.content.strip()
-                text = self._strip_fences(text)
-                data = json.loads(text)
+                data = self._extract_json(text)
 
-                result_str = data.get("result", "concern")
-                try:
-                    result = ValidationResult(result_str)
-                except ValueError:
-                    result = ValidationResult.CONCERN
+                raw_score = data.get("score", 5)
+                score = max(1.0, min(10.0, float(raw_score)))
 
                 return ModelValidation(
                     model_name=name,
-                    result=result,
+                    score=score,
                     reasoning=data.get("reasoning", ""),
                     concerns=data.get("concerns", []),
                 )
@@ -153,58 +150,52 @@ class CrossValidator:
                 logger.exception(f"Validation failed for model {name}")
                 return ModelValidation(
                     model_name=name,
-                    result=ValidationResult.FAIL,
-                    reasoning="模型调用失败",
-                    concerns=["无法完成验证"],
+                    score=5.0,
+                    reasoning=f"模型 {name} 调用或解析失败，按中性处理",
+                    concerns=["模型未能完成验证"],
                 )
 
         # Run all models in parallel
         tasks = [_validate_one(name, llm) for name, llm in llms]
         validations = await asyncio.gather(*tasks)
 
-        # Compute consensus
-        result_counts = Counter(v.result for v in validations)
-        total = len(validations)
-        pass_count = result_counts.get(ValidationResult.PASS, 0)
-        fail_count = result_counts.get(ValidationResult.FAIL, 0)
-        pass_rate = pass_count / total if total else 0
-
-        if pass_rate >= self.pass_threshold and fail_count == 0:
-            consensus = ValidationResult.PASS
-        elif fail_count > pass_count:
-            consensus = ValidationResult.FAIL
-        else:
-            consensus = ValidationResult.CONCERN
+        # Compute consensus: average score
+        scores = [v.score for v in validations]
+        avg_score = sum(scores) / len(scores) if scores else 5.0
+        consensus_score = round(avg_score, 1)
 
         # Build consensus reasoning
         all_concerns = []
         for v in validations:
-            if v.result != ValidationResult.PASS:
+            if v.score < 7:
                 all_concerns.extend(v.concerns)
 
-        if consensus == ValidationResult.PASS:
+        score_strs = [f"{v.model_name.split('/')[-1]}={v.score:.0f}" for v in validations]
+        score_summary = "、".join(score_strs)
+
+        if consensus_score >= 7.5:
             consensus_reasoning = (
-                f"{pass_count}/{total} 个模型通过验证。"
+                f"多数模型看好（{score_summary}，均分 {consensus_score}）。"
                 f"投资逻辑整体成立，核心论点经得起质疑。"
             )
-        elif consensus == ValidationResult.CONCERN:
+        elif consensus_score >= 5:
             consensus_reasoning = (
-                f"部分模型存在顾虑（通过 {pass_count}/{total}）。"
-                f"主要关注点：{'；'.join(all_concerns[:3])}。建议进一步研究。"
+                f"模型观点分化（{score_summary}，均分 {consensus_score}）。"
+                f"主要关注点：{'；'.join(all_concerns[:3]) or '无重大顾虑'}。建议进一步研究。"
             )
         else:
             consensus_reasoning = (
-                f"多数模型否定（通过 {pass_count}/{total}）。"
-                f"主要问题：{'；'.join(all_concerns[:3])}。不建议纳入。"
+                f"多数模型不看好（{score_summary}，均分 {consensus_score}）。"
+                f"主要问题：{'；'.join(all_concerns[:3]) or '整体逻辑存疑'}。不建议纳入。"
             )
 
         return CrossValidationReport(
             supplier_name=supplier.name,
             ticker=supplier.ticker,
             validations=list(validations),
-            consensus=consensus,
+            consensus_score=consensus_score,
             consensus_reasoning=consensus_reasoning,
-            pass_rate=pass_rate,
+            avg_score=consensus_score,
         )
 
     async def validate_all(
@@ -230,16 +221,32 @@ class CrossValidator:
             reports.append(report)
             logger.info(
                 f"Cross-validated {sc.supplier.name}: "
-                f"{report.consensus} (pass_rate={report.pass_rate:.0%})"
+                f"avg_score={report.avg_score:.1f}"
             )
 
         return reports
 
     @staticmethod
-    def _strip_fences(text: str) -> str:
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:])
-            if text.endswith("```"):
-                text = text[:-3]
-        return text.strip()
+    def _extract_json(text: str) -> dict:
+        """从 LLM 输出中提取 JSON 对象，容忍 markdown 代码块和额外文本。"""
+        import re
+        # 尝试 1: 去除 markdown code fence
+        fence_match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+        if fence_match:
+            try:
+                return json.loads(fence_match.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+        # 尝试 2: 直接解析
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        # 尝试 3: 查找第一个 { ... } 块
+        brace_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
+        if brace_match:
+            try:
+                return json.loads(brace_match.group())
+            except json.JSONDecodeError:
+                pass
+        raise ValueError(f"无法从 LLM 输出中提取有效 JSON: {text[:200]}")

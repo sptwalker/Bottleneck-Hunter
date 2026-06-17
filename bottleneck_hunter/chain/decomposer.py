@@ -6,6 +6,7 @@ N layers deep, producing a ChainGraph.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -23,6 +24,38 @@ from bottleneck_hunter.chain.models import (
 logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+def _safe_int(val, default: int = 0) -> int:
+    if isinstance(val, int):
+        return val
+    try:
+        return int(float(str(val)))
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(val, default: float = 0.5) -> float:
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(str(val))
+    except (ValueError, TypeError):
+        return default
+
+
+def _normalize_companies(raw: list) -> list[dict]:
+    """将 LLM 返回的企业列表统一为 [{name, code}] 格式。"""
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for item in raw:
+        if isinstance(item, dict):
+            result.append({"name": item.get("name", ""), "code": item.get("code", "")})
+        elif isinstance(item, str) and item.strip():
+            result.append({"name": item.strip(), "code": ""})
+    return result
+
 
 LAYER_TYPE_MAP = {
     0: LayerType.END_PRODUCT,
@@ -48,6 +81,10 @@ def _layer_type_for_depth(depth: int) -> LayerType:
 class ChainDecomposer:
     """Decomposes an industry chain from an end product using LLM."""
 
+    LLM_TIMEOUT = 120  # 单次 LLM 调用超时（秒）
+    MAX_CONCURRENCY = 4  # 同层并发数量上限
+    MAX_RETRIES = 2  # LLM 调用失败重试次数
+
     def __init__(
         self,
         llm: BaseChatModel,
@@ -60,9 +97,17 @@ class ChainDecomposer:
         self.sector = sector
         self.language = language
         self._system_prompt = _load_prompt("decompose")
+        # 统计计数器（每次 decompose 调用前重置）
+        self._timeout_count = 0
+        self._retry_count = 0
 
-    async def decompose(self, end_product: str, on_layer_start=None) -> ChainGraph:
+    async def decompose(self, end_product: str, on_layer_start=None, on_progress=None) -> ChainGraph:
         """Run full decomposition and return a ChainGraph."""
+        # 重置统计计数器
+        self._timeout_count = 0
+        self._retry_count = 0
+        self._on_progress = on_progress
+
         graph = ChainGraph(
             sector=self.sector or end_product,
             end_product=end_product,
@@ -79,7 +124,14 @@ class ChainDecomposer:
         )
         graph.nodes.append(root)
 
+        # 失败统计
+        fail_count = 0
+        timeout_count = 0
+        retry_count = 0
+
         # Iteratively decompose each layer
+        semaphore = asyncio.Semaphore(self.MAX_CONCURRENCY)
+
         for depth in range(1, self.max_depth + 1):
             parent_nodes = graph.get_nodes_at_layer(depth - 1)
             if on_layer_start:
@@ -87,18 +139,37 @@ class ChainDecomposer:
 
             existing_names = [n.name for n in graph.nodes]
 
-            for parent in parent_nodes:
-                children = await self._decompose_layer(end_product, parent.name, depth, existing_names)
+            async def _process_parent(parent, existing, _depth=depth):
+                async with semaphore:
+                    if on_progress:
+                        await on_progress(f"▸ 拆解: {parent.name} (层 {_depth})")
+                    children = await self._decompose_layer(end_product, parent.name, _depth, existing)
+                    if on_progress:
+                        await on_progress(f"✓ {parent.name} → {len(children)} 个子节点")
+                    return parent, children
+
+            tasks = [_process_parent(p, existing_names[:]) for p in parent_nodes]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"层 {depth} 拆解失败: {result}")
+                    fail_count += 1
+                    if on_progress:
+                        await on_progress(f"✗ 层 {depth} 异常: {result}")
+                    continue
+                parent, children = result
                 for child_data in children:
                     child_name = child_data["name"]
 
-                    # 语义去重：检查是否与已有节点高度相似
                     merged_name = self._find_similar_node(child_name, existing_names)
                     if merged_name:
                         logger.info(f"合并相似节点: '{child_name}' → '{merged_name}'")
                         child_name = merged_name
 
                     if not graph.get_node(child_name):
+                        raw_companies = child_data.get("representative_companies", [])
+                        companies = _normalize_companies(raw_companies)
                         child = IndustryNode(
                             name=child_name,
                             description=child_data.get("description", ""),
@@ -108,6 +179,7 @@ class ChainDecomposer:
                             key_parameters=child_data.get("key_parameters", []),
                             upstream_deps=child_data.get("upstream_deps", []),
                             downstream_deps=[parent.name],
+                            representative_companies=companies,
                         )
                         graph.nodes.append(child)
                         existing_names.append(child_name)
@@ -115,17 +187,41 @@ class ChainDecomposer:
                     link = ChainLink(
                         upstream=child_name,
                         downstream=parent.name,
-                        dependency=child_data.get("dependency", 0.5),
-                        alternatives=child_data.get("alternatives", 0),
-                        notes=child_data.get("notes", ""),
+                        dependency=_safe_float(child_data.get("dependency", 0.5), 0.5),
+                        alternatives=_safe_int(child_data.get("alternatives", 0)),
+                        notes=str(child_data.get("notes", "")),
                     )
                     graph.links.append(link)
 
-            logger.info(f"Decomposed layer {depth}: found {len(graph.get_nodes_at_layer(depth))} nodes")
+            node_count = len(graph.get_nodes_at_layer(depth))
+            logger.info(f"Decomposed layer {depth}: found {node_count} nodes")
+            if on_progress:
+                await on_progress(f"── 层 {depth} 完成: {node_count} 个新节点，累计 {len(graph.nodes)} 个 ──")
+
+        # 汇总 _decompose_layer 中的重试和超时统计
+        timeout_count = self._timeout_count
+        retry_count = self._retry_count
 
         # 全局语义去重
+        if on_progress:
+            await on_progress("▸ 语义去重合并中...")
         graph = await self._merge_similar_nodes(graph)
+        if on_progress:
+            await on_progress(f"✓ 去重完成，最终 {len(graph.nodes)} 个节点")
 
+        # 将失败统计写入 metadata
+        graph.metadata["llm_failures"] = fail_count
+        graph.metadata["llm_timeouts"] = timeout_count
+        graph.metadata["llm_retries"] = retry_count
+        graph.metadata["total_failures"] = fail_count + timeout_count
+
+        if fail_count + timeout_count > 0:
+            logger.warning(
+                f"拆解完成，共 {fail_count + timeout_count} 次失败"
+                f"（节点异常 {fail_count} 次，超时放弃 {timeout_count} 次，重试 {retry_count} 次）"
+            )
+
+        self._on_progress = None
         return graph
 
     async def _decompose_layer(
@@ -156,15 +252,52 @@ class ChainDecomposer:
 - dependency: 对下游的重要程度 0-1
 - alternatives: 已知替代方案数量
 - notes: 补充说明
+- representative_companies: 该环节最具代表性的上市公司列表（2-4家），每个元素包含 name（公司简称）和 code（股票代码）
+  - 优先推荐A股上市公司，code 格式为6位数字（如"002371"，沪市6开头、深市0或3开头、北交所4或8开头）
+  - 若该环节主要为美股上市公司，code 为字母ticker（如"NVDA"）
+  - 若该环节无上市公司或不确定，code 留空字符串
+  - 务必确保推荐的公司确实在该环节有核心业务，不要为了凑数而推荐不相关的公司
 
 只返回 JSON 数组，不要其他文字。"""
 
-        response = await self.llm.ainvoke(
-            [
-                SystemMessage(content=self._system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-        )
+        messages = [
+            SystemMessage(content=self._system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                response = await asyncio.wait_for(
+                    self.llm.ainvoke(messages),
+                    timeout=self.LLM_TIMEOUT,
+                )
+                break
+            except asyncio.TimeoutError:
+                if attempt < self.MAX_RETRIES:
+                    self._retry_count += 1
+                    logger.warning(f"LLM 超时 ({self.LLM_TIMEOUT}s)，重试 {attempt + 1}/{self.MAX_RETRIES}: {parent_name}")
+                    if self._on_progress:
+                        await self._on_progress(f"⚠ 超时重试 {attempt + 1}/{self.MAX_RETRIES}: {parent_name}")
+                    await asyncio.sleep(2)
+                else:
+                    self._timeout_count += 1
+                    logger.error(f"LLM 调用超时，已放弃: {parent_name} (层 {depth})")
+                    if self._on_progress:
+                        await self._on_progress(f"✗ 超时放弃: {parent_name}")
+                    return []
+            except Exception as e:
+                if attempt < self.MAX_RETRIES:
+                    self._retry_count += 1
+                    logger.warning(f"LLM 调用失败，重试 {attempt + 1}/{self.MAX_RETRIES}: {parent_name} - {e}")
+                    if self._on_progress:
+                        await self._on_progress(f"⚠ 失败重试 {attempt + 1}/{self.MAX_RETRIES}: {parent_name}")
+                    await asyncio.sleep(2)
+                else:
+                    self._timeout_count += 1
+                    logger.error(f"LLM 调用失败，已放弃: {parent_name} (层 {depth}) - {e}")
+                    if self._on_progress:
+                        await self._on_progress(f"✗ 调用失败: {parent_name}")
+                    return []
 
         text = response.content.strip()
         # Strip markdown code fences if present
@@ -279,9 +412,12 @@ class ChainDecomposer:
 只返回 JSON 数组，不要其他文字。"""
 
         try:
-            response = await self.llm.ainvoke(
-                [SystemMessage(content="你是产业链分析专家，请精确识别语义重复的环节。"),
-                 HumanMessage(content=prompt)]
+            response = await asyncio.wait_for(
+                self.llm.ainvoke(
+                    [SystemMessage(content="你是产业链分析专家，请精确识别语义重复的环节。"),
+                     HumanMessage(content=prompt)]
+                ),
+                timeout=self.LLM_TIMEOUT,
             )
             text = response.content.strip()
             if text.startswith("```"):

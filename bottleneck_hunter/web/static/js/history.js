@@ -5,8 +5,14 @@
 import { showView } from './app.js';
 import {
   renderChain, renderBottlenecks, renderSuppliers,
-  renderValidation, renderPicks,
+  renderValidation, renderPicks, renderShortlist,
 } from './dashboard.js';
+
+const MARKET_LABELS = {
+  a_stock: 'A 股',
+  us_stock: '美股',
+  all: '全部',
+};
 
 /* ── Init ───────────────────────────────────────────── */
 export function initHistory() {
@@ -44,6 +50,8 @@ function renderHistoryList(analyses) {
     const date = formatDate(a.created_at);
     const picks = (a.top_picks || []).join(', ') || '—';
     const providerModel = [a.provider, a.model].filter(Boolean).join(' / ') || '—';
+    const marketLabel = MARKET_LABELS[a.market] || a.market || '—';
+    const depthLabel = a.max_depth ? `${a.max_depth}层` : '—';
 
     return `
       <div class="history-card" data-id="${esc(a.id)}">
@@ -54,6 +62,8 @@ function renderHistoryList(analyses) {
         <div class="history-card-body">
           <div class="history-meta">
             <span class="history-tag">终端: ${esc(a.end_product)}</span>
+            <span class="history-tag">深度: ${esc(depthLabel)}</span>
+            <span class="history-tag">市场: ${esc(marketLabel)}</span>
             <span class="history-tag">瓶颈: ${a.bottleneck_count || 0}</span>
             <span class="history-tag">供应商: ${a.supplier_count || 0}</span>
             <span class="history-tag">模型: ${esc(providerModel)}</span>
@@ -89,6 +99,16 @@ async function loadAnalysis(id) {
 
     // Store into appState so dashboard refresh works
     window.appState.results = {};
+    window.appState.config = {
+      market: record.market || 'a_stock',
+      provider: record.provider || 'openai',
+      model: record.model || '',
+      language: record.language || 'zh',
+      max_depth: record.max_depth || 4,
+      top_n: record.top_n || 5,
+      sector: record.sector || '',
+      end_product: record.end_product || '',
+    };
 
     // Render chain
     if (result.chain) {
@@ -109,10 +129,8 @@ async function loadAnalysis(id) {
     }
 
     // Render cross-validation
-    if (result.cross_validations && result.cross_validations.length > 0) {
-      window.appState.results.cross_validate = result.cross_validations;
-      renderValidation(result.cross_validations);
-    }
+    window.appState.results.cross_validate = result.cross_validations || [];
+    renderValidation(result.cross_validations || []);
 
     // Render top picks
     renderPicks(
@@ -121,8 +139,12 @@ async function loadAnalysis(id) {
       result.cross_validations || [],
     );
 
+    // Render shortlist
+    renderShortlist(result.supplier_scorecards || []);
+
     // Show dashboard actions
     window.appState.reportPath = record.report_path || '';
+    window.appState.analysisId = id;
     const actionsEl = document.getElementById('dashboard-actions');
     if (actionsEl) actionsEl.style.display = '';
 

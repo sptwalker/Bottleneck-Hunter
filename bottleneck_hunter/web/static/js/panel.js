@@ -16,7 +16,13 @@ const DEFAULT_MODELS = {
   ollama: 'qwen2.5',
   openrouter: 'deepseek/deepseek-chat',
   siliconflow: 'deepseek-ai/DeepSeek-V3',
+  agnes: 'agnes-2.0-flash',
+  kimi: 'moonshot-v1-8k',
 };
+
+const MAX_CV_MODELS = 5;
+
+let _configuredProviders = [];
 
 /* ── Collect all form values into a ScreenRequest JSON object ── */
 function collectConfig() {
@@ -36,7 +42,7 @@ function collectConfig() {
   const provider = document.getElementById('llm-provider').value;
   const model = document.getElementById('llm-model').value.trim();
   const enableCV = document.getElementById('cv-toggle').checked;
-  const validationModels = parseValidationModels(document.getElementById('cv-models').value);
+  const validationModels = collectCvModels();
 
   return {
     sector, end_product: endProduct, max_depth: maxDepth, top_n: topN,
@@ -46,13 +52,85 @@ function collectConfig() {
   };
 }
 
-/* ── Parse "provider:model, provider:model" textarea ── */
-function parseValidationModels(text) {
-  if (!text || !text.trim()) return [];
-  return text.split(',').map(s => s.trim()).filter(Boolean).map(pair => {
-    const [provider, ...rest] = pair.split(':');
-    return { provider: provider.trim(), model: rest.join(':').trim() };
-  }).filter(m => m.provider && m.model);
+/* ── 从已勾选的 checkbox 中收集验证模型列表 ── */
+function collectCvModels() {
+  const checks = document.querySelectorAll('#cv-model-list .cv-check:checked');
+  const result = [];
+  checks.forEach(cb => {
+    const provider = cb.dataset.provider;
+    const model = cb.dataset.model;
+    if (provider && model) {
+      result.push({ provider, model });
+    }
+  });
+  return result;
+}
+
+/* ── 渲染 CV checkbox 列表 ── */
+function renderCvCheckboxList() {
+  const list = document.getElementById('cv-model-list');
+  if (_configuredProviders.length === 0) {
+    list.innerHTML = '<p class="cv-empty-hint">请先在 API 设置中配置至少一个 LLM</p>';
+    return;
+  }
+
+  const items = _configuredProviders.map((p, i) => {
+    const model = DEFAULT_MODELS[p.id] || '';
+    const checked = i < MAX_CV_MODELS ? 'checked' : '';
+    return `
+      <div class="cv-check-row">
+        <label class="cv-check-label">
+          <input type="checkbox" class="cv-check" data-provider="${p.id}" data-model="${model}" ${checked}>
+          <span class="cv-check-name">${_escapeHtml(p.name)}</span>
+          <span class="cv-check-model">${_escapeHtml(model)}</span>
+        </label>
+      </div>`;
+  }).join('');
+
+  list.innerHTML = items + `<p class="cv-check-hint">最多选择 ${MAX_CV_MODELS} 个模型</p>`;
+
+  list.querySelectorAll('.cv-check').forEach(cb => {
+    cb.addEventListener('change', _enforceCvLimit);
+  });
+
+  _enforceCvLimit();
+}
+
+/* ── 限制最多勾选 MAX_CV_MODELS 个 ── */
+function _enforceCvLimit() {
+  const all = document.querySelectorAll('#cv-model-list .cv-check');
+  const checkedCount = document.querySelectorAll('#cv-model-list .cv-check:checked').length;
+
+  all.forEach(cb => {
+    if (!cb.checked) {
+      cb.disabled = checkedCount >= MAX_CV_MODELS;
+    }
+  });
+
+  const hint = document.querySelector('#cv-model-list .cv-check-hint');
+  if (hint) {
+    hint.textContent = `已选 ${checkedCount}/${MAX_CV_MODELS} 个模型`;
+    hint.classList.toggle('cv-hint-full', checkedCount >= MAX_CV_MODELS);
+  }
+}
+
+/* ── 初始化 CV 面板 ── */
+function initCvPanel() {
+  const cvToggle = document.getElementById('cv-toggle');
+  const cvGroup = document.getElementById('cv-models-group');
+
+  cvToggle.addEventListener('change', () => {
+    cvGroup.style.display = cvToggle.checked ? '' : 'none';
+    if (cvToggle.checked) {
+      renderCvCheckboxList();
+    }
+  });
+
+  if (cvToggle.checked) {
+    ensureProvidersLoaded().then(() => {
+      renderCvCheckboxList();
+    });
+  }
 }
 
 /* ── Validate required fields ── */
@@ -77,6 +155,15 @@ export function setPanelDisabled(disabled) {
 
 /* ── Start analysis flow ── */
 async function handleStart() {
+  await ensureProvidersLoaded();
+  const cvToggle = document.getElementById('cv-toggle');
+  if (cvToggle && cvToggle.checked) {
+    const list = document.getElementById('cv-model-list');
+    if (!list || list.querySelectorAll('.cv-check').length === 0) {
+      renderCvCheckboxList();
+    }
+  }
+
   const config = collectConfig();
   const err = validate(config);
   if (err) {
@@ -90,7 +177,6 @@ async function handleStart() {
 
 /* ── Init all panel event listeners ── */
 export function initPanel() {
-  // Sector select: toggle custom input
   const sectorSelect = document.getElementById('sector-select');
   const customGroup = document.getElementById('custom-sector-group');
   const endProductInput = document.getElementById('end-product');
@@ -106,14 +192,8 @@ export function initPanel() {
     }
   });
 
-  // Cross-validation toggle
-  const cvToggle = document.getElementById('cv-toggle');
-  const cvGroup = document.getElementById('cv-models-group');
-  cvToggle.addEventListener('change', () => {
-    cvGroup.style.display = cvToggle.checked ? '' : 'none';
-  });
+  initCvPanel();
 
-  // Provider → model default
   const providerSelect = document.getElementById('llm-provider');
   const modelInput = document.getElementById('llm-model');
   providerSelect.addEventListener('change', () => {
@@ -121,40 +201,61 @@ export function initPanel() {
     if (def) modelInput.value = def;
   });
 
-  // Start button
   document.getElementById('btn-start').addEventListener('click', handleStart);
 
-  // Rerun button (in dashboard actions)
   const rerunBtn = document.getElementById('btn-rerun');
   if (rerunBtn) rerunBtn.addEventListener('click', handleStart);
 
-  // Auto-select a configured provider on load
   autoSelectProvider();
 }
 
 async function autoSelectProvider() {
+  await ensureProvidersLoaded();
+}
+
+async function ensureProvidersLoaded() {
+  if (_configuredProviders.length > 0) return;
   try {
     const res = await fetch('/api/settings');
     if (!res.ok) return;
     const data = await res.json();
-    syncProviderFromSettings(data.providers || []);
+    const providers = data.providers || [];
+    syncProviderFromSettings(providers);
   } catch { /* silent */ }
 }
 
-export function syncProviderFromSettings(providerList) {
-  const configured = providerList.filter(p => p.configured && !p.is_url);
-  if (configured.length === 0) return;
+export function syncProviderFromSettings(providerList, testedIds) {
+  if (testedIds) {
+    _configuredProviders = providerList.filter(p => p.configured && !p.is_url && testedIds.has(p.id));
+  } else {
+    _configuredProviders = providerList.filter(p => p.configured && !p.is_url);
+  }
+
+  if (_configuredProviders.length === 0) return;
 
   const providerSelect = document.getElementById('llm-provider');
   const modelInput = document.getElementById('llm-model');
 
-  const currentConfigured = configured.find(p => p.id === providerSelect.value);
-  if (currentConfigured) return;
+  const currentConfigured = _configuredProviders.find(p => p.id === providerSelect.value);
+  if (!currentConfigured) {
+    const firstId = _configuredProviders[0].id;
+    if (providerSelect.querySelector(`option[value="${firstId}"]`)) {
+      providerSelect.value = firstId;
+      const def = DEFAULT_MODELS[firstId];
+      if (def) modelInput.value = def;
+    }
+  }
 
-  const firstId = configured[0].id;
-  if (providerSelect.querySelector(`option[value="${firstId}"]`)) {
-    providerSelect.value = firstId;
-    const def = DEFAULT_MODELS[firstId];
-    if (def) modelInput.value = def;
+  const cvToggle = document.getElementById('cv-toggle');
+  if (cvToggle && cvToggle.checked) {
+    renderCvCheckboxList();
   }
 }
+
+function _escapeHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+export { collectCvModels, DEFAULT_MODELS, ensureProvidersLoaded };

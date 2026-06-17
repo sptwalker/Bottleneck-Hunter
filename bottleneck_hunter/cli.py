@@ -402,16 +402,15 @@ def _display_results(result, console: Console) -> None:
         table.add_column("公司", width=15)
         table.add_column("代码", width=12)
         table.add_column("共识", width=10)
-        table.add_column("通过率", width=8)
+        table.add_column("AI 均分", width=8)
         table.add_column("共识摘要", width=50)
 
         for cv in result.cross_validations:
-            icon = {"pass": "✅", "concern": "⚠️", "fail": "❌"}.get(cv.consensus, "?")
+            score_icon = "🟢" if cv.avg_score >= 7 else ("🟡" if cv.avg_score >= 5 else "🔴")
             table.add_row(
                 cv.supplier_name,
                 cv.ticker,
-                f"{icon} {cv.consensus}",
-                f"{cv.pass_rate:.0%}",
+                f"{score_icon} {cv.avg_score:.1f}",
                 cv.consensus_reasoning[:50] + "..." if len(cv.consensus_reasoning) > 50 else cv.consensus_reasoning,
             )
         console.print(table)

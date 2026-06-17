@@ -5,9 +5,10 @@
 
 import { initPanel } from './panel.js';
 import { initHot, fetchHotSectors } from './hot.js';
-import { resizeAll } from './charts.js';
+import { resizeAll, initChartFullscreen } from './charts.js';
 import { initSettings } from './settings.js';
 import { initHistory, fetchHistory } from './history.js';
+import { initCvRefresh, initCvSave, initRefreshSuppliers, initComparePanel, initDetailDrawer } from './dashboard.js';
 
 /* ── Global state ────────────────────────────────────── */
 window.appState = {
@@ -29,8 +30,10 @@ export function showView(name) {
   }
 
   document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.view === name ||
-      (btn.dataset.view === 'screen' && name === 'welcome'));
+    const v = btn.dataset.view;
+    const isActive = v === name ||
+      (v === 'history' && name === 'welcome');
+    btn.classList.toggle('active', isActive);
   });
 
   window.appState.view = name;
@@ -56,6 +59,8 @@ function initNav() {
         } else {
           showView('welcome');
         }
+      } else if (view === 'history') {
+        showView('welcome');
       } else if (view === 'hot') {
         showView('hot');
         fetchHotSectors();
@@ -72,8 +77,28 @@ document.addEventListener('DOMContentLoaded', () => {
   initSettings();
   initHistory();
   initExport();
+  initChartFullscreen();
+  initCvRefresh();
+  initCvSave();
+  initRefreshSuppliers();
+  initComparePanel();
+  initDetailDrawer();
+  initPanelToggle();
   showView('welcome');
 });
+
+/* ── Panel collapse toggle ─────────────────────────── */
+function initPanelToggle() {
+  const btn = document.getElementById('btn-panel-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const main = document.querySelector('.app-main');
+    main.classList.toggle('panel-collapsed');
+    btn.textContent = main.classList.contains('panel-collapsed') ? '▶' : '◀';
+    btn.title = main.classList.contains('panel-collapsed') ? '展开侧栏' : '收起侧栏';
+    setTimeout(() => resizeAll(), 350);
+  });
+}
 
 /* ── Export report button ────────────────────────────── */
 function initExport() {

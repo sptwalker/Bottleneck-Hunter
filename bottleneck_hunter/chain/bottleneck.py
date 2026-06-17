@@ -6,6 +6,7 @@ scarcity, irreplaceability, supply-demand gap, pricing power, tech barrier.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -53,6 +54,10 @@ DIMENSION_DESC = {
 class BottleneckAnalyzer:
     """Analyzes chain nodes for bottleneck characteristics."""
 
+    LLM_TIMEOUT = 120
+    MAX_CONCURRENCY = 4
+    MAX_RETRIES = 2
+
     def __init__(
         self,
         llm: BaseChatModel,
@@ -63,23 +68,50 @@ class BottleneckAnalyzer:
         self.weights = weights or DEFAULT_WEIGHTS
         self.language = language
         self._system_prompt = _load_prompt("bottleneck")
+        self._timeout_count = 0
+        self._retry_count = 0
 
-    async def analyze(self, graph: ChainGraph, top_n: int = 5) -> list[BottleneckReport]:
+    async def analyze(self, graph: ChainGraph, top_n: int = 5, on_progress=None) -> list[BottleneckReport]:
         """Analyze all non-root nodes and return ranked bottleneck reports."""
-        # Skip layer 0 (end product itself)
+        self._timeout_count = 0
+        self._retry_count = 0
+        self._on_progress = on_progress
+
         candidates = [n for n in graph.nodes if n.layer > 0]
+        total = len(candidates)
+        semaphore = asyncio.Semaphore(self.MAX_CONCURRENCY)
+
+        async def _task(node, idx):
+            async with semaphore:
+                if on_progress:
+                    await on_progress(f"▸ 分析: {node.name} ({idx + 1}/{total})")
+                result = await self._analyze_node(node.name, node.description, node.layer, graph)
+                if result and on_progress:
+                    await on_progress(f"✓ {node.name}: {result.overall_score:.1f} 分 ({idx + 1}/{total})")
+                elif on_progress:
+                    await on_progress(f"✗ {node.name}: 分析失败 ({idx + 1}/{total})")
+                return result
+
+        results = await asyncio.gather(
+            *[_task(n, i) for i, n in enumerate(candidates)], return_exceptions=True
+        )
+
         reports: list[BottleneckReport] = []
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error(f"瓶颈分析异常: {r}")
+                continue
+            if r is not None:
+                reports.append(r)
 
-        for node in candidates:
-            report = await self._analyze_node(node.name, node.description, node.layer, graph)
-            if report:
-                reports.append(report)
-
-        # Rank by overall score descending
         reports.sort(key=lambda r: r.overall_score, reverse=True)
-        for i, r in enumerate(reports):
-            r.rank = i + 1
+        for i, rpt in enumerate(reports):
+            rpt.rank = i + 1
 
+        if self._timeout_count > 0:
+            logger.warning(f"瓶颈分析: {self._timeout_count} 次超时放弃, {self._retry_count} 次重试")
+
+        self._on_progress = None
         return reports[:top_n]
 
     async def _analyze_node(
@@ -120,12 +152,44 @@ class BottleneckAnalyzer:
 }}"""
 
         try:
-            response = await self.llm.ainvoke(
-                [
-                    SystemMessage(content=self._system_prompt),
-                    HumanMessage(content=user_prompt),
-                ]
-            )
+            messages = [
+                SystemMessage(content=self._system_prompt),
+                HumanMessage(content=user_prompt),
+            ]
+            response = None
+            for attempt in range(self.MAX_RETRIES + 1):
+                try:
+                    response = await asyncio.wait_for(
+                        self.llm.ainvoke(messages), timeout=self.LLM_TIMEOUT,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    if attempt < self.MAX_RETRIES:
+                        self._retry_count += 1
+                        logger.warning(f"瓶颈分析超时，重试 {attempt + 1}/{self.MAX_RETRIES}: {node_name}")
+                        if self._on_progress:
+                            await self._on_progress(f"⚠ 超时重试 {attempt + 1}/{self.MAX_RETRIES}: {node_name}")
+                        await asyncio.sleep(2)
+                    else:
+                        self._timeout_count += 1
+                        logger.error(f"瓶颈分析超时，已放弃: {node_name}")
+                        if self._on_progress:
+                            await self._on_progress(f"✗ 超时放弃: {node_name}")
+                        return None
+                except Exception as e:
+                    if attempt < self.MAX_RETRIES:
+                        self._retry_count += 1
+                        logger.warning(f"瓶颈分析失败，重试 {attempt + 1}/{self.MAX_RETRIES}: {node_name} - {e}")
+                        if self._on_progress:
+                            await self._on_progress(f"⚠ 失败重试 {attempt + 1}/{self.MAX_RETRIES}: {node_name}")
+                        await asyncio.sleep(2)
+                    else:
+                        self._timeout_count += 1
+                        logger.error(f"瓶颈分析失败，已放弃: {node_name} - {e}")
+                        if self._on_progress:
+                            await self._on_progress(f"✗ 调用失败: {node_name}")
+                        return None
+
             text = response.content.strip()
             if text.startswith("```"):
                 lines = text.split("\n")

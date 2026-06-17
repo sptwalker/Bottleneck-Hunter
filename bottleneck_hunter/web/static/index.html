@@ -20,6 +20,7 @@
   <nav class="header-nav">
     <button class="nav-btn active" data-view="screen">产业链分析</button>
     <button class="nav-btn" data-view="hot">热点扫描</button>
+    <button class="nav-btn" data-view="history">历史记录</button>
     <button class="nav-btn nav-btn-icon" id="btn-settings" title="API 设置">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -127,6 +128,8 @@
               <option value="ollama">Ollama</option>
               <option value="openrouter">OpenRouter</option>
               <option value="siliconflow">SiliconFlow</option>
+              <option value="agnes">Agnes AI</option>
+              <option value="kimi">Kimi (月之暗面)</option>
             </select>
           </div>
           <div class="form-group form-group--half">
@@ -139,15 +142,14 @@
       <div class="panel-section">
         <h3 class="panel-heading">交叉验证</h3>
         <div class="form-group">
-          <label class="toggle">
-            <input type="checkbox" id="cv-toggle">
-            <span class="toggle-slider"></span>
-            <span class="toggle-label">启用多模型验证</span>
+          <label class="form-checkbox">
+            <input type="checkbox" id="cv-toggle" checked>
+            <span class="checkbox-mark"></span>
+            <span class="checkbox-label">启用多模型交叉验证</span>
           </label>
         </div>
-        <div class="form-group" id="cv-models-group" style="display:none">
-          <label class="form-label" for="cv-models">验证模型列表</label>
-          <textarea id="cv-models" class="form-textarea" rows="2" placeholder="provider:model, 逗号分隔&#10;例: anthropic:claude-sonnet-4-6,deepseek:deepseek-v4-pro"></textarea>
+        <div id="cv-models-group">
+          <div id="cv-model-list" class="cv-model-list"></div>
         </div>
       </div>
 
@@ -194,42 +196,86 @@
         <div class="pipeline-connector"></div>
         <div class="pipeline-step" data-step="supplier_search"><span class="pipeline-dot"></span><span class="pipeline-label">检索</span></div>
         <div class="pipeline-connector"></div>
+        <div class="pipeline-step" data-step="financial_fetch"><span class="pipeline-dot"></span><span class="pipeline-label">财务</span></div>
+        <div class="pipeline-connector"></div>
         <div class="pipeline-step" data-step="supplier_eval"><span class="pipeline-dot"></span><span class="pipeline-label">评估</span></div>
         <div class="pipeline-connector"></div>
         <div class="pipeline-step" data-step="cross_validate"><span class="pipeline-dot"></span><span class="pipeline-label">验证</span></div>
         <div class="pipeline-connector"></div>
-        <div class="pipeline-step" data-step="save"><span class="pipeline-dot"></span><span class="pipeline-label">存储</span></div>
+        <div class="pipeline-step" data-step="save"><span class="pipeline-dot"></span><span class="pipeline-label">数据存储</span></div>
       </div>
 
       <div class="pipeline-status" id="pipeline-status"></div>
 
       <div class="dashboard-grid">
         <div class="dash-card dash-card--full" id="card-chain">
-          <h3 class="dash-card-title">产业链图谱</h3>
+          <h3 class="dash-card-title">
+            <span>产业链图谱</span>
+            <button class="btn btn-sm btn-fullscreen" id="btn-chart-fullscreen" title="全屏查看">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1h4v1.5h-2.793l3.147 3.146-1.061 1.061-3.147-3.146v2.793h-1.5zM10.5 1h4v4.354h-1.5v-2.793l-3.146 3.146-1.061-1.061 3.146-3.146h-2.793zM1.146 10.646l3.147 3.147h-2.793v1.5h4v-4.354h-1.5v2.793l-3.146-3.146zM14.5 11.646v2.793h-2.793l3.147 3.147-1.061 1.061-3.147-3.147v2.793h-1.5v-4.354h4z" class="fullscreen-expand"/><path d="M5.854 1.146l-3.147 3.147v-2.793h-1.5v4.354h4v-1.5h-2.793l3.146-3.147zM10.146 1.146l3.147 3.147v-2.793h1.5v4.354h-4v-1.5h2.793l-3.146-3.147zM5.854 14.854l-3.147-3.147v2.793h-1.5v-4.354h4v1.5h-2.793l3.146 3.147zM10.146 14.854l3.147-3.147v2.793h1.5v-4.354h-4v1.5h2.793l-3.146 3.147z" class="fullscreen-shrink" style="display:none"/></svg>
+              <span class="fullscreen-label">全屏</span>
+            </button>
+          </h3>
           <div class="dash-card-body">
             <div id="chart-chain" class="chart-container chart-container--dag skeleton"></div>
+            <div id="node-info-panel" class="node-info-panel" style="display:none"></div>
           </div>
         </div>
         <div class="dash-card" id="card-bottleneck">
           <h3 class="dash-card-title">瓶颈排名</h3>
           <div class="dash-card-body">
             <div id="chart-bottleneck" class="chart-container skeleton"></div>
+            <div id="bottleneck-company-panel" class="node-info-panel" style="display:none"></div>
           </div>
         </div>
         <div class="dash-card" id="card-suppliers">
-          <h3 class="dash-card-title">候选供应商</h3>
+          <h3 class="dash-card-title">
+            <span>优选企业列表</span>
+            <div class="dash-card-actions">
+              <button class="btn btn-sm btn-card-action" id="btn-refresh-suppliers" title="重新搜索并评估候选供应商" style="display:none">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                </svg>
+                <span>刷新候选</span>
+              </button>
+            </div>
+          </h3>
           <div class="dash-card-body">
             <div id="table-suppliers" class="table-container skeleton"></div>
           </div>
         </div>
-        <div class="dash-card" id="card-validation">
-          <h3 class="dash-card-title">交叉验证</h3>
-          <div class="dash-card-body">
-            <div id="table-validation" class="table-container skeleton"></div>
+        <div class="dash-card dash-card--full" id="card-compare" style="display:none">
+          <h3 class="dash-card-title">
+            <span>候选对比</span>
+            <button class="btn btn-sm" id="btn-close-compare">关闭</button>
+          </h3>
+          <div class="dash-card-body compare-body">
+            <div id="compare-radar" class="compare-radar"></div>
+            <div id="compare-table" class="compare-table"></div>
           </div>
         </div>
+        <div class="dash-card dash-card--full" id="card-shortlist" style="display:none">
+          <h3 class="dash-card-title">所有入围企业</h3>
+          <div class="dash-card-body" id="shortlist-body"></div>
+        </div>
         <div class="dash-card dash-card--full" id="card-picks" style="display:none">
-          <h3 class="dash-card-title">最终推荐</h3>
+          <h3 class="dash-card-title">
+            <span>最终推荐</span>
+            <div class="dash-card-actions">
+              <button class="btn btn-sm btn-card-action" id="btn-refresh-cv" title="重新运行交叉验证" style="display:none">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                </svg>
+                <span>刷新验证</span>
+              </button>
+              <button class="btn btn-sm btn-card-action btn-save-cv" id="btn-save-cv" title="保存交叉验证结论到分析记录" style="display:none">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+                </svg>
+                <span>保存结论</span>
+              </button>
+            </div>
+          </h3>
           <div class="dash-card-body" id="picks-body"></div>
         </div>
       </div>
@@ -252,6 +298,8 @@
   </section>
 </main>
 
+<button class="btn-panel-toggle" id="btn-panel-toggle" title="收起侧栏">◀</button>
+
 <footer class="app-footer">
   <span>AI 生成内容，不构成投资建议。方法论：Serenity「三步法」— 产业链拆解 → 供应商检索 → 多模型交叉验证</span>
 </footer>
@@ -268,10 +316,26 @@
     </div>
     <div class="modal-footer">
       <span class="settings-status" id="settings-status"></span>
+      <button class="btn btn-secondary" id="btn-test-providers">测试连接</button>
       <button class="btn btn-secondary" id="btn-cancel-settings">取消</button>
       <button class="btn btn-primary" id="btn-save-settings">保存</button>
     </div>
   </div>
+</div>
+
+<!-- Detail Drawer (right-side slide panel) -->
+<div class="drawer-overlay" id="drawer-overlay" style="display:none"></div>
+<div class="drawer" id="detail-drawer" style="display:none">
+  <div class="drawer-header">
+    <div class="drawer-title-group">
+      <h2 class="drawer-company-name" id="drawer-company-name"></h2>
+      <span class="drawer-ticker" id="drawer-ticker"></span>
+      <span class="drawer-industry" id="drawer-industry"></span>
+      <span class="drawer-bottleneck-tag" id="drawer-bottleneck-tag"></span>
+    </div>
+    <button class="drawer-close" id="btn-close-drawer">&times;</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
 </div>
 
 <script type="module" src="/static/js/app.js?v=2"></script>
