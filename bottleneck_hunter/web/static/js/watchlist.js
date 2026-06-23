@@ -340,7 +340,7 @@ function openDrawer(entryId) {
   tierEl.className = `wl-drawer-tier-badge wl-tier-badge wl-tier-badge--${entry.tier}`;
   tierEl.innerHTML = `<span class="wl-tier-dot wl-dot-${entry.tier}"></span>${tierLabel(entry.tier)}`;
 
-  drawer.style.display = 'block';
+  drawer.style.display = 'flex';
   overlay.style.display = 'block';
   requestAnimationFrame(() => {
     drawer.classList.add('drawer-open');
