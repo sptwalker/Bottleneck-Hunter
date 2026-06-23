@@ -399,6 +399,9 @@ async function loadDrawerTabData(entry, tab) {
     case 'capital':
       await loadCapitalTab(entry);
       break;
+    case 'intelligence':
+      await loadIntelligenceTab(entry);
+      break;
     case 'strategy':
       await loadStrategyTab(entry);
       break;
@@ -1543,19 +1546,166 @@ function initRefreshStrategy() {
   });
 }
 
+/* ── Intelligence Tab (情报) ──────────────────────────────── */
+
+async function loadIntelligenceTab(entry) {
+  const pane = document.getElementById('wl-tab-intelligence');
+  if (!pane) return;
+  pane.innerHTML = '<div style="text-align:center;padding:24px;color:var(--muted)">加载中...</div>';
+
+  try {
+    const [intelData, historyData] = await Promise.all([
+      apiFetch(`/${entry.id}/intelligence`),
+      apiFetch(`/${entry.id}/intelligence/history?limit=10`)
+    ]);
+
+    const intel = intelData.intelligence;
+    const history = historyData.history || [];
+
+    if (!intel) {
+      pane.innerHTML = '<div style="padding:20px;color:var(--muted)">暂无情报记录。请先点击"刷新信息"聚合数据源生成情报简报。</div>';
+      return;
+    }
+
+    let summaryHtml = '';
+    const sections = [
+      { key: 'price_summary', label: '价格数据' },
+      { key: 'news_summary', label: '新闻摘要' },
+      { key: 'sec_summary', label: 'SEC文件' },
+      { key: 'options_summary', label: '期权数据' },
+      { key: 'earnings_summary', label: '财报数据' },
+      { key: 'source_scorecard_summary', label: '来源评分卡' },
+    ];
+
+    for (const sec of sections) {
+      const data = intel[sec.key] ? JSON.parse(intel[sec.key]) : {};
+      if (Object.keys(data).length > 0) {
+        summaryHtml += `
+          <div class="wl-intel-section">
+            <h4>${sec.label}</h4>
+            <pre style="white-space:pre-wrap;font-size:var(--fs-sm);opacity:0.85">${escHtml(JSON.stringify(data, null, 2))}</pre>
+          </div>`;
+      }
+    }
+
+    let keySignalsHtml = '';
+    const signals = intel.key_signals ? JSON.parse(intel.key_signals) : [];
+    if (signals.length > 0) {
+      keySignalsHtml = `
+        <div class="wl-intel-section">
+          <h4>关键信号</h4>
+          <ul style="font-size:var(--fs-sm);padding-left:20px;margin:0">
+            ${signals.map(s => `<li>${escHtml(s)}</li>`).join('')}
+          </ul>
+        </div>`;
+    }
+
+    let historyHtml = '';
+    if (history.length > 1) {
+      historyHtml = `
+        <div class="wl-intel-section" style="margin-top:24px">
+          <h4>情报历史 <span style="font-weight:400;opacity:0.6;font-size:var(--fs-sm)">(${history.length} 个版本)</span></h4>
+          <div class="wl-strategy-timeline">`;
+
+      for (const h of history) {
+        const isLatest = h.id === intel.id;
+        const statusLabel = h.status === 'completed' ? '✓' : h.status === 'failed' ? '✗' : '⋯';
+        historyHtml += `
+          <div class="wl-timeline-item ${isLatest ? 'is-latest' : ''}" data-history-id="${h.id}">
+            <div class="wl-timeline-marker"></div>
+            <div class="wl-timeline-content">
+              <div class="wl-timeline-header">
+                <span style="font-size:var(--fs-xs);font-weight:600">v${h.version}</span>
+                <span style="font-size:var(--fs-xs);opacity:0.6">${statusLabel} ${h.status}</span>
+                ${isLatest ? '<span style="font-size:var(--fs-xs);color:var(--primary);font-weight:600">当前</span>' : ''}
+              </div>
+              <div style="font-size:var(--fs-xs);opacity:0.6;margin-top:4px">${new Date(h.created_at).toLocaleString('zh-CN')}</div>
+              ${h.brief_text ? `<div style="font-size:var(--fs-sm);margin-top:6px;opacity:0.8">${escHtml(h.brief_text.substring(0, 100))}${h.brief_text.length > 100 ? '...' : ''}</div>` : ''}
+            </div>
+          </div>`;
+      }
+
+      historyHtml += `
+          </div>
+        </div>`;
+    }
+
+    pane.innerHTML = `
+      <div class="wl-intel-detail">
+        <div class="wl-intel-header">
+          <div style="font-size:var(--fs-lg);font-weight:600;color:var(--accent)">情报简报 <span style="opacity:0.6;font-size:var(--fs-sm)">v${intel.version}</span></div>
+          <div style="font-size:var(--fs-xs);opacity:0.6">${new Date(intel.created_at).toLocaleString('zh-CN')}</div>
+        </div>
+        ${intel.brief_text ? `
+          <div class="wl-intel-section">
+            <h4>简报文本</h4>
+            <p>${escHtml(intel.brief_text)}</p>
+          </div>` : ''}
+        ${keySignalsHtml}
+        ${summaryHtml}
+        ${historyHtml}
+      </div>`;
+  } catch (e) {
+    pane.innerHTML = `<div style="color:var(--danger);padding:16px">${escHtml(e.message)}</div>`;
+  }
+}
+
+/* ── Strategy Tab (策略) ──────────────────────────────── */
+
 async function loadStrategyTab(entry) {
   const pane = document.getElementById('wl-tab-strategy');
   if (!pane) return;
   pane.innerHTML = '<div style="text-align:center;padding:24px;color:var(--muted)">加载中...</div>';
+
   try {
-    const data = await apiFetch(`/${entry.id}/strategy`);
-    const strategy = data.strategy;
+    const [strategyData, historyData] = await Promise.all([
+      apiFetch(`/${entry.id}/strategy`),
+      apiFetch(`/${entry.id}/strategy/history?limit=10`)
+    ]);
+
+    const strategy = strategyData.strategy;
+    const history = historyData.history || [];
+
     if (!strategy) {
       pane.innerHTML = '<div style="padding:20px;color:var(--muted)">暂无策略记录。请先点击"刷新信息"聚合数据，再点击"刷新策略"生成操作策略。</div>';
       return;
     }
+
     const signalLabel = {bullish: '看多', neutral: '中性', bearish: '看空'}[strategy.signal] || '中性';
     const signalClass = `wl-strategy-signal-${strategy.signal}`;
+
+    let historyHtml = '';
+    if (history.length > 1) {
+      historyHtml = `
+        <div class="wl-strategy-section" style="margin-top:24px">
+          <h4>策略历史 <span style="font-weight:400;opacity:0.6;font-size:var(--fs-sm)">(${history.length} 个版本)</span></h4>
+          <div class="wl-strategy-timeline">`;
+
+      for (const h of history) {
+        const hSignal = {bullish: '看多', neutral: '中性', bearish: '看空'}[h.signal] || '中性';
+        const hClass = `wl-strategy-signal-${h.signal}`;
+        const isLatest = h.id === strategy.id;
+        historyHtml += `
+          <div class="wl-timeline-item ${isLatest ? 'is-latest' : ''}" data-history-id="${h.id}">
+            <div class="wl-timeline-marker"></div>
+            <div class="wl-timeline-content">
+              <div class="wl-timeline-header">
+                <span class="wl-strategy-signal ${hClass}" style="font-size:var(--fs-xs)">${hSignal}</span>
+                <span style="font-size:var(--fs-xs);opacity:0.6">v${h.version}</span>
+                <span style="font-size:var(--fs-xs);opacity:0.6">信心 ${h.confidence}/10</span>
+                ${isLatest ? '<span style="font-size:var(--fs-xs);color:var(--primary);font-weight:600">当前</span>' : ''}
+              </div>
+              <div style="font-size:var(--fs-xs);opacity:0.6;margin-top:4px">${new Date(h.created_at).toLocaleString('zh-CN')}</div>
+              ${h.core_logic ? `<div style="font-size:var(--fs-sm);margin-top:6px;opacity:0.8">${escHtml(h.core_logic.substring(0, 100))}${h.core_logic.length > 100 ? '...' : ''}</div>` : ''}
+            </div>
+          </div>`;
+      }
+
+      historyHtml += `
+          </div>
+        </div>`;
+    }
+
     pane.innerHTML = `
       <div class="wl-strategy-detail">
         <div class="wl-strategy-header">
@@ -1565,11 +1715,11 @@ async function loadStrategyTab(entry) {
         </div>
         <div class="wl-strategy-section">
           <h4>情报摘要</h4>
-          <p>${escHtml(strategy.intelligence_summary)}</p>
+          <p>${escHtml(strategy.intelligence_summary || '暂无')}</p>
         </div>
         <div class="wl-strategy-section">
           <h4>核心逻辑</h4>
-          <p>${escHtml(strategy.core_logic)}</p>
+          <p>${escHtml(strategy.core_logic || '暂无')}</p>
         </div>
         <div class="wl-strategy-section">
           <h4>操作策略</h4>
@@ -1579,6 +1729,7 @@ async function loadStrategyTab(entry) {
           <h4>风险控制</h4>
           <pre style="white-space:pre-wrap;font-size:var(--fs-sm)">${escHtml(JSON.stringify(JSON.parse(strategy.risk_control || '{}'), null, 2))}</pre>
         </div>
+        ${historyHtml}
       </div>`;
   } catch (e) {
     pane.innerHTML = `<div style="color:var(--danger);padding:16px">${escHtml(e.message)}</div>`;

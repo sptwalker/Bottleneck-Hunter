@@ -6305,6 +6305,47 @@ ul, ol {
 }
 
 /* Strategy detail in drawer */
+/* ----- Watchlist Strategy Detail ----- */
+
+.wl-intel-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.wl-intel-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  background: var(--surface);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.wl-intel-section {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.wl-intel-section:last-child {
+  border-bottom: none;
+}
+
+.wl-intel-section h4 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--accent);
+}
+
+.wl-intel-section p,
+.wl-intel-section pre {
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  margin: 0;
+}
+
 .wl-strategy-detail {
   display: flex;
   flex-direction: column;
@@ -6365,5 +6406,58 @@ ul, ol {
   font-size: var(--fs-sm);
   line-height: 1.6;
   margin: 0;
+}
+
+.wl-strategy-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.wl-timeline-item {
+  display: flex;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 6px;
+  transition: background var(--transition);
+}
+
+.wl-timeline-item:hover {
+  background: var(--panel-bg);
+}
+
+.wl-timeline-item.is-latest {
+  background: oklch(0.97 0.01 250);
+  border-left: 3px solid var(--accent);
+}
+
+.wl-timeline-marker {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--border);
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.wl-timeline-item.is-latest .wl-timeline-marker {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px oklch(0.55 0.15 250 / 0.2);
+}
+
+.wl-timeline-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.wl-timeline-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
