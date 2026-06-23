@@ -14,6 +14,7 @@ from pathlib import Path
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from bottleneck_hunter.chain.json_utils import extract_json_object as _extract_json
 from bottleneck_hunter.chain.models import (
     CrossValidationReport,
     ModelValidation,
@@ -135,7 +136,7 @@ class CrossValidator:
                     timeout=120,
                 )
                 text = response.content.strip()
-                data = self._extract_json(text)
+                data = _extract_json(text)
 
                 raw_score = data.get("score", 5)
                 score = max(1.0, min(10.0, float(raw_score)))
@@ -225,28 +226,3 @@ class CrossValidator:
             )
 
         return reports
-
-    @staticmethod
-    def _extract_json(text: str) -> dict:
-        """从 LLM 输出中提取 JSON 对象，容忍 markdown 代码块和额外文本。"""
-        import re
-        # 尝试 1: 去除 markdown code fence
-        fence_match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-        if fence_match:
-            try:
-                return json.loads(fence_match.group(1).strip())
-            except json.JSONDecodeError:
-                pass
-        # 尝试 2: 直接解析
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        # 尝试 3: 查找第一个 { ... } 块
-        brace_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
-        if brace_match:
-            try:
-                return json.loads(brace_match.group())
-            except json.JSONDecodeError:
-                pass
-        raise ValueError(f"无法从 LLM 输出中提取有效 JSON: {text[:200]}")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,9 +13,27 @@ from fastapi.responses import FileResponse
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s | %(message)s")
+
 from bottleneck_hunter.web.api import router
+from bottleneck_hunter.web.watchlist_api import router as watchlist_router, set_store as wl_set_store
+from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.watchlist.scheduler import init_scheduler, shutdown_scheduler
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+_wl_store = WatchlistStore()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    wl_set_store(_wl_store)
+    scheduler = init_scheduler(_wl_store)
+    if scheduler:
+        scheduler.start()
+        logging.getLogger(__name__).info("Watchlist scheduler started")
+    yield
+    shutdown_scheduler()
 
 
 class NoCacheStaticMiddleware:
@@ -36,9 +56,10 @@ class NoCacheStaticMiddleware:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="BottleneckHunter", version="0.1.0")
+    app = FastAPI(title="BottleneckHunter", version="0.1.0", lifespan=lifespan)
     app.add_middleware(NoCacheStaticMiddleware)
     app.include_router(router, prefix="/api")
+    app.include_router(watchlist_router, prefix="/api/watchlist")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

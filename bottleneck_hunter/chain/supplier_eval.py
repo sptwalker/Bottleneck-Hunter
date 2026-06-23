@@ -14,10 +14,14 @@ from pathlib import Path
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from bottleneck_hunter.chain.json_utils import strip_fences
 from bottleneck_hunter.chain.models import (
     AlphaScore,
     BottleneckReport,
     FinancialSnapshot,
+    FinalScore,
+    MarketRegion,
+    MoatScore,
     SupplierInfo,
     SupplierScorecard,
 )
@@ -54,6 +58,15 @@ def _format_financial_block(snap: FinancialSnapshot) -> str:
         analyst_lines.append(f"一致预期PE: {snap.consensus_pe}")
     if analyst_lines:
         lines.append("- " + "，".join(analyst_lines))
+    if snap.trend and snap.trend.trend_summary:
+        lines.append(f"\n## 财务趋势（近{len(snap.trend.quarters)}个季度）")
+        lines.append(f"- 趋势概要: {snap.trend.trend_summary}")
+        if snap.trend.revenue_acceleration is not None:
+            lines.append(f"- 营收加速度: {snap.trend.revenue_acceleration:+.1f}pp")
+        if snap.trend.gross_margin_trend is not None:
+            lines.append(f"- 毛利率趋势: {snap.trend.gross_margin_trend:+.1f}pp")
+        if snap.trend.consecutive_growth_quarters > 0:
+            lines.append(f"- 连续正增长: {snap.trend.consecutive_growth_quarters}个季度")
     lines.append("\n⚠ 以上为市场API获取的真实数据，请优先基于这些数据进行财务健康和估值评分。")
     return "\n".join(lines)
 
@@ -121,6 +134,13 @@ class SupplierEvaluator:
 4. financial_health: 财务健康（营收增速、毛利率、现金流）
 5. valuation: 估值水平（PE/PB相对行业均值）
 
+另外，请评估以下4个护城河维度（0-10分）:
+6. patent_moat: 专利/技术壁垒（核心专利数量、技术领先程度、研发投入占比）
+7. switching_cost: 客户转换成本（认证周期、定制化程度、生态锁定）
+8. capacity_lead_time: 产能/交期优势（扩产周期、良率优势、设备壁垒）
+9. cost_advantage: 成本优势（规模效应、工艺领先、原料自给）
+并用一句话总结该公司的核心护城河（moat_reasoning）。
+
 同时列出:
 - strengths: 优势（2-3条）
 - weaknesses: 风险/劣势（1-2条）
@@ -132,6 +152,11 @@ class SupplierEvaluator:
   "capacity_status": 6,
   "financial_health": 7,
   "valuation": 5,
+  "patent_moat": 7,
+  "switching_cost": 6,
+  "capacity_lead_time": 5,
+  "cost_advantage": 6,
+  "moat_reasoning": "...",
   "strengths": ["...", "..."],
   "weaknesses": ["..."]
 }}"""
@@ -147,7 +172,7 @@ class SupplierEvaluator:
                 timeout=120,
             )
             text = response.content.strip()
-            text = self._strip_fences(text)
+            text = strip_fences(text)
             data = json.loads(text)
 
             scores = [
@@ -157,26 +182,43 @@ class SupplierEvaluator:
                 data.get("financial_health", 0),
                 data.get("valuation", 0),
             ]
-            overall = sum(scores) / len(scores) if scores else 0
+            base_overall = sum(scores) / len(scores) if scores else 0
+
+            moat_fields = ["patent_moat", "switching_cost", "capacity_lead_time", "cost_advantage"]
+            moat_scores = [data.get(f, 0) for f in moat_fields]
+            moat_overall = sum(moat_scores) / len(moat_scores) if any(s > 0 for s in moat_scores) else 0
+            moat = MoatScore(
+                patent_moat=data.get("patent_moat", 0),
+                switching_cost=data.get("switching_cost", 0),
+                capacity_lead_time=data.get("capacity_lead_time", 0),
+                cost_advantage=data.get("cost_advantage", 0),
+                overall_moat=round(moat_overall, 1),
+                moat_reasoning=data.get("moat_reasoning", ""),
+            )
+
+            overall = round(base_overall * 0.7 + moat_overall * 0.3, 1) if moat_overall > 0 else round(base_overall, 1)
 
             return SupplierScorecard(
                 supplier=supplier,
                 bottleneck_node=bottleneck.node_name,
+                layer=bottleneck.layer,
                 market_position=data.get("market_position", 0),
                 customer_validation=data.get("customer_validation", 0),
                 capacity_status=data.get("capacity_status", 0),
                 financial_health=data.get("financial_health", 0),
                 valuation=data.get("valuation", 0),
-                overall_score=round(overall, 1),
+                overall_score=overall,
                 strengths=data.get("strengths", []),
                 weaknesses=data.get("weaknesses", []),
                 financial_snapshot=financial_snapshot,
+                moat=moat,
             )
         except Exception:
             logger.exception(f"Failed to evaluate supplier: {supplier.name}")
             return SupplierScorecard(
                 supplier=supplier,
                 bottleneck_node=bottleneck.node_name,
+                layer=bottleneck.layer,
                 market_position=0,
                 customer_validation=0,
                 capacity_status=0,
@@ -288,14 +330,6 @@ class SupplierEvaluator:
 
         return all_scorecards
 
-    @staticmethod
-    def _strip_fences(text: str) -> str:
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:])
-            if text.endswith("```"):
-                text = text[:-3]
-        return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -305,14 +339,24 @@ class SupplierEvaluator:
 class AlphaScorer:
     """计算预期差 (alpha) 评分。
 
-    核心逻辑: alpha = 瓶颈重要性 × (1 - 市场关注度/10)
-    市场关注度由研报覆盖量 + 市值规模决定。
+    核心逻辑: 5 维加权市场关注度 → alpha = 瓶颈重要性 × (1 - 关注度/10)
+    维度: 市值(15%) + 分析师覆盖(20%) + 成交量动量(25%) + 近3月涨幅(15%) + 机构持仓(25%)
     """
 
-    # 市值分档（A 股，亿元）
+    # A 股市值分档（亿元）
     CAP_TIERS_YI = [(50, 1), (200, 3), (500, 5), (1000, 7), (float("inf"), 9)]
-    # 研报数量分档
-    REPORT_TIERS = [(3, 1), (10, 3), (20, 5), (40, 7), (float("inf"), 9)]
+    # 美股市值分档（$B）
+    CAP_TIERS_B = [(2, 1), (10, 3), (50, 5), (200, 7), (float("inf"), 9)]
+    # A 股分析师覆盖分档（近6月去重机构数）
+    ANALYST_TIERS_A = [(3, 1), (8, 3), (15, 5), (25, 7), (float("inf"), 9)]
+    # 美股分析师覆盖分档（yfinance numberOfAnalystOpinions）
+    ANALYST_TIERS_US = [(5, 1), (15, 3), (25, 5), (35, 7), (float("inf"), 9)]
+    # 成交量动量分档（过滤后 10日/60日均量比）
+    VOL_MOMENTUM_TIERS = [(0.6, 1), (0.8, 3), (1.3, 5), (2.0, 7), (float("inf"), 9)]
+    # 近3月涨幅分档（%）
+    PRICE_3M_TIERS = [(-20, 1), (0, 3), (30, 5), (80, 7), (float("inf"), 9)]
+    # 美股机构持仓分档（%）
+    INST_TIERS_US = [(5, 1), (15, 2), (30, 4), (50, 5), (70, 7), (85, 8), (float("inf"), 9)]
 
     @classmethod
     def _tier_score(cls, value: float | None, tiers: list[tuple]) -> float:
@@ -324,6 +368,53 @@ class AlphaScorer:
         return tiers[-1][1]
 
     @classmethod
+    def _compute_trend_bonus(cls, snap: FinancialSnapshot | None) -> float:
+        """根据财务趋势计算加分。盈利加速+毛利率扩张 → 正向加分。"""
+        if not snap or not snap.trend:
+            return 0.0
+        trend = snap.trend
+        bonus = 0.0
+        if trend.revenue_acceleration is not None:
+            if trend.revenue_acceleration > 5:
+                bonus += 1.0
+            elif trend.revenue_acceleration > 2:
+                bonus += 0.5
+            elif trend.revenue_acceleration < -5:
+                bonus -= 0.4
+        if trend.profit_acceleration is not None:
+            if trend.profit_acceleration > 5:
+                bonus += 0.8
+            elif trend.profit_acceleration > 2:
+                bonus += 0.4
+            elif trend.profit_acceleration < -5:
+                bonus -= 0.3
+        if trend.gross_margin_trend is not None:
+            if trend.gross_margin_trend > 2:
+                bonus += 0.7
+            elif trend.gross_margin_trend > 0.5:
+                bonus += 0.3
+            elif trend.gross_margin_trend < -2:
+                bonus -= 0.3
+        return max(-1.0, min(2.5, round(bonus, 2)))
+
+    @classmethod
+    def _compute_smart_money_bonus(cls, scorecard: SupplierScorecard) -> float:
+        """根据聪明钱信号计算加分。低关注度+聪明钱看多 → 最高加分。"""
+        sm = scorecard.smart_money
+        if not sm:
+            return 0.0
+        base = sm.smart_money_score - 5.0
+        return max(-1.0, min(2.0, round(base * 0.4, 2)))
+
+    @classmethod
+    def _compute_catalyst_bonus(cls, scorecard: SupplierScorecard) -> float:
+        """催化剂紧迫度 → 独立加分项 0~2.0。"""
+        cat = scorecard.catalyst
+        if not cat or not cat.events:
+            return 0.0
+        return round(cat.urgency_score / 10 * 2.0, 2)
+
+    @classmethod
     def compute(
         cls,
         scorecard: SupplierScorecard,
@@ -332,32 +423,113 @@ class AlphaScorer:
         """为一张评分卡计算 alpha。"""
         snap = scorecard.financial_snapshot
         cap = scorecard.supplier.market_cap
+        is_us = scorecard.supplier.market == MarketRegion.US_STOCK
 
-        cap_attention = cls._tier_score(cap, cls.CAP_TIERS_YI)
-        report_attention = 5.0
+        # ---- 维度 1: 市值规模 (15%) ----
+        cap_tiers = cls.CAP_TIERS_B if is_us else cls.CAP_TIERS_YI
+        s_cap = cls._tier_score(cap, cap_tiers)
+
+        # ---- 维度 2: 分析师/机构覆盖 (20%) ----
+        analyst_tiers = cls.ANALYST_TIERS_US if is_us else cls.ANALYST_TIERS_A
+        s_analyst = 5.0
         if snap and snap.analyst_report_count is not None:
-            report_attention = cls._tier_score(snap.analyst_report_count, cls.REPORT_TIERS)
+            s_analyst = cls._tier_score(snap.analyst_report_count, analyst_tiers)
 
-        market_attention = round((cap_attention * 0.4 + report_attention * 0.6), 1)
-        market_attention = min(10.0, max(0.0, market_attention))
+        # ---- 维度 3: 成交量动量 (25%) ----
+        s_vol = 5.0
+        if snap and snap.volume_ratio is not None:
+            s_vol = cls._tier_score(snap.volume_ratio, cls.VOL_MOMENTUM_TIERS)
+            if snap.consecutive_volume_days >= 3:
+                s_vol = min(s_vol + 1, 9)
 
+        # ---- 维度 4: 近3月涨幅 (15%) ----
+        s_price = 5.0
+        if snap and snap.price_change_3m_pct is not None:
+            s_price = cls._tier_score(snap.price_change_3m_pct, cls.PRICE_3M_TIERS)
+
+        # ---- 维度 5: 机构持仓 (25%) ----
+        s_inst = 5.0
+        if is_us and snap and snap.institution_holding_pct is not None:
+            s_inst = cls._tier_score(snap.institution_holding_pct, cls.INST_TIERS_US)
+
+        # ---- 加权汇总 ----
+        raw = s_cap * 0.15 + s_analyst * 0.20 + s_vol * 0.25 + s_price * 0.15 + s_inst * 0.25
+
+        ipo_bonus = 0
+        if snap and snap.days_since_ipo is not None and snap.days_since_ipo < 365:
+            ipo_bonus = 2
+
+        market_attention = max(2.0, min(10.0, round(raw + ipo_bonus, 1)))
         information_gap = round(10.0 - market_attention, 1)
-        alpha = round(bottleneck_score * (1 - market_attention / 10), 1)
+
+        # ---- Alpha 计算 (√压缩 + 独立因子加法) ----
+        from math import sqrt
+        raw_gap = bottleneck_score * (1 - market_attention / 10)
+        base_alpha = round(min(5.0, sqrt(max(0, raw_gap)) * 2.0), 2)
+
+        trend_bonus = cls._compute_trend_bonus(snap)
+        smart_money_bonus = cls._compute_smart_money_bonus(scorecard)
+        catalyst_bonus = cls._compute_catalyst_bonus(scorecard)
+
+        vp_discount = 1.0
+        if snap and snap.price_change_1m_pct is not None and snap.volume_ratio is not None:
+            if snap.price_change_1m_pct > 20 and snap.volume_ratio < 0.8:
+                vp_discount = 0.8
+
+        alpha = round(base_alpha * vp_discount + catalyst_bonus + trend_bonus + smart_money_bonus, 1)
         alpha = min(10.0, max(0.0, alpha))
 
+        # ---- reasoning ----
         parts = []
         if cap is not None:
-            parts.append(f"市值{cap}亿")
+            cap_unit = "$B" if is_us else "亿"
+            parts.append(f"市值{cap}{cap_unit}")
         if snap and snap.analyst_report_count is not None:
-            parts.append(f"研报{snap.analyst_report_count}篇")
+            count_label = "分析师" if is_us else "覆盖机构"
+            parts.append(f"{count_label}{snap.analyst_report_count}")
+        if snap and snap.volume_ratio is not None:
+            parts.append(f"量比{snap.volume_ratio:.2f}")
+            if snap.consecutive_volume_days >= 3:
+                parts.append("连续放量")
+        if snap and snap.price_change_3m_pct is not None:
+            parts.append(f"3月涨幅{snap.price_change_3m_pct:+.0f}%")
+        if is_us and snap and snap.institution_holding_pct is not None:
+            parts.append(f"机构持仓{snap.institution_holding_pct:.0f}%")
         parts.append(f"关注度{market_attention}")
         parts.append(f"瓶颈分{bottleneck_score}")
+        parts.append(f"基础α={base_alpha}")
+        if ipo_bonus:
+            parts.append("新股+2")
+        if catalyst_bonus > 0:
+            parts.append(f"催化剂+{catalyst_bonus:.1f}")
+            if scorecard.catalyst and scorecard.catalyst.summary:
+                parts.append(scorecard.catalyst.summary[:30])
+        if trend_bonus != 0:
+            parts.append(f"趋势{'加' if trend_bonus > 0 else '减'}分{trend_bonus:+.1f}")
+            if snap and snap.trend and snap.trend.trend_summary:
+                parts.append(snap.trend.trend_summary)
+        if smart_money_bonus != 0:
+            parts.append(f"聪明钱{'加' if smart_money_bonus > 0 else '减'}分{smart_money_bonus:+.1f}")
+            if scorecard.smart_money and scorecard.smart_money.details:
+                parts.append(scorecard.smart_money.details[0])
+        if vp_discount < 1.0:
+            parts.append("⚠无量上涨折扣×0.8")
         reasoning = "，".join(parts) + f" → alpha={alpha}"
 
         return AlphaScore(
             market_attention=market_attention,
             information_gap=information_gap,
             alpha_score=alpha,
+            trend_bonus=trend_bonus,
+            smart_money_bonus=smart_money_bonus,
+            catalyst_bonus=catalyst_bonus,
+            dim_cap=s_cap,
+            dim_analyst=s_analyst,
+            dim_volume=s_vol,
+            dim_price=s_price,
+            dim_institution=s_inst,
+            ipo_bonus=ipo_bonus,
+            vp_discount=vp_discount,
             reasoning=reasoning,
         )
 
@@ -378,4 +550,43 @@ class AlphaScorer:
         for sc in scorecards:
             bn_score = bottleneck_map.get(sc.bottleneck_node.split(",")[0].strip(), 5.0)
             sc.alpha = cls.compute(sc, bn_score)
+        return scorecards
+
+
+# ---------------------------------------------------------------------------
+# 统一最终评分
+# ---------------------------------------------------------------------------
+
+class FinalScorer:
+    """统一最终评分：quality^w_q × alpha^w_a（几何加权均值）。
+
+    quality = overall_score（纯 LLM 质量评估），alpha = 现有 alpha_score。
+    两者完全正交，无维度重叠。
+    """
+
+    @classmethod
+    def compute(cls, scorecard: SupplierScorecard, w_q: float = 0.4, w_a: float = 0.6) -> FinalScore:
+        quality = max(0.1, min(10.0, scorecard.overall_score))
+        alpha = max(0.1, scorecard.alpha.alpha_score if scorecard.alpha else 0.1)
+        raw = (quality ** w_q) * (alpha ** w_a)
+        final = max(0.0, min(10.0, round(raw, 2)))
+        return FinalScore(
+            quality_score=round(quality, 2),
+            alpha_score=round(alpha, 2),
+            final_score=final,
+            quality_weight=w_q,
+            alpha_weight=w_a,
+        )
+
+    @classmethod
+    def score_all(
+        cls,
+        scorecards: list[SupplierScorecard],
+        w_q: float = 0.4,
+        w_a: float = 0.6,
+    ) -> list[SupplierScorecard]:
+        """为所有评分卡计算最终评分并按 final_score 排序。"""
+        for sc in scorecards:
+            sc.final = cls.compute(sc, w_q, w_a)
+        scorecards.sort(key=lambda s: s.final.final_score, reverse=True)
         return scorecards

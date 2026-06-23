@@ -14,6 +14,7 @@ from pathlib import Path
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from bottleneck_hunter.chain.json_utils import extract_json_array
 from bottleneck_hunter.chain.models import (
     ChainGraph,
     ChainLink,
@@ -312,21 +313,7 @@ class ChainDecomposer:
             return json.loads(text)
         except json.JSONDecodeError:
             logger.warning(f"LLM returned invalid JSON for {parent_name} layer {depth}, attempting extraction")
-            return self._extract_json_from_text(text)
-
-    @staticmethod
-    def _extract_json_from_text(text: str) -> list[dict]:
-        """Fallback: try to find a JSON array anywhere in the text."""
-        import re
-
-        match = re.search(r"\[.*\]", text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        logger.error("Could not extract JSON from LLM response")
-        return []
+            return extract_json_array(text) or []
 
     # ── 本地规则去重 ─────────────────────────────────────
 

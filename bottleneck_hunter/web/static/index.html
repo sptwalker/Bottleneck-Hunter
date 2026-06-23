@@ -4,10 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BottleneckHunter — AI 产业链瓶颈选股</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=2">
+  <link rel="stylesheet" href="/static/css/style.css?v=43">
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 </head>
-<body>
+<body class="wizard-active">
 
 <header class="app-header">
   <div class="header-brand">
@@ -19,8 +20,8 @@
   </div>
   <nav class="header-nav">
     <button class="nav-btn active" data-view="screen">产业链分析</button>
-    <button class="nav-btn" data-view="hot">热点扫描</button>
-    <button class="nav-btn" data-view="history">历史记录</button>
+    <button class="nav-btn" data-view="watchlist">观察池</button>
+    <button class="nav-btn" data-view="trading" disabled title="即将推出">交易中心</button>
     <button class="nav-btn nav-btn-icon" id="btn-settings" title="API 设置">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -30,278 +31,676 @@
 </header>
 
 <main class="app-main">
-  <aside id="panel" class="panel">
-    <div class="panel-inner">
-      <div class="panel-section">
-        <h3 class="panel-heading">行业方向</h3>
-        <div class="form-group">
-          <label class="form-label">入口模式</label>
-          <div class="radio-group">
-            <label class="radio"><input type="radio" name="entry_mode" value="manual" checked><span>手动选择</span></label>
-            <label class="radio"><input type="radio" name="entry_mode" value="hot"><span>从热点选择</span></label>
-          </div>
-        </div>
-        <div class="form-group">
-          <label class="form-label" for="sector-select">产业链方向</label>
-          <select id="sector-select" class="form-select">
-            <option value="GPU/AI算力" data-product="GPU">GPU / AI算力</option>
-            <option value="人形机器人" data-product="人形机器人">人形机器人</option>
-            <option value="商业航天" data-product="商业运载火箭">商业航天</option>
-            <option value="新能源车" data-product="电动汽车">新能源车</option>
-            <option value="custom">自定义输入...</option>
-          </select>
-        </div>
-        <div class="form-group" id="custom-sector-group" style="display:none">
-          <label class="form-label" for="custom-sector">产业名称</label>
-          <input type="text" id="custom-sector" class="form-input" placeholder="例: 低空经济">
-        </div>
-        <div class="form-group">
-          <label class="form-label" for="end-product">终端产品</label>
-          <input type="text" id="end-product" class="form-input" value="GPU">
-        </div>
-      </div>
+    <div id="view-wizard" class="view active">
 
-      <div class="panel-section">
-        <h3 class="panel-heading">分析参数</h3>
-        <div class="form-group">
-          <label class="form-label">拆解深度</label>
-          <div class="radio-group">
-            <label class="radio"><input type="radio" name="max_depth" value="3"><span>3层</span></label>
-            <label class="radio"><input type="radio" name="max_depth" value="4" checked><span>4层</span></label>
-            <label class="radio"><input type="radio" name="max_depth" value="5"><span>5层</span></label>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group form-group--half">
-            <label class="form-label" for="top-n">瓶颈 Top-N</label>
-            <select id="top-n" class="form-select">
-              <option value="3">3</option>
-              <option value="5" selected>5</option>
-              <option value="8">8</option>
-              <option value="10">10</option>
-            </select>
-          </div>
-          <div class="form-group form-group--half">
-            <label class="form-label" for="language">输出语言</label>
-            <select id="language" class="form-select">
-              <option value="zh" selected>中文</option>
-              <option value="en">English</option>
-            </select>
-          </div>
-        </div>
-      </div>
+      <!-- 左侧边栏 -->
+      <aside id="wiz-sidebar" class="wiz-sidebar">
+        <button id="wiz-sidebar-toggle" class="wiz-sidebar-toggle" title="收起/展开">☰</button>
+        <ul class="wiz-sidebar-menu">
+          <li class="wiz-sidebar-item active" data-phase="0">
+            <span class="wiz-status-dot status-gray"></span><span class="wiz-sidebar-label">选题</span>
+          </li>
+          <li class="wiz-sidebar-item" data-phase="1">
+            <span class="wiz-status-dot status-gray"></span><span class="wiz-sidebar-label">瓶颈分析</span>
+          </li>
+          <li class="wiz-sidebar-item" data-phase="2">
+            <span class="wiz-status-dot status-gray"></span><span class="wiz-sidebar-label">入围筛选</span>
+          </li>
+          <li class="wiz-sidebar-item" data-phase="3">
+            <span class="wiz-status-dot status-gray"></span><span class="wiz-sidebar-label">最终评分</span>
+          </li>
+          <li class="wiz-sidebar-item" data-phase="4">
+            <span class="wiz-status-dot status-gray"></span><span class="wiz-sidebar-label">交叉验证</span>
+          </li>
+          <li class="wiz-sidebar-divider"></li>
+          <li class="wiz-sidebar-item" data-page="settings">
+            <span class="wiz-sidebar-icon">&#9881;</span><span class="wiz-sidebar-label">AI模型设置</span>
+          </li>
+          <li class="wiz-sidebar-spacer"></li>
+          <li class="wiz-sidebar-item wiz-sidebar-log-btn" id="sidebar-log-btn" title="运行日志">
+            <span class="wiz-sidebar-icon">&#128203;</span><span class="wiz-sidebar-label">运行日志</span>
+          </li>
+        </ul>
+      </aside>
 
-      <div class="panel-section">
-        <h3 class="panel-heading">市场设置</h3>
-        <div class="form-group">
-          <label class="form-label">目标市场</label>
-          <div class="radio-group">
-            <label class="radio"><input type="radio" name="market" value="a_stock" checked><span>A 股</span></label>
-            <label class="radio"><input type="radio" name="market" value="us_stock"><span>美股</span></label>
-            <label class="radio"><input type="radio" name="market" value="all"><span>全部</span></label>
+      <div class="wiz-content">
+
+      <!-- Phase 导航条 -->
+      <nav id="wizard-nav" class="wiz-nav" style="display:none !important">
+        <div class="wiz-nav-inner">
+          <div class="wiz-step completed" data-phase="0"><span class="wiz-step-dot">✓</span><span class="wiz-step-label">选题</span></div>
+          <div class="wiz-step-line"></div>
+          <div class="wiz-step" data-phase="1"><span class="wiz-step-dot">1</span><span class="wiz-step-label">瓶颈分析</span></div>
+          <div class="wiz-step-line"></div>
+          <div class="wiz-step" data-phase="2"><span class="wiz-step-dot">2</span><span class="wiz-step-label">入围筛选</span></div>
+          <div class="wiz-step-line"></div>
+          <div class="wiz-step" data-phase="3"><span class="wiz-step-dot">3</span><span class="wiz-step-label">最终评分</span></div>
+          <div class="wiz-step-line"></div>
+          <div class="wiz-step" data-phase="4"><span class="wiz-step-dot">4</span><span class="wiz-step-label">交叉验证</span></div>
+        </div>
+      </nav>
+
+      <!-- 起始页 -->
+      <div id="wizard-start" class="wizard-page active">
+        <div class="wiz-start-inner">
+          <div class="wiz-hero">
+            <h2>请选择你的分析模式</h2>
+            <p>快速赛道提供热门选择，自定义分析可以灵活设置，全自动分析需要先设置好所有步骤的参数。</p>
           </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group form-group--half">
-            <label class="form-label" for="max-cap">市值上限(亿)</label>
-            <input type="number" id="max-cap" class="form-input" value="200">
-          </div>
-          <div class="form-group form-group--half">
-            <label class="form-label" for="max-suppliers">供应商数</label>
-            <input type="number" id="max-suppliers" class="form-input" value="20">
-          </div>
-        </div>
-      </div>
 
-      <div class="panel-section">
-        <h3 class="panel-heading">LLM 配置</h3>
-        <div class="form-row">
-          <div class="form-group form-group--half">
-            <label class="form-label" for="llm-provider">Provider</label>
-            <select id="llm-provider" class="form-select">
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="google">Google</option>
-              <option value="qwen">Qwen</option>
-              <option value="glm">GLM (智谱)</option>
-              <option value="ollama">Ollama</option>
-              <option value="openrouter">OpenRouter</option>
-              <option value="siliconflow">SiliconFlow</option>
-              <option value="agnes">Agnes AI</option>
-              <option value="kimi">Kimi (月之暗面)</option>
-            </select>
-          </div>
-          <div class="form-group form-group--half">
-            <label class="form-label" for="llm-model">Model</label>
-            <input type="text" id="llm-model" class="form-input" value="gpt-5.5">
-          </div>
-        </div>
-      </div>
-
-      <div class="panel-section">
-        <h3 class="panel-heading">交叉验证</h3>
-        <div class="form-group">
-          <label class="form-checkbox">
-            <input type="checkbox" id="cv-toggle" checked>
-            <span class="checkbox-mark"></span>
-            <span class="checkbox-label">启用多模型交叉验证</span>
-          </label>
-        </div>
-        <div id="cv-models-group">
-          <div id="cv-model-list" class="cv-model-list"></div>
-        </div>
-      </div>
-
-      <div class="panel-actions">
-        <button id="btn-start" class="btn btn-primary">开始分析</button>
-      </div>
-    </div>
-  </aside>
-
-  <section id="content" class="content">
-    <!-- Welcome + History -->
-    <div id="view-welcome" class="view active">
-      <div class="welcome-hero">
-        <div class="welcome-hero-icon">
-          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
-          </svg>
-        </div>
-        <div class="welcome-hero-text">
-          <h2 class="welcome-hero-title">AI 产业链瓶颈选股系统</h2>
-          <p class="welcome-hero-desc">从左侧面板选择行业方向开始新分析，或从下方历史记录中查看过往结果</p>
-        </div>
-      </div>
-
-      <div class="welcome-divider"></div>
-
-      <div class="history-section">
-        <div class="history-header">
-          <h3 class="history-title">历史分析记录</h3>
-          <button class="btn btn-secondary btn-sm" id="btn-refresh-history">刷新</button>
-        </div>
-        <div id="history-list" class="history-list">
-          <p class="loading-text">正在加载历史记录...</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- Analysis running / results -->
-    <div id="view-screen" class="view">
-      <div id="pipeline" class="pipeline">
-        <div class="pipeline-step" data-step="decompose"><span class="pipeline-dot"></span><span class="pipeline-label">拆解</span></div>
-        <div class="pipeline-connector"></div>
-        <div class="pipeline-step" data-step="bottleneck"><span class="pipeline-dot"></span><span class="pipeline-label">瓶颈</span></div>
-        <div class="pipeline-connector"></div>
-        <div class="pipeline-step" data-step="supplier_search"><span class="pipeline-dot"></span><span class="pipeline-label">检索</span></div>
-        <div class="pipeline-connector"></div>
-        <div class="pipeline-step" data-step="financial_fetch"><span class="pipeline-dot"></span><span class="pipeline-label">财务</span></div>
-        <div class="pipeline-connector"></div>
-        <div class="pipeline-step" data-step="supplier_eval"><span class="pipeline-dot"></span><span class="pipeline-label">评估</span></div>
-        <div class="pipeline-connector"></div>
-        <div class="pipeline-step" data-step="cross_validate"><span class="pipeline-dot"></span><span class="pipeline-label">验证</span></div>
-        <div class="pipeline-connector"></div>
-        <div class="pipeline-step" data-step="save"><span class="pipeline-dot"></span><span class="pipeline-label">数据存储</span></div>
-      </div>
-
-      <div class="pipeline-status" id="pipeline-status"></div>
-
-      <div class="dashboard-grid">
-        <div class="dash-card dash-card--full" id="card-chain">
-          <h3 class="dash-card-title">
-            <span>产业链图谱</span>
-            <button class="btn btn-sm btn-fullscreen" id="btn-chart-fullscreen" title="全屏查看">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1h4v1.5h-2.793l3.147 3.146-1.061 1.061-3.147-3.146v2.793h-1.5zM10.5 1h4v4.354h-1.5v-2.793l-3.146 3.146-1.061-1.061 3.146-3.146h-2.793zM1.146 10.646l3.147 3.147h-2.793v1.5h4v-4.354h-1.5v2.793l-3.146-3.146zM14.5 11.646v2.793h-2.793l3.147 3.147-1.061 1.061-3.147-3.147v2.793h-1.5v-4.354h4z" class="fullscreen-expand"/><path d="M5.854 1.146l-3.147 3.147v-2.793h-1.5v4.354h4v-1.5h-2.793l3.146-3.147zM10.146 1.146l3.147 3.147v-2.793h1.5v4.354h-4v-1.5h2.793l-3.146-3.147zM5.854 14.854l-3.147-3.147v2.793h-1.5v-4.354h4v1.5h-2.793l3.146 3.147zM10.146 14.854l3.147-3.147v2.793h1.5v-4.354h-4v1.5h2.793l-3.146 3.147z" class="fullscreen-shrink" style="display:none"/></svg>
-              <span class="fullscreen-label">全屏</span>
-            </button>
-          </h3>
-          <div class="dash-card-body">
-            <div id="chart-chain" class="chart-container chart-container--dag skeleton"></div>
-            <div id="node-info-panel" class="node-info-panel" style="display:none"></div>
-          </div>
-        </div>
-        <div class="dash-card" id="card-bottleneck">
-          <h3 class="dash-card-title">瓶颈排名</h3>
-          <div class="dash-card-body">
-            <div id="chart-bottleneck" class="chart-container skeleton"></div>
-            <div id="bottleneck-company-panel" class="node-info-panel" style="display:none"></div>
-          </div>
-        </div>
-        <div class="dash-card" id="card-suppliers">
-          <h3 class="dash-card-title">
-            <span>优选企业列表</span>
-            <div class="dash-card-actions">
-              <button class="btn btn-sm btn-card-action" id="btn-refresh-suppliers" title="重新搜索并评估候选供应商" style="display:none">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                </svg>
-                <span>刷新候选</span>
-              </button>
+          <!-- 快速赛道分析 -->
+          <div class="start-card card-yellow">
+            <div class="start-card-header">
+              <h3>快速赛道分析</h3>
+              <button class="btn btn-sm btn-secondary" id="btn-hot-scan">⚡ 热点扫描</button>
             </div>
-          </h3>
-          <div class="dash-card-body">
-            <div id="table-suppliers" class="table-container skeleton"></div>
-          </div>
-        </div>
-        <div class="dash-card dash-card--full" id="card-compare" style="display:none">
-          <h3 class="dash-card-title">
-            <span>候选对比</span>
-            <button class="btn btn-sm" id="btn-close-compare">关闭</button>
-          </h3>
-          <div class="dash-card-body compare-body">
-            <div id="compare-radar" class="compare-radar"></div>
-            <div id="compare-table" class="compare-table"></div>
-          </div>
-        </div>
-        <div class="dash-card dash-card--full" id="card-shortlist" style="display:none">
-          <h3 class="dash-card-title">所有入围企业</h3>
-          <div class="dash-card-body" id="shortlist-body"></div>
-        </div>
-        <div class="dash-card dash-card--full" id="card-picks" style="display:none">
-          <h3 class="dash-card-title">
-            <span>最终推荐</span>
-            <div class="dash-card-actions">
-              <button class="btn btn-sm btn-card-action" id="btn-refresh-cv" title="重新运行交叉验证" style="display:none">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                </svg>
-                <span>刷新验证</span>
-              </button>
-              <button class="btn btn-sm btn-card-action btn-save-cv" id="btn-save-cv" title="保存交叉验证结论到分析记录" style="display:none">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
-                </svg>
-                <span>保存结论</span>
-              </button>
+            <div class="sector-grid" id="wizard-sectors">
+              <button class="sector-btn" data-sector="GPU/AI算力" data-product="GPU" data-market="us_stock">GPU / AI算力</button>
+              <button class="sector-btn" data-sector="人形机器人" data-product="人形机器人" data-market="us_stock">人形机器人</button>
+              <button class="sector-btn" data-sector="商业航天" data-product="商业运载火箭" data-market="us_stock">商业航天</button>
+              <button class="sector-btn" data-sector="新能源车" data-product="电动汽车" data-market="us_stock">新能源车</button>
+              <button class="sector-btn sector-add" id="wiz-add-sector">+ 添加赛道</button>
             </div>
-          </h3>
-          <div class="dash-card-body" id="picks-body"></div>
+            <div class="sector-hint">右键点击赛道按钮可配置参数（市场/产业方向/终端产品） · 最多 8 个自定义赛道</div>
+          </div>
+
+          <!-- 自定义分析 -->
+          <div class="start-card card-blue">
+            <h3>自定义分析</h3>
+            <div class="custom-form">
+              <div class="fg"><label>市场</label><select id="wiz-market"><option value="a_stock">A 股</option><option value="us_stock" selected>美股</option></select></div>
+              <div class="fg"><label>产业方向</label><input type="text" id="wiz-sector" list="dl-sectors" placeholder="例: 低空经济" autocomplete="off"><datalist id="dl-sectors"></datalist></div>
+              <div class="fg"><label>终端产品</label><input type="text" id="wiz-product" list="dl-products" placeholder="例: eVTOL飞行器" autocomplete="off"><datalist id="dl-products"></datalist></div>
+              <div class="fg"><label>主分析模型</label><select id="wiz-main-model"><option value="deepseek::deepseek-chat" selected>DeepSeek</option><option value="openai::gpt-5.5">GPT-5.5</option><option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option><option value="qwen::qwen-plus">Qwen Plus</option><option value="google::gemini-2.5-flash">Gemini Flash</option></select></div>
+              <button class="btn btn-primary" id="wiz-start-custom">开始分析</button>
+            </div>
+          </div>
+
+          <!-- 全自动分析 -->
+          <div class="start-card card-green">
+            <h3>全自动分析</h3>
+            <p class="start-card-desc">按当前各页面设置自动完成全部分析步骤（瓶颈分析 → 入围筛选 → 最终评分 → 交叉验证），全程无需手动干预。</p>
+            <div class="custom-form">
+              <div class="fg"><label>主分析模型</label><select id="wiz-auto-model"><option value="deepseek::deepseek-chat" selected>DeepSeek</option><option value="openai::gpt-5.5">GPT-5.5</option><option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option><option value="qwen::qwen-plus">Qwen Plus</option><option value="google::gemini-2.5-flash">Gemini Flash</option></select></div>
+              <button class="btn btn-success" id="wiz-auto-start">一键启动</button>
+            </div>
+          </div>
+
+          <!-- 历史记录 -->
+          <div class="history-section" id="wizard-history">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h3 style="margin:0">最近分析</h3>
+              <a href="#" class="all-history-link" id="wiz-all-history">查看全部历史 &rarr;</a>
+            </div>
+            <table class="history-tbl" id="wizard-history-tbl">
+              <thead><tr><th>#</th><th>市场</th><th>产业方向</th><th>终端产品</th><th>市值规模</th><th>层数</th><th>主分析模型</th><th>入围数</th><th>进度</th><th>最近更新</th></tr></thead>
+              <tbody id="wizard-history-list"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
-      <div class="dashboard-actions" id="dashboard-actions" style="display:none">
-        <button class="btn btn-secondary" id="btn-export">导出报告</button>
-        <button class="btn btn-secondary" id="btn-rerun">重新分析</button>
+      <!-- 全部历史记录页面 -->
+      <div id="wizard-history-all" class="wizard-page">
+        <div class="wiz-phase-inner">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+            <h2>全部历史记录</h2>
+            <button class="btn btn-secondary btn-sm" id="wiz-history-back">&larr; 返回首页</button>
+          </div>
+          <div class="wiz-card">
+            <table class="history-tbl" id="wiz-all-history-tbl">
+              <thead><tr><th>#</th><th>市场</th><th>产业方向</th><th>终端产品</th><th>市值规模</th><th>层数</th><th>主分析模型</th><th>入围数</th><th>进度</th><th>最近更新</th><th>操作</th></tr></thead>
+              <tbody id="wiz-all-history-list"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Phase 1: 产业链瓶颈 -->
+      <div id="wizard-phase1" class="wizard-page">
+        <div class="wiz-phase-inner">
+          <!-- 统一标题栏 -->
+          <div class="phase-header">
+            <div class="phase-info-row">
+              <h2>瓶颈分析</h2>
+              <span class="analysis-seq-badge" id="analysis-seq-badge" style="display:none"></span>
+              <div class="phase-target" id="p1-target"></div>
+            </div>
+            <div class="phase-settings-row">
+              <label>拆解深度:
+                <select id="wiz-depth" class="form-select form-select--sm">
+                  <option value="3">3层</option><option value="4" selected>4层</option><option value="5">5层</option>
+                </select>
+              </label>
+              <label>每层Top-N:
+                <select id="wiz-topn" class="form-select form-select--sm">
+                  <option value="3">3</option><option value="5" selected>5</option><option value="8">8</option><option value="10">10</option>
+                </select>
+              </label>
+              <label>市值上限(亿):
+                <input type="number" id="wiz-max-cap" class="form-input form-input--sm" value="200" style="width:70px">
+              </label>
+              <span class="p1-timer" id="p1-timer" style="display:none">已用时：<b id="p1-timer-val">00分00秒</b></span>
+              <div class="p1-progress-bar p1-progress-inline" id="p1-progress-bar" style="display:none">
+                <div class="p2-progress-track"><div class="p2-progress-fill" id="p1-progress-fill"></div></div>
+                <span class="p2-progress-text" id="p1-progress-text"></span>
+              </div>
+              <button class="btn btn-sm btn-tristate state-start" id="p1-tristate" style="margin-left:auto">开始分析</button>
+              <button class="btn btn-primary btn-sm" id="wiz-p1-next" style="display:none" disabled>下一步: 入围筛选 &rarr;</button>
+            </div>
+          </div>
+
+          <!-- 进度信息栏 -->
+          <div class="progress-info-bar" id="p1-info-bar" style="display:none">
+            <span class="pib-icon">&#9203;</span>
+            <span class="pib-text" id="p1-info-text">正在初始化...</span>
+          </div>
+
+          <!-- 纵向布局 -->
+          <div class="p1-vertical">
+            <div class="wiz-card" style="position:relative">
+              <div class="chart-header">
+                <div class="wiz-card-title" style="margin-bottom:0;display:flex;align-items:center;gap:12px">
+                  <span>产业链图谱</span>
+                  <div class="chain-tab-bar" style="margin-bottom:0" id="wiz-chain-tabs">
+                    <button class="chain-tab active" data-chart="force">力导向图</button>
+                    <button class="chain-tab" data-chart="tree">径向树图</button>
+                    <button class="chain-tab" data-chart="d3force">D3 Force</button>
+                  </div>
+                </div>
+                <button class="btn-fullscreen" id="wiz-p1-fullscreen">&#9974; 全屏</button>
+              </div>
+              <div class="chain-chart-panels" id="wiz-chart-panels" style="margin-top:10px">
+                <div class="chain-chart-panel active" data-chart="force">
+                  <div id="wiz-chart-force" class="chart-container chart-container--dag skeleton" style="height:420px"></div>
+                </div>
+                <div class="chain-chart-panel" data-chart="tree">
+                  <div id="wiz-chart-tree" class="chart-container chart-container--dag" style="height:420px"></div>
+                </div>
+                <div class="chain-chart-panel" data-chart="d3force">
+                  <svg id="wiz-chart-d3" class="chart-container chart-container--dag" style="width:100%;height:420px"></svg>
+                </div>
+              </div>
+              <div class="chart-progress-overlay" id="p1-progress-overlay" style="display:none">
+                <div class="progress-spinner"></div>
+                <div class="progress-detail" id="p1-progress-detail">
+                  <div class="step-current">正在初始化分析...</div>
+                </div>
+              </div>
+            </div>
+            <div class="wiz-card">
+              <div class="wiz-card-title">瓶颈排名</div>
+              <div id="wiz-chart-bn" class="wiz-chart skeleton" style="height:320px"></div>
+              <div id="wiz-bn-stats" class="bn-stats" style="display:none"></div>
+            </div>
+          </div>
+
+          <div class="wiz-phase-footer">
+            <div class="wiz-progress" id="wiz-p1-progress"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Phase 2: 入围筛选 -->
+      <div id="wizard-phase2" class="wizard-page">
+        <div class="wiz-phase-inner">
+          <div class="phase-header">
+            <div class="phase-info-row">
+              <h2>入围筛选 <span class="wiz-stats-badge" id="wiz-p2-stats"></span></h2>
+              <div class="phase-target" id="p2-target"></div>
+            </div>
+            <div class="phase-settings-row">
+              <div class="layer-chip"><span class="lsc-layer L1">L1</span> 子部件 <input type="number" id="wiz-l1-topn" value="8" min="1" max="20"> 家</div>
+              <div class="layer-chip"><span class="lsc-layer L2">L2</span> 零件层 <input type="number" id="wiz-l2-topn" value="7" min="1" max="20"> 家</div>
+              <div class="layer-chip"><span class="lsc-layer L3">L3</span> 原料层 <input type="number" id="wiz-l3-topn" value="5" min="1" max="20"> 家</div>
+              <span class="p2-total-tag" id="p2-total">合计: 20 家</span>
+              <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--muted)">最低分:
+                <input type="number" id="wiz-min-score" value="0" step="0.5" min="0" max="10" style="width:50px;padding:3px 4px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+              </label>
+              <button class="btn btn-sm btn-tristate state-start" id="p2-tristate" style="margin-left:auto">开始筛选</button>
+              <button class="btn btn-primary btn-sm" id="wiz-p2-next" style="display:none" disabled>下一步: 最终评分 &rarr;</button>
+            </div>
+          </div>
+
+          <!-- 进度条 + 计时器 -->
+          <div class="p2-progress-bar" id="p2-progress-bar" style="display:none">
+            <div class="p2-progress-track">
+              <div class="p2-progress-fill" id="p2-progress-fill"></div>
+            </div>
+            <span class="p2-progress-text" id="p2-progress-text"></span>
+            <span class="p2-timer" id="p2-timer" style="display:none">已用时：<b id="p2-timer-val">00分00秒</b></span>
+          </div>
+
+          <!-- 手动入选 -->
+          <div class="manual-pick-bar" id="manual-pick-bar" style="display:none">
+            <span>&#9995;</span> 手动入选: 勾选下方公司直接加入最终评分（不受自动筛选限制）
+            <span class="manual-pick-count" id="manual-pick-count">已选 0 / 3 家</span>
+          </div>
+
+          <div class="wiz-card">
+            <div class="p2-table-header">
+              <div class="wiz-card-title">入围企业</div>
+              <div class="weight-ctrl" id="p2-weight-ctrl" style="display:none">
+                <span class="weight-label">质量</span>
+                <input type="range" id="wiz-weight-slider" min="0" max="100" value="40" class="weight-range">
+                <span class="weight-label">预期差</span>
+                <span class="weight-val" id="wiz-weight-values">40% / 60%</span>
+              </div>
+            </div>
+            <div id="wiz-p2-table" class="wiz-table-wrap"></div>
+          </div>
+
+          <div class="wiz-phase-footer">
+            <div class="wiz-progress" id="wiz-p2-progress"></div>
+            <div class="wiz-footer-btns">
+              <button class="btn btn-secondary" id="wiz-p2-back">&larr; 返回瓶颈分析</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Phase 3: 最终评分 -->
+      <div id="wizard-phase3" class="wizard-page">
+        <div class="wiz-phase-inner">
+          <div class="phase-header">
+            <div class="phase-info-row">
+              <h2>最终评分</h2>
+              <div class="phase-target" id="p3-target"></div>
+            </div>
+            <div class="phase-settings-row">
+              <div class="weight-ctrl" id="p3-weight-ctrl">
+                <span class="weight-label">质量</span>
+                <input type="range" id="wiz-p3-weight-slider" min="0" max="100" value="40" class="weight-range">
+                <span class="weight-label">预期差</span>
+                <span class="weight-val" id="wiz-p3-weight-values">40% / 60%</span>
+              </div>
+              <label class="p3-topn-label">入选
+                <input type="number" id="wiz-p3-topn" min="1" max="10" value="5" class="p3-topn-input">
+                家</label>
+              <button class="btn btn-sm btn-tristate state-start" id="p3-tristate" style="margin-left:auto">开始评选</button>
+              <button class="btn btn-primary btn-sm" id="wiz-p3-next" style="display:none">下一步: 交叉验证 &rarr;</button>
+            </div>
+          </div>
+
+          <!-- 排名表 -->
+          <div class="wiz-card">
+            <div class="wiz-card-title">入选公司排名 <span class="wiz-stats-badge">（双击查看详情）</span></div>
+            <div id="wiz-p3-table" class="wiz-table-wrap"></div>
+          </div>
+
+          <!-- 横向对比图表 -->
+          <div class="p3-charts-grid">
+            <div class="wiz-card p3-chart-card">
+              <div class="wiz-card-title">
+                质量 vs 预期差 散点图
+                <button class="btn btn-xs ai-interp-trigger" data-chart-type="scatter">AI 解读</button>
+              </div>
+              <div id="wiz-chart-scatter" class="wiz-chart" style="height:260px" data-chart-type="scatter"></div>
+              <div class="ai-expand" id="ai-expand-scatter" style="display:none">
+                <div class="ai-expand-header">
+                  <div class="ai-expand-meta">
+                    <span class="ai-expand-model"></span>
+                    <span class="ai-expand-time"></span>
+                  </div>
+                  <div class="ai-expand-actions">
+                    <button class="btn btn-xs ai-regen-btn" data-chart-type="scatter">重新解读</button>
+                    <button class="btn btn-xs ai-collapse-btn" data-chart-type="scatter">收起 ▲</button>
+                  </div>
+                </div>
+                <div class="ai-expand-body"></div>
+              </div>
+            </div>
+            <div class="wiz-card p3-chart-card">
+              <div class="wiz-card-title">
+                五维雷达对比
+                <button class="btn btn-xs ai-interp-trigger" data-chart-type="radar">AI 解读</button>
+              </div>
+              <div id="wiz-chart-radar" class="wiz-chart" style="height:260px" data-chart-type="radar"></div>
+              <div class="ai-expand" id="ai-expand-radar" style="display:none">
+                <div class="ai-expand-header">
+                  <div class="ai-expand-meta">
+                    <span class="ai-expand-model"></span>
+                    <span class="ai-expand-time"></span>
+                  </div>
+                  <div class="ai-expand-actions">
+                    <button class="btn btn-xs ai-regen-btn" data-chart-type="radar">重新解读</button>
+                    <button class="btn btn-xs ai-collapse-btn" data-chart-type="radar">收起 ▲</button>
+                  </div>
+                </div>
+                <div class="ai-expand-body"></div>
+              </div>
+            </div>
+            <div class="wiz-card p3-chart-card">
+              <div class="wiz-card-title">
+                评分因子横向对比
+                <button class="btn btn-xs ai-interp-trigger" data-chart-type="bar">AI 解读</button>
+              </div>
+              <div id="wiz-chart-bar" class="wiz-chart" style="height:260px" data-chart-type="bar"></div>
+              <div class="ai-expand" id="ai-expand-bar" style="display:none">
+                <div class="ai-expand-header">
+                  <div class="ai-expand-meta">
+                    <span class="ai-expand-model"></span>
+                    <span class="ai-expand-time"></span>
+                  </div>
+                  <div class="ai-expand-actions">
+                    <button class="btn btn-xs ai-regen-btn" data-chart-type="bar">重新解读</button>
+                    <button class="btn btn-xs ai-collapse-btn" data-chart-type="bar">收起 ▲</button>
+                  </div>
+                </div>
+                <div class="ai-expand-body"></div>
+              </div>
+            </div>
+            <div class="wiz-card p3-chart-card">
+              <div class="wiz-card-title">
+                Alpha 因子拆解
+                <button class="btn btn-xs ai-interp-trigger" data-chart-type="stack">AI 解读</button>
+              </div>
+              <div id="wiz-chart-stack" class="wiz-chart" style="height:260px" data-chart-type="stack"></div>
+              <div class="ai-expand" id="ai-expand-stack" style="display:none">
+                <div class="ai-expand-header">
+                  <div class="ai-expand-meta">
+                    <span class="ai-expand-model"></span>
+                    <span class="ai-expand-time"></span>
+                  </div>
+                  <div class="ai-expand-actions">
+                    <button class="btn btn-xs ai-regen-btn" data-chart-type="stack">重新解读</button>
+                    <button class="btn btn-xs ai-collapse-btn" data-chart-type="stack">收起 ▲</button>
+                  </div>
+                </div>
+                <div class="ai-expand-body"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- AI 报告 -->
+          <div class="wiz-card ai-report-card" id="wiz-ai-report" style="display:none">
+            <div class="ai-report-header">
+              <h3>AI 横向对比分析报告</h3>
+              <button class="btn btn-outline-accent btn-sm" id="wiz-gen-report">生成报告</button>
+            </div>
+            <div class="ai-report-body" id="wiz-report-body"></div>
+          </div>
+
+          <div class="wiz-phase-footer">
+            <div class="wiz-footer-btns">
+              <button class="btn btn-secondary" id="wiz-p3-back">&larr; 返回入围筛选</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Phase 4: 交叉验证 -->
+      <div id="wizard-phase4" class="wizard-page">
+        <div class="wiz-phase-inner">
+          <div class="phase-header">
+            <div class="phase-info-row">
+              <h2>交叉验证</h2>
+              <div class="phase-target" id="p4-target"></div>
+            </div>
+            <div class="phase-settings-row">
+              <label>验证 Top-N: <input type="number" id="wiz-cv-topn" class="form-input form-input--sm" value="10" min="1" max="20"></label>
+              <div class="cv-model-group" id="wiz-cv-models"></div>
+              <button class="btn btn-primary btn-sm" id="wiz-p4-run" style="margin-left:auto">开始验证</button>
+              <span class="p4-timer" id="p4-timer" style="display:none">已用时：<b id="p4-timer-val">00分00秒</b></span>
+            </div>
+          </div>
+
+          <div class="wiz-card">
+            <div id="wiz-p4-table" class="wiz-table-wrap"></div>
+          </div>
+
+          <!-- AI 圆桌会议 -->
+          <div class="wiz-card ai-meeting-card" id="ai-meeting-card">
+            <div class="ai-meeting-header">
+              <h3>AI 投研圆桌会议</h3>
+              <div>
+                <span class="meeting-status" id="meeting-status"></span>
+                <button class="btn btn-outline-accent btn-sm" id="btn-start-meeting" disabled>启动会议</button>
+              </div>
+            </div>
+            <div class="ai-meeting-desc">多个 AI 以不同投资视角展开圆桌讨论，比较所有入围企业，通过辩论收敛出共识排名。</div>
+
+            <!-- 会前设置面板 -->
+            <div class="meeting-setup" id="meeting-setup" style="display:none">
+              <h4>会前设置 — 角色分配</h4>
+              <div class="meeting-role-grid" id="meeting-role-grid"></div>
+              <div class="meeting-setup-actions">
+                <button class="btn btn-sm btn-outline-accent" id="btn-preflight" disabled>测试连通性</button>
+                <span class="preflight-status" id="preflight-status"></span>
+              </div>
+            </div>
+
+            <div class="meeting-transcript" id="meeting-transcript" style="display:none">
+              <div class="meeting-messages" id="meeting-messages"></div>
+            </div>
+            <div class="meeting-result" id="meeting-result" style="display:none"></div>
+          </div>
+
+          <div class="wiz-phase-footer">
+            <div class="wiz-progress" id="wiz-p4-progress"></div>
+            <div class="wiz-footer-btns">
+              <button class="btn btn-secondary" id="wiz-p4-back">&larr; 返回最终评分</button>
+              <button class="btn btn-primary" id="wiz-p4-save">保存分析结果</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI模型设置页面 -->
+      <div id="wizard-settings" class="wizard-page">
+        <div class="wiz-phase-inner">
+          <h2>AI 模型设置</h2>
+
+          <div class="wiz-card">
+            <h3>主分析模型</h3>
+            <p class="settings-hint">选择主分析模型后，所有阶段自动同步使用。</p>
+            <div class="wiz-model-select-row">
+              <select id="wiz-settings-provider" class="form-select"></select>
+              <input type="text" id="wiz-settings-model" class="form-input" placeholder="模型名称">
+              <button class="btn btn-secondary btn-sm" id="wiz-test-main-model">测试</button>
+              <span class="provider-test-status" id="wiz-main-model-status"></span>
+            </div>
+          </div>
+
+          <div class="wiz-card">
+            <h3>API Key 配置</h3>
+            <p class="settings-hint">配置各 LLM Provider 的 API Key，保存后即时生效，无需重启。</p>
+            <div id="wiz-provider-list"></div>
+            <div class="wiz-settings-actions">
+              <span class="settings-status" id="wiz-settings-status"></span>
+              <button class="btn btn-secondary btn-sm" id="wiz-test-providers">测试全部连接</button>
+              <button class="btn btn-primary btn-sm" id="wiz-save-settings">保存</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      </div><!-- .wiz-content -->
+    </div>
+
+    <!-- 观察池 View -->
+    <div id="view-watchlist" class="view">
+      <div class="wl-container">
+        <!-- 工具栏 -->
+        <div class="wl-toolbar">
+          <div class="wl-toolbar-left">
+            <h2 class="wl-page-title">观察池</h2>
+            <span class="wl-count-badge" id="wl-count-badge">0 / 24</span>
+          </div>
+          <div class="wl-toolbar-center">
+            <div class="wl-search-box">
+              <input type="text" class="form-input wl-search-input" id="wl-search" placeholder="搜索 Ticker / 名称...">
+            </div>
+            <select class="form-input wl-filter-select" id="wl-filter-tier">
+              <option value="all">全部层级</option>
+              <option value="focus">重点关注</option>
+              <option value="normal">一般关注</option>
+              <option value="track">潜力跟踪</option>
+            </select>
+            <select class="form-input wl-filter-select" id="wl-sort">
+              <option value="tier">按层级</option>
+              <option value="change">按涨跌幅</option>
+              <option value="score">按评分</option>
+              <option value="name">按名称</option>
+            </select>
+          </div>
+          <div class="wl-toolbar-right">
+            <div class="wl-view-toggle" id="wl-view-toggle">
+              <button class="wl-view-btn active" data-mode="table" title="表格视图">☰</button>
+              <button class="wl-view-btn" data-mode="card" title="卡片视图">▦</button>
+            </div>
+            <button class="btn btn-sm" id="wl-btn-refresh">刷新数据</button>
+            <button class="btn btn-sm btn-primary" id="wl-btn-add">+ 添加</button>
+          </div>
+        </div>
+
+        <!-- 添加面板（隐藏） -->
+        <div class="wl-add-panel" id="wl-add-panel" style="display:none">
+          <div class="wl-add-form">
+            <input type="text" class="form-input" id="wl-add-ticker" placeholder="股票代码 (如 NVDA)">
+            <input type="text" class="form-input" id="wl-add-name" placeholder="公司名称">
+            <select class="form-input" id="wl-add-tier">
+              <option value="focus">重点关注 (max 6)</option>
+              <option value="normal">一般关注 (max 6)</option>
+              <option value="track" selected>潜力跟踪 (max 12)</option>
+            </select>
+            <button class="btn btn-sm btn-primary" id="wl-add-submit">确认添加</button>
+            <button class="btn btn-sm btn-secondary" id="wl-add-cancel">取消</button>
+          </div>
+        </div>
+
+        <!-- 刷新进度提示 -->
+        <div class="wl-refresh-bar" id="wl-refresh-bar" style="display:none">
+          <span class="wl-refresh-msg" id="wl-pipeline-status"></span>
+        </div>
+
+        <!-- 表格视图（默认） -->
+        <div class="wl-table-wrap" id="wl-table-view">
+          <table class="wl-table data-table">
+            <thead>
+              <tr>
+                <th class="wl-th-tier">层级</th>
+                <th>Ticker</th>
+                <th>名称</th>
+                <th class="col-num">价格</th>
+                <th class="col-num">涨跌%</th>
+                <th class="col-num">RSI</th>
+                <th class="col-num">MACD</th>
+                <th class="col-num">评分</th>
+                <th>行业</th>
+                <th class="wl-th-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody id="wl-table-body"></tbody>
+          </table>
+        </div>
+
+        <!-- 卡片视图（隐藏） -->
+        <div class="wl-cards-view" id="wl-cards-view" style="display:none">
+          <div class="wl-tiers" id="wl-tiers">
+            <section class="wl-tier-section" data-tier="focus">
+              <div class="wl-tier-header">
+                <span class="wl-tier-dot wl-dot-focus"></span>
+                <h3>重点关注</h3>
+                <span class="wl-tier-count" id="wl-tier-count-focus">0 / 6</span>
+              </div>
+              <div class="wl-card-grid" id="wl-grid-focus"></div>
+            </section>
+            <section class="wl-tier-section" data-tier="normal">
+              <div class="wl-tier-header">
+                <span class="wl-tier-dot wl-dot-normal"></span>
+                <h3>一般关注</h3>
+                <span class="wl-tier-count" id="wl-tier-count-normal">0 / 6</span>
+              </div>
+              <div class="wl-card-grid" id="wl-grid-normal"></div>
+            </section>
+            <section class="wl-tier-section" data-tier="track">
+              <div class="wl-tier-header">
+                <span class="wl-tier-dot wl-dot-track"></span>
+                <h3>潜力跟踪</h3>
+                <span class="wl-tier-count" id="wl-tier-count-track">0 / 12</span>
+              </div>
+              <div class="wl-card-grid" id="wl-grid-track"></div>
+            </section>
+          </div>
+        </div>
+
+        <!-- 空状态 -->
+        <div class="wl-empty" id="wl-empty">
+          <p>观察池为空</p>
+          <p class="wl-empty-hint">通过产业链分析的 Phase 4 结果添加股票，或手动添加</p>
+        </div>
+
+        <!-- 底部栏：管道状态 + LLM 预算 -->
+        <div class="wl-footer-bar">
+          <div class="wl-pipe-status" id="wl-pipe-summary"></div>
+          <div class="wl-budget-bar" id="wl-budget-bar">
+            <span class="wl-budget-label">LLM 预算</span>
+            <div class="wl-budget-gauge">
+              <div class="wl-budget-fill" id="wl-budget-fill"></div>
+            </div>
+            <span class="wl-budget-text" id="wl-budget-text">$0.00 / $2.00</span>
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- Hot sectors view -->
-    <div id="view-hot" class="view">
-      <div class="hot-header">
-        <h2 class="hot-title">A 股热点板块扫描</h2>
-        <button class="btn btn-secondary" id="btn-refresh-hot">刷新数据</button>
+    <!-- 交易中心 View（占位） -->
+    <div id="view-trading" class="view">
+      <div class="wl-container">
+        <div class="wl-status-bar">
+          <h2 class="wl-page-title">模拟交易中心</h2>
+        </div>
+        <div class="wl-empty">
+          <p>交易中心正在开发中</p>
+          <p class="wl-empty-hint">Phase 8B 将实现模拟交易功能</p>
+        </div>
       </div>
-      <div id="hot-table-wrap" class="skeleton" style="min-height:200px"></div>
-      <div id="hot-emerging" style="margin-top:var(--sp-6)"></div>
     </div>
-  </section>
 </main>
 
-<button class="btn-panel-toggle" id="btn-panel-toggle" title="收起侧栏">◀</button>
+
+<!-- 详情抽屉 800px -->
+<div class="drawer-overlay" id="wiz-drawer" style="display:none">
+  <div class="drawer-panel">
+    <div class="drawer-header">
+      <h3 id="drawer-title"></h3>
+      <button class="drawer-close" id="drawer-close">&#10005;</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </div>
+</div>
+
+<!-- 右键菜单 -->
+<div class="ctx-menu" id="ctx-menu" style="display:none">
+  <h4>配置赛道参数</h4>
+  <div class="fg"><label>市场</label><select id="ctx-market"><option value="a_stock">A 股</option><option value="us_stock" selected>美股</option></select></div>
+  <div class="fg"><label>产业方向</label><input type="text" id="ctx-sector"></div>
+  <div class="fg"><label>终端产品</label><input type="text" id="ctx-product"></div>
+  <div class="ctx-menu-btns">
+    <button class="btn btn-sm btn-secondary" id="ctx-cancel">取消</button>
+    <button class="btn btn-sm" style="color:var(--danger)" id="ctx-delete">删除</button>
+    <button class="btn btn-sm btn-primary" id="ctx-save">保存</button>
+    <button class="btn btn-sm btn-primary" id="ctx-start" style="background:var(--accent)">开始分析</button>
+  </div>
+</div>
+
+<!-- 实时日志面板 -->
+<div id="wiz-log-panel" class="wiz-log-panel" style="display:none">
+  <div class="wiz-log-header" id="wiz-log-header">
+    <span class="wiz-log-title">📋 运行日志</span>
+    <div class="wiz-log-actions">
+      <button class="wiz-log-btn" id="wiz-log-clear" title="清空">清空</button>
+      <button class="wiz-log-btn" id="wiz-log-toggle" title="折叠">▼</button>
+    </div>
+  </div>
+  <div class="wiz-log-body" id="wiz-log-body"></div>
+</div>
+
 
 <footer class="app-footer">
   <span>AI 生成内容，不构成投资建议。方法论：Serenity「三步法」— 产业链拆解 → 供应商检索 → 多模型交叉验证</span>
+  <span class="app-version">v0.4.0</span>
 </footer>
 
 <div id="settings-modal" class="modal-overlay" style="display:none">
@@ -323,6 +722,51 @@
   </div>
 </div>
 
+<!-- Hot Scan Modal -->
+<div class="hot-modal-overlay" id="hot-modal" style="display:none">
+  <div class="hot-modal-panel">
+    <div class="hot-modal-header">
+      <h3>A股热点赛道推荐</h3>
+      <span class="hot-modal-badge">AI 推荐</span>
+      <button class="hot-modal-close" id="hot-modal-close">&times;</button>
+    </div>
+    <div class="hot-modal-body" id="hot-modal-body"></div>
+    <div class="hot-modal-footer">
+      <button class="btn btn-secondary btn-sm" id="hot-modal-refresh">刷新</button>
+      <button class="btn btn-primary btn-sm" id="hot-modal-apply">加入快速赛道</button>
+    </div>
+  </div>
+</div>
+
+<!-- Watchlist Detail Drawer -->
+<div class="drawer-overlay" id="wl-drawer-overlay" style="display:none"></div>
+<div class="drawer" id="wl-drawer" style="display:none">
+  <div class="drawer-header">
+    <div class="drawer-title-group">
+      <h2 class="drawer-company-name" id="wl-drawer-name"></h2>
+      <span class="drawer-ticker" id="wl-drawer-ticker"></span>
+      <span class="wl-drawer-price" id="wl-drawer-price"></span>
+      <span class="wl-drawer-change" id="wl-drawer-change"></span>
+      <span class="wl-drawer-tier-badge" id="wl-drawer-tier"></span>
+    </div>
+    <button class="drawer-close" id="wl-drawer-close">&times;</button>
+  </div>
+  <div class="wl-drawer-tabs">
+    <button class="wl-drawer-tab active" data-tab="info">基本信息</button>
+    <button class="wl-drawer-tab" data-tab="price">价格</button>
+    <button class="wl-drawer-tab" data-tab="news">新闻</button>
+    <button class="wl-drawer-tab" data-tab="capital">资金</button>
+    <button class="wl-drawer-tab" data-tab="uzi">UZI 分析</button>
+  </div>
+  <div class="drawer-body" id="wl-drawer-body">
+    <div class="wl-tab-pane active" id="wl-tab-info"></div>
+    <div class="wl-tab-pane" id="wl-tab-price"></div>
+    <div class="wl-tab-pane" id="wl-tab-news"></div>
+    <div class="wl-tab-pane" id="wl-tab-capital"></div>
+    <div class="wl-tab-pane" id="wl-tab-uzi"></div>
+  </div>
+</div>
+
 <!-- Detail Drawer (right-side slide panel) -->
 <div class="drawer-overlay" id="drawer-overlay" style="display:none"></div>
 <div class="drawer" id="detail-drawer" style="display:none">
@@ -338,12 +782,38 @@
   <div class="drawer-body" id="drawer-body"></div>
 </div>
 
-<script type="module" src="/static/js/app.js?v=2"></script>
+<!-- 重新分析确认弹窗 -->
+<div class="modal-overlay" id="reanalyze-overlay" style="display:none">
+  <div class="modal-dialog reanalyze-modal">
+    <div class="modal-header">
+      <h3>确认重新分析</h3>
+      <button class="modal-close" id="reanalyze-close">&times;</button>
+    </div>
+    <div class="modal-body" id="reanalyze-body">
+      <p class="reanalyze-hint">以下为本次分析将使用的模型和接口：</p>
+    </div>
+    <div class="modal-footer" id="reanalyze-footer">
+      <div class="ra-summary" id="ra-summary"></div>
+      <div class="ra-footer-buttons">
+        <button class="btn btn-sm" id="reanalyze-test">开始测试</button>
+        <button class="btn btn-sm btn-primary" id="reanalyze-confirm" disabled>开始分析</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/static/js/app.js?v=43"></script>
 <script>
   window.addEventListener('error', e => {
-    document.title = 'JS ERROR: ' + e.message;
     console.error('Global error:', e.message, e.filename, e.lineno);
   });
+  // 确保 wizard 模式布局即使模块加载失败也能正确显示
+  document.addEventListener('DOMContentLoaded', () => {
+    document.body.classList.add('wizard-active');
+    const wiz = document.getElementById('view-wizard');
+    if (wiz) wiz.classList.add('active');
+  });
 </script>
+<div class="score-tooltip" id="score-tooltip"></div>
 </body>
 </html>

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 try:
@@ -17,11 +17,61 @@ try:
 except ImportError:
     yf = None  # type: ignore[assignment]
 
-from .models import FinancialSnapshot, MarketRegion, SupplierInfo
+from .models import FinancialSnapshot, FinancialTrend, MarketRegion, QuarterlyDataPoint, SupplierInfo
 
 logger = logging.getLogger(__name__)
 
 _SEMAPHORE = asyncio.Semaphore(4)
+
+
+def _compute_trend(quarters: list[QuarterlyDataPoint]) -> FinancialTrend:
+    """从季度数据点列表计算趋势指标。quarters 按时间降序（最新在前）。"""
+    trend = FinancialTrend(quarters=quarters)
+    if len(quarters) < 2:
+        return trend
+
+    rev_yoys = [q.revenue_yoy_pct for q in quarters if q.revenue_yoy_pct is not None]
+    profit_yoys = [q.net_profit_yoy_pct for q in quarters if q.net_profit_yoy_pct is not None]
+    gm_vals = [q.gross_margin_pct for q in quarters if q.gross_margin_pct is not None]
+
+    def _avg(vals: list[float]) -> float:
+        return sum(vals) / len(vals) if vals else 0.0
+
+    if len(rev_yoys) >= 4:
+        recent = _avg(rev_yoys[:2])
+        earlier = _avg(rev_yoys[2:4])
+        trend.revenue_acceleration = round(recent - earlier, 2)
+
+    if len(profit_yoys) >= 4:
+        recent = _avg(profit_yoys[:2])
+        earlier = _avg(profit_yoys[2:4])
+        trend.profit_acceleration = round(recent - earlier, 2)
+
+    if len(gm_vals) >= 4:
+        recent = _avg(gm_vals[:2])
+        earlier = _avg(gm_vals[2:4])
+        trend.gross_margin_trend = round(recent - earlier, 2)
+
+    count = 0
+    for q in quarters:
+        if q.revenue_yoy_pct is not None and q.revenue_yoy_pct > 0:
+            count += 1
+        else:
+            break
+    trend.consecutive_growth_quarters = count
+
+    parts = []
+    if trend.revenue_acceleration is not None:
+        direction = "加速" if trend.revenue_acceleration > 2 else "减速" if trend.revenue_acceleration < -2 else "平稳"
+        parts.append(f"营收{direction}({trend.revenue_acceleration:+.1f}pp)")
+    if trend.gross_margin_trend is not None:
+        direction = "扩张" if trend.gross_margin_trend > 0.5 else "收缩" if trend.gross_margin_trend < -0.5 else "持平"
+        parts.append(f"毛利率{direction}({trend.gross_margin_trend:+.1f}pp)")
+    if trend.consecutive_growth_quarters > 0:
+        parts.append(f"连续{trend.consecutive_growth_quarters}季正增长")
+    trend.trend_summary = "，".join(parts) if parts else "趋势数据不足"
+
+    return trend
 
 
 def _safe_float(val, scale: float = 1.0) -> Optional[float]:
@@ -43,6 +93,49 @@ def _safe_int(val) -> Optional[int]:
         return None
 
 
+def _compute_volume_metrics(
+    volumes: list[float], closes: list[float],
+) -> tuple[Optional[float], Optional[float], Optional[float], int]:
+    """从日线数据计算成交量动量（含异常值过滤）和涨幅。
+
+    Returns:
+        (volume_ratio, price_change_3m_pct, price_change_1m_pct, consecutive_volume_days)
+    """
+    if len(volumes) < 20 or len(closes) < 20:
+        return None, None, None, 0
+
+    n = min(len(volumes), 60)
+    vol_60d_avg = sum(volumes[-n:]) / n
+    if vol_60d_avg <= 0:
+        return None, None, None, 0
+
+    recent_10 = list(volumes[-10:])
+    for i in range(len(recent_10)):
+        if recent_10[i] > vol_60d_avg * 10:
+            recent_10[i] = vol_60d_avg * 3
+    filtered_10d_avg = sum(recent_10) / len(recent_10)
+    volume_ratio = round(filtered_10d_avg / vol_60d_avg, 3)
+
+    consecutive = 0
+    daily_ratios = [v / vol_60d_avg for v in volumes[-10:]]
+    for i in range(len(daily_ratios) - 2):
+        if daily_ratios[i] > 1.3 and daily_ratios[i + 1] > 1.3 and daily_ratios[i + 2] > 1.3:
+            consecutive = 3
+            break
+
+    chg_3m = None
+    if len(closes) >= 60 and closes[-60] != 0:
+        chg_3m = round((closes[-1] / closes[-60] - 1) * 100, 1)
+    elif closes[0] != 0:
+        chg_3m = round((closes[-1] / closes[0] - 1) * 100, 1)
+
+    chg_1m = None
+    if len(closes) >= 20 and closes[-20] != 0:
+        chg_1m = round((closes[-1] / closes[-20] - 1) * 100, 1)
+
+    return volume_ratio, chg_3m, chg_1m, consecutive
+
+
 # ---------------------------------------------------------------------------
 # A 股：AKShare (同花顺 + 东方财富)
 # ---------------------------------------------------------------------------
@@ -51,13 +144,11 @@ def _fetch_astock_financial(code_6: str) -> FinancialSnapshot:
     """同步拉取 A 股财务数据。code_6 = 6位纯数字代码。"""
     snap = FinancialSnapshot(data_source="akshare_ths")
 
-    # 1) 财务摘要 — stock_financial_abstract_ths
+    # 1) 财务摘要 — stock_financial_abstract_ths（取近8个季度）
     try:
         df = ak.stock_financial_abstract_ths(symbol=code_6, indicator="按报告期")
         if df is not None and not df.empty:
-            row = df.iloc[0]
             cols = df.columns.tolist()
-            snap.report_date = str(row.iloc[0]) if len(cols) > 0 else ""
 
             col_map = {
                 "营业总收入": "revenue",
@@ -67,42 +158,98 @@ def _fetch_astock_financial(code_6: str) -> FinancialSnapshot:
                 "资产负债率": "debt_ratio_pct",
                 "每股经营现金流": "cashflow_per_share",
             }
-            for col_keyword, attr in col_map.items():
-                matched = [c for c in cols if col_keyword in c]
-                if not matched:
-                    continue
-                val = row[matched[0]]
-                if attr == "revenue":
-                    snap.revenue_yi = _safe_float(val, 1e-8)
-                elif attr == "net_profit":
-                    snap.net_profit_yi = _safe_float(val, 1e-8)
-                elif attr in ("gross_margin_pct", "roe_pct", "debt_ratio_pct"):
-                    setattr(snap, attr, _safe_float(val))
-                elif attr == "cashflow_per_share":
-                    snap.cashflow_per_share = _safe_float(val)
-
-            # 同比增速
             revenue_yoy_cols = [c for c in cols if "营业总收入" in c and "同比" in c]
-            if revenue_yoy_cols:
-                snap.revenue_yoy_pct = _safe_float(row[revenue_yoy_cols[0]])
             net_profit_yoy_cols = [c for c in cols if "净利润" in c and "同比" in c]
-            if net_profit_yoy_cols:
-                snap.net_profit_yoy_pct = _safe_float(row[net_profit_yoy_cols[0]])
+
+            quarters: list[QuarterlyDataPoint] = []
+            for idx, row in df.head(8).iterrows():
+                qp = QuarterlyDataPoint(
+                    report_date=str(row.iloc[0]) if len(cols) > 0 else "",
+                )
+                for col_keyword, attr in col_map.items():
+                    matched = [c for c in cols if col_keyword in c]
+                    if not matched:
+                        continue
+                    val = row[matched[0]]
+                    if attr == "revenue":
+                        qp.revenue_yi = _safe_float(val, 1e-8)
+                    elif attr == "net_profit":
+                        qp.net_profit_yi = _safe_float(val, 1e-8)
+                    elif attr == "gross_margin_pct":
+                        qp.gross_margin_pct = _safe_float(val)
+                    elif attr == "roe_pct":
+                        qp.roe_pct = _safe_float(val)
+
+                if revenue_yoy_cols:
+                    qp.revenue_yoy_pct = _safe_float(row[revenue_yoy_cols[0]])
+                if net_profit_yoy_cols:
+                    qp.net_profit_yoy_pct = _safe_float(row[net_profit_yoy_cols[0]])
+
+                quarters.append(qp)
+
+            if quarters:
+                latest = quarters[0]
+                snap.report_date = latest.report_date
+                snap.revenue_yi = latest.revenue_yi
+                snap.net_profit_yi = latest.net_profit_yi
+                snap.gross_margin_pct = latest.gross_margin_pct
+                snap.roe_pct = latest.roe_pct
+                snap.revenue_yoy_pct = latest.revenue_yoy_pct
+                snap.net_profit_yoy_pct = latest.net_profit_yoy_pct
+
+                # 从 col_map 中提取 debt_ratio_pct / cashflow_per_share（只需最新期）
+                row0 = df.iloc[0]
+                debt_cols = [c for c in cols if "资产负债率" in c]
+                if debt_cols:
+                    snap.debt_ratio_pct = _safe_float(row0[debt_cols[0]])
+                cf_cols = [c for c in cols if "每股经营现金流" in c]
+                if cf_cols:
+                    snap.cashflow_per_share = _safe_float(row0[cf_cols[0]])
+
+                snap.trend = _compute_trend(quarters)
+
     except Exception as e:
         logger.warning(f"AKShare 财务摘要获取失败 ({code_6}): {e}")
 
-    # 2) 研报数据 — stock_research_report_em
+    # 2) 研报数据 — stock_research_report_em（改为近6月去重机构数）
     try:
         df_rpt = ak.stock_research_report_em(symbol=code_6)
         if df_rpt is not None and not df_rpt.empty:
-            snap.analyst_report_count = min(len(df_rpt), 999)
-            first = df_rpt.iloc[0]
             cols_rpt = df_rpt.columns.tolist()
+            date_col = [c for c in cols_rpt if "日期" in c]
+            inst_col = [c for c in cols_rpt if "机构" in c]
+            if date_col and inst_col:
+                cutoff = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+                df_rpt["_date_str"] = df_rpt[date_col[0]].astype(str)
+                recent = df_rpt[df_rpt["_date_str"] >= cutoff]
+                snap.analyst_report_count = int(recent[inst_col[0]].nunique()) if not recent.empty else 0
+            else:
+                snap.analyst_report_count = min(len(df_rpt), 999)
+            first = df_rpt.iloc[0]
             rating_cols = [c for c in cols_rpt if "评级" in c or "rating" in c.lower()]
             if rating_cols:
                 snap.analyst_rating = str(first[rating_cols[0]])
     except Exception as e:
         logger.debug(f"AKShare 研报数据获取失败 ({code_6}): {e}")
+
+    # 3) 日线数据 → 成交量动量 + 涨幅
+    try:
+        df_hist = ak.stock_zh_a_hist(
+            symbol=code_6, period="daily",
+            start_date=(datetime.now() - timedelta(days=180)).strftime("%Y%m%d"),
+            end_date=datetime.now().strftime("%Y%m%d"),
+            adjust="qfq",
+        )
+        if df_hist is not None and len(df_hist) >= 20:
+            vols = df_hist["成交量"].tolist()
+            cls_prices = df_hist["收盘"].tolist()
+            vr, c3m, c1m, consec = _compute_volume_metrics(vols, cls_prices)
+            snap.volume_ratio = vr
+            snap.price_change_3m_pct = c3m
+            snap.price_change_1m_pct = c1m
+            snap.consecutive_volume_days = consec
+    except Exception as e:
+        logger.debug(f"AKShare 日线数据获取失败 ({code_6}): {e}")
 
     return snap
 
@@ -127,6 +274,16 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
         snap.debt_ratio_pct = _safe_float(info.get("debtToEquity"))
         snap.cashflow_per_share = _safe_float(info.get("operatingCashflow"))
 
+        # 机构持仓
+        inst_pct = info.get("heldPercentInstitutions")
+        if inst_pct is not None:
+            snap.institution_holding_pct = round(float(inst_pct) * 100, 2)
+
+        # IPO 日期
+        ipo_ts = info.get("firstTradeDateEpochUtc")
+        if ipo_ts:
+            snap.days_since_ipo = (datetime.now() - datetime.utcfromtimestamp(ipo_ts)).days
+
         eps_fwd = info.get("forwardEps")
         pe_fwd = info.get("forwardPE")
         if eps_fwd is not None:
@@ -141,10 +298,57 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
         if n_analysts is not None:
             snap.analyst_report_count = _safe_int(n_analysts)
 
-        # 报告日期
         fiscal = info.get("mostRecentQuarter")
         if fiscal:
             snap.report_date = datetime.fromtimestamp(fiscal).strftime("%Y-%m-%d")
+
+        # 多季度趋势数据
+        try:
+            qf = stock.quarterly_financials
+            qi = stock.quarterly_income_stmt
+            if qf is not None and not qf.empty:
+                quarters: list[QuarterlyDataPoint] = []
+                for col_date in list(qf.columns)[:8]:
+                    qp = QuarterlyDataPoint(
+                        report_date=col_date.strftime("%Y-%m-%d") if hasattr(col_date, "strftime") else str(col_date),
+                    )
+                    rev = qf.at["Total Revenue", col_date] if "Total Revenue" in qf.index else None
+                    qp.revenue_yi = _safe_float(rev, 1e-8)
+                    ni = qf.at["Net Income", col_date] if "Net Income" in qf.index else None
+                    qp.net_profit_yi = _safe_float(ni, 1e-8)
+                    gp = qf.at["Gross Profit", col_date] if "Gross Profit" in qf.index else None
+                    if rev and gp and float(str(rev)) != 0:
+                        qp.gross_margin_pct = round(float(str(gp)) / float(str(rev)) * 100, 2)
+                    quarters.append(qp)
+
+                # 计算 YoY（需要至少5季度：当前+4季度前）
+                for i, qp in enumerate(quarters):
+                    if i + 4 < len(quarters):
+                        prev = quarters[i + 4]
+                        if qp.revenue_yi and prev.revenue_yi and prev.revenue_yi != 0:
+                            qp.revenue_yoy_pct = round((qp.revenue_yi / prev.revenue_yi - 1) * 100, 2)
+                        if qp.net_profit_yi and prev.net_profit_yi and prev.net_profit_yi != 0:
+                            qp.net_profit_yoy_pct = round((qp.net_profit_yi / prev.net_profit_yi - 1) * 100, 2)
+
+                if quarters:
+                    snap.trend = _compute_trend(quarters)
+        except Exception as e:
+            logger.debug(f"yfinance 季度数据获取失败 ({ticker}): {e}")
+
+        # 日线数据 → 成交量动量 + 涨幅
+        try:
+            hist = stock.history(period="6mo")
+            if hist is not None and len(hist) >= 20:
+                vols = hist["Volume"].tolist()
+                cls_prices = hist["Close"].tolist()
+                vr, c3m, c1m, consec = _compute_volume_metrics(vols, cls_prices)
+                snap.volume_ratio = vr
+                snap.price_change_3m_pct = c3m
+                snap.price_change_1m_pct = c1m
+                snap.consecutive_volume_days = consec
+        except Exception as e:
+            logger.debug(f"yfinance 日线数据获取失败 ({ticker}): {e}")
+
     except Exception as e:
         logger.warning(f"yfinance 数据获取失败 ({ticker}): {e}")
 
@@ -185,13 +389,92 @@ async def fetch_financial_snapshot(supplier: SupplierInfo) -> Optional[Financial
             return None
 
 
-async def fetch_batch(suppliers: list[SupplierInfo]) -> dict[str, FinancialSnapshot]:
-    """批量拉取。返回 {ticker: FinancialSnapshot}，失败的自动跳过。"""
-    tasks = {s.ticker: fetch_financial_snapshot(s) for s in suppliers}
+async def fetch_batch(suppliers: list[SupplierInfo]) -> tuple[dict[str, FinancialSnapshot], list[str]]:
+    """批量拉取。返回 ({ticker: FinancialSnapshot}, [failed_tickers])，失败的自动重试一次。"""
     results: dict[str, FinancialSnapshot] = {}
-    for ticker, coro in tasks.items():
+    failed_suppliers: list[SupplierInfo] = []
+
+    tasks = {s.ticker: (s, fetch_financial_snapshot(s)) for s in suppliers}
+    for ticker, (supplier, coro) in tasks.items():
         snap = await coro
         if snap is not None:
             results[ticker] = snap
-    logger.info(f"财务数据批量拉取完成: {len(results)}/{len(suppliers)} 成功")
-    return results
+        else:
+            failed_suppliers.append(supplier)
+
+    if failed_suppliers:
+        logger.info(f"财务数据重试: {len(failed_suppliers)} 个失败的 ticker")
+        for s in failed_suppliers:
+            snap = await fetch_financial_snapshot(s)
+            if snap is not None:
+                results[s.ticker] = snap
+
+    failed_tickers = [s.ticker for s in failed_suppliers if s.ticker not in results]
+    logger.info(f"财务数据批量拉取完成: {len(results)}/{len(suppliers)} 成功, {len(failed_tickers)} 失败")
+    return results, failed_tickers
+
+
+# ---------------------------------------------------------------------------
+# K 线数据
+# ---------------------------------------------------------------------------
+
+def _fetch_astock_kline(code_6: str, days: int = 365) -> list[dict]:
+    if ak is None:
+        return []
+    df = ak.stock_zh_a_hist(
+        symbol=code_6, period="daily",
+        start_date=(datetime.now() - timedelta(days=days)).strftime("%Y%m%d"),
+        end_date=datetime.now().strftime("%Y%m%d"),
+        adjust="qfq",
+    )
+    if df is None or df.empty:
+        return []
+    rows = []
+    for _, r in df.iterrows():
+        rows.append({
+            "date": str(r["日期"])[:10],
+            "open": round(float(r["开盘"]), 2),
+            "high": round(float(r["最高"]), 2),
+            "low": round(float(r["最低"]), 2),
+            "close": round(float(r["收盘"]), 2),
+            "volume": int(r["成交量"]),
+        })
+    return rows
+
+
+def _fetch_us_kline(ticker: str, period: str = "1y") -> list[dict]:
+    if yf is None:
+        return []
+    stock = yf.Ticker(ticker)
+    hist = stock.history(period=period)
+    if hist is None or hist.empty:
+        return []
+    rows = []
+    for date, r in hist.iterrows():
+        rows.append({
+            "date": str(date.date()),
+            "open": round(float(r["Open"]), 2),
+            "high": round(float(r["High"]), 2),
+            "low": round(float(r["Low"]), 2),
+            "close": round(float(r["Close"]), 2),
+            "volume": int(r["Volume"]),
+        })
+    return rows
+
+
+async def fetch_kline(ticker: str, market: str = "us_stock") -> list[dict]:
+    """获取近一年 K 线 OHLCV 数据。"""
+    try:
+        if market == "a_stock":
+            code = _extract_astock_code(ticker)
+            if not code:
+                return []
+            return await asyncio.to_thread(_fetch_astock_kline, code)
+        else:
+            t = ticker.split(".")[0].strip()
+            if not t:
+                return []
+            return await asyncio.to_thread(_fetch_us_kline, t)
+    except Exception as e:
+        logger.warning(f"K线数据获取失败 ({ticker}): {e}")
+        return []

@@ -198,8 +198,541 @@ BottleneckHunter/
 | P2 | Phase 4 - 工作流完善 | ✅ 已完成 | 集成供应商+验证的完整流程 |
 | P3 | Phase 5 - CLI 完善 | ✅ 已完成 | 完整的 CLI 选股体验 |
 | P3 | Phase 1.1 - 预设数据 | ✅ 3个已创建 | 产业链模板库持续扩充 |
+| P0 | Phase 6 - Wizard UI | ✅ 已完成 | 4-Phase Wizard + 圆桌会议 |
+| P0 | Phase 7A - 技术债务 | ✅ 已完成 | JSON 统一 + 缓存 TTL + 超时保护 |
+| P0 | Phase 7B - 测试补充 | ✅ 已完成 | 74 个新测试，165 项全部通过 |
+| P1 | Phase 7D - 体验优化 | ✅ 已完成 | 真流式 + 断连重试 + 模块拆分 |
+| P0 | Phase 8A - 观察池骨架 | 🔲 待开发 | 观察池 CRUD + 数据管道 + 每日更新 |
+| P0 | Phase 8B - 决策引擎 | 🔲 待开发 | 模拟交易 + 综合评分 + 推送通知 |
+| P1 | Phase 8C - 复盘系统 | 🔲 待开发 | 交易复盘 + 经验卡片 + 调优闭环 |
 
-**下一步**：接入真实 LLM API 进行端到端测试，验证完整流程
+**下一步**：Phase 8A — 观察池核心骨架
+
+---
+
+## Phase 6：Wizard UI 重构与 4-Phase 流水线 ✅ (已完成)
+
+**目标**：将一体化选股流程拆分为 4 个可独立刷新的步骤，配合全新 Wizard 式前端
+
+### 6.1 整体架构
+
+```
+起始页（选赛道/历史）
+  ↓
+Phase 1: 产业链瓶颈（SSE） → 拆解 + 瓶颈评分
+  ↓
+Phase 2: 入围筛选（SSE）   → 搜索 + 评估 + Alpha + 分层入围 + 手动入选
+  ↓
+Phase 3: 最终评分（即时+AI） → 几何均值排名 + 横向对比图表 + AI 分析报告
+  ↓
+Phase 4: 交叉验证（SSE）   → 多模型对抗验证 + AI 圆桌会议（下阶段）
+```
+
+级联清除规则：刷新 Phase N → 清除 Phase N..4，保留 1..N-1
+
+### 6.2 已完成 ✅
+
+| 模块 | 说明 |
+|------|------|
+| `chain/models.py` | FinalScore, FinalScoredCompany 数据模型 |
+| `chain/supplier_eval.py` | FinalScorer 几何加权均值评分（quality^w_q × alpha^w_a） |
+| `web/phase_cache.py` | 服务端内存缓存（analysis_id → phase 结果） |
+| `web/streaming.py` | stream_phase1/2/4 SSE 异步生成器 |
+| `web/api.py` | Phase1-4 API 端点 + 缓存读取端点 |
+| `tests/test_final_scorer.py` | 10 项单元测试 |
+| 前端 JS 骨架 | phases.js + phase-views.js + app.js 路由 |
+
+### 6.3 Step A: Wizard 前端重构（当前）
+
+基于确认的原型 v3（`static/prototype.html`）重新实现前端。
+
+**起始页：**
+- 自定义赛道按钮组（文字按钮，最多 8 个），右键配置参数（市场/产业方向/终端产品）
+- 全自动分析模式：载入历史数据后一键按当前设置自动完成所有 Phase
+- 自定义输入表单：市场/产业方向/终端产品/市值上限
+- 历史记录完整表格：市场/产业方向/终端产品/市值规模/分析层数/主分析模型/入围供应商数量/日期
+- 赛道配置存储到 localStorage，支持增删改
+
+**Phase 1 — 瓶颈分析：**
+- 先设置参数（深度/TopN/市场/市值/LLM），点击"开始分析"再启动
+- 产业链图谱保留三图切换（力导向/径向树/D3 Force）
+- 图谱窗口内叠加分析进度（spinner + 逐层拆解详细信息）
+
+**Phase 2 — 分层入围 + 手动入选：**
+- 按分析层数（子部件层L1/零件层L2/原料层L3）分别设置入围数量
+- 表格增加 checkbox 列，手动勾选不超过 3 家加入最终评分
+- 表格完整展示五维评分列（地位/客户/产能/财务/估值）+ 综合 + Alpha + 趋势 + 聪明钱 + 护城河
+- 所有公司名标注层级标记（L1/L2/L3/L4 彩色 badge）
+- 点击可展开行内企业简介和核心产品信息
+- 后端 ShortlistConfig 新增 `per_layer_top_n: dict[str, int]` + `manual_picks: list[str]`
+
+**Phase 3 — 综合分析页：**
+- 即时部分（拖动滑块实时更新）：排名表 + 4 张对比图表
+  - 散点图（质量 vs 预期差，气泡=最终分）
+  - 五维雷达对比图（地位/客户/产能/财务/估值）
+  - 分组柱状图（各公司 quality/alpha/趋势/聪明钱）
+  - 堆叠柱状图（Alpha 因子拆解：瓶颈×信息差+催化剂+趋势+聪明钱）
+- AI 报告部分（按钮触发，SSE 流式）：横向对比分析评价
+  - 权重变化后提示"排名已更新，是否重新生成报告？"
+  - 报告缓存，相同权重不重复生成
+- 大尺寸公司详情抽屉（720px 宽，点击行展开），完整覆盖旧系统全部 10 个 section：
+  1. 评分概览（最终分/质量分/预期差）
+  2. 企业简介
+  3. 核心产品（tags）
+  4. 五维评分（雷达图 + 条形图）
+  5. 优势与风险
+  6. 财务快照（8 项指标 + 机构评级/研报覆盖/预期PE/预期EPS）
+  7. 财务趋势（加速度/毛利率趋势/连续增长季数）
+  8. 瓶颈定位（5 维瓶颈评分）
+  9. 竞争护城河（4 维 + 分析要点）
+  10. 聪明钱信号（评分/方向/明细）
+  11. 催化剂时间线（类型/日期/置信度/影响力）
+  12. 预期差分析（6 项因子 + 推理说明）
+
+**Phase 4 — 交叉验证增强：**
+- 每家公司可展开详细面板，包含：
+  - 10 分制多维评分表（技术壁垒/市场地位/财务健康/成长潜力/估值合理性/风险可控性 × 各AI）
+  - 各 AI 独立评语（优势 + 风险点）
+- 所有公司名标注层级标记
+- 底部预留 AI 圆桌会议区（下阶段开发，含模拟预览）
+
+**全局规范：**
+- 所有公司名称后附带层级标记（L1/L2/L3/L4 彩色 badge）
+- 数据字段完整覆盖旧系统（dashboard.js 详情抽屉 10 个 section 全部迁移）
+
+### 6.4 Step B: 后端 API 补充
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/phase2` | 新增 `per_layer_top_n` 和 `manual_picks` 参数支持 |
+| `POST /api/phase3/report` | 新增 AI 横向分析报告生成（SSE 流式） |
+| `GET /api/phase3/report/{id}` | 获取已缓存的 AI 报告 |
+| `GET /api/history` | 返回完整历史字段（市场/层数/模型/入围数） |
+| `POST /api/auto-run` | 前端已实现（自动模式顺序触发 Phase 1-4，无需后端端点） |
+| `GET /api/sectors` | 前端已实现（localStorage 管理赛道配置，无需后端端点） |
+
+### 6.5 Step C: 集成测试 + 部署
+
+1. 端到端 4-Phase 流程测试（真实 LLM）
+2. 分层入围 + 手动入选验证
+3. AI 报告生成 + 缓存验证
+4. 抽屉详情数据完整性验证（对照旧系统 10 个 section 逐项核对）
+5. 级联清除 + 断点续跑验证
+6. 全自动分析模式 E2E 测试
+7. 自定义赛道 CRUD + localStorage 持久化测试
+
+### 6.6 Step D: AI 圆桌会议（下阶段子模块）
+
+**架构设计（待详细设计）：**
+
+```
+POST /api/phase4/meeting — 启动会议（SSE 流式）
+
+会议流程：
+  主持人（专用 prompt）控制议程
+    ↓
+  Round 1: 各 AI 独立发表对 Top-N 排名的看法
+    ↓
+  Round 2-4: 互相提问 + 质疑 + 回应（上下文传递）
+    ↓
+  Round 5: 主持人总结共识 + 分歧 + 最终排名
+```
+
+关键设计点：
+- 主持人 LLM 负责议程控制，从参会 AI 的回复中提取问题转发
+- 每轮对话上下文累积传递，模拟真实讨论
+- 前端聊天气泡 UI，SSE 逐条推送发言
+- 10 分钟超时保护，最多 5 轮 + 总结
+- 输出结构化结论：推荐排名 + 风险排名 + 共识度 + 主要分歧点
+
+---
+
+## Phase 7：质量加固与体验优化 ✅ (已完成)
+
+### 7A 技术债务清理 ✅
+
+| 任务 | 说明 |
+|------|------|
+| `chain/json_utils.py` | 统一 6 处重复的 JSON 提取逻辑为 `extract_json_object` / `extract_json_array` |
+| `web/phase_cache.py` | 增加 TTL (4h) + LRU (50 条) 淘汰机制 |
+| `web/streaming.py` | 圆桌会议全局超时保护 (600s) |
+
+### 7B 核心测试补充 ✅
+
+新增 74 个单元测试，覆盖 5 个此前零覆盖的核心模块：
+
+| 测试文件 | 目标模块 | 测试数 |
+|---------|---------|--------|
+| `test_roundtable.py` | roundtable.py | 22 |
+| `test_cross_validation.py` | cross_validation.py | 11 |
+| `test_catalyst.py` | catalyst.py | 11 |
+| `test_smart_money.py` | smart_money.py | 16 |
+| `test_meeting_data.py` | meeting_data.py | 15 |
+
+全部 165 个测试通过。
+
+### 7D 体验优化 ✅
+
+| 任务 | 说明 |
+|------|------|
+| AI 报告真流式 | `api.py` 的 `ainvoke` 改为 `astream` 逐 token 推送，不支持 stream 的模型自动降级 |
+| SSE 断连重试 | `phases.js` 提取通用 `readSSEStream()` 工具函数，支持最多 3 次递增间隔重试 + phase_cache 恢复 |
+| streaming.py 拆分 | 1,422 行拆为 `streaming/_common.py` / `legacy.py` / `phases.py` / `meeting.py` 四文件包 |
+| PLAN.md 更新 | 修正 `/auto-run` 和 `/sectors` 为前端已实现，更新 Phase 6/7 完成状态 |
+| 进度百分比 + ETA | Phase 2 供应商评估和催化剂分析步骤增加前端百分比进度条和预估剩余时间 |
+
+---
+
+## Phase 8：跟踪观察池与智能决策引擎
+
+### 8.0 系统设计总览
+
+**核心理念**：从"一次性筛选"进化为"持续跟踪 + 自适应决策"，三大模块形成闭环：
+
+```
+┌──────────┐     P4 勾选加入     ┌──────────┐    交易信号     ┌──────────┐
+│  分析流程  │ ────────────────► │  观察池   │ ─────────────► │ 交易中心  │
+│ Phase1-4  │                   │  跟踪+决策 │  用户确认执行   │ 模拟交易  │
+└──────────┘                   └─────┬────┘               └────┬─────┘
+                                     │                         │
+                                     │◄────────────────────────┘
+                                     │  复盘结果 + 经验卡片回流
+                                     │  调优建议反馈
+```
+
+**前端导航结构**：
+
+| 入口 | 说明 |
+|------|------|
+| 分析流程 | 现有 Phase 1-4 Wizard（P4 新增"加入观察池"按钮） |
+| 观察池 | 独立页面：跟踪信息 + 决策建议 + 经验知识库 |
+| 交易中心 | 独立页面：模拟账户 + 操作记录 + 预算监控 |
+
+**设计约束**：
+- 一期仅支持美股市场
+- 观察池上限 24 只股票
+- 数据源全部免费（yfinance + SEC EDGAR + News RSS）
+- LLM 成本设日/月上限，超限自动降级
+- 模拟交易半自动模式（系统建议 → 用户确认 → 执行）
+- 不支持做空，一次性买入/卖出，简化版
+
+### 8.1 数据模型
+
+#### 观察池相关
+
+```
+watchlist（观察池）
+├── id, ticker, name, market
+├── source: "phase3" | "phase4" | "manual"   ← 来源
+├── source_analysis_id: nullable              ← 关联的分析记录
+├── tier: "focus" | "normal" | "track"        ← 重点(6)/一般(6)/潜力(12)
+├── priority_score: float                     ← 自动排序分
+├── added_at, last_updated
+└── status: "active" | "pending_remove"
+
+market_snapshots（每日快照）
+├── ticker, date
+├── price, volume, change_pct
+├── volume_ratio, price_52w_high/low
+└── technical_signals: JSON                   ← RSI/MACD 等
+
+news_digest（每日新闻摘要）
+├── ticker, date
+├── raw_headlines: JSON
+├── llm_summary: text
+├── sentiment: float (-1 ~ +1)
+└── key_events: JSON                          ← 结构化事件提取
+
+sec_filings（SEC 文件监控）
+├── ticker, filing_type (10-K/10-Q/8-K/Form4)
+├── filed_date, url
+├── llm_summary: text
+└── significance: "high" | "medium" | "low"
+
+earnings_reports（财报追踪）
+├── ticker, quarter
+├── revenue, eps, guidance
+├── surprise_pct
+└── llm_analysis: text
+
+options_activity（期权异动）
+├── ticker, date
+├── unusual_volume_calls/puts
+├── put_call_ratio
+└── notable_trades: JSON
+
+insider_trades（内部人交易）
+├── ticker, date, insider_name, title
+├── transaction_type: "buy" | "sell"
+├── shares, price, value
+└── significance_note: text
+```
+
+#### 决策引擎相关
+
+```
+composite_score（综合评分 — 每日更新）
+├── ticker, date
+├── fundamental_score: float                  ← 财务面
+├── technical_score: float                    ← 技术面
+├── catalyst_score: float                     ← 催化剂
+├── sentiment_score: float                    ← 市场情绪
+├── smart_money_score: float                  ← 聪明钱
+├── overall_score: float                      ← 加权总分
+├── signal: "strong_buy"|"buy"|"hold"|"reduce"|"sell"
+├── llm_reasoning: text
+└── confidence: float (0-1)
+```
+
+#### 交易中心相关
+
+```
+sim_account（模拟账户 — 用户可自定义初始资金和仓位上限）
+├── initial_capital, current_cash
+├── total_value, total_pnl, total_pnl_pct
+├── max_position_pct
+└── created_at
+
+sim_positions（持仓）
+├── ticker, shares, avg_cost
+├── current_price, unrealized_pnl
+└── weight_pct
+
+sim_trades（交易记录）
+├── id, ticker, action: "buy"|"sell"
+├── shares, price, total_value
+├── signal_source: JSON                       ← 触发信号
+├── llm_reasoning: text                       ← 决策理由
+├── status: "pending"|"executed"|"rejected"   ← 半自动确认
+└── executed_at
+```
+
+#### 复盘系统相关
+
+```
+trade_review（交易复盘）
+├── trade_id → sim_trades
+├── entry_price, exit_price, holding_days
+├── pnl, pnl_pct
+├── what_went_right: text
+├── what_went_wrong: text
+├── lesson_learned: text
+└── reviewed_at
+
+experience_cards（经验卡片 — LLM 压缩的可复用知识）
+├── id, scope: "global"|"sector"|"ticker"
+├── scope_key: nullable
+├── category: "pattern"|"lesson"|"rule"
+├── content: text
+├── evidence: JSON                            ← 支撑案例
+├── confidence: float
+├── applied_count: int
+└── created_at, updated_at
+
+tuning_log（调优记录）
+├── id, type: "weight"|"threshold"|"prompt"|"rule"
+├── parameter_name
+├── old_value, new_value
+├── reason: text
+├── evidence: JSON
+├── status: "proposed"|"approved"|"rejected"
+└── proposed_at, decided_at
+
+llm_budget（LLM 成本控制）
+├── date
+├── tokens_used, cost_estimate
+├── daily_limit, monthly_limit
+└── alert_threshold_pct
+```
+
+### 8.2 LLM 成本控制策略
+
+```
+三级降级机制：
+├── 正常模式：主模型处理所有分析
+├── 节约模式（日用量 > 80%）：潜力区股票跳过 LLM 分析，仅更新量化数据
+└── 熔断模式（日用量 > 100%）：停止所有 LLM 调用，仅更新价格数据
+
+默认上限：
+├── 日上限：$3（约 300K tokens @ GPT-4o）
+└── 月上限：$60
+
+每日预估消耗（24 只股票）：
+├── 新闻摘要分析：24 × ~2K tokens ≈ 48K
+├── 综合评分更新：24 × ~3K tokens ≈ 72K
+├── 异常检测判断：24 × ~1K tokens ≈ 24K
+├── 每日简报生成：1 × ~5K tokens ≈ 5K
+└── 合计 ≈ 150K tokens/天（约 $0.5-1）
+```
+
+### 8.3 技术选型
+
+| 组件 | 选择 | 理由 |
+|------|------|------|
+| 定时调度 | APScheduler 内嵌 FastAPI | 一期最简，二期可替换为 Celery/cron |
+| 数据存储 | SQLite（扩展现有 store.py） | 无额外依赖，二期可迁移 PostgreSQL |
+| 浏览器推送 | Web Push API + Service Worker | 标准方案，免费，离线可达 |
+| SEC 数据 | EDGAR REST API（免费） | 官方接口，Form 4 / 8-K / 10-Q |
+| 期权数据 | yfinance options chain | 免费快照，够用 |
+| 新闻抓取 | yfinance news + Google News RSS | 零成本，LLM 补质量 |
+| 经验存储 | SQLite + JSON 字段 | 一期够用，二期可迁移向量库 |
+
+### 8.4 Phase 8A：核心骨架（2 周）
+
+**目标**：观察池 CRUD + 数据管道 + 每日更新 + 基础 UI
+
+#### Week 1：数据层 + 数据管道
+
+| # | 任务 | 说明 |
+|---|------|------|
+| 1 | SQLite 表结构 + Pydantic 模型 | watchlist / market_snapshots / news_digest / sec_filings / insider_trades / options_activity / earnings_reports / llm_budget |
+| 2 | 观察池 CRUD API | POST/GET/PUT/DELETE /api/watchlist，含分层排序、状态管理 |
+| 3 | 价格数据管道 | yfinance 批量拉取日线，每日 2 次（开盘前 + 收盘后），含技术指标计算（RSI/MACD） |
+| 4 | 新闻抓取 + LLM 摘要 | yfinance news + RSS → LLM 每日汇总 + 情绪分析 + 关键事件提取 |
+| 5 | SEC EDGAR 抓取 | Form 4（内部人交易）+ 8-K（重大事件）+ 10-Q/10-K（财报）自动检测新文件 |
+| 6 | APScheduler 集成 | 定时任务注册 + 手动触发 API + 任务状态查询 |
+
+#### Week 2：前端 + 集成
+
+| # | 任务 | 说明 |
+|---|------|------|
+| 7 | 顶部导航改造 | 新增"观察池"+"交易中心"入口，三页面路由 |
+| 8 | 观察池主页面 | 三区布局（重点/一般/潜力），卡片视图，排序标记 |
+| 9 | Phase 4 "加入观察池" | P4 页面增加勾选按钮，支持系统推荐 + 手动勾选加入 |
+| 10 | 手动添加股票 | 搜索框 + ticker 验证 + 基础信息预览 |
+| 11 | 股票详情页 | 价格走势图 + 新闻时间线 + SEC 文件 + 内部人交易 |
+| 12 | 数据管道状态面板 | 上次更新时间 + 手动触发按钮 + LLM 日/月用量监控 |
+
+### 8.5 Phase 8B：决策引擎（2 周）
+
+**目标**：综合评分 + 模拟交易 + 推送通知 + 每日简报
+
+#### Week 3：评分 + 交易
+
+| # | 任务 | 说明 |
+|---|------|------|
+| 1 | 综合评分引擎 | 5 维量化评分 + LLM 定性判断 → 加权总分 + 买卖信号（经验卡片注入） |
+| 2 | 模拟交易账户 | 开户 API（自定义初始资金/仓位上限）+ 资产净值计算 |
+| 3 | 交易建议生成 | LLM 基于评分+市场数据+经验卡片 → 生成买入/卖出建议 + 理由 |
+| 4 | 交易确认流程 | 推送建议 → 用户确认/拒绝 → 执行记录 |
+| 5 | 期权异动检测 | yfinance options chain → 异常成交量/put-call ratio 分析 |
+| 6 | 异常信号检测 | 价格突变 / 成交量异常 / 评级变动 / 内部人大额交易 |
+
+#### Week 4：推送 + 简报
+
+| # | 任务 | 说明 |
+|---|------|------|
+| 7 | 浏览器推送通知 | Service Worker 注册 + Push API + 通知分类和优先级 |
+| 8 | 信号事件系统 | 事件分类（价格/催化剂/新闻/评级/评分变动）+ 去重 + 优先级排序 |
+| 9 | 每日简报生成 | LLM 汇总当日所有股票动态 → 结构化简报（重点变化 + 建议操作） |
+| 10 | 交易中心仪表盘 | 持仓一览 + 总 P&L 曲线 + 交易历史 + 预算监控 |
+| 11 | 分层自动调整 | 综合评分变化 → 自动升降级（重点↔一般↔潜力） |
+| 12 | 移除建议逻辑 | 连续排名末位 N 周 → 标记"待移除" + 推送建议 |
+
+### 8.6 Phase 8C：复盘系统（2 周）
+
+**目标**：交易复盘 + 经验卡片 + 参数调优 + 闭环
+
+#### Week 5：复盘引擎
+
+| # | 任务 | 说明 |
+|---|------|------|
+| 1 | 交易复盘框架 | 卖出后自动触发 → LLM 归因分析（对/错 + 原因） |
+| 2 | 归因分析引擎 | 对比入场时各维度评分 vs 实际走势，定位判断偏差来源 |
+| 3 | 经验卡片生成 | LLM 从复盘中提炼可复用知识 → scope(global/sector/ticker) |
+| 4 | 经验卡片管理 UI | 查看/编辑/删除/标记有效性 + 按行业/股票筛选 |
+| 5 | 决策上下文注入 | 综合评分和交易建议生成时，自动检索相关经验卡片注入 prompt |
+| 6 | 行业级经验聚合 | 同行业多只股票的共性规律 → 行业级经验卡片 |
+
+#### Week 6：调优闭环
+
+| # | 任务 | 说明 |
+|---|------|------|
+| 7 | 参数调优建议 | 分析历史表现 → 建议评分权重/买卖阈值调整 + 证据展示 |
+| 8 | Prompt 调优建议 | 检测系统性偏差（如催化剂判断过于乐观）→ 建议 prompt 修改 |
+| 9 | 调优确认流程 | 展示建议 + 证据 → 用户批准/拒绝 → 生效并记录 |
+| 10 | 调优效果追踪 | 调整前后的决策准确率对比（A/B 视图） |
+| 11 | 定期复盘报告 | 月度/季度自动生成系统表现总结（胜率/收益率/最大回撤） |
+| 12 | 历史分析对比 | 同赛道不同时间的分析结果 → 排名变化追踪 |
+
+### 8.7 后端新增 API 一览
+
+```
+观察池：
+  POST   /api/watchlist                ← 添加股票（from P4 或手动）
+  GET    /api/watchlist                ← 获取列表（含分层排序）
+  PUT    /api/watchlist/{ticker}       ← 更新（层级/状态）
+  DELETE /api/watchlist/{ticker}       ← 移除
+  GET    /api/watchlist/{ticker}/detail ← 股票详情（快照+新闻+SEC+评分）
+
+数据管道：
+  POST   /api/pipeline/trigger         ← 手动触发数据更新
+  GET    /api/pipeline/status          ← 管道状态（上次运行/下次调度）
+  GET    /api/watchlist/{ticker}/news   ← 新闻摘要历史
+  GET    /api/watchlist/{ticker}/filings ← SEC 文件列表
+  GET    /api/watchlist/{ticker}/insider ← 内部人交易
+  GET    /api/watchlist/{ticker}/options ← 期权异动
+
+决策引擎：
+  GET    /api/watchlist/{ticker}/score  ← 综合评分历史
+  GET    /api/signals                  ← 待处理信号列表
+  GET    /api/briefing/{date}          ← 每日简报
+
+交易中心：
+  POST   /api/sim/account              ← 创建/重置模拟账户
+  GET    /api/sim/account              ← 账户概览
+  GET    /api/sim/positions            ← 当前持仓
+  GET    /api/sim/trades               ← 交易历史
+  POST   /api/sim/trades/{id}/confirm  ← 确认执行交易
+  POST   /api/sim/trades/{id}/reject   ← 拒绝交易建议
+
+复盘系统：
+  GET    /api/reviews                  ← 复盘列表
+  GET    /api/reviews/{trade_id}       ← 单笔复盘详情
+  GET    /api/experience               ← 经验卡片列表
+  PUT    /api/experience/{id}          ← 编辑经验卡片
+  GET    /api/tuning                   ← 调优建议列表
+  POST   /api/tuning/{id}/approve      ← 批准调优
+  POST   /api/tuning/{id}/reject       ← 拒绝调优
+  GET    /api/report/monthly           ← 月度复盘报告
+
+预算：
+  GET    /api/budget                   ← 当前用量 + 上限
+  PUT    /api/budget                   ← 修改上限
+```
+
+### 8.8 前端页面结构
+
+```
+顶部导航栏：[ 分析流程 ] [ 观察池 ] [ 交易中心 ]
+
+观察池页面：
+├── 三区卡片布局（重点6 / 一般6 / 潜力12）
+│   └── 每张卡片：名称 + 当前价 + 涨跌幅 + 信号灯 + 综合评分
+├── 手动添加入口（搜索框 + ticker 验证）
+├── 数据管道状态栏（上次更新 + 手动刷新按钮）
+├── 每日简报面板（当日要点 + 建议操作）
+└── 股票详情页（点击卡片展开）
+    ├── 价格走势图（K线 + 成交量 + 技术指标）
+    ├── 综合评分趋势图
+    ├── 新闻时间线
+    ├── SEC 文件列表
+    ├── 内部人交易记录
+    ├── 期权异动
+    └── 经验卡片（与该股票相关的历史经验）
+
+交易中心页面：
+├── 账户概览（总资产 / 现金 / 持仓市值 / 总盈亏 / 收益率曲线）
+├── 当前持仓表格（股票 / 数量 / 成本 / 现价 / 盈亏 / 仓位占比）
+├── 待确认交易（系统建议列表 + 确认/拒绝按钮）
+├── 交易历史（完整操作记录 + 决策理由）
+├── LLM 预算监控（日/月用量仪表盘 + 上限设置）
+└── 复盘面板
+    ├── 已完成交易复盘列表（盈亏 + 归因 + 教训）
+    ├── 经验卡片库（全局/行业/个股三级）
+    ├── 调优建议列表（待审批 + 已执行 + 效果对比）
+    └── 月度/季度绩效报告
+```
 
 ---
 
@@ -207,6 +740,10 @@ BottleneckHunter/
 
 1. **LLM 幻觉风险**：产业链拆解结果可能包含不准确信息，需要与预设数据交叉核对
 2. **数据源限制**：A 股供应商数据依赖 AKShare 接口稳定性，需做好降级处理
-3. **API 成本**：多模型交叉验证会显著增加 API 调用成本，建议设置模型数量上限
+3. **API 成本**：多模型交叉验证会显著增加 API 调用成本，建议设置模型数量上限；Phase 8 每日持续调用需设日/月硬上限 + 三级降级
 4. **回测验证**：开发完成后，应选取历史案例（如光模块产业链）验证系统输出质量
 5. **合规风险**：输出报告需明确标注"仅供参考，不构成投资建议"
+6. **模拟交易风险**：模拟环境无滑点/流动性限制，实际交易结果可能偏差较大，UI 需醒目标注"模拟数据"
+7. **免费数据源不稳定**：yfinance/EDGAR 可能限流或接口变更，数据管道需做好降级和重试
+8. **经验卡片质量**：LLM 总结的经验可能包含错误归因，需用户定期审核经验库有效性
+9. **调优过拟合**：基于少量交易的参数调优可能过拟合，建议积累 20+ 笔交易后再启动自动调优建议

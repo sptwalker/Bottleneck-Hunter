@@ -202,7 +202,10 @@ function handleEvent(evt, state) {
     state.results[data.step] = data.result;
 
     if (data.step === 'decompose') renderChain(data.result);
-    if (data.step === 'bottleneck') renderBottlenecks(data.result);
+    if (data.step === 'bottleneck') {
+      renderBottlenecks(data.result);
+      window.appState.failedBottleneckNodes = data.failed_nodes || [];
+    }
     if (data.step === 'supplier_eval') renderSuppliers(data.result);
     if (data.step === 'cross_validate') renderValidation(data.skipped ? [] : data.result);
   }

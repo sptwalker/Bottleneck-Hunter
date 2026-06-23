@@ -70,11 +70,17 @@ class BottleneckAnalyzer:
         self._system_prompt = _load_prompt("bottleneck")
         self._timeout_count = 0
         self._retry_count = 0
+        self._failed_nodes: list[dict] = []
+
+    @property
+    def failed_nodes(self) -> list[dict]:
+        return list(self._failed_nodes)
 
     async def analyze(self, graph: ChainGraph, top_n: int = 5, on_progress=None) -> list[BottleneckReport]:
         """Analyze all non-root nodes and return ranked bottleneck reports."""
         self._timeout_count = 0
         self._retry_count = 0
+        self._failed_nodes = []
         self._on_progress = on_progress
 
         candidates = [n for n in graph.nodes if n.layer > 0]
@@ -88,8 +94,14 @@ class BottleneckAnalyzer:
                 result = await self._analyze_node(node.name, node.description, node.layer, graph)
                 if result and on_progress:
                     await on_progress(f"✓ {node.name}: {result.overall_score:.1f} 分 ({idx + 1}/{total})")
-                elif on_progress:
-                    await on_progress(f"✗ {node.name}: 分析失败 ({idx + 1}/{total})")
+                elif not result:
+                    self._failed_nodes.append({
+                        "name": node.name,
+                        "description": node.description,
+                        "layer": node.layer,
+                    })
+                    if on_progress:
+                        await on_progress(f"✗ {node.name}: 分析失败 ({idx + 1}/{total})")
                 return result
 
         results = await asyncio.gather(
@@ -97,9 +109,15 @@ class BottleneckAnalyzer:
         )
 
         reports: list[BottleneckReport] = []
-        for r in results:
+        for i, r in enumerate(results):
             if isinstance(r, Exception):
                 logger.error(f"瓶颈分析异常: {r}")
+                node = candidates[i]
+                self._failed_nodes.append({
+                    "name": node.name,
+                    "description": node.description,
+                    "layer": node.layer,
+                })
                 continue
             if r is not None:
                 reports.append(r)
@@ -112,7 +130,56 @@ class BottleneckAnalyzer:
             logger.warning(f"瓶颈分析: {self._timeout_count} 次超时放弃, {self._retry_count} 次重试")
 
         self._on_progress = None
-        return reports[:top_n]
+        return reports
+
+    async def retry_failed_nodes(
+        self, graph: ChainGraph, on_progress=None,
+    ) -> list[BottleneckReport]:
+        """Retry only the previously failed nodes. Returns successful reports."""
+        if not self._failed_nodes:
+            return []
+
+        nodes_to_retry = list(self._failed_nodes)
+        self._failed_nodes = []
+        self._timeout_count = 0
+        self._retry_count = 0
+        self._on_progress = on_progress
+
+        total = len(nodes_to_retry)
+        semaphore = asyncio.Semaphore(self.MAX_CONCURRENCY)
+
+        async def _task(node_info, idx):
+            async with semaphore:
+                name = node_info["name"]
+                if on_progress:
+                    await on_progress(f"▸ 补充分析: {name} ({idx + 1}/{total})")
+                result = await self._analyze_node(
+                    name, node_info["description"], node_info["layer"], graph,
+                )
+                if result and on_progress:
+                    await on_progress(f"✓ {name}: {result.overall_score:.1f} 分 ({idx + 1}/{total})")
+                elif not result:
+                    self._failed_nodes.append(node_info)
+                    if on_progress:
+                        await on_progress(f"✗ {name}: 补充分析失败 ({idx + 1}/{total})")
+                return result
+
+        results = await asyncio.gather(
+            *[_task(n, i) for i, n in enumerate(nodes_to_retry)],
+            return_exceptions=True,
+        )
+
+        reports: list[BottleneckReport] = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"补充分析异常: {r}")
+                self._failed_nodes.append(nodes_to_retry[i])
+                continue
+            if r is not None:
+                reports.append(r)
+
+        self._on_progress = None
+        return reports
 
     async def _analyze_node(
         self, node_name: str, description: str, layer: int, graph: ChainGraph

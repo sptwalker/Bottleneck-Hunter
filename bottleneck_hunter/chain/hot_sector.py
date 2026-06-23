@@ -20,6 +20,110 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class SectorRecommendation:
+    """推荐赛道：将热门板块映射为产业方向+终端产品。"""
+
+    sector: str           # 产业方向
+    end_product: str      # 终端产品
+    reason: str           # 推荐理由（如"涨幅+3.2%, 主力净流入8.5亿"）
+    score: float          # 综合热度分
+    market: str = "a_stock"
+    source_board: str = ""  # 原始板块名
+
+
+# 常见 A 股概念板块名 → (产业方向, 终端产品) 映射
+BOARD_TO_SECTOR: dict[str, tuple[str, str]] = {
+    # AI / 半导体
+    "算力": ("GPU/AI算力", "GPU"),
+    "芯片": ("半导体芯片", "芯片"),
+    "光模块": ("光通信", "光模块"),
+    "CPO": ("光通信", "CPO光模块"),
+    "存储": ("存储芯片", "DRAM/NAND"),
+    "AI": ("人工智能", "AI大模型"),
+    "人工智能": ("人工智能", "AI大模型"),
+    "大模型": ("人工智能", "AI大模型"),
+    "AIGC": ("人工智能", "AIGC应用"),
+    "数据中心": ("数据中心", "服务器"),
+    "服务器": ("数据中心", "AI服务器"),
+    "PCB": ("PCB印制电路板", "高端PCB"),
+    "封装": ("先进封装", "Chiplet封装"),
+    "EDA": ("EDA/IP", "EDA工具"),
+    "光刻": ("半导体设备", "光刻机"),
+    # 机器人 / 智能制造
+    "机器人": ("人形机器人", "人形机器人"),
+    "人形机器人": ("人形机器人", "人形机器人"),
+    "减速器": ("精密传动", "RV减速器"),
+    "传感器": ("传感器", "智能传感器"),
+    # 汽车
+    "无人驾驶": ("智能驾驶", "自动驾驶系统"),
+    "智能驾驶": ("智能驾驶", "自动驾驶系统"),
+    "新能源汽车": ("新能源车", "电动汽车"),
+    "新能源车": ("新能源车", "电动汽车"),
+    "汽车零部件": ("汽车零部件", "汽车零部件"),
+    "充电桩": ("充电基础设施", "充电桩"),
+    # 新能源
+    "锂电池": ("动力电池", "锂电池"),
+    "电池": ("动力电池", "锂电池"),
+    "固态电池": ("固态电池", "固态电池"),
+    "钠电池": ("钠离子电池", "钠离子电池"),
+    "光伏": ("光伏", "光伏组件"),
+    "风电": ("风电", "风力发电机"),
+    "储能": ("储能", "储能系统"),
+    "氢能": ("氢能", "燃料电池"),
+    # 军工 / 航天
+    "军工": ("国防军工", "武器装备"),
+    "航天": ("商业航天", "商业运载火箭"),
+    "低空经济": ("低空经济", "eVTOL飞行器"),
+    "卫星": ("卫星互联网", "通信卫星"),
+    "北斗": ("北斗导航", "北斗芯片"),
+    "无人机": ("无人机", "工业无人机"),
+    # 医药
+    "医药": ("创新药", "创新药物"),
+    "创新药": ("创新药", "创新药物"),
+    "中药": ("中医药", "中药"),
+    "医疗器械": ("医疗器械", "高端医疗设备"),
+    "CXO": ("CXO", "医药外包服务"),
+    "减肥药": ("减肥药", "GLP-1药物"),
+    # 半导体
+    "半导体": ("半导体", "半导体设备"),
+    # 消费电子
+    "消费电子": ("消费电子", "智能手机"),
+    "面板": ("显示面板", "OLED面板"),
+    "MR": ("混合现实", "MR头显"),
+    "VR": ("虚拟现实", "VR设备"),
+    # 产业链
+    "华为": ("华为产业链", "鸿蒙生态"),
+    "鸿蒙": ("华为产业链", "鸿蒙生态"),
+    "苹果": ("苹果产业链", "iPhone"),
+    "特斯拉": ("特斯拉产业链", "电动汽车"),
+    # 其他热门
+    "信创": ("信创", "国产替代软硬件"),
+    "网络安全": ("网络安全", "安全产品"),
+    "云计算": ("云计算", "云服务"),
+    "游戏": ("游戏", "网络游戏"),
+    "影视": ("影视传媒", "影视内容"),
+    "短剧": ("短剧", "短剧内容"),
+    "白酒": ("白酒", "高端白酒"),
+    "食品": ("食品饮料", "食品"),
+    "家电": ("家电", "智能家电"),
+    "房地产": ("房地产", "住宅地产"),
+    "银行": ("银行", "商业银行"),
+    "保险": ("保险", "保险服务"),
+    "证券": ("证券", "证券经纪"),
+    "稀土": ("稀土", "稀土永磁材料"),
+    "黄金": ("贵金属", "黄金"),
+    "煤炭": ("煤炭", "动力煤"),
+    "钢铁": ("钢铁", "钢材"),
+    "有色金属": ("有色金属", "铜铝等"),
+    "化工": ("化工", "化工新材料"),
+    "PEEK": ("高性能材料", "PEEK材料"),
+    "碳纤维": ("碳纤维", "碳纤维复合材料"),
+    "工业母机": ("工业母机", "高端数控机床"),
+    "3D打印": ("3D打印", "工业级3D打印机"),
+}
+
+
+@dataclass
 class HotSector:
     """A single hot sector with multi-signal scoring."""
 
@@ -89,6 +193,79 @@ class HotSectorDetector:
         self.top_n = top_n
         self.min_price_change = min_price_change
         self.min_turnover = min_turnover
+
+    def recommend_sectors(self, top_n: int = 5) -> list[SectorRecommendation]:
+        """从热门板块中推荐 top_n 个赛道，映射为产业方向+终端产品。
+
+        Args:
+            top_n: 返回推荐赛道数量，默认 5。
+
+        Returns:
+            SectorRecommendation 列表，按综合热度降序排列。
+        """
+        try:
+            result = self.detect()
+        except Exception as e:
+            logger.warning(f"热门板块检测失败，返回空推荐列表: {e}")
+            return []
+
+        if not result.all_ranked:
+            return []
+
+        recommendations: list[SectorRecommendation] = []
+        seen_sectors: set[str] = set()  # 去重：同一产业方向只取第一个
+
+        for hs in result.all_ranked:
+            if len(recommendations) >= top_n:
+                break
+
+            # 模糊匹配：遍历映射字典，检查板块名是否包含关键词
+            sector_name = None
+            end_product = None
+            for keyword, (sec, prod) in BOARD_TO_SECTOR.items():
+                if keyword in hs.name:
+                    sector_name = sec
+                    end_product = prod
+                    break
+
+            # 未匹配到的板块，直接用板块名构造
+            if sector_name is None:
+                sector_name = hs.name
+                end_product = hs.name + "相关产品"
+
+            # 去重：同一产业方向只保留热度最高的
+            if sector_name in seen_sectors:
+                continue
+            seen_sectors.add(sector_name)
+
+            # 构造推荐理由，包含具体数据
+            reason_parts: list[str] = []
+            if hs.price_change_pct is not None:
+                sign = "+" if hs.price_change_pct >= 0 else ""
+                reason_parts.append(f"涨幅{sign}{hs.price_change_pct:.2f}%")
+            if hs.main_net_inflow is not None:
+                reason_parts.append(f"主力净流入{hs.main_net_inflow:.1f}亿")
+            if hs.turnover_rate is not None:
+                reason_parts.append(f"换手率{hs.turnover_rate:.1f}%")
+            if hs.up_count is not None and hs.down_count is not None:
+                reason_parts.append(f"涨{hs.up_count}/跌{hs.down_count}")
+            if hs.leader_stock:
+                reason_parts.append(f"领涨股:{hs.leader_stock}")
+
+            reason = ", ".join(reason_parts) if reason_parts else "热门板块"
+
+            recommendations.append(
+                SectorRecommendation(
+                    sector=sector_name,
+                    end_product=end_product,
+                    reason=reason,
+                    score=hs.composite_score,
+                    market="a_stock",
+                    source_board=hs.name,
+                )
+            )
+
+        return recommendations
 
     def detect(self) -> HotSectorResult:
         """Run full hot sector detection pipeline."""
@@ -353,3 +530,121 @@ def detect_hot_sectors(top_n: int = 20) -> HotSectorResult:
     """Convenience function to run hot sector detection."""
     detector = HotSectorDetector(top_n=top_n)
     return detector.detect()
+
+
+# ── LLM-Hybrid Hot Sector Recommendations ────────────────────────────
+
+import asyncio
+import json
+import time
+
+_hot_scan_cache: dict[str, tuple[float, list[dict]]] = {}
+_HOT_SCAN_TTL = 1800  # 30 minutes
+
+
+async def llm_recommend_hot_sectors(
+    provider: str,
+    model: str,
+    top_n: int = 8,
+) -> list[dict]:
+    """LLM 智能热点赛道推荐。
+
+    1. 尝试 AKShare 获取板块涨幅前10作为参考（5秒超时）
+    2. 用 LLM 生成结构化推荐（保证可靠输出）
+    3. 结果缓存30分钟
+    """
+    from bottleneck_hunter.llm_clients.factory import create_llm
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    cache_key = f"{provider}::{model}"
+    if cache_key in _hot_scan_cache:
+        ts, cached = _hot_scan_cache[cache_key]
+        if time.time() - ts < _HOT_SCAN_TTL:
+            return cached
+
+    # ── Step 1: AKShare 板块数据（best-effort）──
+    market_context = ""
+    try:
+        def _fetch_boards():
+            try:
+                df = ak.stock_board_concept_name_em()
+                if df is not None and not df.empty:
+                    top10 = df.head(10)
+                    lines = []
+                    for _, row in top10.iterrows():
+                        name = row.get("板块名称", "")
+                        chg = row.get("涨跌幅", 0)
+                        lines.append(f"{name}（涨跌幅{chg:.1f}%）")
+                    return "；".join(lines)
+            except Exception:
+                pass
+            return ""
+
+        market_context = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_boards), timeout=5.0
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.warning(f"AKShare 板块数据获取失败，使用纯 LLM 推荐: {e}")
+
+    # ── Step 2: LLM 推荐 ──
+    system_prompt = (
+        "你是中国A股市场投资研究专家，精通板块轮动分析和热点主题追踪。"
+        "你需要推荐当前最值得关注的热门投资赛道。"
+        "每个赛道必须提供：产业方向名称（sector）、具体终端产品名称（end_product）、简短推荐理由（reason，10-20字）。"
+        "只推荐真实存在且当前有明确催化剂或市场热度的方向。"
+        "返回纯JSON数组，不加任何其他文字或markdown标记。"
+    )
+
+    if market_context:
+        user_prompt = (
+            f"当前东方财富A股概念板块涨幅前10（供参考）：\n{market_context}\n\n"
+            f"请基于以上实时数据和你对市场趋势的了解，推荐 {top_n} 个当前A股最热门的投资赛道。\n"
+            f'返回JSON数组：[{{"sector": "产业方向", "end_product": "终端产品", "reason": "推荐理由", "market": "a_stock"}}]'
+        )
+    else:
+        user_prompt = (
+            f"请基于你对近期A股市场趋势和板块轮动的了解，推荐 {top_n} 个当前A股最热门的投资赛道。\n"
+            f'返回JSON数组：[{{"sector": "产业方向", "end_product": "终端产品", "reason": "推荐理由", "market": "a_stock"}}]'
+        )
+
+    try:
+        llm = create_llm(provider, model, temperature=0.3)
+        messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+        resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30.0)
+        text = resp.content.strip()
+
+        # 解析 JSON — 剥离可能的 markdown code fence
+        if "```" in text:
+            import re
+            m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+            if m:
+                text = m.group(1).strip()
+
+        results = json.loads(text)
+        if not isinstance(results, list):
+            results = []
+
+        # 标准化字段
+        clean = []
+        for item in results[:top_n]:
+            if isinstance(item, dict) and item.get("sector") and item.get("end_product"):
+                clean.append({
+                    "sector": str(item["sector"]),
+                    "end_product": str(item["end_product"]),
+                    "reason": str(item.get("reason", "")),
+                    "market": str(item.get("market", "a_stock")),
+                })
+
+        _hot_scan_cache[cache_key] = (time.time(), clean)
+        logger.info(f"LLM 热点推荐完成: {len(clean)} 个赛道")
+        return clean
+
+    except asyncio.TimeoutError:
+        logger.error("LLM 热点推荐超时")
+        return []
+    except json.JSONDecodeError as e:
+        logger.error(f"LLM 返回非 JSON 格式: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"LLM 热点推荐失败: {e}")
+        return []

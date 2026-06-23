@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from bottleneck_hunter.chain.financial_data import (
+    _compute_volume_metrics,
     _extract_astock_code,
     _fetch_astock_financial,
     _fetch_us_financial,
@@ -44,6 +45,48 @@ class TestHelpers:
         assert _extract_astock_code("12345") is None
 
 
+class TestComputeVolumeMetrics:
+    def test_basic(self):
+        volumes = [100.0] * 60
+        closes = [10.0] * 60
+        vr, c3m, c1m, consec = _compute_volume_metrics(volumes, closes)
+        assert vr == 1.0
+        assert c3m == 0.0
+        assert c1m == 0.0
+        assert consec == 0
+
+    def test_too_few_data(self):
+        vr, c3m, c1m, consec = _compute_volume_metrics([100] * 10, [10] * 10)
+        assert vr is None
+        assert consec == 0
+
+    def test_outlier_filtering(self):
+        volumes = [100.0] * 50 + [100.0] * 9 + [5000.0]
+        closes = [10.0] * 60
+        vr, _, _, _ = _compute_volume_metrics(volumes, closes)
+        assert vr is not None
+        assert vr < 4.0
+
+    def test_consecutive_volume(self):
+        base = [100.0] * 50
+        recent = [100.0] * 4 + [200.0, 200.0, 200.0] + [100.0] * 3
+        volumes = base + recent
+        closes = [10.0] * 60
+        _, _, _, consec = _compute_volume_metrics(volumes, closes)
+        assert consec == 3
+
+    def test_price_change(self):
+        volumes = [100.0] * 60
+        closes = [10.0] * 40 + [12.0] * 20
+        vr, c3m, c1m, consec = _compute_volume_metrics(volumes, closes)
+        assert c3m == pytest.approx(20.0, abs=0.5)
+        assert c1m == 0.0
+
+    def test_zero_avg_volume(self):
+        vr, _, _, _ = _compute_volume_metrics([0.0] * 60, [10.0] * 60)
+        assert vr is None
+
+
 class TestFetchAstock:
     @patch("bottleneck_hunter.chain.financial_data.ak")
     def test_success(self, mock_ak):
@@ -62,20 +105,30 @@ class TestFetchAstock:
 
         df_rpt = pd.DataFrame({
             "title": [f"研报{i}" for i in range(28)],
+            "日期": ["2026-05-01"] * 10 + ["2025-08-01"] * 18,
+            "机构名称": [f"券商{i % 8}" for i in range(28)],
             "机构评级": ["买入"] * 28,
         })
         mock_ak.stock_research_report_em.return_value = df_rpt
 
+        df_hist = pd.DataFrame({
+            "成交量": [100000.0] * 60,
+            "收盘": [50.0] * 60,
+        })
+        mock_ak.stock_zh_a_hist.return_value = df_hist
+
         snap = _fetch_astock_financial("600519")
         assert snap.data_source == "akshare_ths"
         assert snap.revenue_yi is not None
-        assert snap.analyst_report_count == 28
+        assert snap.analyst_report_count == 8
         assert snap.analyst_rating == "买入"
+        assert snap.volume_ratio is not None
 
     @patch("bottleneck_hunter.chain.financial_data.ak")
     def test_empty_data(self, mock_ak):
         mock_ak.stock_financial_abstract_ths.return_value = pd.DataFrame()
         mock_ak.stock_research_report_em.return_value = None
+        mock_ak.stock_zh_a_hist.return_value = None
         snap = _fetch_astock_financial("000001")
         assert snap.data_source == "akshare_ths"
         assert snap.revenue_yi is None
@@ -98,7 +151,16 @@ class TestFetchUS:
             "recommendationKey": "buy",
             "numberOfAnalystOpinions": 35,
             "mostRecentQuarter": 1735084800,  # ~2024-12-25
+            "heldPercentInstitutions": 0.72,
+            "firstTradeDateEpochUtc": 917015400,
         }
+        mock_hist = pd.DataFrame({
+            "Volume": [1000000.0] * 60,
+            "Close": [100.0] * 60,
+        })
+        mock_ticker.history.return_value = mock_hist
+        mock_ticker.quarterly_financials = pd.DataFrame()
+        mock_ticker.quarterly_income_stmt = pd.DataFrame()
         mock_yf.Ticker.return_value = mock_ticker
 
         snap = _fetch_us_financial("NVDA")
@@ -107,6 +169,9 @@ class TestFetchUS:
         assert snap.consensus_eps == 3.2
         assert snap.analyst_rating == "buy"
         assert snap.analyst_report_count == 35
+        assert snap.institution_holding_pct == 72.0
+        assert snap.days_since_ipo is not None and snap.days_since_ipo > 0
+        assert snap.volume_ratio is not None
 
     @patch("bottleneck_hunter.chain.financial_data.yf")
     def test_empty_info(self, mock_yf):
@@ -157,7 +222,8 @@ class TestFetchBatch:
                 FinancialSnapshot(data_source="akshare_ths", revenue_yi=100.0),
                 FinancialSnapshot(data_source="yfinance", revenue_yi=50.0),
             ]
-            results = await fetch_batch(suppliers)
+            results, failed = await fetch_batch(suppliers)
             assert len(results) == 2
             assert "600519.SH" in results
             assert "NVDA" in results
+            assert failed == []

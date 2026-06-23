@@ -21,6 +21,7 @@ from typing import Any
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from bottleneck_hunter.chain.json_utils import extract_json_array as _extract_json_array
 from bottleneck_hunter.chain.models import (
     BottleneckReport,
     ChainGraph,
@@ -219,48 +220,6 @@ def _try_akshare_search(terms: list[str], max_market_cap_yi: float | None) -> li
 
     logger.info(f"AKShare 板块搜索: 关键词 {terms} → {len(suppliers)} 家")
     return suppliers
-
-
-# ---------------------------------------------------------------------------
-# JSON extraction helpers
-# ---------------------------------------------------------------------------
-
-def _extract_json_array(text: str) -> list | None:
-    """Try multiple strategies to extract a JSON array from LLM response."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-        return None
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if match:
-        try:
-            result = json.loads(match.group())
-            if isinstance(result, list):
-                return result
-        except json.JSONDecodeError:
-            pass
-
-    items = []
-    for m in re.finditer(r"\{[^{}]+\}", text):
-        try:
-            obj = json.loads(m.group())
-            if "name" in obj or "code" in obj or "ticker" in obj:
-                items.append(obj)
-        except json.JSONDecodeError:
-            continue
-    return items if items else None
 
 
 # ---------------------------------------------------------------------------

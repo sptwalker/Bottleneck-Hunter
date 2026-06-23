@@ -1,23 +1,25 @@
 /**
- * settings.js — LLM API settings modal.
+ * settings.js — LLM API settings (modal + inline).
  */
 
 import { syncProviderFromSettings } from './panel.js';
 
 let providers = [];
+let _onProvidersChange = null;
 
 function openModal() {
   document.getElementById('settings-modal').style.display = '';
   document.getElementById('settings-status').textContent = '';
-  fetchSettings();
+  fetchAndRender('provider-list');
 }
 
 function closeModal() {
   document.getElementById('settings-modal').style.display = 'none';
 }
 
-async function fetchSettings() {
-  const list = document.getElementById('provider-list');
+export async function fetchAndRender(containerId) {
+  const list = document.getElementById(containerId);
+  if (!list) return [];
   list.innerHTML = '<p style="color:var(--muted);font-size:var(--fs-sm)">加载中...</p>';
 
   try {
@@ -25,14 +27,17 @@ async function fetchSettings() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     providers = data.providers || [];
-    renderProviders();
+    renderProviders(containerId);
+    return providers;
   } catch (err) {
     list.innerHTML = `<p style="color:var(--danger)">加载失败: ${err.message}</p>`;
+    return [];
   }
 }
 
-function renderProviders() {
-  const list = document.getElementById('provider-list');
+function renderProviders(containerId) {
+  const list = document.getElementById(containerId);
+  if (!list) return;
   list.innerHTML = providers.map((p, i) => {
     const placeholder = p.configured ? p.masked : (p.is_url ? 'http://localhost:11434' : '未配置');
     const inputType = p.is_url ? 'text' : 'password';
@@ -57,15 +62,16 @@ function renderProviders() {
   });
 }
 
-async function testProviders() {
-  const btn = document.getElementById('btn-test-providers');
-  btn.disabled = true;
-  btn.textContent = '测试中...';
+export async function testAll(containerId, statusId, callback) {
+  const statusEl = document.getElementById(statusId);
+  const setStatus = (msg, cls) => {
+    if (statusEl) { statusEl.textContent = msg; statusEl.className = 'settings-status ' + (cls || ''); }
+  };
+
   setStatus('正在测试所有已配置的 Provider...', '');
 
-  // 将所有已配置 provider 的状态标记设为加载中
   providers.forEach(p => {
-    const el = document.querySelector(`[data-test-id="${p.id}"]`);
+    const el = document.querySelector(`#${containerId} [data-test-id="${p.id}"], [data-test-id="${p.id}"]`);
     if (!el) return;
     if (p.configured) {
       el.className = 'provider-test-status test-loading';
@@ -104,7 +110,6 @@ async function testProviders() {
       }
     });
 
-    // 未配置的 provider 清空状态
     providers.forEach(p => {
       if (!p.configured) {
         const el = document.querySelector(`[data-test-id="${p.id}"]`);
@@ -115,25 +120,24 @@ async function testProviders() {
     const msg = `测试完成: ${passCount} 个通过, ${failCount} 个失败`;
     setStatus(msg, failCount === 0 ? 'success' : 'error');
 
-    // 同步到面板：只保留通过测试的 provider
     syncProviderFromSettings(providers, passedIds);
+    if (_onProvidersChange) _onProvidersChange(providers);
+    if (callback) callback(providers);
   } catch (err) {
     setStatus(`测试失败: ${err.message}`, 'error');
-    // 清除所有加载状态
     document.querySelectorAll('.provider-test-status').forEach(el => {
       if (el.classList.contains('test-loading')) {
         el.className = 'provider-test-status';
         el.innerHTML = '';
       }
     });
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '测试连接';
   }
 }
 
-async function saveSettings() {
-  const inputs = document.querySelectorAll('#provider-list input[data-env]');
+export async function saveAll(containerId, statusId, callback) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const inputs = container.querySelectorAll('input[data-env]');
   const settings = {};
   inputs.forEach(input => {
     const val = input.value.trim();
@@ -141,13 +145,15 @@ async function saveSettings() {
   });
 
   if (Object.keys(settings).length === 0) {
-    setStatus('未检测到修改', 'error');
+    const statusEl = document.getElementById(statusId);
+    if (statusEl) { statusEl.textContent = '未检测到修改'; statusEl.className = 'settings-status error'; }
     return;
   }
 
-  const btn = document.getElementById('btn-save-settings');
-  btn.disabled = true;
-  btn.textContent = '保存中...';
+  const statusEl = document.getElementById(statusId);
+  const setStatus = (msg, cls) => {
+    if (statusEl) { statusEl.textContent = msg; statusEl.className = 'settings-status ' + (cls || ''); }
+  };
 
   try {
     const res = await fetch('/api/settings', {
@@ -158,21 +164,22 @@ async function saveSettings() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     providers = data.providers || providers;
-    renderProviders();
+    renderProviders(containerId);
     syncProviderFromSettings(providers);
+    if (_onProvidersChange) _onProvidersChange(providers);
+    if (callback) callback(providers);
     setStatus('已保存，即时生效', 'success');
   } catch (err) {
     setStatus(`保存失败: ${err.message}`, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '保存';
   }
 }
 
-function setStatus(msg, cls) {
-  const el = document.getElementById('settings-status');
-  el.textContent = msg;
-  el.className = 'settings-status ' + (cls || '');
+export function getProviders() {
+  return providers;
+}
+
+export function onProvidersChange(fn) {
+  _onProvidersChange = fn;
 }
 
 function escapeHtml(str) {
@@ -182,13 +189,32 @@ function escapeHtml(str) {
 }
 
 export function initSettings() {
-  document.getElementById('btn-settings').addEventListener('click', openModal);
-  document.getElementById('btn-close-settings').addEventListener('click', closeModal);
-  document.getElementById('btn-cancel-settings').addEventListener('click', closeModal);
-  document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
-  document.getElementById('btn-test-providers').addEventListener('click', testProviders);
+  const btnSettings = document.getElementById('btn-settings');
+  if (btnSettings) btnSettings.addEventListener('click', openModal);
 
-  document.getElementById('settings-modal').addEventListener('click', (e) => {
-    if (e.target.classList.contains('modal-overlay')) closeModal();
+  const btnClose = document.getElementById('btn-close-settings');
+  if (btnClose) btnClose.addEventListener('click', closeModal);
+
+  const btnCancel = document.getElementById('btn-cancel-settings');
+  if (btnCancel) btnCancel.addEventListener('click', closeModal);
+
+  const btnSave = document.getElementById('btn-save-settings');
+  if (btnSave) btnSave.addEventListener('click', () => saveAll('provider-list', 'settings-status'));
+
+  const btnTest = document.getElementById('btn-test-providers');
+  if (btnTest) btnTest.addEventListener('click', () => {
+    btnTest.disabled = true;
+    btnTest.textContent = '测试中...';
+    testAll('provider-list', 'settings-status').finally(() => {
+      btnTest.disabled = false;
+      btnTest.textContent = '测试连接';
+    });
   });
+
+  const modal = document.getElementById('settings-modal');
+  if (modal) {
+    modal.addEventListener('click', (e) => {
+      if (e.target.classList.contains('modal-overlay')) closeModal();
+    });
+  }
 }

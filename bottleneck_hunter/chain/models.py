@@ -154,6 +154,29 @@ class SupplierInfo(BaseModel):
     source: str = Field(default="llm", description="候选来源: llm / akshare / chain")
 
 
+class QuarterlyDataPoint(BaseModel):
+    """单季度财务数据点。"""
+
+    report_date: str = Field(default="", description="报告期 e.g. 2025-03-31")
+    revenue_yi: Optional[float] = Field(None, description="营业总收入(亿)")
+    net_profit_yi: Optional[float] = Field(None, description="归母净利润(亿)")
+    gross_margin_pct: Optional[float] = Field(None, description="销售毛利率(%)")
+    roe_pct: Optional[float] = Field(None, description="净资产收益率(%)")
+    revenue_yoy_pct: Optional[float] = Field(None, description="营收同比增速(%)")
+    net_profit_yoy_pct: Optional[float] = Field(None, description="净利润同比增速(%)")
+
+
+class FinancialTrend(BaseModel):
+    """多季度财务趋势分析结果。"""
+
+    quarters: list[QuarterlyDataPoint] = Field(default_factory=list, description="近N个季度数据，按时间降序")
+    revenue_acceleration: Optional[float] = Field(None, description="营收加速度: 最近2Q平均增速 - 前2Q平均增速")
+    gross_margin_trend: Optional[float] = Field(None, description="毛利率趋势: 最近2Q均值 - 前2Q均值（百分点）")
+    consecutive_growth_quarters: int = Field(default=0, description="连续营收正增长季度数")
+    profit_acceleration: Optional[float] = Field(None, description="净利润加速度: 最近2Q平均增速 - 前2Q平均增速")
+    trend_summary: str = Field(default="", description="趋势一句话摘要")
+
+
 class FinancialSnapshot(BaseModel):
     """真实财务数据快照，来自市场 API 而非 LLM。"""
 
@@ -174,6 +197,15 @@ class FinancialSnapshot(BaseModel):
     consensus_eps: Optional[float] = Field(None, description="一致预期 EPS（当年）")
     consensus_pe: Optional[float] = Field(None, description="一致预期 PE（当年）")
 
+    trend: Optional[FinancialTrend] = Field(None, description="多季度财务趋势")
+
+    volume_ratio: Optional[float] = Field(None, description="成交量动量: 过滤后10日均量/60日均量")
+    price_change_3m_pct: Optional[float] = Field(None, description="近3月涨幅(%)")
+    price_change_1m_pct: Optional[float] = Field(None, description="近1月涨幅(%)")
+    institution_holding_pct: Optional[float] = Field(None, description="机构持仓占流通股比例(%)")
+    consecutive_volume_days: int = Field(default=0, description="连续放量天数(日成交量>60日均量×1.3)")
+    days_since_ipo: Optional[int] = Field(None, description="上市天数")
+
 
 class AlphaScore(BaseModel):
     """预期差评分：瓶颈重要性高 + 市场关注度低 = 高 Alpha 潜力。"""
@@ -181,7 +213,73 @@ class AlphaScore(BaseModel):
     market_attention: float = Field(default=0.0, ge=0, le=10, description="市场关注度 0-10")
     information_gap: float = Field(default=0.0, ge=0, le=10, description="信息差评分 0-10")
     alpha_score: float = Field(default=0.0, ge=0, le=10, description="综合预期差 0-10")
+    trend_bonus: float = Field(default=0.0, description="盈利趋势加分 -1.0~+2.5")
+    smart_money_bonus: float = Field(default=0.0, description="聪明钱加分 -1.0~+2.0")
+    catalyst_bonus: float = Field(default=0.0, description="催化剂紧迫度加分 0~2.0")
+    dim_cap: float = Field(default=5.0, description="市值规模维度得分 0-9")
+    dim_analyst: float = Field(default=5.0, description="分析师覆盖维度得分 0-9")
+    dim_volume: float = Field(default=5.0, description="成交量动量维度得分 0-9")
+    dim_price: float = Field(default=5.0, description="近3月涨幅维度得分 0-9")
+    dim_institution: float = Field(default=5.0, description="机构持仓维度得分 0-9")
+    ipo_bonus: float = Field(default=0.0, description="IPO加分 (0 or 2)")
+    vp_discount: float = Field(default=1.0, description="量价背离折扣系数 (1.0 or 0.8)")
     reasoning: str = ""
+
+
+class MoatScore(BaseModel):
+    """竞争护城河评分。"""
+
+    patent_moat: float = Field(default=0, ge=0, le=10, description="专利/技术壁垒")
+    switching_cost: float = Field(default=0, ge=0, le=10, description="客户转换成本")
+    capacity_lead_time: float = Field(default=0, ge=0, le=10, description="产能/交期优势")
+    cost_advantage: float = Field(default=0, ge=0, le=10, description="成本优势")
+    overall_moat: float = Field(default=0, ge=0, le=10, description="护城河综合评分")
+    moat_reasoning: str = Field(default="", description="护城河分析要点")
+
+
+class SmartMoneySignal(BaseModel):
+    """聪明钱信号：机构/内部人行为数据。"""
+
+    institution_holding_change: Optional[float] = Field(None, description="机构持仓变动(%)")
+    insider_net_shares: Optional[float] = Field(None, description="内部人净买入股数(万股)")
+    northbound_net_buy: Optional[float] = Field(None, description="北向资金净买入(万元)")
+    margin_balance_change: Optional[float] = Field(None, description="融资余额变化(%)")
+    fund_flow_net: Optional[float] = Field(None, description="主力资金净流入(万元)")
+    lhb_net_buy: Optional[float] = Field(None, description="龙虎榜机构席位净买入(万元)")
+    short_interest_pct: Optional[float] = Field(None, description="做空占流通股比例(%)")
+    institution_count: Optional[int] = Field(None, description="持仓机构数量")
+    smart_money_score: float = Field(default=5.0, ge=0, le=10, description="聪明钱综合评分 0-10")
+    signal_direction: str = Field(default="neutral", description="信号方向: bullish/neutral/bearish")
+    details: list[str] = Field(default_factory=list, description="信号明细说明")
+
+
+class CatalystEvent(BaseModel):
+    """单个催化剂事件。"""
+
+    event_type: str = Field(description="催化剂类型: policy/capacity/technology/order/earnings")
+    description: str = Field(description="事件描述")
+    expected_date: str = Field(default="", description="预期时间 e.g. 2025Q3 或 2025-09")
+    confidence: float = Field(default=5.0, ge=0, le=10, description="置信度 0-10")
+    impact_score: float = Field(default=5.0, ge=0, le=10, description="影响力 0-10")
+
+
+class CatalystTimeline(BaseModel):
+    """催化剂时间线分析结果。"""
+
+    events: list[CatalystEvent] = Field(default_factory=list, description="催化剂事件列表")
+    urgency_score: float = Field(default=5.0, ge=0, le=10, description="紧迫度评分 0-10（越高=越快兑现）")
+    investment_window: str = Field(default="", description="建议投资窗口 e.g. '未来1-2个季度'")
+    summary: str = Field(default="", description="催化剂一句话总结")
+
+
+class FinalScore(BaseModel):
+    """统一最终评分：quality^w_q × alpha^w_a 几何加权均值。"""
+
+    quality_score: float = Field(ge=0, le=10, description="质量评分（= overall_score）")
+    alpha_score: float = Field(ge=0, le=10, description="预期差评分")
+    final_score: float = Field(ge=0, le=10, description="最终综合评分")
+    quality_weight: float = Field(default=0.4, description="质量权重")
+    alpha_weight: float = Field(default=0.6, description="预期差权重")
 
 
 class SupplierScorecard(BaseModel):
@@ -189,6 +287,7 @@ class SupplierScorecard(BaseModel):
 
     supplier: SupplierInfo
     bottleneck_node: str
+    layer: int = Field(default=0, description="产业链层级深度")
     market_position: float = Field(ge=0, le=10)
     customer_validation: float = Field(ge=0, le=10)
     capacity_status: float = Field(ge=0, le=10)
@@ -199,6 +298,10 @@ class SupplierScorecard(BaseModel):
     weaknesses: list[str] = Field(default_factory=list)
     financial_snapshot: Optional[FinancialSnapshot] = Field(None, description="真实财务数据快照")
     alpha: Optional[AlphaScore] = Field(None, description="预期差评分")
+    moat: Optional[MoatScore] = Field(None, description="竞争护城河评分")
+    smart_money: Optional[SmartMoneySignal] = Field(None, description="聪明钱信号")
+    catalyst: Optional[CatalystTimeline] = Field(None, description="催化剂时间线")
+    final: Optional[FinalScore] = Field(None, description="统一最终评分")
 
     @model_serializer(mode="wrap")
     def _serialize_with_dimension_scores(self, handler):
@@ -211,6 +314,15 @@ class SupplierScorecard(BaseModel):
             "valuation": self.valuation,
         }
         return d
+
+
+class FinalScoredCompany(BaseModel):
+    """Phase 3 输出：带最终评分排名的公司。"""
+
+    rank: int = Field(ge=1, description="最终排名")
+    scorecard: SupplierScorecard
+    final: FinalScore
+    key_factors: list[str] = Field(default_factory=list, description="关键决策因子")
 
 
 class ValidationResult(str, Enum):
@@ -248,3 +360,41 @@ class ScreeningResult(BaseModel):
     supplier_scorecards: list[SupplierScorecard]
     cross_validations: list[CrossValidationReport]
     top_picks: list[str] = Field(default_factory=list, description="Ticker symbols of final recommendations")
+
+
+# ── AI 投研圆桌会议 ──────────────────────────────────────────
+
+class MeetingMessage(BaseModel):
+    """圆桌会议中的一条发言。"""
+
+    round_num: int = Field(description="0=开场, 1=独立提名, 2=辩论, 3=总结")
+    role: str = Field(description="growth/value/risk/chain/host")
+    participant_name: str
+    model_name: str = ""
+    content: str = Field(description="展示用自然语言")
+    structured_data: dict | None = Field(None, description="LLM 返回的原始 JSON")
+
+
+class MeetingRanking(BaseModel):
+    """圆桌会议最终排名中的一条。"""
+
+    rank: int
+    ticker: str
+    name: str
+    borda_points: int = 0
+    supporter_count: int = 0
+    supporters: list[str] = Field(default_factory=list, description="投票支持的角色 ID")
+    opposers: list[str] = Field(default_factory=list, description="未投票的角色 ID")
+    reasoning: str = ""
+
+
+class RoundtableMeetingResult(BaseModel):
+    """圆桌会议完整结果。"""
+
+    participants: list[dict] = Field(default_factory=list)
+    transcript: list[MeetingMessage] = Field(default_factory=list)
+    final_ranking: list[MeetingRanking] = Field(default_factory=list)
+    key_agreements: list[str] = Field(default_factory=list)
+    key_disagreements: list[str] = Field(default_factory=list)
+    risk_warnings: list[str] = Field(default_factory=list)
+    investment_thesis: str = ""

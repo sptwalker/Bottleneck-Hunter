@@ -14,3 +14,9 @@ output/
 results/
 data/
 .claude/
+.codegraph/
+node_modules/
+package-lock.json
+test_banners*.png
+test_screenshot*.png
+test_hot_scan*.png

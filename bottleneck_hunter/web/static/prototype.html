@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BottleneckHunter — Wizard UI 原型 v4</title>
+<style>
+:root {
+  --bg: #f8f9fb; --surface: #fff; --ink: #1a1d23; --muted: #6b7280;
+  --accent: #3b6de0; --accent-hover: #2d5bc7; --accent-light: rgba(59,109,224,.08);
+  --border: #e2e5ea; --success: #16a34a; --warning: #ca8a04; --danger: #dc2626;
+  --font: "Inter",system-ui,-apple-system,sans-serif;
+  --sidebar-w: 220px; --header-h: 52px; --radius: 8px;
+  --shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);font-size:14px;color:var(--ink);background:var(--bg)}
+
+/* ── Header ─── */
+.header{position:fixed;top:0;left:0;right:0;z-index:100;height:var(--header-h);display:flex;align-items:center;justify-content:space-between;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border)}
+.header-brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px}
+.header-brand svg{width:22px;height:22px;color:var(--accent)}
+.header-sub{font-size:12px;color:var(--muted);font-weight:400;margin-left:4px}
+.header-actions{display:flex;gap:8px}
+.header-btn{padding:6px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--muted);font-size:12px;cursor:pointer}
+.header-btn:hover{color:var(--ink);border-color:var(--accent)}
+
+/* ── Layout ─── */
+.layout{display:flex;margin-top:var(--header-h);min-height:calc(100vh - var(--header-h))}
+
+/* ── Sidebar ─── */
+.sidebar{width:var(--sidebar-w);background:var(--surface);border-right:1px solid var(--border);padding:16px 0;position:fixed;top:var(--header-h);bottom:0;overflow-y:auto}
+.sidebar-title{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;padding:8px 20px 6px;margin-top:8px}
+.sidebar-item{display:flex;align-items:center;gap:10px;padding:9px 20px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;border-left:3px solid transparent}
+.sidebar-item:hover{background:#f1f3f7;color:var(--ink)}
+.sidebar-item.active{color:var(--accent);font-weight:600;background:rgba(59,109,224,.05);border-left-color:var(--accent)}
+.sidebar-dot{width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;font-size:11px;font-weight:700;border:2px solid currentColor;flex-shrink:0}
+.sidebar-item.completed .sidebar-dot{background:var(--accent);color:#fff;border-color:var(--accent)}
+.sidebar-item.active .sidebar-dot{background:var(--accent);color:#fff;border-color:var(--accent)}
+.sidebar-sub-desc{font-size:10px;color:var(--muted);padding:0 20px 6px 52px;margin-top:-4px;line-height:1.4}
+
+/* ── Main ─── */
+.main{flex:1;margin-left:var(--sidebar-w);padding:24px 32px 60px}
+
+/* ── Page Toggle ─── */
+.page{display:none}.page.active{display:block}
+
+/* ── Common ─── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;margin-bottom:16px;box-shadow:var(--shadow)}
+.card-title{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:12px}
+.phase-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px}
+.phase-header h2{font-size:18px}
+.phase-config{display:flex;align-items:center;gap:14px;font-size:13px;flex-wrap:wrap}
+.phase-config label{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.phase-config select,.phase-config input[type="number"]{width:68px;padding:4px 6px;font-size:13px;border:1px solid var(--border);border-radius:5px}
+.phase-footer{display:flex;align-items:center;justify-content:space-between;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
+.progress-msg{font-size:13px;color:var(--muted)}
+.progress-done{color:var(--success);font-weight:600}
+.footer-btns{display:flex;gap:8px}
+.stats-info{font-size:12px;color:var(--muted);font-weight:400}
+
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:all .15s}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-secondary{background:var(--surface);color:var(--ink);border:1px solid var(--border)}
+.btn-secondary:hover{border-color:var(--accent);color:var(--accent)}
+.btn-sm{padding:5px 10px;font-size:12px}
+.btn-outline-accent{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+.btn-outline-accent:hover{background:var(--accent-light)}
+.btn-success{background:var(--success);color:#fff}
+.btn-success:hover{background:#15803d}
+.btn-warning{background:var(--warning);color:#fff}
+.btn-warning:hover{background:#a16207}
+
+.data-table{width:100%;border-collapse:collapse;font-size:13px}
+.data-table th{text-align:left;padding:8px 10px;border-bottom:2px solid var(--border);font-weight:600;font-size:12px;color:var(--muted);white-space:nowrap}
+.data-table td{padding:8px 10px;border-bottom:1px solid var(--border)}
+.data-table tbody tr:hover{background:rgba(59,109,224,.02)}
+.data-table tbody tr.row-selected{background:rgba(59,109,224,.06)}
+
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;color:#fff;min-width:32px;text-align:center}
+.rank-num{font-weight:700;color:var(--accent)}
+.ticker{font-family:"Cascadia Code",monospace;font-size:12px;color:var(--muted)}
+.company-name{font-weight:600}
+.factor-tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;background:var(--accent-light);color:var(--accent);margin-right:3px}
+
+/* 层级标记 */
+.layer-badge{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle}
+.layer-badge.L1{background:#dbeafe;color:#1d4ed8}
+.layer-badge.L2{background:#fef3c7;color:#92400e}
+.layer-badge.L3{background:#d1fae5;color:#065f46}
+.layer-badge.L4{background:#fce7f3;color:#9d174d}
+
+.chart-placeholder{display:flex;align-items:center;justify-content:center;height:300px;background:var(--bg);border-radius:6px;color:var(--muted);font-size:13px;border:1px dashed var(--border);cursor:pointer}
+.chart-placeholder:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ══ 起始页 ══ */
+.start-inner{max-width:920px;margin:0 auto}
+.start-hero{text-align:center;padding:28px 0 20px}
+.start-hero h2{font-size:22px;margin-bottom:4px}
+.start-hero p{color:var(--muted);font-size:14px}
+
+/* 自定义赛道 */
+.sector-grid{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px;justify-content:center}
+.sector-btn{padding:10px 20px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;min-width:100px;text-align:center}
+.sector-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-light)}
+.sector-btn.active{border-color:var(--accent);color:var(--accent);background:var(--accent-light)}
+.sector-add{border-style:dashed;color:var(--muted);font-weight:400}
+.sector-add:hover{color:var(--accent);border-color:var(--accent)}
+.sector-hint{font-size:11px;color:var(--muted);text-align:center;margin-bottom:20px}
+
+/* 右键菜单 */
+.ctx-menu{position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:12px 16px;z-index:300;width:280px;font-size:13px}
+.ctx-menu h4{font-size:12px;margin-bottom:8px;color:var(--muted)}
+.ctx-menu .fg{margin-bottom:8px}
+.ctx-menu label{display:block;font-size:11px;color:var(--muted);margin-bottom:2px}
+.ctx-menu input,.ctx-menu select{width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px}
+.ctx-menu-btns{display:flex;gap:6px;justify-content:flex-end;margin-top:8px}
+
+/* 自定义输入 */
+.custom-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 22px;margin-bottom:20px}
+.custom-card h3{font-size:15px;margin-bottom:12px}
+.custom-form{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.custom-form .fg{flex:1;min-width:120px}
+.custom-form label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+.custom-form input,.custom-form select{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px}
+
+/* 全自动分析卡 */
+.auto-card{background:linear-gradient(135deg,#eef2ff,#f0fdf4);border:1px solid #c7d2fe;border-radius:12px;padding:16px 20px;margin-bottom:20px;display:flex;align-items:center;gap:16px}
+.auto-icon{font-size:28px;flex-shrink:0}
+.auto-text h3{font-size:14px;margin-bottom:2px}
+.auto-text p{font-size:12px;color:var(--muted);line-height:1.5}
+.auto-card .btn{flex-shrink:0}
+.auto-model-sel{display:flex;align-items:center;gap:6px;font-size:12px;margin-top:6px}
+.auto-model-sel label{color:var(--muted)}
+.auto-model-sel select{padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:12px}
+
+/* 历史记录 */
+.history-section h3{font-size:15px;margin-bottom:10px}
+.history-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.history-tbl th{text-align:left;padding:6px 8px;border-bottom:2px solid var(--border);font-weight:600;color:var(--muted);font-size:11px}
+.history-tbl td{padding:7px 8px;border-bottom:1px solid var(--border)}
+.history-tbl tbody tr{cursor:pointer}
+.history-tbl tbody tr:hover{background:rgba(59,109,224,.03)}
+.hist-mkt{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;background:#dbeafe;color:#1d4ed8}
+.hist-sector{font-weight:600}
+.hist-model{font-family:"Cascadia Code",monospace;font-size:11px;color:var(--muted)}
+
+/* ══ Phase 1 ══ */
+.p1-config-card{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 18px}
+.p1-config-card label{display:flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap}
+.p1-config-card select,.p1-config-card input[type="number"]{width:60px;padding:4px 6px;font-size:13px;border:1px solid var(--border);border-radius:5px}
+.p1-vertical{display:flex;flex-direction:column;gap:16px}
+.chain-tab-bar{display:flex;gap:4px;margin-bottom:8px}
+.chain-tab{padding:4px 10px;border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer;background:var(--surface)}
+.chain-tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.chart-header{display:flex;align-items:center;justify-content:space-between}
+.btn-fullscreen{padding:3px 8px;border:1px solid var(--border);border-radius:4px;font-size:11px;background:var(--surface);cursor:pointer;color:var(--muted)}
+.btn-fullscreen:hover{border-color:var(--accent);color:var(--accent)}
+.progress-info-bar{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:6px;font-size:13px;color:var(--accent);margin-bottom:16px}
+.progress-info-bar .pib-icon{animation:spin 1.5s linear infinite;font-size:14px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.progress-info-bar .pib-text{flex:1}
+.btn-tristate{min-width:100px;text-align:center}
+.btn-tristate.state-start{background:var(--accent);color:#fff}
+.btn-tristate.state-pause{background:var(--warning);color:#fff}
+.btn-tristate.state-restart{background:var(--surface);color:var(--ink);border:1px solid var(--border)}
+.chart-progress-overlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(248,249,251,.92);border-radius:6px;z-index:5}
+.progress-spinner{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}
+.progress-detail{font-size:12px;color:var(--muted);margin-top:10px;text-align:center;line-height:1.6}
+.progress-detail .step-current{color:var(--accent);font-weight:600}
+
+/* ══ Phase 2 ══ */
+.p2-filter-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 18px}
+.layer-chip{display:flex;align-items:center;gap:5px;padding:5px 10px;background:var(--bg);border:1px solid var(--border);border-radius:20px;font-size:12px}
+.layer-chip .lsc-layer{font-weight:700;padding:1px 5px;border-radius:3px;font-size:10px}
+.layer-chip .lsc-layer.L1{background:#dbeafe;color:#1d4ed8}
+.layer-chip .lsc-layer.L2{background:#fef3c7;color:#92400e}
+.layer-chip .lsc-layer.L3{background:#d1fae5;color:#065f46}
+.layer-chip input[type="number"]{width:44px;padding:3px 2px 3px 6px;border:1px solid var(--border);border-radius:4px;font-size:12px;text-align:center}
+.p2-total-tag{font-size:12px;color:var(--muted);font-weight:600;padding:5px 10px;background:var(--bg);border-radius:20px;border:1px solid var(--border)}
+.manual-pick-bar{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#fef9e7;border:1px solid #fde68a;border-radius:8px;margin-bottom:14px;font-size:13px}
+.manual-pick-count{font-weight:700;color:var(--warning)}
+.p2-checkbox{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+.tag-manual{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:#fef3c7;color:#92400e;margin-left:4px}
+
+.p2-expand-row{display:none}
+.p2-expand-row.open{display:table-row}
+.p2-expand-cell{padding:12px 16px !important;background:var(--bg);border-bottom:2px solid var(--border)}
+.p2-company-intro{font-size:13px;line-height:1.7}
+.p2-company-intro h4{font-size:12px;font-weight:700;color:var(--muted);margin:6px 0 4px;text-transform:uppercase}
+.p2-company-intro p{margin-bottom:6px}
+.p2-product-tags{display:flex;gap:4px;flex-wrap:wrap}
+.p2-product-tag{padding:2px 8px;background:var(--accent-light);color:var(--accent);border-radius:4px;font-size:11px;font-weight:600}
+
+/* ══ Phase 3 ══ */
+.p3-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px}
+.weight-ctrl{display:flex;align-items:center;gap:10px}
+.weight-label{font-size:13px;font-weight:600}
+.weight-range{width:160px;accent-color:var(--accent)}
+.weight-val{font-size:14px;font-weight:700;color:var(--accent);min-width:80px;text-align:center}
+.p3-charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.company-row-clickable{cursor:pointer}
+.company-row-clickable:hover{background:rgba(59,109,224,.04) !important}
+.expand-arrow{color:var(--muted);font-size:11px;transition:transform .2s}
+
+.ai-report-card{border:1px solid #c7d2fe;background:#f5f7ff}
+.ai-report-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.ai-report-header h3{font-size:14px;font-weight:700}
+.ai-report-body{font-size:13px;line-height:1.8;color:var(--ink)}
+.ai-report-body p{margin-bottom:10px}
+.ai-report-body strong{color:var(--accent)}
+
+.ai-interp-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:250;display:flex;align-items:center;justify-content:center}
+.ai-interp-panel{width:540px;max-width:90vw;background:var(--surface);border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.2);overflow:hidden}
+.ai-interp-header{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:linear-gradient(135deg,#eef2ff,#f5f7ff);border-bottom:1px solid var(--border)}
+.ai-interp-header h3{font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
+.ai-interp-body{padding:16px 20px;font-size:13px;line-height:1.8;max-height:400px;overflow-y:auto}
+.ai-interp-body p{margin-bottom:10px}
+.ai-interp-close{width:28px;height:28px;border:none;background:rgba(0,0,0,.06);border-radius:6px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+
+/* ═══ 抽屉 800px ═══ */
+.drawer-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.3);z-index:200;display:flex;justify-content:flex-end}
+.drawer-panel{width:800px;max-width:94vw;background:var(--surface);height:100%;overflow-y:auto;box-shadow:-4px 0 20px rgba(0,0,0,.12);padding:0}
+.drawer-header{display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);z-index:1}
+.drawer-header h3{font-size:18px;display:flex;align-items:center;gap:8px}
+.drawer-close{width:32px;height:32px;border:none;background:var(--bg);border-radius:6px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.drawer-body{padding:20px 28px}
+.drawer-section{margin-bottom:20px}
+.drawer-section h4{font-size:13px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.03em;border-bottom:1px solid var(--border);padding-bottom:5px}
+.drawer-kv{display:grid;grid-template-columns:120px 1fr;gap:4px 12px;font-size:13px}
+.drawer-kv dt{color:var(--muted)}.drawer-kv dd{font-weight:500}
+.drawer-score-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
+.drawer-score-box{text-align:center;padding:14px 8px;background:var(--bg);border-radius:8px}
+.drawer-score-box .val{font-size:24px;font-weight:800}
+.drawer-score-box .lbl{font-size:11px;color:var(--muted);margin-top:2px}
+.val-green{color:var(--success)}.val-yellow{color:var(--warning)}.val-accent{color:var(--accent)}.val-red{color:var(--danger)}
+.drawer-five-dim{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:4px}
+.drawer-radar-wrap{display:flex;align-items:center;justify-content:center;height:220px}
+.dim-bar-list{font-size:13px}
+.dim-bar-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.dim-bar-label{width:60px;text-align:right;color:var(--muted);font-size:12px}
+.dim-bar-track{flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden}
+.dim-bar-fill{height:100%;border-radius:4px;background:var(--accent)}
+.dim-bar-val{width:28px;font-weight:700;font-size:12px;color:var(--accent)}
+.drawer-strengths{display:flex;gap:16px}
+.drawer-strengths > div{flex:1}
+.drawer-strengths h5{font-size:12px;margin-bottom:6px}
+.s-item{font-size:12px;margin-bottom:4px;line-height:1.5}
+.s-good{color:var(--success)}.s-bad{color:var(--danger)}
+.drawer-fin-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:13px}
+.drawer-fin-box{padding:8px;background:var(--bg);border-radius:6px;text-align:center}
+.drawer-fin-box .fv{font-size:16px;font-weight:700;margin-bottom:1px}
+.drawer-fin-box .fl{font-size:10px;color:var(--muted)}
+.drawer-catalyst-timeline{position:relative;padding-left:18px}
+.drawer-catalyst-timeline::before{content:'';position:absolute;left:5px;top:4px;bottom:4px;width:2px;background:var(--border)}
+.catalyst-item{position:relative;margin-bottom:12px;font-size:12px;line-height:1.5}
+.catalyst-item::before{content:'';position:absolute;left:-15px;top:5px;width:8px;height:8px;border-radius:50%;background:var(--accent);border:2px solid var(--surface)}
+.catalyst-date{font-weight:700;color:var(--accent);margin-right:6px}
+.catalyst-type{padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px}
+.ct-policy{background:#dbeafe;color:#1d4ed8}.ct-capacity{background:#d1fae5;color:#065f46}
+.ct-tech{background:#fce7f3;color:#9d174d}.ct-order{background:#fef3c7;color:#92400e}
+
+/* ══ Phase 4 ══ */
+.cv-model-group{display:flex;gap:12px;flex-wrap:wrap}
+.cv-check{display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer}
+.cv-check input{margin:0}
+.cv-pass{background:var(--success);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.cv-concern{background:var(--warning);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.cv-fail{background:var(--danger);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.cv-expand-row{display:none}.cv-expand-row.open{display:table-row}
+.cv-expand-cell{padding:0 !important;border-bottom:2px solid var(--border)}
+.cv-detail-inner{padding:14px 16px;background:var(--bg)}
+.cv-chart-tabs{display:flex;gap:4px;margin-bottom:10px}
+.cv-chart-tab{padding:4px 12px;border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer;background:var(--surface)}
+.cv-chart-tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.cv-chart-wrap{height:280px;background:var(--bg);border-radius:6px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;margin-bottom:12px}
+.cv-comment{font-size:12px;line-height:1.7}
+.cv-comment h5{font-size:12px;font-weight:700;color:var(--accent);margin:8px 0 4px}
+.cv-comment p{margin-bottom:4px}
+.cv-comment .risk-item{color:var(--danger)}.cv-comment .str-item{color:var(--success)}
+
+.ai-meeting-card{border:2px dashed #c7d2fe;background:#fafbff;margin-top:20px}
+.ai-meeting-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.ai-meeting-header h3{font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
+.ai-meeting-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:#dbeafe;color:var(--accent)}
+.ai-meeting-desc{font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:14px}
+.ai-meeting-preview{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:13px}
+.meeting-bubble{display:flex;gap:10px;margin-bottom:12px}
+.meeting-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;flex-shrink:0}
+.av-gpt{background:#10a37f}.av-claude{background:#d97706}.av-ds{background:#6366f1}.av-host{background:var(--ink)}
+.meeting-name{font-weight:700;font-size:12px;margin-bottom:2px}
+.meeting-msg{color:var(--ink);line-height:1.5}
+
+/* ══ 日志面板 ══ */
+.log-panel{position:fixed;bottom:40px;right:20px;width:500px;background:#1e1e2e;border:1px solid #444;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:1000;font-family:"Cascadia Code","Consolas",monospace;font-size:12px}
+.log-header{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:#2d2d3f;border-radius:10px 10px 0 0;color:#aaa;font-weight:600;font-size:12px}
+.log-body{padding:8px 14px;max-height:200px;overflow-y:auto;color:#ccc;line-height:1.7}
+.log-line{white-space:pre-wrap}.log-ts{color:#555;margin-right:6px}.log-ok{color:#4ade80}.log-err{color:#f87171}
+
+@media(max-width:900px){
+  .sidebar{display:none}.main{margin-left:0}
+  .p3-charts-grid{grid-template-columns:1fr}
+  .sector-grid{justify-content:flex-start}
+  .log-panel{width:calc(100% - 20px);right:10px}
+  .drawer-panel{width:100%}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ Header ═══ -->
+<header class="header">
+  <div class="header-brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+    BottleneckHunter <span class="header-sub">瓶颈猎手 v0.5</span>
+  </div>
+  <div class="header-actions">
+    <button class="header-btn" onclick="alert('API 设置')">API 设置</button>
+    <button class="header-btn" onclick="switchPage('start')">首页</button>
+  </div>
+</header>
+
+<div class="layout">
+
+<!-- ═══ Sidebar ═══ -->
+<nav class="sidebar">
+  <div class="sidebar-title">分析步骤</div>
+  <div class="sidebar-item completed" onclick="switchPage('start')"><span class="sidebar-dot">✓</span> 选择方向</div>
+  <div class="sidebar-item active" onclick="switchPage('phase1')"><span class="sidebar-dot">1</span> 瓶颈分析</div>
+  <div class="sidebar-item" onclick="switchPage('phase2')"><span class="sidebar-dot">2</span> 入围筛选</div>
+  <div class="sidebar-item" onclick="switchPage('phase3')"><span class="sidebar-dot">3</span> 最终评分</div>
+  <div class="sidebar-item" onclick="switchPage('phase4')"><span class="sidebar-dot">4</span> 交叉验证</div>
+  <div class="sidebar-title" style="margin-top:24px">快捷操作</div>
+  <div class="sidebar-item" onclick="alert('热点扫描：自动扫描市场热门产业链方向和近期趋势变化，发现新的投资机会')"><span style="width:22px;text-align:center">📊</span> 热点扫描</div>
+  <div class="sidebar-sub-desc">扫描市场热门产业链和趋势变化</div>
+  <div class="sidebar-item"><span style="width:22px;text-align:center">📋</span> 历史记录</div>
+</nav>
+
+<!-- ═══ Main ═══ -->
+<div class="main">
+
+<!-- ═══ 起始页 ═══ -->
+<div class="page active" id="page-start">
+<div class="start-inner">
+  <div class="start-hero">
+    <h2>选择分析方向</h2>
+    <p>点击赛道快速开始，右键可配置赛道参数，或使用自定义输入</p>
+  </div>
+
+  <!-- 自定义赛道按钮组 -->
+  <div class="sector-grid">
+    <button class="sector-btn active" oncontextmenu="showCtxMenu(event,this)" onclick="switchPage('phase1')">GPU / AI算力</button>
+    <button class="sector-btn" oncontextmenu="showCtxMenu(event,this)" onclick="switchPage('phase1')">人形机器人</button>
+    <button class="sector-btn" oncontextmenu="showCtxMenu(event,this)" onclick="switchPage('phase1')">商业航天</button>
+    <button class="sector-btn" oncontextmenu="showCtxMenu(event,this)" onclick="switchPage('phase1')">新能源车</button>
+    <button class="sector-btn sector-add" onclick="alert('添加赛道')">+ 添加赛道</button>
+  </div>
+  <div class="sector-hint">右键点击赛道按钮可配置参数（市场/产业方向/终端产品）· 最多 8 个自定义赛道</div>
+
+  <!-- 自定义分析（在全自动之前） -->
+  <div class="custom-card">
+    <h3>自定义分析</h3>
+    <div class="custom-form">
+      <div class="fg"><label>市场</label><select><option selected>A 股</option><option>美股</option></select></div>
+      <div class="fg"><label>产业方向</label><input type="text" placeholder="例: 低空经济"></div>
+      <div class="fg"><label>终端产品</label><input type="text" placeholder="例: eVTOL飞行器"></div>
+      <div class="fg"><label>主分析模型</label><select><option selected>DeepSeek</option><option>GPT-5.5</option><option>Claude Sonnet</option><option>Qwen Plus</option><option>Gemini Flash</option></select></div>
+      <button class="btn btn-primary" onclick="switchPage('phase1')">开始分析</button>
+    </div>
+  </div>
+
+  <!-- 全自动分析（在自定义之后） -->
+  <div class="auto-card">
+    <span class="auto-icon">⚡</span>
+    <div class="auto-text">
+      <h3>全自动分析模式</h3>
+      <p>按当前各页面设置自动完成全部分析步骤（瓶颈分析 → 入围筛选 → 最终评分 → 交叉验证），全程无需手动干预。</p>
+      <div class="auto-model-sel">
+        <label>主分析模型:</label>
+        <select><option selected>DeepSeek</option><option>GPT-5.5</option><option>Claude Sonnet</option><option>Qwen Plus</option><option>Gemini Flash</option></select>
+      </div>
+    </div>
+    <button class="btn btn-success" onclick="alert('全自动分析启动！')">一键启动</button>
+  </div>
+
+  <!-- 历史记录完整表格 -->
+  <div class="history-section">
+    <h3>最近分析</h3>
+    <table class="history-tbl">
+      <thead><tr><th>市场</th><th>产业方向</th><th>终端产品</th><th>市值规模</th><th>层数</th><th>主分析模型</th><th>入围数</th><th>日期</th></tr></thead>
+      <tbody>
+        <tr onclick="switchPage('phase1')"><td><span class="hist-mkt">A股</span></td><td class="hist-sector">GPU/AI算力</td><td>GPU</td><td>≤200亿</td><td>4层</td><td class="hist-model">deepseek-chat</td><td>12</td><td>2026-06-18</td></tr>
+        <tr onclick="switchPage('phase1')"><td><span class="hist-mkt">A股</span></td><td class="hist-sector">人形机器人</td><td>人形机器人</td><td>≤300亿</td><td>3层</td><td class="hist-model">gpt-5.5</td><td>8</td><td>2026-06-15</td></tr>
+        <tr onclick="switchPage('phase1')"><td><span class="hist-mkt">美股</span></td><td class="hist-sector">商业航天</td><td>商业运载火箭</td><td>≤$5B</td><td>4层</td><td class="hist-model">claude-sonnet</td><td>6</td><td>2026-06-10</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</div>
+
+<!-- ═══ Phase 1: 产业链瓶颈分析 ═══ -->
+<div class="page" id="page-phase1">
+  <!-- 参数区：主分析模型在前，市场只有A股/美股，三态按钮 -->
+  <div class="card p1-config-card">
+    <label>主分析模型: <select><option>DeepSeek</option><option selected>GPT-5.5</option><option>Claude Sonnet</option><option>Qwen Plus</option><option>Gemini Flash</option></select></label>
+    <label>拆解深度: <select id="p1-depth"><option>3层</option><option selected>4层</option><option>5层</option></select></label>
+    <label>每层Top-N: <select><option>3</option><option selected>5</option><option>8</option><option>10</option></select></label>
+    <label>市场: <select><option selected>A 股</option><option>美股</option></select></label>
+    <label>市值上限(亿): <input type="number" value="200" style="width:70px"></label>
+    <button class="btn btn-sm btn-tristate state-start" id="p1-tristate" onclick="toggleP1Tristate()">▶ 开始分析</button>
+  </div>
+
+  <!-- 进度信息栏 -->
+  <div class="progress-info-bar" id="p1-info-bar">
+    <span class="pib-icon">⏳</span>
+    <span class="pib-text">正在拆解第 2/4 层（4 个节点）... 已完成: L0 GPU → L1 芯片设计, 封装, 代工, 存储</span>
+  </div>
+
+  <!-- 纵向布局 — 图谱和排名各占一行 -->
+  <div class="p1-vertical">
+    <div class="card" style="position:relative">
+      <div class="chart-header">
+        <div class="card-title" style="margin-bottom:0;display:flex;align-items:center;gap:12px">
+          <span>产业链图谱</span>
+          <div class="chain-tab-bar" style="margin-bottom:0">
+            <button class="chain-tab active">力导向图</button>
+            <button class="chain-tab">径向树图</button>
+            <button class="chain-tab">D3 Force</button>
+          </div>
+        </div>
+        <button class="btn-fullscreen" onclick="alert('全屏模式')">⛶ 全屏</button>
+      </div>
+      <div class="chart-placeholder" style="height:420px;margin-top:10px" id="p1-chart">[ 力导向图 — ECharts graph ]</div>
+      <div class="chart-progress-overlay" id="p1-progress-overlay" style="display:none">
+        <div class="progress-spinner"></div>
+        <div class="progress-detail">
+          <div class="step-current">正在拆解第 2/4 层（4 个节点）...</div>
+          <div>已完成: L0 GPU → L1 芯片设计, 封装, 代工, 存储</div>
+          <div>当前: L2 → 光模块, HBM, CoWoS, 散热...</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">瓶颈排名</div>
+      <div class="chart-placeholder" style="height:320px">[ 横向柱状图 — 节点瓶颈得分 ]</div>
+    </div>
+  </div>
+
+  <div class="phase-footer">
+    <span class="progress-msg progress-done">Phase 1 完成 — 分析 20 个节点，识别 8 个瓶颈</span>
+    <div class="footer-btns">
+      <button class="btn btn-primary" onclick="switchPage('phase2')">下一步: 入围筛选 →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Phase 2: 入围筛选 ═══ -->
+<div class="page" id="page-phase2">
+  <div class="phase-header">
+    <h2>入围筛选 <span class="stats-info">共搜索 45 家，评估后 28 家，筛选后 15 家</span></h2>
+  </div>
+
+  <!-- 筛选控制行 — 按钮 + 各层数量框 + 总数 在同一排 -->
+  <div class="card p2-filter-row">
+    <button class="btn btn-primary btn-sm">开始筛选</button>
+    <div class="layer-chip"><span class="lsc-layer L1">L1</span> 子部件 <input type="number" value="5" min="1" max="10" step="1" onchange="updateP2Total()"> 家</div>
+    <div class="layer-chip"><span class="lsc-layer L2">L2</span> 零件层 <input type="number" value="4" min="1" max="10" step="1" onchange="updateP2Total()"> 家</div>
+    <div class="layer-chip"><span class="lsc-layer L3">L3</span> 原料层 <input type="number" value="3" min="1" max="10" step="1" onchange="updateP2Total()"> 家</div>
+    <span class="p2-total-tag" id="p2-total">合计: 12 家</span>
+    <label style="font-size:12px;display:flex;align-items:center;gap:4px;margin-left:auto;color:var(--muted)">最低分: <input type="number" value="0" step="0.5" style="width:50px;padding:3px 4px;border:1px solid var(--border);border-radius:4px;font-size:12px"></label>
+  </div>
+
+  <!-- 手动入选 -->
+  <div class="manual-pick-bar">
+    <span>✋</span> 手动入选: 勾选下方公司直接加入最终评分（不受自动筛选限制）
+    <span class="manual-pick-count">已选 1 / 3 家</span>
+  </div>
+
+  <!-- 入围表格 — 10色评分 -->
+  <div class="card">
+    <table class="data-table">
+      <thead><tr><th style="width:30px"></th><th>#</th><th>公司</th><th>代码</th><th>瓶颈环节</th><th>地位</th><th>客户</th><th>产能</th><th>财务</th><th>估值</th><th>综合</th><th>Alpha</th><th>趋势</th><th>聪明钱</th><th>护城河</th><th>状态</th><th></th></tr></thead>
+      <tbody>
+        <tr class="company-row-clickable" onclick="toggleP2Expand('p2e1')">
+          <td><input type="checkbox" class="p2-checkbox"></td><td>1</td>
+          <td class="company-name">英伟达微电子 <span class="layer-badge L1">L1</span></td>
+          <td class="ticker">688541.SH</td><td>GPU芯片设计</td>
+          <td><span class="badge" style="background:#16a34a">8.0</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.5</span></td>
+          <td><span class="badge" style="background:#f97316">6.8</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.2</span></td>
+          <td><span class="badge" style="background:#f97316">6.0</span></td>
+          <td><span class="badge" style="background:#16a34a">8.5</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.2</span></td>
+          <td style="color:var(--success);font-weight:700">↑</td>
+          <td style="color:var(--success)">看多</td>
+          <td>7.8</td>
+          <td><span class="factor-tag">自动入围</span></td>
+          <td class="expand-arrow">▶</td>
+        </tr>
+        <tr class="p2-expand-row" id="p2e1"><td colspan="17" class="p2-expand-cell">
+          <div class="p2-company-intro">
+            <h4>企业简介</h4>
+            <p>英伟达微电子科技有限公司专注于 GPU 芯片设计与 AI 加速器研发，是国内领先的 AI 计算芯片设计公司。</p>
+            <h4>核心产品</h4>
+            <div class="p2-product-tags">
+              <span class="p2-product-tag">GPU 训练芯片</span>
+              <span class="p2-product-tag">AI 推理加速卡</span>
+              <span class="p2-product-tag">DPU 数据处理器</span>
+              <span class="p2-product-tag">CUDA 生态工具链</span>
+            </div>
+          </div>
+        </td></tr>
+
+        <tr class="company-row-clickable" onclick="toggleP2Expand('p2e2')">
+          <td><input type="checkbox" class="p2-checkbox"></td><td>2</td>
+          <td class="company-name">海光信息 <span class="layer-badge L1">L1</span></td>
+          <td class="ticker">688041.SH</td><td>GPU芯片设计</td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.5</span></td>
+          <td><span class="badge" style="background:#f97316">6.8</span></td>
+          <td><span class="badge" style="background:#f97316">6.5</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.0</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.5</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.8</span></td>
+          <td><span class="badge" style="background:#f97316">6.5</span></td>
+          <td style="color:var(--success);font-weight:700">↑</td>
+          <td style="color:var(--muted)">中性</td>
+          <td>7.2</td>
+          <td><span class="factor-tag">自动入围</span></td>
+          <td class="expand-arrow">▶</td>
+        </tr>
+        <tr class="p2-expand-row" id="p2e2"><td colspan="17" class="p2-expand-cell">
+          <div class="p2-company-intro">
+            <h4>企业简介</h4><p>海光信息主营高端处理器（CPU/DCU），是国内 x86 兼容 CPU 的核心供应商。</p>
+            <h4>核心产品</h4>
+            <div class="p2-product-tags"><span class="p2-product-tag">海光 DCU</span><span class="p2-product-tag">海光 CPU</span><span class="p2-product-tag">深算系列</span></div>
+          </div>
+        </td></tr>
+
+        <tr><td><input type="checkbox" class="p2-checkbox"></td><td>3</td>
+          <td class="company-name">寒武纪 <span class="layer-badge L1">L1</span></td>
+          <td class="ticker">688256.SH</td><td>AI加速器</td>
+          <td><span class="badge" style="background:#f97316">6.5</span></td>
+          <td><span class="badge" style="background:#f97316">6.0</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.5</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.8</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.0</span></td>
+          <td><span class="badge" style="background:#f97316">6.2</span></td>
+          <td><span class="badge" style="background:#16a34a">8.1</span></td>
+          <td style="color:var(--muted)">→</td><td style="color:var(--success)">看多</td><td>5.5</td>
+          <td><span class="factor-tag">自动入围</span></td><td class="expand-arrow">▶</td>
+        </tr>
+
+        <tr><td><input type="checkbox" class="p2-checkbox"></td><td>4</td>
+          <td class="company-name">中芯国际 <span class="layer-badge L2">L2</span></td>
+          <td class="ticker">688981.SH</td><td>先进制程代工</td>
+          <td><span class="badge" style="background:#16a34a">8.0</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.8</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.0</span></td>
+          <td><span class="badge" style="background:#f97316">6.5</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.5</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.5</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.8</span></td>
+          <td style="color:var(--success);font-weight:700">↑</td><td style="color:var(--success)">看多</td><td>8.0</td>
+          <td><span class="factor-tag">自动入围</span></td><td class="expand-arrow">▶</td>
+        </tr>
+
+        <tr><td><input type="checkbox" class="p2-checkbox"></td><td>5</td>
+          <td class="company-name">长电科技 <span class="layer-badge L2">L2</span></td>
+          <td class="ticker">600584.SH</td><td>先进封装</td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.2</span></td>
+          <td><span class="badge" style="background:#f97316">6.5</span></td>
+          <td><span class="badge" style="background:#f97316">6.8</span></td>
+          <td><span class="badge" style="background:#f97316">6.2</span></td>
+          <td><span class="badge" style="background:#f97316">6.0</span></td>
+          <td><span class="badge" style="background:#f97316">6.8</span></td>
+          <td><span class="badge" style="background:#4ade80;color:#065f46">7.6</span></td>
+          <td style="color:var(--muted)">→</td><td style="color:var(--muted)">中性</td><td>6.3</td>
+          <td><span class="factor-tag">自动入围</span></td><td class="expand-arrow">▶</td>
+        </tr>
+
+        <tr class="row-selected"><td><input type="checkbox" class="p2-checkbox" checked></td><td>6</td>
+          <td class="company-name">华天科技 <span class="layer-badge L2">L2</span></td>
+          <td class="ticker">002185.SZ</td><td>先进封装</td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.5</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.0</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.2</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.5</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.8</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.8</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.2</span></td>
+          <td style="color:var(--muted)">→</td><td style="color:var(--muted)">中性</td><td>5.0</td>
+          <td><span class="tag-manual">手动入选</span></td><td class="expand-arrow">▶</td>
+        </tr>
+
+        <tr><td><input type="checkbox" class="p2-checkbox"></td><td>7</td>
+          <td class="company-name">澜起科技 <span class="layer-badge L3">L3</span></td>
+          <td class="ticker">688008.SH</td><td>HBM存储接口</td>
+          <td><span class="badge" style="background:#f97316">6.8</span></td>
+          <td><span class="badge" style="background:#f97316">6.5</span></td>
+          <td><span class="badge" style="background:#f97316">6.0</span></td>
+          <td><span class="badge" style="background:#f97316">6.2</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.5</span></td>
+          <td><span class="badge" style="background:#f97316">6.5</span></td>
+          <td><span class="badge" style="background:#f59e0b;color:#fff">5.4</span></td>
+          <td style="color:var(--success);font-weight:700">↑</td><td style="color:var(--muted)">中性</td><td>6.0</td>
+          <td></td><td class="expand-arrow">▶</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="phase-footer">
+    <span class="progress-msg progress-done">Phase 2 完成 — 自动入围 5 家 + 手动入选 1 家 = 共 6 家进入最终评分</span>
+    <div class="footer-btns">
+      <button class="btn btn-secondary" onclick="switchPage('phase1')">← 返回瓶颈分析</button>
+      <button class="btn btn-primary" onclick="switchPage('phase3')">下一步: 最终评分 →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Phase 3: 最终评分 ═══ -->
+<div class="page" id="page-phase3">
+  <div class="p3-top">
+    <div style="display:flex;align-items:center;gap:14px">
+      <h2>最终评分排名</h2>
+      <!-- 三态按钮 -->
+      <button class="btn btn-sm btn-tristate state-start" id="p3-tristate" onclick="toggleP3Tristate()">▶ 开始评选</button>
+    </div>
+    <div class="weight-ctrl">
+      <span class="weight-label">质量</span>
+      <input type="range" min="0" max="100" value="40" class="weight-range" oninput="document.getElementById('wv').textContent=this.value+'% / '+(100-this.value)+'%'">
+      <span class="weight-label">预期差</span>
+      <span class="weight-val" id="wv">40% / 60%</span>
+    </div>
+  </div>
+
+  <!-- 排名表 -->
+  <div class="card">
+    <div class="card-title">入选公司排名 <span class="stats-info">（点击展开详情抽屉）</span></div>
+    <table class="data-table">
+      <thead><tr><th>排名</th><th>公司</th><th>代码</th><th>最终分</th><th>质量分</th><th>预期差</th><th>瓶颈环节</th><th>关键因子</th><th>来源</th><th></th></tr></thead>
+      <tbody>
+        <tr class="company-row-clickable" onclick="toggleDrawer()"><td class="rank-num">1</td><td class="company-name">寒武纪 <span class="layer-badge L1">L1</span></td><td class="ticker">688256.SH</td><td><span class="badge" style="background:#4ade80;color:#065f46;font-size:13px;padding:3px 10px">7.21</span></td><td><span class="badge" style="background:#f97316">6.2</span></td><td><span class="badge" style="background:#16a34a">8.1</span></td><td>AI加速器</td><td><span class="factor-tag">高预期差</span><span class="factor-tag">聪明钱看多</span></td><td><span class="factor-tag">自动</span></td><td class="expand-arrow">▶</td></tr>
+        <tr class="company-row-clickable" onclick="toggleDrawer()"><td class="rank-num">2</td><td class="company-name">英伟达微电子 <span class="layer-badge L1">L1</span></td><td class="ticker">688541.SH</td><td><span class="badge" style="background:#4ade80;color:#065f46;font-size:13px;padding:3px 10px">7.15</span></td><td><span class="badge" style="background:#16a34a">8.5</span></td><td><span class="badge" style="background:#4ade80;color:#065f46">7.2</span></td><td>GPU芯片设计</td><td><span class="factor-tag">高质量</span><span class="factor-tag">高预期差</span></td><td><span class="factor-tag">自动</span></td><td class="expand-arrow">▶</td></tr>
+        <tr class="company-row-clickable" onclick="toggleDrawer()"><td class="rank-num">3</td><td class="company-name">长电科技 <span class="layer-badge L2">L2</span></td><td class="ticker">600584.SH</td><td><span class="badge" style="background:#4ade80;color:#065f46;font-size:13px;padding:3px 10px">7.08</span></td><td><span class="badge" style="background:#f97316">6.8</span></td><td><span class="badge" style="background:#4ade80;color:#065f46">7.6</span></td><td>先进封装</td><td><span class="factor-tag">高预期差</span></td><td><span class="factor-tag">自动</span></td><td class="expand-arrow">▶</td></tr>
+        <tr class="company-row-clickable" onclick="toggleDrawer()"><td class="rank-num">4</td><td class="company-name">海光信息 <span class="layer-badge L1">L1</span></td><td class="ticker">688041.SH</td><td><span class="badge" style="background:#f97316;font-size:13px;padding:3px 10px">6.52</span></td><td><span class="badge" style="background:#4ade80;color:#065f46">7.8</span></td><td><span class="badge" style="background:#f97316">6.5</span></td><td>GPU芯片设计</td><td><span class="factor-tag">高质量</span></td><td><span class="factor-tag">自动</span></td><td class="expand-arrow">▶</td></tr>
+        <tr class="company-row-clickable" onclick="toggleDrawer()"><td class="rank-num">5</td><td class="company-name">中芯国际 <span class="layer-badge L2">L2</span></td><td class="ticker">688981.SH</td><td><span class="badge" style="background:#f97316;font-size:13px;padding:3px 10px">6.33</span></td><td><span class="badge" style="background:#4ade80;color:#065f46">7.5</span></td><td><span class="badge" style="background:#f59e0b;color:#fff">5.8</span></td><td>先进制程代工</td><td><span class="factor-tag">高质量</span><span class="factor-tag">聪明钱看多</span></td><td><span class="factor-tag">自动</span></td><td class="expand-arrow">▶</td></tr>
+        <tr class="company-row-clickable" onclick="toggleDrawer()"><td class="rank-num">6</td><td class="company-name">华天科技 <span class="layer-badge L2">L2</span></td><td class="ticker">002185.SZ</td><td><span class="badge" style="background:#f59e0b;color:#fff;font-size:13px;padding:3px 10px">5.12</span></td><td><span class="badge" style="background:#f59e0b;color:#fff">5.8</span></td><td><span class="badge" style="background:#f59e0b;color:#fff">5.2</span></td><td>先进封装</td><td></td><td><span class="tag-manual">手动</span></td><td class="expand-arrow">▶</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 横向对比图表 — 点击弹出AI解读 -->
+  <div class="p3-charts-grid">
+    <div class="card"><div class="card-title">质量 vs 预期差 散点图 <span class="stats-info">（点击查看AI解读）</span></div><div class="chart-placeholder" style="height:260px" onclick="showAiInterp('scatter')">[ 气泡散点图 — x=质量, y=预期差, size=最终分 ]</div></div>
+    <div class="card"><div class="card-title">五维雷达对比 <span class="stats-info">（点击查看AI解读）</span></div><div class="chart-placeholder" style="height:260px" onclick="showAiInterp('radar')">[ 雷达图 — 地位/客户/产能/财务/估值 ]</div></div>
+    <div class="card"><div class="card-title">评分因子横向对比 <span class="stats-info">（点击查看AI解读）</span></div><div class="chart-placeholder" style="height:260px" onclick="showAiInterp('bar')">[ 分组柱状图 — 各公司 quality/alpha/趋势/聪明钱 ]</div></div>
+    <div class="card"><div class="card-title">Alpha 因子拆解 <span class="stats-info">（点击查看AI解读）</span></div><div class="chart-placeholder" style="height:260px" onclick="showAiInterp('stack')">[ 堆叠柱状图 — 瓶颈×信息差+催化剂+趋势+聪明钱 ]</div></div>
+  </div>
+
+  <!-- AI 报告 -->
+  <div class="card ai-report-card">
+    <div class="ai-report-header">
+      <h3>AI 横向对比分析报告</h3>
+      <button class="btn btn-outline-accent btn-sm">生成报告</button>
+    </div>
+    <div class="ai-report-body">
+      <p><strong>整体格局：</strong>本次 GPU/AI算力 产业链筛选共入围 6 家公司，覆盖芯片设计(L1)、先进封装(L2)、制程代工(L2)三大瓶颈环节。综合质量与预期差评估，<strong>寒武纪</strong>凭借 AI 加速器赛道的高信息差和聪明钱看多信号位列第一，但其质量评分（6.2）偏低，需关注商业化落地进度。</p>
+      <p><strong>核心对比：</strong>前两名呈现"互补型"特征 — 寒武纪依靠高预期差取胜（alpha=8.1），英伟达微电子则凭借绝对质量领先（quality=8.5）。若投资者更看重确定性，调高质量权重至 60% 后英伟达微电子将跃升至第一。</p>
+      <p><strong>风险提示：</strong>华天科技(L2)为手动入选，自动筛选中因评分不足被排除，其先进封装布局仍处早期阶段。中芯国际(L2)虽质量评分较高，但预期差偏低（5.8），市场已充分定价其先进制程突破预期。</p>
+    </div>
+  </div>
+
+  <div class="phase-footer">
+    <span></span>
+    <div class="footer-btns">
+      <button class="btn btn-secondary" onclick="switchPage('phase2')">← 返回入围筛选</button>
+      <button class="btn btn-primary" onclick="switchPage('phase4')">下一步: 交叉验证 →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Phase 4: 交叉验证 ═══ -->
+<div class="page" id="page-phase4">
+  <div class="phase-header">
+    <h2>交叉验证</h2>
+    <div class="phase-config">
+      <label>验证 Top-N: <input type="number" value="5" style="width:50px"></label>
+      <div class="cv-model-group">
+        <label class="cv-check"><input type="checkbox" checked> GPT-5.5</label>
+        <label class="cv-check"><input type="checkbox" checked> Claude Sonnet</label>
+        <label class="cv-check"><input type="checkbox" checked> DeepSeek</label>
+        <label class="cv-check"><input type="checkbox"> Gemini Flash</label>
+      </div>
+      <button class="btn btn-primary btn-sm">开始验证</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <table class="data-table">
+      <thead><tr><th>公司</th><th>共识分</th><th>结论</th><th>GPT-5.5</th><th>Claude</th><th>DeepSeek</th><th></th></tr></thead>
+      <tbody>
+        <!-- 寒武纪 -->
+        <tr class="company-row-clickable" onclick="toggleCvExpand('cv1')"><td class="company-name">寒武纪 <span class="layer-badge L1">L1</span></td><td><span class="badge" style="background:#4ade80;color:#065f46">7.8</span></td><td><span class="cv-pass">推荐</span></td><td><span class="badge" style="background:#16a34a;font-size:10px;padding:1px 5px">8.2</span></td><td><span class="badge" style="background:#4ade80;color:#065f46;font-size:10px;padding:1px 5px">7.5</span></td><td><span class="badge" style="background:#4ade80;color:#065f46;font-size:10px;padding:1px 5px">7.8</span></td><td class="expand-arrow" id="cv-a1">▼</td></tr>
+        <tr class="cv-expand-row open" id="cv1"><td colspan="7" class="cv-expand-cell"><div class="cv-detail-inner">
+          <!-- ECharts 图表替代评分表 -->
+          <div class="cv-chart-tabs">
+            <button class="cv-chart-tab active" onclick="switchCvChart(this,'line')">堆叠折线图</button>
+            <button class="cv-chart-tab" onclick="switchCvChart(this,'bar')">圆角堆叠柱状图</button>
+          </div>
+          <div class="cv-chart-wrap">[ ECharts 堆叠折线图 — X轴: 技术壁垒/市场地位/财务健康/成长潜力/估值合理性/风险可控性, 系列: GPT-5.5(8.2) / Claude(7.5) / DeepSeek(7.8) ]</div>
+          <div class="cv-comment">
+            <h5>GPT-5.5 评语（推荐 8.2/10）</h5>
+            <p class="str-item">✅ 国产 AI 加速器龙头，思元系列芯片已进入多家互联网大厂训练集群，技术壁垒高。推理芯片 MLU370-S4 在边缘场景放量超预期。</p>
+            <p class="risk-item">⚠️ PE 180x 高估值风险，需关注 Q3 订单兑现。</p>
+            <h5>Claude Sonnet 评语（推荐 7.5/10）</h5>
+            <p class="str-item">✅ 技术路线独特，自研指令集形成生态壁垒，大基金三期追加投资增强确定性。</p>
+            <p class="risk-item">⚠️ 估值显著偏高，任何低于预期的季度都会引发显著回调。海外制裁升级风险。</p>
+            <h5>DeepSeek 评语（推荐 7.8/10）</h5>
+            <p class="str-item">✅ 边缘推理+训练双轮驱动，Q3 订单已超全年指引，成长确定性强。</p>
+            <p class="risk-item">⚠️ 美商务部 Q4 可能扩大实体清单范围，影响台积电 5nm 代工。</p>
+          </div>
+        </div></td></tr>
+
+        <!-- 英伟达微电子 -->
+        <tr class="company-row-clickable" onclick="toggleCvExpand('cv2')"><td class="company-name">英伟达微电子 <span class="layer-badge L1">L1</span></td><td><span class="badge" style="background:#4ade80;color:#065f46">7.2</span></td><td><span class="cv-pass">推荐</span></td><td><span class="badge" style="background:#4ade80;color:#065f46;font-size:10px;padding:1px 5px">7.5</span></td><td><span class="badge" style="background:#f97316;font-size:10px;padding:1px 5px">6.8</span></td><td><span class="badge" style="background:#4ade80;color:#065f46;font-size:10px;padding:1px 5px">7.3</span></td><td class="expand-arrow" id="cv-a2">▶</td></tr>
+        <tr class="cv-expand-row" id="cv2"><td colspan="7" class="cv-expand-cell"><div class="cv-detail-inner">
+          <div class="cv-chart-tabs">
+            <button class="cv-chart-tab active" onclick="switchCvChart(this,'line')">堆叠折线图</button>
+            <button class="cv-chart-tab" onclick="switchCvChart(this,'bar')">圆角堆叠柱状图</button>
+          </div>
+          <div class="cv-chart-wrap">[ ECharts 堆叠折线图 — X轴: 6维评分, 系列: GPT-5.5(7.5) / Claude(6.8) / DeepSeek(7.3) ]</div>
+          <div class="cv-comment">
+            <h5>GPT-5.5 评语</h5><p class="str-item">✅ 质量评分最高，GPU 设计能力强，客户验证充分。</p>
+            <h5>Claude Sonnet 评语</h5><p class="risk-item">⚠️ 估值偏高，成长空间不及寒武纪。</p>
+          </div>
+        </div></td></tr>
+
+        <tr class="company-row-clickable" onclick="toggleCvExpand('cv3')"><td class="company-name">长电科技 <span class="layer-badge L2">L2</span></td><td><span class="badge" style="background:#f97316">6.1</span></td><td><span class="cv-concern">存疑</span></td><td><span class="badge" style="background:#f97316;font-size:10px;padding:1px 5px">6.5</span></td><td><span class="badge" style="background:#f59e0b;color:#fff;font-size:10px;padding:1px 5px">5.2</span></td><td><span class="badge" style="background:#f97316;font-size:10px;padding:1px 5px">6.5</span></td><td class="expand-arrow" id="cv-a3">▶</td></tr>
+        <tr class="cv-expand-row" id="cv3"><td colspan="7" class="cv-expand-cell"><div class="cv-detail-inner">
+          <div class="cv-chart-tabs">
+            <button class="cv-chart-tab active" onclick="switchCvChart(this,'line')">堆叠折线图</button>
+            <button class="cv-chart-tab" onclick="switchCvChart(this,'bar')">圆角堆叠柱状图</button>
+          </div>
+          <div class="cv-chart-wrap">[ ECharts 堆叠折线图 — 长电科技 3AI评分 ]</div>
+          <div class="cv-comment"><p class="str-item">✅ 先进封装龙头，Chiplet 趋势受益者。</p><p class="risk-item">⚠️ 三个模型均对短期业绩增速持保留态度，客户集中度风险较高。</p></div>
+        </div></td></tr>
+
+        <tr class="company-row-clickable" onclick="toggleCvExpand('cv4')"><td class="company-name">海光信息 <span class="layer-badge L1">L1</span></td><td><span class="badge" style="background:#f59e0b;color:#fff">5.5</span></td><td><span class="cv-concern">存疑</span></td><td><span class="badge" style="background:#f97316;font-size:10px;padding:1px 5px">6.0</span></td><td><span class="badge" style="background:#f59e0b;color:#fff;font-size:10px;padding:1px 5px">5.0</span></td><td><span class="badge" style="background:#f59e0b;color:#fff;font-size:10px;padding:1px 5px">5.5</span></td><td class="expand-arrow" id="cv-a4">▶</td></tr>
+        <tr class="cv-expand-row" id="cv4"><td colspan="7" class="cv-expand-cell"><div class="cv-detail-inner">
+          <div class="cv-chart-tabs">
+            <button class="cv-chart-tab active" onclick="switchCvChart(this,'line')">堆叠折线图</button>
+            <button class="cv-chart-tab" onclick="switchCvChart(this,'bar')">圆角堆叠柱状图</button>
+          </div>
+          <div class="cv-chart-wrap">[ ECharts 堆叠折线图 — 海光信息 3AI评分 ]</div>
+          <div class="cv-comment"><p class="str-item">✅ 国产 CPU/DCU 双轮驱动。</p><p class="risk-item">⚠️ 预期差不足，机构持仓已较高。</p></div>
+        </div></td></tr>
+
+        <tr class="company-row-clickable" onclick="toggleCvExpand('cv5')"><td class="company-name">中芯国际 <span class="layer-badge L2">L2</span></td><td><span class="badge" style="background:#eab308;color:#fff">4.2</span></td><td><span class="cv-fail">不推荐</span></td><td><span class="badge" style="background:#f59e0b;color:#fff;font-size:10px;padding:1px 5px">5.0</span></td><td><span class="badge" style="background:#b45309;color:#fff;font-size:10px;padding:1px 5px">3.8</span></td><td><span class="badge" style="background:#b45309;color:#fff;font-size:10px;padding:1px 5px">3.8</span></td><td class="expand-arrow" id="cv-a5">▶</td></tr>
+        <tr class="cv-expand-row" id="cv5"><td colspan="7" class="cv-expand-cell"><div class="cv-detail-inner">
+          <div class="cv-chart-tabs">
+            <button class="cv-chart-tab active" onclick="switchCvChart(this,'line')">堆叠折线图</button>
+            <button class="cv-chart-tab" onclick="switchCvChart(this,'bar')">圆角堆叠柱状图</button>
+          </div>
+          <div class="cv-chart-wrap">[ ECharts 堆叠折线图 — 中芯国际 3AI评分 ]</div>
+          <div class="cv-comment"><p class="risk-item">⚠️ 三个模型一致认为估值过高、预期差不足，且地缘政治风险显著。不建议当前价位介入。</p></div>
+        </div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- AI 会议 -->
+  <div class="card ai-meeting-card">
+    <div class="ai-meeting-header">
+      <h3>🎙️ AI 圆桌会议 <span class="ai-meeting-badge">下阶段功能</span></h3>
+      <button class="btn btn-outline-accent btn-sm" disabled>启动会议</button>
+    </div>
+    <div class="ai-meeting-desc">多个 AI 模型将以圆桌会议形式，围绕入选企业进行深度讨论：互相提问、质疑假设、交叉验证投资逻辑，在 10 分钟内得出推荐排名和风险排名的共识结论。</div>
+    <div class="ai-meeting-preview">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;font-weight:600">会议预览（模拟）</div>
+      <div class="meeting-bubble"><div class="meeting-avatar av-host">主</div><div class="meeting-text"><div class="meeting-name">主持人</div><div class="meeting-msg">本次会议讨论 5 家入选企业的推荐排名。请各位从各自视角出发，首先对排名第一的寒武纪<span class="layer-badge L1">L1</span>发表看法。</div></div></div>
+      <div class="meeting-bubble"><div class="meeting-avatar av-gpt">G</div><div class="meeting-text"><div class="meeting-name">GPT-5.5</div><div class="meeting-msg">寒武纪推理芯片 MLU370-S4 在边缘场景出货量超预期，这是核心预期差。但我想问 Claude —— 你给出 7.5 分，主要担忧是估值还是基本面？</div></div></div>
+      <div class="meeting-bubble"><div class="meeting-avatar av-claude">C</div><div class="meeting-text"><div class="meeting-name">Claude Sonnet</div><div class="meeting-msg">主要是估值。PE 180x 意味着任何低于预期的季度都会引发显著回调。不过我同意边缘推理增量逻辑，如果 Q3 订单确认，我会上调至 8.0。</div></div></div>
+      <div style="text-align:center;color:var(--muted);font-size:12px;margin-top:8px;font-style:italic">— 以上为模拟预览，实际会议将由 AI 自动进行 —</div>
+    </div>
+  </div>
+
+  <div class="phase-footer">
+    <span class="progress-msg progress-done">交叉验证完成 — 5 家公司, 3 个模型</span>
+    <div class="footer-btns">
+      <button class="btn btn-secondary" onclick="switchPage('phase3')">← 返回最终评分</button>
+      <button class="btn btn-primary" onclick="alert('已保存')">保存分析结果</button>
+    </div>
+  </div>
+</div>
+
+</div><!-- .main -->
+</div><!-- .layout -->
+
+<!-- ═══ 抽屉详情 — 800px 宽 ═══ -->
+<div class="drawer-overlay" id="drawer" style="display:none" onclick="if(event.target===this)toggleDrawer()">
+<div class="drawer-panel">
+  <div class="drawer-header">
+    <h3>寒武纪 <span class="layer-badge L1">L1</span> <span class="ticker" style="margin-left:4px">688256.SH</span></h3>
+    <button class="drawer-close" onclick="toggleDrawer()">✕</button>
+  </div>
+  <div class="drawer-body">
+    <div class="drawer-score-grid">
+      <div class="drawer-score-box"><div class="val val-accent">7.21</div><div class="lbl">最终评分</div></div>
+      <div class="drawer-score-box"><div class="val val-yellow">6.2</div><div class="lbl">质量分</div></div>
+      <div class="drawer-score-box"><div class="val val-green">8.1</div><div class="lbl">预期差</div></div>
+    </div>
+    <div class="drawer-section"><h4>企业简介</h4><p style="font-size:13px;line-height:1.7">寒武纪(688256.SH)专注于 AI 芯片研发，主营智能处理器 IP 和云端/边缘端 AI 加速卡。核心产品包括思元系列云端训练芯片和 MLU370 推理加速卡。</p></div>
+    <div class="drawer-section"><h4>核心产品</h4><div class="p2-product-tags"><span class="p2-product-tag">思元 590 训练芯片</span><span class="p2-product-tag">MLU370-S4 推理卡</span><span class="p2-product-tag">Cambricon Neuware SDK</span><span class="p2-product-tag">智能处理器 IP 授权</span></div></div>
+    <div class="drawer-section"><h4>五维评分</h4><div class="drawer-five-dim"><div class="drawer-radar-wrap"><div class="chart-placeholder" style="width:200px;height:200px;border:none;background:transparent">[ 雷达图 ]</div></div><div class="dim-bar-list"><div class="dim-bar-row"><span class="dim-bar-label">市场地位</span><div class="dim-bar-track"><div class="dim-bar-fill" style="width:65%"></div></div><span class="dim-bar-val">6.5</span></div><div class="dim-bar-row"><span class="dim-bar-label">客户验证</span><div class="dim-bar-track"><div class="dim-bar-fill" style="width:60%"></div></div><span class="dim-bar-val">6.0</span></div><div class="dim-bar-row"><span class="dim-bar-label">产能状况</span><div class="dim-bar-track"><div class="dim-bar-fill" style="width:55%"></div></div><span class="dim-bar-val">5.5</span></div><div class="dim-bar-row"><span class="dim-bar-label">财务健康</span><div class="dim-bar-track"><div class="dim-bar-fill" style="width:58%"></div></div><span class="dim-bar-val">5.8</span></div><div class="dim-bar-row"><span class="dim-bar-label">估值水平</span><div class="dim-bar-track"><div class="dim-bar-fill" style="width:50%"></div></div><span class="dim-bar-val">5.0</span></div></div></div></div>
+    <div class="drawer-section"><h4>优势与风险</h4><div class="drawer-strengths"><div><h5 style="color:var(--success)">优势</h5><div class="s-item s-good">✅ 国产 AI 加速器龙头，自研指令集形成生态壁垒</div><div class="s-item s-good">✅ 思元系列已进入多家互联网大厂训练集群</div><div class="s-item s-good">✅ 大基金三期追加投资增强确定性</div></div><div><h5 style="color:var(--danger)">风险</h5><div class="s-item s-bad">⚠️ PE 180x 估值风险显著</div><div class="s-item s-bad">⚠️ 海外制裁可能影响先进工艺获取</div><div class="s-item s-bad">⚠️ 客户集中度高，大客户依赖风险</div></div></div></div>
+    <div class="drawer-section"><h4>财务快照 <span class="stats-info">报告期: 2026Q1</span></h4><div class="drawer-fin-grid"><div class="drawer-fin-box"><div class="fv" style="color:var(--accent)">18.5</div><div class="fl">营收(亿)</div></div><div class="drawer-fin-box"><div class="fv" style="color:var(--success)">+45.2%</div><div class="fl">营收同比</div></div><div class="drawer-fin-box"><div class="fv">3.2</div><div class="fl">净利润(亿)</div></div><div class="drawer-fin-box"><div class="fv" style="color:var(--success)">+62.8%</div><div class="fl">净利同比</div></div><div class="drawer-fin-box"><div class="fv">62.3%</div><div class="fl">毛利率</div></div><div class="drawer-fin-box"><div class="fv">8.5%</div><div class="fl">ROE</div></div><div class="drawer-fin-box"><div class="fv">32.1%</div><div class="fl">负债率</div></div><div class="drawer-fin-box"><div class="fv">1.25</div><div class="fl">每股现金流</div></div></div><div style="display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--muted)"><span>机构评级: <strong style="color:var(--success)">增持</strong></span><span>研报覆盖: <strong>28</strong> 篇</span><span>预期PE: <strong>182.5x</strong></span><span>预期EPS: <strong>0.68</strong></span></div></div>
+    <div class="drawer-section"><h4>财务趋势 <span class="stats-info">近4季</span></h4><dl class="drawer-kv"><dt>趋势摘要</dt><dd>营收连续4季正增长，增速加速</dd><dt>营收加速度</dt><dd style="color:var(--success)">+8.5pp</dd><dt>利润加速度</dt><dd style="color:var(--success)">+12.3pp</dd><dt>毛利率趋势</dt><dd style="color:var(--success)">+2.1pp</dd><dt>连续正增长</dt><dd><strong>4</strong> 季</dd></dl></div>
+    <div class="drawer-section"><h4>瓶颈定位</h4><dl class="drawer-kv"><dt>瓶颈环节</dt><dd>AI加速器 <span class="layer-badge L1">L1</span></dd><dt>瓶颈评分</dt><dd><strong>8.4</strong> / 10</dd><dt>稀缺性</dt><dd>8.5</dd><dt>不可替代性</dt><dd>7.8</dd><dt>供需缺口</dt><dd>8.2</dd><dt>定价权</dt><dd>7.5</dd><dt>技术壁垒</dt><dd>8.2</dd></dl></div>
+    <div class="drawer-section"><h4>竞争护城河</h4><dl class="drawer-kv"><dt>综合评分</dt><dd><strong>5.5</strong> / 10</dd><dt>专利壁垒</dt><dd>6.2</dd><dt>转换成本</dt><dd>5.8</dd><dt>产能优势</dt><dd>4.5</dd><dt>成本优势</dt><dd>5.0</dd><dt>分析要点</dt><dd style="font-size:12px">自研 MLU 架构 + Cambricon 编译器形成软件生态锁定，但硬件产能依赖外部代工</dd></dl></div>
+    <div class="drawer-section"><h4>聪明钱信号</h4><dl class="drawer-kv"><dt>综合评分</dt><dd><strong>7.2</strong> / 10</dd><dt>信号方向</dt><dd style="color:var(--success);font-weight:700">看多</dd><dt>信号明细</dt><dd style="font-size:12px">北向资金近 20 日净流入 3.8 亿；主力资金连续 5 日净买入；大基金三期持股增加</dd></dl></div>
+    <div class="drawer-section"><h4>催化剂 <span class="stats-info">紧迫度 8.5/10</span></h4><div class="drawer-catalyst-timeline"><div class="catalyst-item"><span class="catalyst-date">2026Q3</span><span class="catalyst-type ct-order">订单</span> MLU370-S4 边缘推理芯片出货量翻倍</div><div class="catalyst-item"><span class="catalyst-date">2026H2</span><span class="catalyst-type ct-policy">政策</span> 国家大基金三期追加投资预期落地</div><div class="catalyst-item"><span class="catalyst-date">2026Q4</span><span class="catalyst-type ct-tech">技术</span> 新一代思元 590 训练芯片流片</div><div class="catalyst-item"><span class="catalyst-date">2027Q1</span><span class="catalyst-type ct-capacity">产能</span> 合肥封测基地投产，产能提升 40%</div></div></div>
+    <div class="drawer-section"><h4>预期差分析（Alpha）</h4><dl class="drawer-kv"><dt>市场关注度</dt><dd>3.5 / 10</dd><dt>信息差</dt><dd>8.0 / 10</dd><dt>趋势加分</dt><dd style="color:var(--success)">+1.2</dd><dt>聪明钱加分</dt><dd style="color:var(--success)">+0.9</dd><dt>催化剂乘数</dt><dd>×1.15</dd><dt>Alpha 合计</dt><dd><strong style="color:var(--accent)">8.1</strong></dd><dt>推理说明</dt><dd style="font-size:12px">市场低估边缘推理芯片放量潜力，聪明钱已提前布局，催化剂密集期在 Q3-Q4</dd></dl></div>
+  </div>
+</div>
+</div>
+
+<!-- ═══ AI 图表解读弹窗 ═══ -->
+<div class="ai-interp-modal" id="ai-interp-modal" style="display:none" onclick="if(event.target===this)closeAiInterp()">
+<div class="ai-interp-panel">
+  <div class="ai-interp-header">
+    <h3>🤖 AI 图表解读</h3>
+    <button class="ai-interp-close" onclick="closeAiInterp()">✕</button>
+  </div>
+  <div class="ai-interp-body" id="ai-interp-body"></div>
+</div>
+</div>
+
+<!-- ═══ 右键菜单 ═══ -->
+<div class="ctx-menu" id="ctx-menu" style="display:none">
+  <h4>配置赛道参数</h4>
+  <div class="fg"><label>市场</label><select><option selected>A 股</option><option>美股</option></select></div>
+  <div class="fg"><label>产业方向</label><input type="text" value="GPU/AI算力"></div>
+  <div class="fg"><label>终端产品</label><input type="text" value="GPU"></div>
+  <div class="ctx-menu-btns">
+    <button class="btn btn-sm btn-secondary" onclick="hideCtxMenu()">取消</button>
+    <button class="btn btn-sm" style="color:var(--danger)" onclick="hideCtxMenu()">删除</button>
+    <button class="btn btn-sm btn-primary" onclick="hideCtxMenu()">保存</button>
+  </div>
+</div>
+
+<!-- ═══ 日志面板 ═══ -->
+<div class="log-panel">
+  <div class="log-header"><span>📋 运行日志</span><span style="cursor:pointer;font-size:11px">清空 | ▼</span></div>
+  <div class="log-body">
+    <div class="log-line"><span class="log-ts">[14:32:05]</span> Phase 1 启动 — 产业: GPU/AI算力, 产品: GPU</div>
+    <div class="log-line"><span class="log-ts">[14:32:06]</span> 参数: 深度=4, TopN=5, 主分析模型=deepseek/deepseek-chat</div>
+    <div class="log-line"><span class="log-ts">[14:32:08]</span> [decompose] 正在拆解第 1/4 层（1 个节点）...</div>
+    <div class="log-line"><span class="log-ts">[14:32:15]</span> [decompose] 正在拆解第 2/4 层（4 个节点）...</div>
+    <div class="log-line"><span class="log-ts">[14:32:28]</span> [decompose] 正在拆解第 3/4 层（12 个节点）...</div>
+    <div class="log-line"><span class="log-ts">[14:32:45]</span> [bottleneck] 瓶颈分析中 (8/20)...</div>
+    <div class="log-line log-ok"><span class="log-ts">[14:33:02]</span> Phase 1 完成 — analysis_id=abc123, 瓶颈报告 8 条</div>
+    <div class="log-line"><span class="log-ts">[14:33:05]</span> Phase 2 启动 — 搜索供应商并评估</div>
+    <div class="log-line"><span class="log-ts">[14:33:20]</span> [phase2] 已评估 10/45 家供应商...</div>
+    <div class="log-line log-ok"><span class="log-ts">[14:34:12]</span> Phase 2 完成 — 入围 15 家</div>
+  </div>
+</div>
+
+<script>
+function switchPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  const el=document.getElementById('page-'+id);
+  if(el)el.classList.add('active');
+  const steps=['start','phase1','phase2','phase3','phase4'];
+  const idx=steps.indexOf(id);
+  document.querySelectorAll('.sidebar-item').forEach((item,i)=>{
+    if(i<5){item.classList.remove('completed','active','disabled');
+      if(i<idx)item.classList.add('completed');
+      else if(i===idx)item.classList.add('active');
+    }
+  });
+}
+function toggleDrawer(){const d=document.getElementById('drawer');d.style.display=d.style.display==='none'?'flex':'none'}
+function toggleCvExpand(id){
+  const row=document.getElementById(id);
+  const arrow=document.getElementById(id.replace('cv','cv-a'));
+  if(row.classList.contains('open')){row.classList.remove('open');if(arrow)arrow.textContent='▶'}
+  else{row.classList.add('open');if(arrow)arrow.textContent='▼'}
+}
+function toggleP2Expand(id){
+  const row=document.getElementById(id);
+  if(row.classList.contains('open'))row.classList.remove('open');
+  else row.classList.add('open');
+}
+function showCtxMenu(e,btn){
+  e.preventDefault();
+  const menu=document.getElementById('ctx-menu');
+  menu.style.display='block';
+  menu.style.left=e.pageX+'px';
+  menu.style.top=e.pageY+'px';
+}
+function hideCtxMenu(){document.getElementById('ctx-menu').style.display='none'}
+document.addEventListener('click',e=>{if(!e.target.closest('.ctx-menu')&&!e.target.closest('.sector-btn'))hideCtxMenu()});
+
+/* 三态按钮 — Phase 1 */
+let p1State='start';
+function toggleP1Tristate(){
+  const btn=document.getElementById('p1-tristate');
+  if(p1State==='start'){
+    p1State='pause';btn.className='btn btn-sm btn-tristate state-pause';btn.textContent='⏸ 暂停分析';
+    document.getElementById('p1-progress-overlay').style.display='flex';
+  }else if(p1State==='pause'){
+    p1State='restart';btn.className='btn btn-sm btn-tristate state-restart';btn.textContent='↻ 重新分析';
+    document.getElementById('p1-progress-overlay').style.display='none';
+  }else{
+    p1State='pause';btn.className='btn btn-sm btn-tristate state-pause';btn.textContent='⏸ 暂停分析';
+    document.getElementById('p1-progress-overlay').style.display='flex';
+  }
+}
+
+/* 三态按钮 — Phase 3 */
+let p3State='start';
+function toggleP3Tristate(){
+  const btn=document.getElementById('p3-tristate');
+  if(p3State==='start'){
+    p3State='pause';btn.className='btn btn-sm btn-tristate state-pause';btn.textContent='⏸ 暂停评选';
+  }else if(p3State==='pause'){
+    p3State='restart';btn.className='btn btn-sm btn-tristate state-restart';btn.textContent='↻ 重新评选';
+  }else{
+    p3State='pause';btn.className='btn btn-sm btn-tristate state-pause';btn.textContent='⏸ 暂停评选';
+  }
+}
+
+/* Phase 2 总数更新 */
+function updateP2Total(){
+  const inputs=document.querySelectorAll('.layer-chip input[type="number"]');
+  let total=0;inputs.forEach(i=>total+=parseInt(i.value)||0);
+  document.getElementById('p2-total').textContent='合计: '+total+' 家';
+}
+
+/* AI 图表解读弹窗 */
+const interpTexts={
+  scatter:'<p><strong>散点图分析：</strong>本图展示了 6 家入围公司在「质量-预期差」二维空间中的分布。气泡大小代表最终评分。</p><p><strong>核心发现：</strong>图表呈现明显的两极分化 — 右上角（高质量+高预期差）为理想区域，目前仅英伟达微电子<span class="layer-badge L1">L1</span>接近该区域。寒武纪<span class="layer-badge L1">L1</span>虽预期差最高（8.1），但质量分偏低（6.2）。</p><p><strong>投资启示：</strong>当前权重设置有利于寒武纪等高信息差标的。若调高质量权重至 60%，英伟达微电子将跃升至第一。</p>',
+  radar:'<p><strong>雷达图分析：</strong>五维雷达图对比了入围公司在市场地位、客户验证、产能状况、财务健康、估值水平五个维度的表现。</p><p><strong>核心发现：</strong>中芯国际<span class="layer-badge L2">L2</span>在地位和客户两个维度显著领先。寒武纪<span class="layer-badge L1">L1</span>各维度较为均衡但整体偏小，基本面尚需加强。</p><p><strong>投资启示：</strong>雷达图面积最大的并非最终排名最高的公司，说明预期差因素对排名影响显著。</p>',
+  bar:'<p><strong>分组柱状图分析：</strong>横向对比各公司在质量、预期差、趋势、聪明钱四个关键因子上的得分。</p><p><strong>核心发现：</strong>寒武纪的预期差（alpha）独占鳌头（8.1），但质量分（6.2）在前五名中最低，形成显著的"跷跷板"效应。</p><p><strong>投资启示：</strong>若追求稳健投资，应关注四因子均高于均值的英伟达微电子和长电科技。</p>',
+  stack:'<p><strong>堆叠柱状图分析：</strong>将 Alpha 得分拆解为瓶颈×信息差、催化剂、趋势、聪明钱四个分项。</p><p><strong>核心发现：</strong>寒武纪的 Alpha 主要由"信息差"贡献（占比 45%），催化剂占 25%，说明市场对其边缘推理芯片的认知不足是核心驱动力。</p><p><strong>投资启示：</strong>信息差驱动的 Alpha 时效性最强，一旦市场注意力转移，预期差将快速收窄。建议在 Q3 催化剂落地前介入。</p>'
+};
+function showAiInterp(type){
+  document.getElementById('ai-interp-body').innerHTML=interpTexts[type]||'';
+  document.getElementById('ai-interp-modal').style.display='flex';
+}
+function closeAiInterp(){document.getElementById('ai-interp-modal').style.display='none'}
+
+/* Phase 4 图表切换 */
+function switchCvChart(btn,type){
+  const tabs=btn.parentElement;
+  tabs.querySelectorAll('.cv-chart-tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active');
+  const wrap=tabs.nextElementSibling;
+  if(type==='line')wrap.textContent='[ ECharts 堆叠折线图 — X轴: 技术壁垒/市场地位/财务健康/成长潜力/估值合理性/风险可控性 ]';
+  else wrap.textContent='[ ECharts 圆角堆叠柱状图 — X轴: 技术壁垒/市场地位/财务健康/成长潜力/估值合理性/风险可控性 ]';
+}
+</script>
+</body>
+</html>

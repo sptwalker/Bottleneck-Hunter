@@ -1,0 +1,171 @@
+"""Price data pipeline — fetch daily OHLCV + compute technical indicators.
+
+Uses yfinance for US stocks, same async pattern as chain/financial_data.py.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+from datetime import datetime, timezone
+
+import pandas as pd
+import yfinance as yf
+
+from bottleneck_hunter.watchlist.store import WatchlistStore
+
+logger = logging.getLogger(__name__)
+
+_SEM = asyncio.Semaphore(4)
+
+
+# ---------------------------------------------------------------------------
+# Technical indicators
+# ---------------------------------------------------------------------------
+
+def _compute_rsi(closes: list[float], period: int = 14) -> float | None:
+    if len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100.0 - 100.0 / (1.0 + rs), 2)
+
+
+def _compute_macd(closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[float, float, float] | None:
+    if len(closes) < slow + signal:
+        return None
+
+    def ema(data: list[float], period: int) -> list[float]:
+        result = [sum(data[:period]) / period]
+        k = 2.0 / (period + 1)
+        for v in data[period:]:
+            result.append(v * k + result[-1] * (1 - k))
+        return result
+
+    ema_fast = ema(closes, fast)
+    ema_slow = ema(closes, slow)
+    offset = slow - fast
+    macd_line = [ema_fast[i + offset] - ema_slow[i] for i in range(len(ema_slow))]
+    if len(macd_line) < signal:
+        return None
+    signal_line = ema(macd_line, signal)
+    hist = macd_line[-1] - signal_line[-1]
+    return round(macd_line[-1], 4), round(signal_line[-1], 4), round(hist, 4)
+
+
+def _compute_sma(closes: list[float], period: int) -> float | None:
+    if len(closes) < period:
+        return None
+    return round(sum(closes[-period:]) / period, 4)
+
+
+def _safe(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    except (ValueError, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Data fetching
+# ---------------------------------------------------------------------------
+
+def _fetch_daily_data(ticker: str, days: int = 180) -> list[dict]:
+    """Fetch OHLCV from yfinance and compute RSI/MACD/SMA. Synchronous."""
+    try:
+        t = yf.Ticker(ticker)
+        period = "1y" if days > 180 else "6mo"
+        df: pd.DataFrame = t.history(period=period)
+        if df is None or df.empty:
+            logger.warning("No price data for %s", ticker)
+            return []
+
+        closes = df["Close"].tolist()
+        volumes = df["Volume"].tolist()
+        opens = df["Open"].tolist()
+        highs = df["High"].tolist()
+        lows = df["Low"].tolist()
+
+        rsi = _compute_rsi(closes)
+        macd_result = _compute_macd(closes)
+        sma_20 = _compute_sma(closes, 20)
+        sma_50 = _compute_sma(closes, 50)
+
+        info = {}
+        try:
+            info = t.info or {}
+        except Exception:
+            pass
+
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result = []
+        for i in range(max(0, len(df) - days), len(df)):
+            date_str = df.index[i].strftime("%Y-%m-%d")
+            prev_close = closes[i - 1] if i > 0 else closes[i]
+            change_pct = ((closes[i] - prev_close) / prev_close * 100) if prev_close else 0.0
+            snap = {
+                "ticker": ticker,
+                "date": date_str,
+                "open": _safe(opens[i]),
+                "high": _safe(highs[i]),
+                "low": _safe(lows[i]),
+                "close": _safe(closes[i]),
+                "volume": int(volumes[i]) if volumes[i] else None,
+                "change_pct": round(change_pct, 2),
+                "fetched_at": now_iso,
+            }
+            # 技术指标只挂在最后一天
+            if i == len(df) - 1:
+                snap["rsi_14"] = rsi
+                snap["sma_20"] = sma_20
+                snap["sma_50"] = sma_50
+                snap["market_cap"] = _safe(info.get("marketCap"))
+                snap["pe_ratio"] = _safe(info.get("forwardPE") or info.get("trailingPE"))
+                if macd_result:
+                    snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
+            result.append(snap)
+        return result
+
+    except Exception as e:
+        logger.error("Price fetch failed for %s: %s", ticker, e)
+        return []
+
+
+async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180) -> str:
+    """Fetch one ticker asynchronously with semaphore. Returns status string."""
+    async with _SEM:
+        try:
+            snapshots = await asyncio.to_thread(_fetch_daily_data, ticker, days)
+            if snapshots:
+                store.save_snapshots(snapshots)
+                return "ok"
+            return "no_data"
+        except Exception as e:
+            logger.error("Price pipeline error for %s: %s", ticker, e)
+            return f"error: {e}"
+
+
+async def fetch_price_batch(tickers: list[str], store: WatchlistStore, days: int = 180) -> dict[str, str]:
+    """Batch-fetch daily prices for all watchlist tickers. Returns {ticker: status}."""
+    if not tickers:
+        return {}
+    tasks = {t: asyncio.create_task(_fetch_one(t, store, days)) for t in tickers}
+    results = {}
+    for ticker, task in tasks.items():
+        results[ticker] = await task
+    return results

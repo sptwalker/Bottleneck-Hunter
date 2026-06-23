@@ -1,0 +1,544 @@
+"""SSE streaming — phased pipeline functions."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections import defaultdict
+from collections.abc import AsyncGenerator
+
+from bottleneck_hunter.chain.bottleneck import BottleneckAnalyzer
+from bottleneck_hunter.chain.catalyst import CatalystAnalyzer
+from bottleneck_hunter.chain.cross_validation import CrossValidator
+from bottleneck_hunter.chain.decomposer import ChainDecomposer
+from bottleneck_hunter.chain.financial_data import fetch_batch
+from bottleneck_hunter.chain.models import MarketRegion
+from bottleneck_hunter.chain.smart_money import track_batch as smart_money_batch
+from bottleneck_hunter.chain.supplier_eval import AlphaScorer, FinalScorer, SupplierEvaluator
+from bottleneck_hunter.chain.supplier_search import SupplierSearcher
+from bottleneck_hunter.llm_clients.factory import create_llm
+from bottleneck_hunter.web import phase_cache
+
+from ._common import (
+    logger,
+    STEP_LABELS,
+    MARKET_MAP,
+    _sse,
+    _run_decompose_with_progress,
+    _run_bottleneck_with_progress,
+    _run_supplier_search_with_progress,
+    _run_supplier_eval_with_progress,
+)
+
+
+# ===========================================================================
+# Phase 分步流水线
+# ===========================================================================
+
+
+async def stream_phase1(
+    *,
+    sector: str,
+    end_product: str,
+    max_depth: int = 3,
+    top_n: int = 5,
+    language: str = "zh",
+    provider: str = "openai",
+    model: str = "",
+    market: str = "us_stock",
+    max_market_cap_yi: float | None = 200,
+    store=None,
+) -> AsyncGenerator[dict, None]:
+    """Phase 1: 产业链拆解 + 瓶颈分析。返回 ALL 瓶颈报告。"""
+    import uuid as _uuid
+
+    analysis_id = str(_uuid.uuid4())
+
+    try:
+        deep_llm = create_llm(provider, model)
+    except Exception as e:
+        yield _sse("error", step="init", message=f"LLM 初始化失败: {e}")
+        return
+
+    # ── 拆解 ──
+    try:
+        yield _sse("step_start", step="decompose", index=0, message=STEP_LABELS["decompose"])
+        decomposer = ChainDecomposer(
+            llm=deep_llm, max_depth=max_depth, sector=sector, language=language,
+        )
+        queue = asyncio.Queue()
+        task = asyncio.create_task(
+            _run_decompose_with_progress(decomposer, end_product, queue)
+        )
+        max_batches_per_layer = 8
+        total_timeout = (
+            max_depth * max_batches_per_layer
+            * decomposer.LLM_TIMEOUT * (decomposer.MAX_RETRIES + 1)
+            // decomposer.MAX_CONCURRENCY
+            + decomposer.LLM_TIMEOUT
+        )
+        total_timeout = min(total_timeout, 1800)
+        deadline = asyncio.get_event_loop().time() + total_timeout
+
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                task.cancel()
+                raise TimeoutError(f"产业链拆解超时（已等待 {total_timeout}s）")
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=min(30.0, remaining))
+                if event is None:
+                    break
+                yield event
+            except asyncio.TimeoutError:
+                if task.done():
+                    break
+
+        chain = await task
+        yield _sse("step_done", step="decompose", index=0, result=chain.model_dump())
+    except Exception as e:
+        logger.exception("Phase1 decompose failed")
+        yield _sse("error", step="decompose", message=str(e))
+        return
+
+    # ── 瓶颈 ──
+    try:
+        yield _sse("step_start", step="bottleneck", index=1, message=STEP_LABELS["bottleneck"])
+        analyzer = BottleneckAnalyzer(llm=deep_llm, language=language)
+        bn_queue = asyncio.Queue()
+        bn_task = asyncio.create_task(
+            _run_bottleneck_with_progress(analyzer, chain, top_n, bn_queue)
+        )
+        while True:
+            try:
+                event = await asyncio.wait_for(bn_queue.get(), timeout=30.0)
+                if event is None:
+                    break
+                yield event
+            except asyncio.TimeoutError:
+                if bn_task.done():
+                    break
+
+        all_reports = await bn_task
+        failed_nodes = analyzer.failed_nodes
+
+        # 按层取 top_n
+        layer_groups: dict[int, list] = defaultdict(list)
+        for r in all_reports:
+            if r.layer > 0:
+                layer_groups[r.layer].append(r)
+        top_reports = []
+        for layer in sorted(layer_groups.keys()):
+            sorted_group = sorted(layer_groups[layer], key=lambda x: x.overall_score, reverse=True)
+            top_reports.extend(sorted_group[:top_n])
+
+        yield _sse("step_done", step="bottleneck", index=1,
+                   result=[r.model_dump() for r in top_reports],
+                   failed_nodes=failed_nodes)
+    except Exception as e:
+        logger.exception("Phase1 bottleneck failed")
+        yield _sse("error", step="bottleneck", message=str(e))
+        return
+
+    # ── 缓存 + 持久化 ──
+    phase1_data = {
+        "chain": chain.model_dump(),
+        "all_reports": [r.model_dump() for r in all_reports],
+        "top_reports": [r.model_dump() for r in top_reports],
+        "failed_nodes": failed_nodes,
+        "config": {"sector": sector, "end_product": end_product, "max_depth": max_depth,
+                   "top_n": top_n, "language": language, "provider": provider, "model": model},
+    }
+    phase_cache.set_phase(analysis_id, 1, phase1_data)
+
+    if store:
+        try:
+            from types import SimpleNamespace
+            cfg = SimpleNamespace(
+                sector=sector, end_product=end_product, provider=provider,
+                model=model, market=market, max_depth=max_depth,
+                top_n=top_n, max_market_cap_yi=max_market_cap_yi, language=language,
+            )
+            result_dict = {
+                "sector": sector, "chain": chain.model_dump(),
+                "bottleneck_reports": [r.model_dump() for r in all_reports],
+                "supplier_scorecards": [], "cross_validations": [], "top_picks": [],
+            }
+            saved_id, saved_seq = store.save(cfg, result_dict)
+            analysis_id = saved_id
+            phase_cache.clear(phase1_data.get("_old_aid", ""))
+            phase_cache.set_phase(analysis_id, 1, phase1_data)
+        except Exception:
+            logger.exception("Phase1 保存失败")
+
+    yield _sse("phase1_complete", analysis_id=analysis_id, seq_no=locals().get("saved_seq", 0), **phase1_data)
+
+
+async def stream_phase2(
+    *,
+    analysis_id: str,
+    per_layer_top_n: int = 8,
+    layer_top_n: dict[str, int] | None = None,
+    min_overall_score: float = 0.0,
+    max_shortlist_count: int = 30,
+    market: str = "us_stock",
+    max_market_cap_yi: float | None = 200,
+    max_suppliers: int = 20,
+    language: str = "zh",
+    provider: str = "openai",
+    model: str = "",
+    store=None,
+) -> AsyncGenerator[dict, None]:
+    """Phase 2: 入围筛选（搜索+财务+评估+催化剂+Alpha）。"""
+    from bottleneck_hunter.chain.models import BottleneckReport, ChainGraph
+
+    logger.info("[stream-phase2] 启动 | provider=%s | model=%s | analysis_id=%s", provider, model, analysis_id)
+
+    p1 = phase_cache.get_phase(analysis_id, 1)
+    if not p1:
+        yield _sse("error", step="init", message="Phase 1 数据未找到，请先运行 Phase 1")
+        return
+
+    try:
+        deep_llm = create_llm(provider, model)
+        llm_info = f"{provider}/{getattr(deep_llm, 'model_name', None) or getattr(deep_llm, 'model', model)}"
+        logger.info("[stream-phase2] LLM创建成功 | %s | base_url=%s",
+                     llm_info, getattr(getattr(deep_llm, 'client', None), '_base_url', '未知'))
+    except Exception as e:
+        yield _sse("error", step="init", message=f"LLM 初始化失败: {e}")
+        return
+
+    market_enum = MARKET_MAP.get(market, MarketRegion.A_STOCK)
+    chain = ChainGraph(**p1["chain"])
+    all_reports = [BottleneckReport(**r) for r in p1["all_reports"]]
+
+    # 按层取 per_layer_top_n
+    layer_groups: dict[int, list] = defaultdict(list)
+    for r in all_reports:
+        if r.layer > 0:
+            layer_groups[r.layer].append(r)
+    top_reports = []
+    for layer in sorted(layer_groups.keys()):
+        count = int(layer_top_n.get(str(layer), per_layer_top_n)) if layer_top_n else per_layer_top_n
+        sorted_group = sorted(layer_groups[layer], key=lambda x: x.overall_score, reverse=True)
+        top_reports.extend(sorted_group[:count])
+
+    # ── 供应商搜索 ──
+    yield _sse("step_progress", step="init", message=f"模型: {llm_info}", log=True)
+    try:
+        yield _sse("step_start", step="supplier_search", index=0, message=STEP_LABELS["supplier_search"])
+        searcher = SupplierSearcher(
+            market=market_enum, max_market_cap_yi=max_market_cap_yi,
+            max_results=min(max_suppliers, 10), language=language, llm=deep_llm,
+        )
+        ss_queue = asyncio.Queue()
+        ss_task = asyncio.create_task(
+            _run_supplier_search_with_progress(searcher, top_reports, ss_queue, chain_graph=chain)
+        )
+        while True:
+            try:
+                event = await asyncio.wait_for(ss_queue.get(), timeout=30.0)
+                if event is None:
+                    break
+                yield event
+            except asyncio.TimeoutError:
+                if ss_task.done():
+                    break
+
+        supplier_map = await ss_task
+        total_suppliers = sum(len(v) for v in supplier_map.values())
+        yield _sse("step_progress", step="supplier_search",
+                   message=f"供应商检索完成: 共 {total_suppliers} 家", log=True)
+
+        flat = []
+        for node_name, suppliers in supplier_map.items():
+            for s in suppliers:
+                flat.append({**s.model_dump(), "_bottleneck_node": node_name})
+        yield _sse("step_done", step="supplier_search", index=0, result=flat)
+    except Exception as e:
+        logger.exception("Phase2 supplier search failed")
+        yield _sse("error", step="supplier_search", message=str(e))
+        return
+
+    # ── 财务 + 聪明钱（并行） ──
+    financial_map = {}
+    smart_money_map = {}
+    failed_tickers = []
+    try:
+        all_suppliers = [s for sl in supplier_map.values() for s in sl]
+        if all_suppliers:
+            yield _sse("step_start", step="financial_fetch", index=1, message=STEP_LABELS["financial_fetch"])
+            fin_task = fetch_batch(all_suppliers)
+            sm_task = smart_money_batch(all_suppliers)
+            (financial_map, fin_failed), (smart_money_map, sm_failed) = await asyncio.gather(fin_task, sm_task)
+            failed_tickers = list(set(fin_failed + sm_failed))
+            yield _sse("step_done", step="financial_fetch", index=1,
+                       result={"fetched": len(financial_map), "smart_money": len(smart_money_map),
+                               "failed_tickers": failed_tickers})
+    except Exception as e:
+        logger.exception("Phase2 financial fetch failed")
+        yield _sse("step_done", step="financial_fetch", index=1, result={}, error=str(e))
+
+    # ── 供应商评估 ──
+    scorecards = []
+    try:
+        yield _sse("step_start", step="supplier_eval", index=2, message=STEP_LABELS["supplier_eval"])
+        evaluator = SupplierEvaluator(llm=deep_llm, language=language)
+        se_queue = asyncio.Queue()
+        se_task = asyncio.create_task(
+            _run_supplier_eval_with_progress(evaluator, supplier_map, top_reports, se_queue, financial_map=financial_map)
+        )
+
+        import time as _time
+        se_start_ts = _time.monotonic()
+        se_heartbeat_count = 0
+        se_eval_done = 0
+        se_eval_current = ""
+
+        while True:
+            try:
+                event = await asyncio.wait_for(se_queue.get(), timeout=15.0)
+                if event is None:
+                    break
+                yield event
+                msg = event.get("data", "")
+                if "✓" in msg or "✗" in msg:
+                    se_eval_done += 1
+                if "▸" in msg:
+                    try:
+                        import json as _json
+                        d = _json.loads(msg) if isinstance(msg, str) else msg
+                        se_eval_current = d.get("message", "")
+                    except Exception:
+                        pass
+            except asyncio.TimeoutError:
+                if se_task.done():
+                    break
+                se_heartbeat_count += 1
+                elapsed = _time.monotonic() - se_start_ts
+                eta_str = ""
+                if se_eval_done > 0:
+                    per_item = elapsed / se_eval_done
+                    remaining = (total_suppliers - se_eval_done) * per_item
+                    eta_str = f"，预计还需 {int(remaining)}s"
+                yield _sse("step_progress", step="supplier_eval",
+                           message=f"▸ 评估中... 已耗时 {int(elapsed)}s ({se_eval_done}/{total_suppliers}{eta_str})", log=False)
+        scorecards = await se_task
+
+        # 挂载聪明钱
+        if smart_money_map:
+            for sc in scorecards:
+                sm = smart_money_map.get(sc.supplier.ticker)
+                if sm:
+                    sc.smart_money = sm
+
+        # Alpha + 初步 FinalScore（用于入围筛选）
+        bn_score_map = {r.node_name: r.overall_score for r in all_reports}
+        AlphaScorer.score_all(scorecards, bn_score_map)
+        FinalScorer.score_all(scorecards)
+
+        yield _sse("step_done", step="supplier_eval", index=2,
+                   result=[sc.model_dump() for sc in scorecards])
+    except Exception as e:
+        logger.exception("Phase2 supplier eval failed")
+        yield _sse("error", step="supplier_eval", message=str(e))
+        return
+
+    # ── ShortlistConfig 筛选（用 final_score 排序，保住高alpha潜力股） ──
+    total_before = len(scorecards)
+    if min_overall_score > 0:
+        scorecards = [sc for sc in scorecards
+                      if (sc.final and sc.final.final_score >= min_overall_score)
+                      or sc.overall_score >= min_overall_score]
+    scorecards.sort(key=lambda s: s.final.final_score if s.final else s.overall_score, reverse=True)
+    if max_shortlist_count and len(scorecards) > max_shortlist_count:
+        scorecards = scorecards[:max_shortlist_count]
+
+    yield _sse("step_progress", step="filter",
+               message=f"筛选完成: {total_before} → {len(scorecards)} 家入围", log=True)
+
+    # ── 催化剂（仅对入围公司） ──
+    try:
+        yield _sse("step_start", step="catalyst", index=3,
+                   message=f"{STEP_LABELS['catalyst']}（{len(scorecards)} 家）")
+        catalyst_analyzer = CatalystAnalyzer(llm=deep_llm, language=language)
+        bn_report_map = {r.node_name: r for r in all_reports}
+
+        cat_queue: asyncio.Queue = asyncio.Queue()
+        cat_total = len(scorecards)
+        cat_done = 0
+        cat_current = ""
+        import time as _time
+        cat_start_ts = _time.monotonic()
+
+        llm_name = getattr(deep_llm, 'model_name', None) or getattr(deep_llm, 'model', 'unknown')
+        logger.info("[streaming-catalyst] 启动 | 入围=%d家 | 模型=%s", cat_total, llm_name)
+
+        async def _cat_progress(msg):
+            nonlocal cat_done, cat_current
+            if msg.startswith("▸"):
+                cat_current = msg[2:].strip()
+                await cat_queue.put(_sse("step_progress", step="catalyst",
+                                        message=f"▸ {cat_current} ({cat_done}/{cat_total})", log=True))
+            elif msg.startswith("✓") or msg.startswith("✗"):
+                cat_done += 1
+                await cat_queue.put(_sse("step_progress", step="catalyst",
+                                        message=f"{msg} ({cat_done}/{cat_total})", log=True))
+            elif msg.startswith("⊘") or msg.startswith("📊"):
+                await cat_queue.put(_sse("step_progress", step="catalyst",
+                                        message=msg, log=True))
+
+        catalyst_analyzer._on_progress = _cat_progress
+
+        async def _run_catalyst():
+            await catalyst_analyzer.analyze_batch(scorecards, bn_report_map)
+            await cat_queue.put(None)
+
+        cat_task = asyncio.create_task(_run_catalyst())
+        heartbeat_count = 0
+        while True:
+            try:
+                event = await asyncio.wait_for(cat_queue.get(), timeout=8.0)
+                if event is None:
+                    break
+                yield event
+            except asyncio.TimeoutError:
+                if cat_task.done():
+                    break
+                heartbeat_count += 1
+                elapsed = _time.monotonic() - cat_start_ts
+                eta_str = ""
+                if cat_done > 0:
+                    per_item = elapsed / cat_done
+                    remaining = (cat_total - cat_done) * per_item
+                    eta_str = f"，预计还需 {int(remaining)}s"
+                current_label = f" — {cat_current}" if cat_current else ""
+                logger.info("[streaming-catalyst] 心跳 #%d | 已完成=%d/%d | 已耗时=%.0fs%s",
+                             heartbeat_count, cat_done, cat_total, elapsed,
+                             f" | 当前={cat_current}" if cat_current else "")
+                yield _sse("step_progress", step="catalyst",
+                           message=f"▸ 催化剂分析中{current_label} ({cat_done}/{cat_total}{eta_str})", log=False)
+        await cat_task
+
+        total_elapsed = _time.monotonic() - cat_start_ts
+        logger.info("[streaming-catalyst] 完成 | 总耗时=%.1fs | 心跳数=%d", total_elapsed, heartbeat_count)
+
+        bn_score_map = {r.node_name: r.overall_score for r in all_reports}
+        AlphaScorer.score_all(scorecards, bn_score_map)
+        FinalScorer.score_all(scorecards)
+        yield _sse("step_done", step="catalyst", index=3, result=[])
+    except Exception as e:
+        logger.exception("Phase2 catalyst failed")
+        yield _sse("step_done", step="catalyst", index=3, result=[], error=str(e))
+
+    # ── 缓存 + 持久化 ──
+    phase2_data = {
+        "scorecards": [sc.model_dump() for sc in scorecards],
+        "config": {
+            "per_layer_top_n": per_layer_top_n, "min_overall_score": min_overall_score,
+            "max_shortlist_count": max_shortlist_count, "market": market,
+        },
+        "stats": {"total_searched": total_suppliers, "after_eval": total_before, "after_filter": len(scorecards)},
+        "failed_tickers": failed_tickers,
+    }
+    phase_cache.set_phase(analysis_id, 2, phase2_data)
+
+    if store:
+        try:
+            store.update_suppliers(analysis_id, [sc.model_dump() for sc in scorecards],
+                                   max_market_cap_yi=max_market_cap_yi)
+        except Exception:
+            logger.exception("Phase2 保存失败")
+
+    sc_count = len(phase2_data.get("scorecards", []))
+    logger.info("[stream-phase2] 准备发送 phase2_complete | scorecards=%d", sc_count)
+    try:
+        evt = _sse("phase2_complete", analysis_id=analysis_id, **phase2_data)
+        data_len = len(evt.get("data", ""))
+        logger.info("[stream-phase2] phase2_complete 事件已构建 | data长度=%d chars", data_len)
+        yield evt
+        logger.info("[stream-phase2] phase2_complete 已yield")
+    except Exception:
+        logger.exception("[stream-phase2] phase2_complete 发送失败")
+
+
+async def stream_phase4(
+    *,
+    analysis_id: str,
+    top_n: int = 10,
+    validation_models: list[dict] | None = None,
+    language: str = "zh",
+    store=None,
+) -> AsyncGenerator[dict, None]:
+    """Phase 4: 交叉验证 top N 公司。"""
+    from bottleneck_hunter.chain.models import SupplierScorecard
+
+    p2 = phase_cache.get_phase(analysis_id, 2)
+    if not p2 and store:
+        logger.info("[stream-phase4] cache miss, 尝试从数据库恢复 Phase 2 | analysis_id=%s", analysis_id)
+        record = store.get(analysis_id)
+        if record and record.get("result_json", {}).get("supplier_scorecards"):
+            p2 = {
+                "scorecards": record["result_json"]["supplier_scorecards"],
+                "config": {"market": record.get("market", "us_stock")},
+            }
+            phase_cache.set_phase(analysis_id, 2, p2)
+            logger.info("[stream-phase4] 从数据库恢复 Phase 2 成功 | scorecards=%d", len(p2["scorecards"]))
+    if not p2:
+        yield _sse("error", step="init", message="Phase 2 数据未找到，请先运行 Phase 2")
+        return
+
+    if not validation_models:
+        yield _sse("error", step="init", message="未配置验证模型")
+        return
+
+    scorecards = [SupplierScorecard(**d) for d in p2["scorecards"]]
+
+    # 用 final_score 排序（如果有），否则用 overall_score
+    def sort_key(sc):
+        if sc.final:
+            return sc.final.final_score
+        return sc.overall_score
+    scorecards.sort(key=sort_key, reverse=True)
+    top_scorecards = scorecards[:top_n]
+
+    if not top_scorecards:
+        yield _sse("error", step="cross_validate", message="没有可验证的公司")
+        return
+
+    yield _sse("step_start", step="cross_validate", index=0,
+               message=f"正在对 top {len(top_scorecards)} 家公司进行交叉验证...")
+
+    try:
+        validator = CrossValidator(validation_models=validation_models, language=language)
+        validations = await validator.validate_all(top_scorecards)
+        yield _sse("step_done", step="cross_validate", index=0,
+                   result=[v.model_dump() for v in validations])
+    except Exception as e:
+        logger.exception("Phase4 cross-validation failed")
+        yield _sse("error", step="cross_validate", message=str(e))
+        return
+
+    recommendations = []
+    for cv in validations:
+        sc = next((s for s in top_scorecards if s.supplier.ticker == cv.ticker), None)
+        recommendations.append({
+            "ticker": cv.ticker, "name": cv.supplier_name,
+            "final_score": sc.final.final_score if sc and sc.final else sc.overall_score if sc else 0,
+            "consensus": cv.consensus_score,
+            "pass_fail": "pass" if cv.consensus_score >= 7.5 else ("concern" if cv.consensus_score >= 5 else "fail"),
+        })
+
+    phase4_data = {
+        "validations": [v.model_dump() for v in validations],
+        "recommendations": recommendations,
+    }
+    phase_cache.set_phase(analysis_id, 4, phase4_data)
+
+    if store:
+        try:
+            store.update_cross_validations(analysis_id, [v.model_dump() for v in validations])
+        except Exception:
+            logger.exception("Phase4 保存失败")
+
+    yield _sse("phase4_complete", analysis_id=analysis_id, **phase4_data)

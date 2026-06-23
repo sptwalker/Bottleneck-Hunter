@@ -7,6 +7,7 @@ import {
   renderChain, renderBottlenecks, renderSuppliers,
   renderValidation, renderPicks, renderShortlist,
 } from './dashboard.js';
+import { restorePanelFromHistory } from './panel.js';
 
 const MARKET_LABELS = {
   a_stock: 'A 股',
@@ -52,11 +53,19 @@ function renderHistoryList(analyses) {
     const providerModel = [a.provider, a.model].filter(Boolean).join(' / ') || '—';
     const marketLabel = MARKET_LABELS[a.market] || a.market || '—';
     const depthLabel = a.max_depth ? `${a.max_depth}层` : '—';
+    const seqLabel = a.seq_no ? `#${a.seq_no}` : '';
+    const cp = a.completed_phases || 0;
+    const PHASE_NAMES = ['瓶颈', '筛选', '验证', '会议'];
+    const phaseDots = PHASE_NAMES.map((n, i) =>
+      `<span class="phase-dot ${i < cp ? 'phase-done' : ''}" title="${n}">${n}</span>`
+    ).join('');
 
     return `
       <div class="history-card" data-id="${esc(a.id)}">
         <div class="history-card-header">
+          ${seqLabel ? `<span class="history-seq">${esc(seqLabel)}</span>` : ''}
           <span class="history-sector">${esc(a.sector)}</span>
+          <span class="history-phase-progress">${phaseDots}</span>
           <span class="history-date">${esc(date)}</span>
         </div>
         <div class="history-card-body">
@@ -100,7 +109,7 @@ async function loadAnalysis(id) {
     // Store into appState so dashboard refresh works
     window.appState.results = {};
     window.appState.config = {
-      market: record.market || 'a_stock',
+      market: record.market || 'us_stock',
       provider: record.provider || 'openai',
       model: record.model || '',
       language: record.language || 'zh',
@@ -109,6 +118,8 @@ async function loadAnalysis(id) {
       sector: record.sector || '',
       end_product: record.end_product || '',
     };
+
+    restorePanelFromHistory(window.appState.config);
 
     // Render chain
     if (result.chain) {

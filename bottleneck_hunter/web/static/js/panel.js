@@ -13,7 +13,7 @@ const DEFAULT_MODELS = {
   google: 'gemini-2.5-flash',
   qwen: 'qwen-plus',
   glm: 'glm-4-plus',
-  ollama: 'qwen2.5',
+  minimax: 'MiniMax-Text-01',
   openrouter: 'deepseek/deepseek-chat',
   siliconflow: 'deepseek-ai/DeepSeek-V3',
   agnes: 'agnes-2.0-flash',
@@ -236,13 +236,15 @@ export function syncProviderFromSettings(providerList, testedIds) {
   const providerSelect = document.getElementById('llm-provider');
   const modelInput = document.getElementById('llm-model');
 
-  const currentConfigured = _configuredProviders.find(p => p.id === providerSelect.value);
-  if (!currentConfigured) {
-    const firstId = _configuredProviders[0].id;
-    if (providerSelect.querySelector(`option[value="${firstId}"]`)) {
-      providerSelect.value = firstId;
-      const def = DEFAULT_MODELS[firstId];
-      if (def) modelInput.value = def;
+  if (providerSelect && modelInput) {
+    const currentConfigured = _configuredProviders.find(p => p.id === providerSelect.value);
+    if (!currentConfigured) {
+      const firstId = _configuredProviders[0].id;
+      if (providerSelect.querySelector(`option[value="${firstId}"]`)) {
+        providerSelect.value = firstId;
+        const def = DEFAULT_MODELS[firstId];
+        if (def) modelInput.value = def;
+      }
     }
   }
 
@@ -256,6 +258,77 @@ function _escapeHtml(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/* ── 从历史记录还原侧边栏参数，锁定 market 和 depth ── */
+export function restorePanelFromHistory(config) {
+  const sectorSelect = document.getElementById('sector-select');
+  const customGroup = document.getElementById('custom-sector-group');
+  const endProductInput = document.getElementById('end-product');
+
+  // sector
+  const matched = sectorSelect.querySelector(`option[value="${config.sector}"]`);
+  if (matched) {
+    sectorSelect.value = config.sector;
+    customGroup.style.display = 'none';
+  } else {
+    sectorSelect.value = 'custom';
+    customGroup.style.display = '';
+    document.getElementById('custom-sector').value = config.sector || '';
+  }
+  sectorSelect.disabled = true;
+  const customInput = document.getElementById('custom-sector');
+  if (customInput) customInput.disabled = true;
+
+  // end_product
+  endProductInput.value = config.end_product || '';
+  endProductInput.disabled = true;
+
+  // max_depth — lock
+  document.querySelectorAll('input[name="max_depth"]').forEach(r => {
+    r.checked = String(r.value) === String(config.max_depth || 4);
+    r.disabled = true;
+  });
+
+  // market — lock
+  document.querySelectorAll('input[name="market"]').forEach(r => {
+    r.checked = r.value === (config.market || 'us_stock');
+    r.disabled = true;
+  });
+
+  // top_n
+  const topN = document.getElementById('top-n');
+  if (topN && config.top_n) topN.value = String(config.top_n);
+
+  // language
+  const lang = document.getElementById('language');
+  if (lang && config.language) lang.value = config.language;
+
+  // provider + model
+  const providerSelect = document.getElementById('llm-provider');
+  const modelInput = document.getElementById('llm-model');
+  if (config.provider && providerSelect.querySelector(`option[value="${config.provider}"]`)) {
+    providerSelect.value = config.provider;
+  }
+  if (config.model) modelInput.value = config.model;
+
+  // max_cap, max_suppliers — keep editable with current DOM defaults
+
+  // 隐藏"开始分析"按钮（历史模式不需要）
+  const startBtn = document.getElementById('btn-start');
+  if (startBtn) startBtn.style.display = 'none';
+}
+
+/* ── 解除历史模式锁定，恢复侧边栏为可编辑状态 ── */
+export function unlockPanel() {
+  document.getElementById('sector-select').disabled = false;
+  const customInput = document.getElementById('custom-sector');
+  if (customInput) customInput.disabled = false;
+  document.getElementById('end-product').disabled = false;
+  document.querySelectorAll('input[name="max_depth"]').forEach(r => r.disabled = false);
+  document.querySelectorAll('input[name="market"]').forEach(r => r.disabled = false);
+  const startBtn = document.getElementById('btn-start');
+  if (startBtn) startBtn.style.display = '';
 }
 
 export { collectCvModels, DEFAULT_MODELS, ensureProvidersLoaded };
