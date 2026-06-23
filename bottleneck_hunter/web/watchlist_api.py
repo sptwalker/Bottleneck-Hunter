@@ -7,6 +7,7 @@ before /{entry_id} to avoid being swallowed by the path parameter.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
