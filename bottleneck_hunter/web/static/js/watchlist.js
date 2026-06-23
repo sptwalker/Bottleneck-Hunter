@@ -11,6 +11,9 @@ const wlState = {
   total: 0,
   budget: null,
   refreshing: false,
+  refreshingIntel: false,
+  refreshingStrategy: false,
+  strategyCache: {},
   viewMode: 'table',
   filterTier: 'all',
   sortBy: 'tier',
@@ -162,6 +165,16 @@ function renderTable() {
       : '';
     const name = entry.company_name_cn || entry.company_name || entry.ticker;
 
+    // 策略信号
+    const strat = wlState.strategyCache[entry.id];
+    const stratSignal = strat ? strat.signal : '';
+    const stratConf = strat ? strat.confidence : '';
+    const stratBadge = stratSignal
+      ? `<span class="wl-strategy-badge wl-strategy-${stratSignal}">${
+          stratSignal === 'bullish' ? '看多' : stratSignal === 'bearish' ? '看空' : '中性'
+        } <span style="opacity:0.7">${stratConf}</span></span>`
+      : '<span style="color:var(--muted);font-size:var(--fs-xs)">--</span>';
+
     return `
       <tr data-id="${entry.id}" data-ticker="${entry.ticker}">
         <td><span class="wl-tier-badge wl-tier-badge--${entry.tier}"><span class="wl-tier-dot wl-dot-${entry.tier}"></span>${tierLabel(entry.tier)}</span></td>
@@ -172,6 +185,7 @@ function renderTable() {
         <td class="col-num">${rsi}</td>
         <td class="col-num">${macd.html}</td>
         <td class="col-num wl-score-cell ${scoreClass}">${score}</td>
+        <td class="col-num">${stratBadge}</td>
         <td style="font-size:var(--fs-xs);color:var(--muted)">${entry.sector || ''}</td>
         <td>
           <div class="wl-row-actions">
@@ -384,6 +398,9 @@ async function loadDrawerTabData(entry, tab) {
       break;
     case 'capital':
       await loadCapitalTab(entry);
+      break;
+    case 'strategy':
+      await loadStrategyTab(entry);
       break;
     case 'uzi':
       await loadUziTab(entry);
@@ -1444,6 +1461,136 @@ export function hideP4WatchlistActions() {
   if (el) el.style.display = 'none';
 }
 
+/* ── Strategy Brain Functions ──────────────────────────── */
+
+async function loadStrategySummaries() {
+  try {
+    const data = await apiFetch('/strategy-summaries');
+    wlState.strategyCache = data.summaries || {};
+    render();
+  } catch (e) {
+    console.error('Failed to load strategy summaries:', e);
+  }
+}
+
+function initRefreshIntel() {
+  const btn = document.getElementById('wl-btn-refresh-intel');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (wlState.refreshingIntel) return;
+    wlState.refreshingIntel = true;
+    btn.textContent = '聚合中...';
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/refresh-intelligence`, { method: 'POST' });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value);
+        const lines = text.split('\n').filter(l => l.startsWith('data:'));
+        for (const line of lines) {
+          const evt = JSON.parse(line.substring(5));
+          if (evt.event === 'intel_done') {
+            console.log('Intelligence refresh completed');
+          }
+        }
+      }
+      await loadWatchlist();
+    } catch (e) {
+      alert(`刷新失败: ${e.message}`);
+    } finally {
+      wlState.refreshingIntel = false;
+      btn.textContent = '刷新信息';
+      btn.disabled = false;
+    }
+  });
+}
+
+function initRefreshStrategy() {
+  const btn = document.getElementById('wl-btn-refresh-strategy');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (wlState.refreshingStrategy) return;
+    wlState.refreshingStrategy = true;
+    btn.textContent = '生成中...';
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/refresh-strategy`, { method: 'POST' });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value);
+        const lines = text.split('\n').filter(l => l.startsWith('data:'));
+        for (const line of lines) {
+          const evt = JSON.parse(line.substring(5));
+          if (evt.event === 'strategy_done') {
+            console.log('Strategy refresh completed');
+          }
+        }
+      }
+      await loadStrategySummaries();
+    } catch (e) {
+      alert(`更新失败: ${e.message}`);
+    } finally {
+      wlState.refreshingStrategy = false;
+      btn.textContent = '刷新策略';
+      btn.disabled = false;
+    }
+  });
+}
+
+async function loadStrategyTab(entry) {
+  const pane = document.getElementById('wl-tab-strategy');
+  if (!pane) return;
+  pane.innerHTML = '<div style="text-align:center;padding:24px;color:var(--muted)">加载中...</div>';
+  try {
+    const data = await apiFetch(`/${entry.id}/strategy`);
+    const strategy = data.strategy;
+    if (!strategy) {
+      pane.innerHTML = '<div style="padding:20px;color:var(--muted)">暂无策略记录。请先点击"刷新信息"聚合数据，再点击"刷新策略"生成操作策略。</div>';
+      return;
+    }
+    const signalLabel = {bullish: '看多', neutral: '中性', bearish: '看空'}[strategy.signal] || '中性';
+    const signalClass = `wl-strategy-signal-${strategy.signal}`;
+    pane.innerHTML = `
+      <div class="wl-strategy-detail">
+        <div class="wl-strategy-header">
+          <div class="wl-strategy-signal ${signalClass}">${signalLabel} <span style="opacity:0.6">v${strategy.version}</span></div>
+          <div style="flex:1"></div>
+          <div style="font-size:var(--fs-sm)">信心：${strategy.confidence}/10</div>
+        </div>
+        <div class="wl-strategy-section">
+          <h4>情报摘要</h4>
+          <p>${escHtml(strategy.intelligence_summary)}</p>
+        </div>
+        <div class="wl-strategy-section">
+          <h4>核心逻辑</h4>
+          <p>${escHtml(strategy.core_logic)}</p>
+        </div>
+        <div class="wl-strategy-section">
+          <h4>操作策略</h4>
+          <pre style="white-space:pre-wrap;font-size:var(--fs-sm)">${escHtml(JSON.stringify(JSON.parse(strategy.action_strategy || '{}'), null, 2))}</pre>
+        </div>
+        <div class="wl-strategy-section">
+          <h4>风险控制</h4>
+          <pre style="white-space:pre-wrap;font-size:var(--fs-sm)">${escHtml(JSON.stringify(JSON.parse(strategy.risk_control || '{}'), null, 2))}</pre>
+        </div>
+      </div>`;
+  } catch (e) {
+    pane.innerHTML = `<div style="color:var(--danger);padding:16px">${escHtml(e.message)}</div>`;
+  }
+}
+
+function escHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 /* ── Init ─────────────────────────────────────────────── */
 
 export function initWatchlist() {
@@ -1453,7 +1600,10 @@ export function initWatchlist() {
   initCardActions();
   initDrawer();
   initRefresh();
+  initRefreshIntel();
+  initRefreshStrategy();
   loadWatchlist();
   loadBudget();
   loadPipelineStatus();
+  loadStrategySummaries();
 }

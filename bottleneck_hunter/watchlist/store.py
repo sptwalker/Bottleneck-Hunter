@@ -172,6 +172,52 @@ CREATE TABLE IF NOT EXISTS uzi_analyses (
     trap_level    TEXT,
     FOREIGN KEY (entry_id) REFERENCES watchlist(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS stock_intelligence (
+    id              TEXT PRIMARY KEY,
+    entry_id        TEXT NOT NULL,
+    ticker          TEXT NOT NULL,
+    version         INTEGER NOT NULL DEFAULT 1,
+    price_summary   TEXT DEFAULT '{}',
+    news_summary    TEXT DEFAULT '{}',
+    sec_summary     TEXT DEFAULT '{}',
+    options_summary TEXT DEFAULT '{}',
+    earnings_summary TEXT DEFAULT '{}',
+    source_scorecard_summary TEXT DEFAULT '{}',
+    brief_text      TEXT DEFAULT '',
+    key_signals     TEXT DEFAULT '[]',
+    data_freshness  TEXT DEFAULT '{}',
+    status          TEXT DEFAULT 'running' CHECK(status IN ('running','completed','failed')),
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    error           TEXT DEFAULT '',
+    FOREIGN KEY (entry_id) REFERENCES watchlist(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS strategy_records (
+    id              TEXT PRIMARY KEY,
+    entry_id        TEXT NOT NULL,
+    ticker          TEXT NOT NULL,
+    intelligence_id TEXT,
+    version         INTEGER NOT NULL DEFAULT 1,
+    intelligence_summary TEXT DEFAULT '',
+    bull_bear_analysis   TEXT DEFAULT '{}',
+    core_logic           TEXT DEFAULT '',
+    action_strategy      TEXT DEFAULT '{}',
+    risk_control         TEXT DEFAULT '{}',
+    targets_timeline     TEXT DEFAULT '{}',
+    strategy_comparison  TEXT DEFAULT '{}',
+    confidence_rating    TEXT DEFAULT '{}',
+    signal          TEXT DEFAULT 'neutral' CHECK(signal IN ('bullish','neutral','bearish')),
+    confidence      INTEGER DEFAULT 5 CHECK(confidence BETWEEN 1 AND 10),
+    reasoning_chain TEXT DEFAULT '',
+    status          TEXT DEFAULT 'running' CHECK(status IN ('running','completed','failed')),
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    error           TEXT DEFAULT '',
+    FOREIGN KEY (entry_id) REFERENCES watchlist(id) ON DELETE CASCADE,
+    FOREIGN KEY (intelligence_id) REFERENCES stock_intelligence(id)
+);
 """
 
 _CREATE_INDEXES = """
@@ -185,6 +231,11 @@ CREATE INDEX IF NOT EXISTS idx_budget_date ON llm_budget(date);
 CREATE INDEX IF NOT EXISTS idx_watchlist_tier ON watchlist(tier, composite_score DESC);
 CREATE INDEX IF NOT EXISTS idx_uzi_entry ON uzi_analyses(entry_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_uzi_ticker ON uzi_analyses(ticker, analysis_type);
+CREATE INDEX IF NOT EXISTS idx_intelligence_entry ON stock_intelligence(entry_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_intelligence_ticker ON stock_intelligence(ticker, version DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_entry ON strategy_records(entry_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_ticker ON strategy_records(ticker, version DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_signal ON strategy_records(signal, confidence DESC);
 """
 
 _MIGRATIONS: list[str] = []
@@ -847,3 +898,268 @@ class WatchlistStore:
             return dict(row) if row else None
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------
+    # Intelligence records
+    # ------------------------------------------------------------------
+
+    def create_intelligence(self, entry_id: str, ticker: str) -> tuple[str, int]:
+        """Create a new intelligence record. Returns (intelligence_id, version)."""
+        intel_id = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM stock_intelligence WHERE entry_id = ?",
+                (entry_id,)
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO stock_intelligence
+                   (id, entry_id, ticker, version, status, created_at)
+                   VALUES (?, ?, ?, ?, 'running', ?)""",
+                (intel_id, entry_id, ticker, version, _now_iso()),
+            )
+            conn.commit()
+            return intel_id, version
+        finally:
+            conn.close()
+
+    def complete_intelligence(self, intel_id: str, *,
+                              price_summary: str = "{}",
+                              news_summary: str = "{}",
+                              sec_summary: str = "{}",
+                              options_summary: str = "{}",
+                              earnings_summary: str = "{}",
+                              source_scorecard_summary: str = "{}",
+                              brief_text: str = "",
+                              key_signals: str = "[]",
+                              data_freshness: str = "{}") -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                """UPDATE stock_intelligence SET
+                   status='completed', completed_at=?,
+                   price_summary=?, news_summary=?, sec_summary=?,
+                   options_summary=?, earnings_summary=?, source_scorecard_summary=?,
+                   brief_text=?, key_signals=?, data_freshness=?
+                   WHERE id=?""",
+                (_now_iso(), price_summary, news_summary, sec_summary,
+                 options_summary, earnings_summary, source_scorecard_summary,
+                 brief_text, key_signals, data_freshness, intel_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def fail_intelligence(self, intel_id: str, error: str) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                """UPDATE stock_intelligence SET
+                   status='failed', completed_at=?, error=?
+                   WHERE id=?""",
+                (_now_iso(), error, intel_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_latest_intelligence(self, entry_id: str) -> dict | None:
+        """Returns the most recent completed intelligence record."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """SELECT * FROM stock_intelligence
+                   WHERE entry_id = ? AND status = 'completed'
+                   ORDER BY version DESC LIMIT 1""",
+                (entry_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_intelligence_history(self, entry_id: str, limit: int = 10) -> list[dict]:
+        """Returns intelligence history (metadata only, no full JSON bodies)."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT id, entry_id, ticker, version, status,
+                   created_at, completed_at, error, data_freshness
+                   FROM stock_intelligence WHERE entry_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (entry_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_intelligence(self, intel_id: str) -> dict | None:
+        """Returns a single intelligence record with all JSON fields."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM stock_intelligence WHERE id = ?", (intel_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Strategy records
+    # ------------------------------------------------------------------
+
+    def create_strategy(self, entry_id: str, ticker: str,
+                        intelligence_id: str | None = None) -> tuple[str, int]:
+        """Create a new strategy record. Returns (strategy_id, version)."""
+        strategy_id = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM strategy_records WHERE entry_id = ?",
+                (entry_id,)
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO strategy_records
+                   (id, entry_id, ticker, intelligence_id, version, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, 'running', ?)""",
+                (strategy_id, entry_id, ticker, intelligence_id, version, _now_iso()),
+            )
+            conn.commit()
+            return strategy_id, version
+        finally:
+            conn.close()
+
+    def complete_strategy(self, strategy_id: str, *,
+                          intelligence_summary: str = "",
+                          bull_bear_analysis: str = "{}",
+                          core_logic: str = "",
+                          action_strategy: str = "{}",
+                          risk_control: str = "{}",
+                          targets_timeline: str = "{}",
+                          strategy_comparison: str = "{}",
+                          confidence_rating: str = "{}",
+                          signal: str = "neutral",
+                          confidence: int = 5,
+                          reasoning_chain: str = "") -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                """UPDATE strategy_records SET
+                   status='completed', completed_at=?,
+                   intelligence_summary=?, bull_bear_analysis=?, core_logic=?,
+                   action_strategy=?, risk_control=?, targets_timeline=?,
+                   strategy_comparison=?, confidence_rating=?,
+                   signal=?, confidence=?, reasoning_chain=?
+                   WHERE id=?""",
+                (_now_iso(), intelligence_summary, bull_bear_analysis, core_logic,
+                 action_strategy, risk_control, targets_timeline,
+                 strategy_comparison, confidence_rating,
+                 signal, confidence, reasoning_chain, strategy_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def fail_strategy(self, strategy_id: str, error: str) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                """UPDATE strategy_records SET
+                   status='failed', completed_at=?, error=?
+                   WHERE id=?""",
+                (_now_iso(), error, strategy_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_latest_strategy(self, entry_id: str) -> dict | None:
+        """Returns the most recent completed strategy record."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """SELECT * FROM strategy_records
+                   WHERE entry_id = ? AND status = 'completed'
+                   ORDER BY version DESC LIMIT 1""",
+                (entry_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_strategy_history(self, entry_id: str, limit: int = 10) -> list[dict]:
+        """Returns strategy history (metadata only)."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT id, entry_id, ticker, intelligence_id, version,
+                   signal, confidence, status, created_at, completed_at, error
+                   FROM strategy_records WHERE entry_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (entry_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_strategy(self, strategy_id: str) -> dict | None:
+        """Returns a single strategy record with all fields."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM strategy_records WHERE id = ?", (strategy_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_previous_strategy(self, entry_id: str,
+                              exclude_id: str | None = None) -> dict | None:
+        """Returns the most recent completed strategy BEFORE the current one."""
+        conn = self._connect()
+        try:
+            if exclude_id:
+                row = conn.execute(
+                    """SELECT * FROM strategy_records
+                       WHERE entry_id = ? AND status = 'completed' AND id != ?
+                       ORDER BY version DESC LIMIT 1""",
+                    (entry_id, exclude_id)
+                ).fetchone()
+            else:
+                # Get second-most-recent
+                row = conn.execute(
+                    """SELECT * FROM strategy_records
+                       WHERE entry_id = ? AND status = 'completed'
+                       ORDER BY version DESC LIMIT 1 OFFSET 1""",
+                    (entry_id,)
+                ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_all_strategy_summaries(self) -> dict[str, dict]:
+        """Returns {entry_id: {signal, confidence, version, created_at}} for all entries."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT entry_id, signal, confidence, version, created_at
+                   FROM strategy_records
+                   WHERE status = 'completed'
+                   AND (entry_id, version) IN (
+                       SELECT entry_id, MAX(version)
+                       FROM strategy_records
+                       WHERE status = 'completed'
+                       GROUP BY entry_id
+                   )"""
+            ).fetchall()
+            return {
+                r["entry_id"]: {
+                    "signal": r["signal"],
+                    "confidence": r["confidence"],
+                    "version": r["version"],
+                    "created_at": r["created_at"],
+                }
+                for r in rows
+            }
+        finally:
+            conn.close()
+

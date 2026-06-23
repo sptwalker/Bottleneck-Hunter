@@ -6274,3 +6274,96 @@ ul, ol {
     grid-template-columns: 1fr;
   }
 }
+
+/* ══════════════════════════════════════════════════════════
+   Strategy Brain Styles
+   ══════════════════════════════════════════════════════════ */
+
+/* Strategy badge in table */
+.wl-strategy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.wl-strategy-bullish {
+  background: oklch(0.92 0.05 145);
+  color: oklch(0.35 0.12 145);
+}
+.wl-strategy-bearish {
+  background: oklch(0.92 0.05 25);
+  color: oklch(0.40 0.15 25);
+}
+.wl-strategy-neutral {
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+/* Strategy detail in drawer */
+.wl-strategy-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.wl-strategy-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.wl-strategy-signal {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  padding: 6px 14px;
+  border-radius: 6px;
+}
+
+.wl-strategy-signal-bullish {
+  background: oklch(0.92 0.05 145);
+  color: oklch(0.35 0.12 145);
+}
+
+.wl-strategy-signal-bearish {
+  background: oklch(0.92 0.05 25);
+  color: oklch(0.40 0.15 25);
+}
+
+.wl-strategy-signal-neutral {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.wl-strategy-section {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.wl-strategy-section:last-child {
+  border-bottom: none;
+}
+
+.wl-strategy-section h4 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--accent);
+}
+
+.wl-strategy-section p,
+.wl-strategy-section pre {
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  margin: 0;
+}
+

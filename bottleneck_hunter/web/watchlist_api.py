@@ -99,6 +99,60 @@ async def refresh_pipeline(pipeline: str, request: Request):
 
 
 # ─────────────────────────────────────────────────────────────
+# Strategy Brain — Intelligence + Strategy
+# ─────────────────────────────────────────────────────────────
+
+@router.post("/refresh-intelligence")
+async def refresh_intelligence(request: Request):
+    """SSE 流：刷新所有股票的情报聚合"""
+    from bottleneck_hunter.watchlist.strategy_engine import refresh_intelligence_all
+    from bottleneck_hunter.watchlist.budget import BudgetTracker
+
+    store = _get_store()
+    budget = BudgetTracker(store)
+
+    async def event_generator():
+        async for evt in refresh_intelligence_all(store, budget):
+            if await request.is_disconnected():
+                break
+            yield {
+                "event": evt.get("event", "progress"),
+                "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
+            }
+
+    return EventSourceResponse(event_generator())
+
+
+@router.post("/refresh-strategy")
+async def refresh_strategy(request: Request):
+    """SSE 流：刷新所有股票的策略生成"""
+    from bottleneck_hunter.watchlist.strategy_engine import refresh_strategy_all
+    from bottleneck_hunter.watchlist.budget import BudgetTracker
+
+    store = _get_store()
+    budget = BudgetTracker(store)
+
+    async def event_generator():
+        async for evt in refresh_strategy_all(store, budget):
+            if await request.is_disconnected():
+                break
+            yield {
+                "event": evt.get("event", "progress"),
+                "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
+            }
+
+    return EventSourceResponse(event_generator())
+
+
+@router.get("/strategy-summaries")
+async def get_strategy_summaries():
+    """批量获取所有股票的最新策略信号（避免 N+1）"""
+    store = _get_store()
+    summaries = store.get_all_strategy_summaries()
+    return {"summaries": summaries}
+
+
+# ─────────────────────────────────────────────────────────────
 # Watchlist CRUD
 # ─────────────────────────────────────────────────────────────
 
@@ -314,3 +368,52 @@ async def uzi_trigger(entry_id: str, analysis_type: str, request: Request):
             yield {"event": evt.get("event", "progress"), "data": _json.dumps(evt, ensure_ascii=False)}
 
     return EventSourceResponse(event_generator())
+
+
+# ─────────────────────────────────────────────────────────────
+# Intelligence & Strategy endpoints
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/{entry_id}/intelligence")
+async def get_intelligence(entry_id: str):
+    """获取最新情报"""
+    store = _get_store()
+    entry = store.get(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    intel = store.get_latest_intelligence(entry_id)
+    return {"intelligence": intel}
+
+
+@router.get("/{entry_id}/intelligence/history")
+async def get_intelligence_history(entry_id: str, limit: int = 10):
+    """获取情报历史"""
+    store = _get_store()
+    entry = store.get(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    history = store.get_intelligence_history(entry_id, limit)
+    return {"history": history}
+
+
+@router.get("/{entry_id}/strategy")
+async def get_strategy(entry_id: str):
+    """获取最新策略"""
+    store = _get_store()
+    entry = store.get(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    strategy = store.get_latest_strategy(entry_id)
+    return {"strategy": strategy}
+
+
+@router.get("/{entry_id}/strategy/history")
+async def get_strategy_history(entry_id: str, limit: int = 10):
+    """获取策略历史"""
+    store = _get_store()
+    entry = store.get(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    history = store.get_strategy_history(entry_id, limit)
+    return {"history": history}
+

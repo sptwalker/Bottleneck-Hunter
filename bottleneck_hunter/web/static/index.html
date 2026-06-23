@@ -549,6 +549,8 @@
               <button class="wl-view-btn active" data-mode="table" title="表格视图">☰</button>
               <button class="wl-view-btn" data-mode="card" title="卡片视图">▦</button>
             </div>
+            <button class="btn btn-sm" id="wl-btn-refresh-intel" title="聚合所有数据源生成情报摘要">刷新信息</button>
+            <button class="btn btn-sm" id="wl-btn-refresh-strategy" title="基于最新情报生成操作策略">刷新策略</button>
             <button class="btn btn-sm" id="wl-btn-refresh">刷新数据</button>
             <button class="btn btn-sm btn-primary" id="wl-btn-add">+ 添加</button>
           </div>
@@ -587,6 +589,7 @@
                 <th class="col-num">RSI</th>
                 <th class="col-num">MACD</th>
                 <th class="col-num">评分</th>
+                <th class="col-num wl-th-strategy">策略</th>
                 <th>行业</th>
                 <th class="wl-th-actions">操作</th>
               </tr>
@@ -756,6 +759,7 @@
     <button class="wl-drawer-tab" data-tab="price">价格</button>
     <button class="wl-drawer-tab" data-tab="news">新闻</button>
     <button class="wl-drawer-tab" data-tab="capital">资金</button>
+    <button class="wl-drawer-tab" data-tab="strategy">策略</button>
     <button class="wl-drawer-tab" data-tab="uzi">UZI 分析</button>
   </div>
   <div class="drawer-body" id="wl-drawer-body">
@@ -763,6 +767,7 @@
     <div class="wl-tab-pane" id="wl-tab-price"></div>
     <div class="wl-tab-pane" id="wl-tab-news"></div>
     <div class="wl-tab-pane" id="wl-tab-capital"></div>
+    <div class="wl-tab-pane" id="wl-tab-strategy"></div>
     <div class="wl-tab-pane" id="wl-tab-uzi"></div>
   </div>
 </div>
