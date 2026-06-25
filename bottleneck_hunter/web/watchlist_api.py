@@ -178,6 +178,21 @@ async def add_to_watchlist(req: AddToWatchlistRequest):
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@router.put("/batch-tier")
+async def batch_update_tier(req: Request):
+    store = _get_store()
+    body = await req.json()
+    ids = body.get("ids", [])
+    tier = body.get("tier")
+    if not ids or tier not in ("focus", "normal", "track"):
+        raise HTTPException(status_code=400, detail="ids and valid tier required")
+    updated = 0
+    for eid in ids:
+        if store.update(eid, tier=tier):
+            updated += 1
+    return {"status": "ok", "updated": updated}
+
+
 # ─────────────────────────────────────────────────────────────
 # Entry detail + sub-resources (parameterized /{entry_id})
 # ─────────────────────────────────────────────────────────────

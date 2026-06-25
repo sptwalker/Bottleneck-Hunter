@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s | %(messa
 
 from bottleneck_hunter.web.api import router
 from bottleneck_hunter.web.watchlist_api import router as watchlist_router, set_store as wl_set_store
+from bottleneck_hunter.web.decision_api import router as decision_router, set_store as dc_set_store
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.scheduler import init_scheduler, shutdown_scheduler
 
@@ -28,6 +29,7 @@ _wl_store = WatchlistStore()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     wl_set_store(_wl_store)
+    dc_set_store(_wl_store)
     scheduler = init_scheduler(_wl_store)
     if scheduler:
         scheduler.start()
@@ -60,6 +62,7 @@ def create_app() -> FastAPI:
     app.add_middleware(NoCacheStaticMiddleware)
     app.include_router(router, prefix="/api")
     app.include_router(watchlist_router, prefix="/api/watchlist")
+    app.include_router(decision_router, prefix="/api/decision")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

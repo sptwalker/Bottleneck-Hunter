@@ -5,118 +5,12 @@
 
 import { renderPhase1, renderPhase2Table, renderPhase3Table, renderPhase4Table, renderScatterPlot, renderRadarChart, renderBarCompare, renderAlphaStack, setP2SelectionCallback, getP2SelectedTickers, resetP2Selection } from './phase-views.js';
 import { fetchAndRender, testAll, saveAll, onProvidersChange, getProviders } from './settings.js';
+import { state, logMsg, clearLog, getScoreColor, scoreNeedsDarkText, SCORE_COLORS, getMainModel, formatMarkdown } from './wizard-state.js';
+import { readSSEStream } from './sse.js';
+import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, MEETING_ROLES } from './ai-features.js';
+import { openDrawer, closeDrawer } from './drawer.js';
 
-/* ── Wizard 状态 ───────────────────────────── */
-const state = {
-  currentPhase: 0,
-  currentPage: null,
-  analysisId: null,
-  seqNo: null,
-  running: false,
-  config: {},
-  phase1: null,
-  phase2: null,
-  phase3: null,
-  phase4: null,
-  p1TriState: 'start',   // start | pause | resume | restart
-  p2TriState: 'start',   // start | pause | resume | restart
-  p3TriState: 'start',
-  manualPicks: [],
-  p1Error: false,
-  p2Error: false,
-  p4Error: false,
-  p2NeedsUpdate: false,
-  p3NeedsUpdate: false,
-  p4NeedsUpdate: false,
-  aiReports: {},
-  autoMode: false,
-};
-window.wizardState = state;
 
-/* ── SSE 流读取工具（含断连重试） ─────────────── */
-async function readSSEStream(url, body, { onEvent, onTick, onError, label = 'sse', maxRetries = 3 } = {}) {
-  const delays = [1000, 3000, 5000];
-  let attempt = 0;
-  let receivedAny = false;
-
-  while (attempt <= maxRetries) {
-    try {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`);
-      }
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let sseEvent = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        receivedAny = true;
-        attempt = 0;
-        if (onTick) onTick();
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            sseEvent = line.slice(6).trim();
-          } else if (line.startsWith('data:')) {
-            try {
-              const data = JSON.parse(line.slice(5).trim());
-              data._sseEvent = sseEvent;
-              if (onEvent) onEvent(data);
-            } catch (e) { console.warn(`[${label}] JSON解析失败:`, e.message, line.slice(0, 200)); }
-            sseEvent = '';
-          } else if (line.trim() === '') {
-            sseEvent = '';
-          }
-        }
-      }
-      if (buffer.trim().startsWith('data:')) {
-        try {
-          const data = JSON.parse(buffer.trim().slice(5).trim());
-          if (onEvent) onEvent(data);
-        } catch (e) { console.warn(`[${label}] 尾部JSON解析失败:`, e.message); }
-      }
-      return;
-    } catch (err) {
-      if (err.name === 'AbortError') throw err;
-      attempt++;
-      if (attempt > maxRetries) {
-        if (onError) onError(err);
-        return;
-      }
-      const delay = delays[attempt - 1] || 5000;
-      logMsg(`[${label}] 连接中断，${delay / 1000}s 后重试 (${attempt}/${maxRetries})...`, 'warn');
-      await new Promise(r => setTimeout(r, delay));
-
-      if (state.analysisId) {
-        try {
-          const statusResp = await fetch(`/api/history/${state.analysisId}/phase-status`);
-          if (statusResp.ok) {
-            const statusData = await statusResp.json();
-            if (statusData && statusData.completed) {
-              logMsg(`[${label}] 后端已完成，使用缓存数据`, 'info');
-              return;
-            }
-          }
-        } catch (_) {}
-      }
-    }
-  }
-}
-
-const SCORE_COLORS = {
-  10: '#FFD700', 9: '#166534', 8: '#16a34a', 7: '#4ade80',
-  6: '#f97316', 5: '#f59e0b', 4: '#eab308', 3: '#b45309',
-  2: '#9ca3af', 1: '#991b1b',
-};
 
 /* ── Phase 1 计时器 ──────────────────────────── */
 let _p1TimerInterval = null;
@@ -138,14 +32,16 @@ function _resetP1Progress() {
   const wrap = document.getElementById('p1-progress-bar');
   const bar = document.getElementById('p1-progress-fill');
   const text = document.getElementById('p1-progress-text');
-  if (wrap) wrap.style.display = '';
+  if (wrap) wrap.style.display = 'none';
   if (bar) bar.style.width = '0%';
   if (text) text.textContent = '';
 }
 
 function _updateP1Progress(pct, label) {
+  const wrap = document.getElementById('p1-progress-bar');
   const bar = document.getElementById('p1-progress-fill');
   const text = document.getElementById('p1-progress-text');
+  if (wrap) wrap.style.display = '';
   if (bar) bar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
   if (text) text.textContent = label || '';
 }
@@ -267,7 +163,12 @@ function resetForNewAnalysis() {
   if (p3next) p3next.style.display = 'none';
 
   ['wiz-chart-force','wiz-chart-tree','wiz-chart-d3','wiz-chart-bn'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.innerHTML = '';
+    const el = document.getElementById(id);
+    if (el) {
+      const inst = echarts.getInstanceByDom(el);
+      if (inst) inst.dispose();
+      el.innerHTML = '';
+    }
   });
   const bnStats = document.getElementById('wiz-bn-stats');
   if (bnStats) { bnStats.innerHTML = ''; bnStats.style.display = 'none'; }
@@ -334,44 +235,7 @@ function _autoChainNext() {
   }
 }
 
-/* ── 日志面板 ─────────────────────────────── */
-function logMsg(text, level = 'info') {
-  const body = document.getElementById('wiz-log-body');
-  const panel = document.getElementById('wiz-log-panel');
-  if (!body || !panel) return;
-  if (panel.style.display !== 'none') {
-    panel.classList.remove('collapsed');
-    const toggleBtn = document.getElementById('wiz-log-toggle');
-    if (toggleBtn) toggleBtn.textContent = '▼';
-  }
-  const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  const cls = level === 'error' ? 'log-error' : level === 'done' ? 'log-done' : level === 'warn' ? 'log-warn' : '';
-  const line = document.createElement('div');
-  line.className = `wiz-log-line ${cls}`;
-  line.innerHTML = `<span class="log-ts">[${ts}]</span> ${text}`;
-  body.appendChild(line);
-  body.scrollTop = body.scrollHeight;
-  // 更新侧边栏按钮未读指示
-  const logBtn = document.getElementById('sidebar-log-btn');
-  if (logBtn && panel.style.display === 'none') logBtn.classList.add('has-unread');
-}
 
-function clearLog() {
-  const body = document.getElementById('wiz-log-body');
-  if (body) body.innerHTML = '';
-  const panel = document.getElementById('wiz-log-panel');
-  if (panel) panel.style.display = 'none';
-}
-
-/* ── 评分颜色 ─────────────────────────────── */
-export function getScoreColor(score) {
-  const s = Math.round(Math.max(1, Math.min(10, score)));
-  return SCORE_COLORS[s] || '#9ca3af';
-}
-
-export function scoreNeedsDarkText(score) {
-  return [10, 7, 4].includes(Math.round(Math.max(1, Math.min(10, score))));
-}
 
 /* ── Phase 导航 ───────────────────────────── */
 function showPage(page) {
@@ -390,18 +254,32 @@ function updateNav() {
   const nav = document.getElementById('wizard-nav');
   if (!nav) return;
   nav.style.display = state.currentPhase > 0 ? 'flex' : 'none';
+  const ps = _getPhaseStatus();
+  const statusMap = { 1: ps.p1, 2: ps.p2, 3: ps.p3, 4: ps.p4 };
+
   nav.querySelectorAll('.wiz-step').forEach(step => {
     const p = parseInt(step.dataset.phase);
-    step.classList.remove('completed', 'active', 'pending');
-    if (p < state.currentPhase) {
-      step.classList.add('completed');
-      step.querySelector('.wiz-step-dot').textContent = '✓';
-    } else if (p === state.currentPhase) {
+    const dot = step.querySelector('.wiz-step-dot');
+    step.classList.remove('completed', 'active', 'pending', 'step-green', 'step-red', 'step-yellow');
+
+    const status = statusMap[p] || 'gray';
+    if (p === state.currentPhase) {
       step.classList.add('active');
-      step.querySelector('.wiz-step-dot').textContent = p || '✓';
+      if (status === 'green') { step.classList.add('step-green'); dot.textContent = '✓'; }
+      else if (status === 'red') { step.classList.add('step-red'); dot.textContent = '!'; }
+      else { dot.textContent = p; }
+    } else if (status === 'green') {
+      step.classList.add('completed', 'step-green');
+      dot.textContent = '✓';
+    } else if (status === 'red') {
+      step.classList.add('step-red');
+      dot.textContent = '!';
+    } else if (status === 'yellow') {
+      step.classList.add('step-yellow');
+      dot.textContent = '⟳';
     } else {
       step.classList.add('pending');
-      step.querySelector('.wiz-step-dot').textContent = p;
+      dot.textContent = p;
     }
   });
 }
@@ -561,13 +439,6 @@ function initSidebar() {
   }
 }
 
-/* ── 解析主分析模型 ──────────────────────── */
-function getMainModel() {
-  const sel = document.getElementById('wiz-main-model') || document.getElementById('wiz-p1-model');
-  const val = sel?.value || 'deepseek::deepseek-chat';
-  const [provider, model] = val.split('::');
-  return { provider, model };
-}
 
 /* ── 四态按钮 ─────────────────────────────── */
 const TRISTATE_LABELS = {
@@ -651,6 +522,7 @@ async function runPhase1(sector, product) {
   const market = state.config.market || 'us_stock';
 
   const maxCap = parseFloat(document.getElementById('wiz-max-cap')?.value || '200');
+  state.config.max_market_cap_yi = maxCap;
 
   logMsg(`参数: 深度=${depth}, TopN=${topN}, 市场=${market}, 模型=${provider}/${model || '默认'}`);
 
@@ -664,6 +536,8 @@ async function runPhase1(sector, product) {
   try {
     await readSSEStream('/api/phase1', body, {
       label: 'phase1-sse',
+      logFn: logMsg,
+      getAnalysisId: () => state.analysisId,
       onTick: _updateP1Timer,
       onEvent: (data) => handlePhase1Event(data),
       onError: (err) => {
@@ -692,10 +566,10 @@ async function runPhase1(sector, product) {
   }
   hideP1Overlay();
   updateSidebarStatus();
+  updateNav();
 }
 
 function handlePhase1Event(data) {
-  _updateP1Timer();
   // step_start: 有 index 和 step 字段
   if (data.index !== undefined && data.step && !data.result) {
     _p1Step = data.step;
@@ -773,6 +647,7 @@ function handlePhase1Event(data) {
     hideP1Overlay();
     setTriState('p1-tristate', 'p1TriState', 'restart');
     updateSidebarStatus();
+    updateNav();
     _savePhaseStatus();
     _autoChainNext();
   }
@@ -785,6 +660,7 @@ function handlePhase1Event(data) {
     state.p1Error = true;
     state.autoMode = false;
     updateSidebarStatus();
+    updateNav();
   }
 }
 
@@ -855,8 +731,8 @@ async function runPhase2() {
       min_overall_score: minScore,
       max_shortlist_count: maxCount,
     },
-    market: document.getElementById('wiz-p1-market')?.value || 'us_stock',
-    max_market_cap_yi: parseFloat(document.getElementById('wiz-max-cap')?.value || '200'),
+    market: state.config.market || 'us_stock',
+    max_market_cap_yi: state.config.max_market_cap_yi || parseFloat(document.getElementById('wiz-max-cap')?.value || '200'),
     max_suppliers: 20,
     language: 'zh', provider, model,
   };
@@ -864,6 +740,8 @@ async function runPhase2() {
   try {
     await readSSEStream('/api/phase2', body, {
       label: 'phase2-sse',
+      logFn: logMsg,
+      getAnalysisId: () => state.analysisId,
       onTick: _updateP2Timer,
       onEvent: (data) => handlePhase2Event(data, progress),
       onError: (err) => {
@@ -889,10 +767,10 @@ async function runPhase2() {
     setTriState('p2-tristate', 'p2TriState', 'restart');
   }
   updateSidebarStatus();
+  updateNav();
 }
 
 function handlePhase2Event(data, progress) {
-  _updateP2Timer();
   if (data._sseEvent === 'error' && data.step === 'init' && data.message) {
     progress.innerHTML = `<div class="progress-msg progress-error">${data.message}</div>`;
     logMsg(`[phase2] ${data.message}`, 'error');
@@ -901,6 +779,7 @@ function handlePhase2Event(data, progress) {
     state.autoMode = false;
     setTriState('p2-tristate', 'p2TriState', 'restart');
     updateSidebarStatus();
+    updateNav();
     return;
   }
 
@@ -980,6 +859,7 @@ function handlePhase2Event(data, progress) {
     progress.innerHTML = '<div class="progress-msg progress-done">Phase 2 完成</div>';
     setTriState('p2-tristate', 'p2TriState', 'restart');
     updateSidebarStatus();
+    updateNav();
     _savePhaseStatus();
     _autoChainNext();
   }
@@ -1065,6 +945,7 @@ function runPhase3(wQ, wA) {
   renderBarCompare(ranked);
   renderAlphaStack(ranked);
   updateSidebarStatus();
+  updateNav();
 
   const p3Next = document.getElementById('wiz-p3-next');
   if (p3Next) p3Next.style.display = '';
@@ -1148,6 +1029,8 @@ async function runPhase4() {
   try {
     await readSSEStream('/api/phase4', body, {
       label: 'phase4-sse',
+      logFn: logMsg,
+      getAnalysisId: () => state.analysisId,
       onTick: _updateP4Timer,
       onEvent: (data) => handlePhase4Event(data, progress),
       onError: (err) => {
@@ -1168,10 +1051,10 @@ async function runPhase4() {
   _stopP4Timer();
   state.running = false;
   updateSidebarStatus();
+  updateNav();
 }
 
 function handlePhase4Event(data, progress) {
-  _updateP4Timer();
   if (data.message) {
     progress.innerHTML = `<div class="progress-msg">${data.message}</div>`;
     logMsg(`[phase4] ${data.message}`);
@@ -1179,807 +1062,17 @@ function handlePhase4Event(data, progress) {
 
   if (data.validations || data.recommendations) {
     state.phase4 = data;
+    state.p4Error = false;
     renderPhase4Table(data.validations || [], data.recommendations || [], state.phase3?.ranked_results || []);
     const vCount = (data.validations || []).length;
     logMsg(`Phase 4 完成 — 验证 ${vCount} 家公司`, 'done');
     progress.innerHTML = '<div class="progress-msg progress-done">交叉验证完成</div>';
     enableMeetingButton();
     updateSidebarStatus();
+    updateNav();
     _savePhaseStatus();
     _autoChainNext();
   }
-}
-
-/* ── AI 投研圆桌会议 ──────────────────────── */
-
-const MEETING_ROLES = [
-  { id: 'growth', name: '成长型投资者', letter: '成', color: '#10a37f' },
-  { id: 'value',  name: '价值型投资者', letter: '价', color: '#d97706' },
-  { id: 'risk',   name: '风险分析师',   letter: '风', color: '#dc2626' },
-  { id: 'chain',  name: '产业链专家',   letter: '链', color: '#6366f1' },
-];
-
-function buildMeetingSetup() {
-  const setup = document.getElementById('meeting-setup');
-  const grid = document.getElementById('meeting-role-grid');
-  if (!setup || !grid) return;
-
-  const modelCheckboxes = document.querySelectorAll('#wiz-cv-models input[type="checkbox"]:checked');
-  const models = Array.from(modelCheckboxes).map(cb => {
-    const [provider, model] = cb.value.split('::');
-    return { provider, model, label: `${provider}/${model}` };
-  });
-
-  if (models.length === 0) {
-    setup.style.display = 'none';
-    return;
-  }
-
-  grid.innerHTML = '';
-  const optionsHtml = models.map((m, i) => `<option value="${m.provider}::${m.model}">${m.label}</option>`).join('');
-
-  MEETING_ROLES.forEach((role, idx) => {
-    const row = document.createElement('div');
-    row.className = 'meeting-role-row';
-    const defaultIdx = idx % models.length;
-    const defaultVal = `${models[defaultIdx].provider}::${models[defaultIdx].model}`;
-    row.innerHTML = `
-      <div class="meeting-role-avatar" style="background:${role.color}">${role.letter}</div>
-      <div class="meeting-role-name">${role.name}</div>
-      <select class="meeting-role-select" data-role="${role.id}">
-        ${optionsHtml}
-      </select>
-      <span class="meeting-role-status" id="preflight-${role.id}"></span>
-    `;
-    const select = row.querySelector('select');
-    if (select) select.value = defaultVal;
-    grid.appendChild(row);
-  });
-
-  setup.style.display = 'block';
-  const preflightBtn = document.getElementById('btn-preflight');
-  if (preflightBtn) preflightBtn.disabled = false;
-}
-
-function getSelectedRoleAssignments() {
-  const assignments = {};
-  MEETING_ROLES.forEach(role => {
-    const select = document.querySelector(`select[data-role="${role.id}"]`);
-    if (select && select.value) {
-      const [provider, model] = select.value.split('::');
-      assignments[role.id] = { provider, model };
-    }
-  });
-  return assignments;
-}
-
-async function runPreflight() {
-  const btn = document.getElementById('btn-preflight');
-  const statusEl = document.getElementById('preflight-status');
-  if (btn) { btn.disabled = true; btn.textContent = '测试中...'; }
-  if (statusEl) statusEl.textContent = '';
-
-  const assignments = getSelectedRoleAssignments();
-  const seen = new Set();
-  const models = [];
-  Object.values(assignments).forEach(m => {
-    const key = `${m.provider}::${m.model}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      models.push(m);
-    }
-  });
-
-  MEETING_ROLES.forEach(role => {
-    const el = document.getElementById(`preflight-${role.id}`);
-    if (el) { el.textContent = '⏳'; el.className = 'meeting-role-status'; }
-  });
-
-  try {
-    const resp = await fetch('/api/meeting/preflight', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ models }),
-    });
-    const data = await resp.json();
-    const resultMap = {};
-    for (const r of (data.results || [])) {
-      resultMap[`${r.provider}::${r.model}`] = r.success;
-    }
-
-    let allOk = true;
-    MEETING_ROLES.forEach(role => {
-      const m = assignments[role.id];
-      const key = m ? `${m.provider}::${m.model}` : '';
-      const ok = resultMap[key] === true;
-      if (!ok) allOk = false;
-      const el = document.getElementById(`preflight-${role.id}`);
-      if (el) {
-        el.textContent = ok ? '✅' : '❌';
-        el.className = `meeting-role-status ${ok ? 'preflight-ok' : 'preflight-fail'}`;
-      }
-    });
-
-    if (allOk) {
-      if (statusEl) statusEl.textContent = '全部通过';
-      const meetBtn = document.getElementById('btn-start-meeting');
-      if (meetBtn) meetBtn.disabled = false;
-    } else {
-      if (statusEl) statusEl.textContent = '部分模型不可用';
-    }
-  } catch (err) {
-    if (statusEl) statusEl.textContent = `测试失败: ${err.message}`;
-  }
-  if (btn) { btn.disabled = false; btn.textContent = '测试连通性'; }
-}
-
-function enableMeetingButton() {
-  buildMeetingSetup();
-  const btn = document.getElementById('btn-start-meeting');
-  if (btn) {
-    btn.textContent = '启动会议';
-  }
-}
-
-async function startMeeting() {
-  if (!state.analysisId) return;
-  const btn = document.getElementById('btn-start-meeting');
-  const status = document.getElementById('meeting-status');
-  const transcript = document.getElementById('meeting-transcript');
-  const messages = document.getElementById('meeting-messages');
-  const resultDiv = document.getElementById('meeting-result');
-
-  if (btn) { btn.disabled = true; btn.textContent = '会议进行中...'; }
-  if (status) status.textContent = '进行中';
-  if (transcript) transcript.style.display = 'block';
-  if (messages) messages.innerHTML = '';
-  if (resultDiv) { resultDiv.style.display = 'none'; resultDiv.innerHTML = ''; }
-
-  document.getElementById('ai-meeting-card')?.classList.add('meeting-active');
-
-  const modelCheckboxes = document.querySelectorAll('#wiz-cv-models input[type="checkbox"]:checked');
-  const validationModels = Array.from(modelCheckboxes).map(cb => {
-    const [provider, model] = cb.value.split('::');
-    return { provider, model };
-  });
-
-  const roleAssignments = getSelectedRoleAssignments();
-
-  const body = {
-    analysis_id: state.analysisId,
-    validation_models: validationModels,
-    role_assignments: Object.keys(roleAssignments).length > 0 ? roleAssignments : null,
-    language: 'zh',
-  };
-
-  logMsg('圆桌会议启动', 'info');
-
-  try {
-    await readSSEStream('/api/phase4/meeting', body, {
-      label: 'meeting-sse',
-      onEvent: (data) => handleMeetingEvent(data),
-      onError: (err) => {
-        logMsg(`圆桌会议连接失败: ${err.message}`, 'error');
-        if (status) status.textContent = '失败';
-      },
-    });
-  } catch (err) {
-    logMsg(`圆桌会议连接失败: ${err.message}`, 'error');
-    if (status) status.textContent = '失败';
-  }
-
-  if (btn) { btn.textContent = '重新开会'; btn.disabled = false; }
-  document.getElementById('ai-meeting-card')?.classList.remove('meeting-active');
-}
-
-function handleMeetingEvent(data) {
-  if (data.meeting_error || data.message && !data.role && !data.participants) {
-    if (data.meeting_error) {
-      const msg = data.message || data.meeting_error || '未知错误';
-      logMsg(`[会议错误] ${msg}`, 'error');
-      const status = document.getElementById('meeting-status');
-      if (status) status.textContent = '失败';
-      return;
-    }
-    if (data.message && !data.role) {
-      logMsg(`[会议] ${data.message}`, 'info');
-      const status = document.getElementById('meeting-status');
-      if (status) status.textContent = data.message;
-      return;
-    }
-  }
-
-  if (data.participants !== undefined && data.company_count !== undefined) {
-    logMsg(`会议开始 — ${data.company_count} 家企业, ${data.participants.length} 位参会者`);
-    state.meetingParticipants = data.participants;
-    return;
-  }
-
-  if (data.round_num !== undefined && data.round_name !== undefined && !data.content) {
-    renderMeetingRoundDivider(data.round_num, data.round_name);
-    logMsg(`第 ${data.round_num} 轮: ${data.round_name}`);
-    return;
-  }
-
-  if (data.content !== undefined && data.role !== undefined) {
-    renderMeetingBubble(data);
-    return;
-  }
-
-  if (data.ranking) {
-    logMsg(`Borda 排名出炉 — 第一: ${data.ranking[0]?.name || '?'}`, 'done');
-    return;
-  }
-
-  if (data.result) {
-    state.meetingResult = data.result;
-    renderMeetingResult(data.result);
-    const status = document.getElementById('meeting-status');
-    if (status) status.textContent = '已完成';
-    logMsg('圆桌会议完成', 'done');
-    return;
-  }
-}
-
-function renderMeetingRoundDivider(roundNum, roundName) {
-  const container = document.getElementById('meeting-messages');
-  if (!container) return;
-  const div = document.createElement('div');
-  div.className = 'meeting-round-divider';
-  div.innerHTML = `<span>第 ${roundNum} 轮: ${roundName}</span>`;
-  container.appendChild(div);
-  container.scrollTop = container.scrollHeight;
-}
-
-function renderMeetingBubble(msg) {
-  const container = document.getElementById('meeting-messages');
-  if (!container) return;
-
-  const bubble = document.createElement('div');
-  bubble.className = 'meeting-bubble';
-
-  const avatarClass = `av-${msg.role}`;
-  const avatarLetter = msg.avatar_letter || msg.participant_name?.charAt(0) || '?';
-  const color = msg.color || '#64748b';
-
-  bubble.innerHTML = `
-    <div class="meeting-avatar ${avatarClass}" style="background:${color}">${avatarLetter}</div>
-    <div class="meeting-bubble-body">
-      <div class="meeting-name">${msg.participant_name}${msg.model_name ? ` <span class="meeting-model">${msg.model_name}</span>` : ''}</div>
-      <div class="meeting-msg">${msg.content.replace(/\n/g, '<br>')}</div>
-    </div>
-  `;
-  container.appendChild(bubble);
-  container.scrollTop = container.scrollHeight;
-}
-
-function renderMeetingResult(result) {
-  const div = document.getElementById('meeting-result');
-  if (!div) return;
-  div.style.display = 'block';
-
-  const roleMap = {};
-  MEETING_ROLES.forEach(r => { roleMap[r.id] = r; });
-  function roleIcon(roleId, size = 18) {
-    const r = roleMap[roleId];
-    if (!r) return '';
-    return `<span class="vote-icon" style="background:${r.color}" title="${r.name}">${r.letter}</span>`;
-  }
-
-  let html = '<h4>最终排名</h4>';
-  html += '<table class="meeting-ranking-table"><thead><tr><th>排名</th><th>企业</th><th>Borda</th><th>支持</th><th>反对</th><th>理由</th></tr></thead><tbody>';
-  for (const r of (result.final_ranking || [])) {
-    const supIcons = (r.supporters || []).map(id => roleIcon(id)).join('');
-    const oppIcons = (r.opposers || []).map(id => roleIcon(id)).join('');
-    html += `<tr>
-      <td><strong>${r.rank}</strong></td>
-      <td>${r.name} (${r.ticker})</td>
-      <td>${r.borda_points}</td>
-      <td class="vote-cell">${supIcons || '<span class="vote-none">—</span>'}</td>
-      <td class="vote-cell">${oppIcons || '<span class="vote-none">—</span>'}</td>
-      <td>${r.reasoning || ''}</td>
-    </tr>`;
-  }
-  html += '</tbody></table>';
-
-  if (result.investment_thesis) {
-    html += `<div class="meeting-thesis"><strong>投资主线:</strong> ${result.investment_thesis}</div>`;
-  }
-
-  if (result.key_agreements?.length) {
-    html += '<div class="meeting-section"><strong>共识:</strong><ul>' +
-      result.key_agreements.map(a => `<li>${a}</li>`).join('') + '</ul></div>';
-  }
-  if (result.key_disagreements?.length) {
-    html += '<div class="meeting-section"><strong>分歧:</strong><ul>' +
-      result.key_disagreements.map(d => `<li>${d}</li>`).join('') + '</ul></div>';
-  }
-  if (result.risk_warnings?.length) {
-    html += '<div class="meeting-section meeting-risk"><strong>风险警示:</strong><ul>' +
-      result.risk_warnings.map(w => `<li>${w}</li>`).join('') + '</ul></div>';
-  }
-
-  div.innerHTML = html;
-}
-
-function restoreMeeting(meetingData) {
-  if (!meetingData) return;
-  const transcript = document.getElementById('meeting-transcript');
-  const messages = document.getElementById('meeting-messages');
-  if (transcript) transcript.style.display = 'block';
-  if (messages) messages.innerHTML = '';
-
-  let lastRound = -1;
-  for (const msg of (meetingData.transcript || [])) {
-    if (msg.round_num !== lastRound) {
-      const roundNames = { 0: '开场', 1: '独立提名', 2: '辩论与质疑', 3: '会议总结' };
-      renderMeetingRoundDivider(msg.round_num, roundNames[msg.round_num] || `第${msg.round_num}轮`);
-      lastRound = msg.round_num;
-    }
-    const participant = (meetingData.participants || []).find(p => p.role === msg.role);
-    renderMeetingBubble({
-      ...msg,
-      avatar_letter: participant?.avatar_letter || msg.participant_name?.charAt(0) || '?',
-      color: participant?.color || '#64748b',
-    });
-  }
-
-  if (meetingData.final_ranking?.length) {
-    renderMeetingResult(meetingData);
-  }
-
-  enableMeetingButton();
-  const status = document.getElementById('meeting-status');
-  if (status) status.textContent = '已完成';
-  const btn = document.getElementById('btn-start-meeting');
-  if (btn) btn.textContent = '重新开会';
-}
-
-/* ── AI 评点权重指纹 ──────────────────────── */
-function _aiScoringConfig() {
-  return state.phase3?.scoring_config || { quality_weight: 0.5, alpha_weight: 0.5 };
-}
-
-function _aiConfigMatch(cached) {
-  if (!cached?.scoring_config) return false;
-  const cur = _aiScoringConfig();
-  return cached.scoring_config.quality_weight === cur.quality_weight
-      && cached.scoring_config.alpha_weight === cur.alpha_weight;
-}
-
-/* ── AI 解读 — 内嵌展开面板 ──────────────────── */
-
-function _updateExpandMeta(panel, data) {
-  const modelEl = panel.querySelector('.ai-expand-model');
-  const timeEl = panel.querySelector('.ai-expand-time');
-  if (modelEl && data.model) modelEl.textContent = data.model;
-  if (timeEl && data.generated_at) {
-    const ts = data.generated_at.replace('T', ' ').slice(0, 19);
-    timeEl.textContent = ts;
-  }
-}
-
-function _updateTriggerBtn(chartType, hasCache) {
-  const btn = document.querySelector(`.ai-interp-trigger[data-chart-type="${chartType}"]`);
-  if (btn) {
-    btn.classList.toggle('has-cache', !!hasCache);
-    btn.textContent = hasCache ? '查看解读' : 'AI 解读';
-  }
-}
-
-let _aiInterpBusy = false;
-function toggleAiInterp(chartType) {
-  if (_aiInterpBusy) return;
-  _aiInterpBusy = true;
-  setTimeout(() => _aiInterpBusy = false, 300);
-
-  const panel = document.getElementById(`ai-expand-${chartType}`);
-  if (!panel || !state.analysisId) return;
-
-  if (panel.style.display !== 'none') {
-    panel.style.display = 'none';
-    return;
-  }
-
-  panel.style.display = '';
-  const body = panel.querySelector('.ai-expand-body');
-  const cached = state.aiReports[chartType];
-
-  if (cached?.text) {
-    if (_aiConfigMatch(cached)) {
-      body.innerHTML = formatMarkdown(cached.text);
-      _updateExpandMeta(panel, cached);
-      return;
-    }
-    body.innerHTML = `<div class="ai-stale-notice">
-      <p>⚠ 权重已调整，以下为旧评点，可能与当前图表不一致</p>
-    </div>` + formatMarkdown(cached.text);
-    _updateExpandMeta(panel, cached);
-    const regenBtn = panel.querySelector('.ai-regen-btn');
-    if (regenBtn) regenBtn.style.display = '';
-    return;
-  }
-
-  _fetchAiInterp(chartType, false);
-}
-
-async function _fetchAiInterp(chartType, force) {
-  const panel = document.getElementById(`ai-expand-${chartType}`);
-  if (!panel) return;
-  panel.style.display = '';
-  const body = panel.querySelector('.ai-expand-body');
-  const regenBtn = panel.querySelector('.ai-regen-btn');
-  if (regenBtn) regenBtn.disabled = true;
-  body.innerHTML = '<div class="ai-expand-loading">正在生成 AI 解读...</div>';
-
-  try {
-    const { provider, model } = getMainModel();
-    const resp = await fetch('/api/ai-report', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        analysis_id: state.analysisId,
-        provider, model,
-        report_type: 'chart_interp',
-        chart_type: chartType,
-        force,
-      }),
-    });
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
-      body.innerHTML = `<p style="color:var(--danger)">AI 解读请求失败 (${resp.status})</p>`;
-      return;
-    }
-    body.innerHTML = '';
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        try {
-          const d = JSON.parse(line.slice(5).trim());
-          if (d.text) body.innerHTML += d.text.replace(/\n/g, '<br>');
-          if (d.full_text) {
-            body.innerHTML = formatMarkdown(d.full_text);
-            const reportData = {
-              text: d.full_text,
-              scoring_config: _aiScoringConfig(),
-              model: d.model || model,
-              provider: d.provider || provider,
-              generated_at: d.generated_at || '',
-            };
-            state.aiReports[chartType] = reportData;
-            _updateExpandMeta(panel, reportData);
-            _updateTriggerBtn(chartType, true);
-          }
-          if (d.message) body.innerHTML = `<p style="color:var(--danger)">${d.message}</p>`;
-        } catch {}
-      }
-    }
-  } catch (e) {
-    body.innerHTML = `<p style="color:var(--danger)">AI 解读失败: ${e.message}</p>`;
-  } finally {
-    if (regenBtn) { regenBtn.disabled = false; regenBtn.style.display = ''; }
-  }
-}
-
-async function generateAiReport() {
-  const body = document.getElementById('wiz-report-body');
-  const btn = document.getElementById('wiz-gen-report');
-  if (!body || !state.analysisId) return;
-
-  const cached = state.aiReports['comparison'];
-  const isStale = cached?.text && !_aiConfigMatch(cached);
-  const isFresh = cached?.text && _aiConfigMatch(cached);
-
-  if (isFresh && btn?.textContent !== '重新生成') {
-    body.innerHTML = formatMarkdown(cached.text);
-    if (btn) btn.textContent = '重新生成';
-    return;
-  }
-
-  if (isStale && btn?.textContent !== '重新生成') {
-    body.innerHTML = `<div class="ai-stale-notice"><p>⚠ 权重已调整，以下为旧报告</p>
-      <button class="btn btn-sm ai-regen-btn" id="ai-regen-comparison">重新生成</button>
-    </div>` + formatMarkdown(cached.text);
-    document.getElementById('ai-regen-comparison')?.addEventListener('click', () => {
-      _fetchAiReport(body, btn, true);
-    });
-    if (btn) btn.textContent = '重新生成';
-    return;
-  }
-
-  _fetchAiReport(body, btn, !!isFresh);
-}
-
-async function _fetchAiReport(body, btn, force) {
-  if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
-  body.innerHTML = '<p style="color:var(--muted);text-align:center;padding:20px">正在生成横向对比报告...</p>';
-
-  try {
-    const { provider, model } = getMainModel();
-    const resp = await fetch('/api/ai-report', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        analysis_id: state.analysisId,
-        provider, model,
-        report_type: 'comparison',
-        force,
-      }),
-    });
-    if (!resp.ok) {
-      body.innerHTML = `<p style="color:var(--danger)">AI 报告请求失败 (${resp.status})</p>`;
-      return;
-    }
-    body.innerHTML = '';
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        try {
-          const d = JSON.parse(line.slice(5).trim());
-          if (d.text) body.innerHTML += d.text.replace(/\n/g, '<br>');
-          if (d.full_text) {
-            body.innerHTML = formatMarkdown(d.full_text);
-            state.aiReports['comparison'] = {
-              text: d.full_text,
-              scoring_config: _aiScoringConfig(),
-              model: d.model || model,
-              provider: d.provider || provider,
-              generated_at: d.generated_at || '',
-            };
-          }
-          if (d.message) body.innerHTML = `<p style="color:var(--danger)">${d.message}</p>`;
-        } catch {}
-      }
-    }
-  } catch (e) {
-    body.innerHTML = `<p style="color:var(--danger)">报告生成失败: ${e.message}</p>`;
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '重新生成'; }
-  }
-}
-
-function formatMarkdown(text) {
-  return text
-    .replace(/^### (.+)$/gm, '<h4>$1</h4>')
-    .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^# (.+)$/gm, '<h2>$1</h2>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>\n?)+/g, m => `<ul>${m}</ul>`)
-    .replace(/\n{2,}/g, '</p><p>')
-    .replace(/\n/g, '<br>')
-    .replace(/^/, '<p>').replace(/$/, '</p>');
-}
-
-/* ── 抽屉 ─────────────────────────────────── */
-function openDrawer(company) {
-  const drawer = document.getElementById('wiz-drawer');
-  const title = document.getElementById('drawer-title');
-  const body = document.getElementById('drawer-body');
-  if (!drawer) return;
-
-  const name = company.supplier?.name || company.name || '未知';
-  const ticker = company.supplier?.ticker || company.ticker || '';
-  const layer = company.supplier?.layer_label || company.layer_label || '';
-
-  title.innerHTML = `${name} ${layer ? `<span class="layer-badge ${layer}">${layer}</span>` : ''} <span class="col-ticker">${ticker}</span>`;
-
-  body.innerHTML = buildDrawerContent(company);
-  drawer.style.display = 'flex';
-
-  const klineDom = document.getElementById('drawer-kline');
-  if (klineDom && ticker) {
-    klineDom.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px 0">加载K线数据…</p>';
-    const market = state.config?.market || 'us_stock';
-    fetch(`/api/stock/${encodeURIComponent(ticker)}/kline?market=${market}`)
-      .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-      .then(data => {
-        if (!data?.length) { klineDom.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px 0">暂无K线数据</p>'; return; }
-        renderKlineChart(klineDom, data, name);
-      })
-      .catch(() => { klineDom.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px 0">K线数据加载失败</p>'; });
-  }
-}
-
-function closeDrawer() {
-  const drawer = document.getElementById('wiz-drawer');
-  if (drawer) drawer.style.display = 'none';
-  const overlay = document.getElementById('kline-fullscreen');
-  if (overlay) overlay.remove();
-}
-
-function renderKlineChart(dom, data, title) {
-  dom.innerHTML = '';
-  const chart = echarts.init(dom);
-  const dates = data.map(d => d.date);
-  const ohlc = data.map(d => [d.open, d.close, d.low, d.high]);
-  const vols = data.map(d => d.volume);
-  const colors = data.map(d => d.close >= d.open ? '#26a69a' : '#ef5350');
-
-  const option = {
-    animation: false,
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    grid: [
-      { left: 60, right: 20, top: 20, height: '55%' },
-      { left: 60, right: 20, top: '78%', height: '16%' },
-    ],
-    xAxis: [
-      { type: 'category', data: dates, gridIndex: 0, axisLabel: { show: false } },
-      { type: 'category', data: dates, gridIndex: 1, axisLabel: { fontSize: 10, color: '#888' } },
-    ],
-    yAxis: [
-      { gridIndex: 0, scale: true, splitLine: { lineStyle: { color: 'rgba(255,255,255,.06)' } }, axisLabel: { fontSize: 10, color: '#888' } },
-      { gridIndex: 1, scale: true, splitLine: { show: false }, axisLabel: { show: false } },
-    ],
-    dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 },
-      { type: 'slider', xAxisIndex: [0, 1], bottom: 2, height: 14, borderColor: 'transparent', fillerColor: 'rgba(0,160,233,.18)' },
-    ],
-    series: [
-      { type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0,
-        itemStyle: { color: '#26a69a', color0: '#ef5350', borderColor: '#26a69a', borderColor0: '#ef5350' } },
-      { type: 'bar', data: vols.map((v, i) => ({ value: v, itemStyle: { color: colors[i] + '66' } })),
-        xAxisIndex: 1, yAxisIndex: 1 },
-    ],
-  };
-  chart.setOption(option);
-
-  dom.addEventListener('click', () => openKlineFullscreen(data, title));
-}
-
-function openKlineFullscreen(data, title) {
-  let overlay = document.getElementById('kline-fullscreen');
-  if (overlay) overlay.remove();
-
-  overlay = document.createElement('div');
-  overlay.id = 'kline-fullscreen';
-  overlay.className = 'kline-overlay';
-  overlay.innerHTML = `
-    <div class="kline-overlay-header">
-      <span>${title || ''} 近一年K线</span>
-      <button class="kline-overlay-close">&times;</button>
-    </div>
-    <div id="kline-full-chart" style="flex:1;width:100%"></div>
-  `;
-  document.body.appendChild(overlay);
-
-  const closeBtn = overlay.querySelector('.kline-overlay-close');
-  closeBtn.addEventListener('click', () => overlay.remove());
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  document.addEventListener('keydown', function esc(e) { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', esc); } });
-
-  requestAnimationFrame(() => {
-    const dom = document.getElementById('kline-full-chart');
-    if (!dom) return;
-    const chart = echarts.init(dom);
-    const dates = data.map(d => d.date);
-    const ohlc = data.map(d => [d.open, d.close, d.low, d.high]);
-    const vols = data.map(d => d.volume);
-    const colors = data.map(d => d.close >= d.open ? '#26a69a' : '#ef5350');
-
-    chart.setOption({
-      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-      grid: [
-        { left: 80, right: 40, top: 30, height: '58%' },
-        { left: 80, right: 40, top: '82%', height: '12%' },
-      ],
-      xAxis: [
-        { type: 'category', data: dates, gridIndex: 0, axisLabel: { show: false } },
-        { type: 'category', data: dates, gridIndex: 1, axisLabel: { fontSize: 11, color: '#ccc' } },
-      ],
-      yAxis: [
-        { gridIndex: 0, scale: true, splitLine: { lineStyle: { color: 'rgba(255,255,255,.08)' } }, axisLabel: { color: '#ccc' } },
-        { gridIndex: 1, scale: true, splitLine: { show: false }, axisLabel: { show: false } },
-      ],
-      dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: 30, end: 100 },
-        { type: 'slider', xAxisIndex: [0, 1], bottom: 8, height: 18, borderColor: 'transparent', fillerColor: 'rgba(0,160,233,.25)' },
-      ],
-      series: [
-        { type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0,
-          itemStyle: { color: '#26a69a', color0: '#ef5350', borderColor: '#26a69a', borderColor0: '#ef5350' } },
-        { type: 'bar', data: vols.map((v, i) => ({ value: v, itemStyle: { color: colors[i] + '66' } })),
-          xAxisIndex: 1, yAxisIndex: 1 },
-      ],
-    });
-    window.addEventListener('resize', () => chart.resize());
-  });
-}
-
-function buildDrawerContent(c) {
-  const q = c.quality_score || c.overall_score || 0;
-  const a = c.alpha_val || c.alpha?.alpha_score || 0;
-  const f = c.final_score || 0;
-  const snap = c.financial_snapshot || {};
-  const alpha = c.alpha || {};
-  const capYi = snap.market_cap_yi ?? c.supplier?.market_cap;
-
-  const dimTips = {
-    market_position: `市场地位 ${(c.market_position||0).toFixed(1)} 分\nAI 综合评估市场份额、品牌影响力、行业排名`,
-    customer_validation: `客户验证 ${(c.customer_validation||0).toFixed(1)} 分\nAI 评估客户质量、长期订单合同、复购率`,
-    capacity: `产能状况 ${(c.capacity_status||c.capacity||0).toFixed(1)} 分\nAI 评估产能利用率、扩产计划、交付周期`,
-    financial_health: `财务健康 ${(c.financial_health||0).toFixed(1)} 分\n${snap.roe_pct != null ? 'ROE: ' + snap.roe_pct.toFixed(1) + '%' : ''}${snap.debt_ratio_pct != null ? ' 负债率: ' + snap.debt_ratio_pct.toFixed(1) + '%' : ''}${snap.gross_margin_pct != null ? ' 毛利率: ' + snap.gross_margin_pct.toFixed(1) + '%' : ''}`,
-    valuation: `估值水平 ${(c.valuation||0).toFixed(1)} 分\n${snap.consensus_pe != null ? '预期PE: ' + snap.consensus_pe.toFixed(1) + 'x' : ''}${capYi != null ? ' 市值: ' + capYi + '亿' : ''}`,
-  };
-
-  const alphaDims = [
-    { key: 'dim_cap', label: '市值规模', tip: `市值规模得分 ${alpha.dim_cap ?? '-'}\n${capYi != null ? '市值: ' + capYi + '亿' : '市值未知'}\n市值越小，预期差越大` },
-    { key: 'dim_analyst', label: '分析师覆盖', tip: `分析师覆盖得分 ${alpha.dim_analyst ?? '-'}\n覆盖机构数: ${snap.analyst_report_count ?? '未知'}\n覆盖越少，信息差越大` },
-    { key: 'dim_volume', label: '成交量动量', tip: `成交量动量得分 ${alpha.dim_volume ?? '-'}\n量比(10日/60日): ${snap.volume_ratio?.toFixed(2) ?? '未知'}\n连续放量 ${snap.consecutive_volume_days || 0} 天` },
-    { key: 'dim_price', label: '近期涨幅', tip: `近期涨幅得分 ${alpha.dim_price ?? '-'}\n近3月: ${snap.price_change_3m_pct?.toFixed(1) ?? '?'}%  近1月: ${snap.price_change_1m_pct?.toFixed(1) ?? '?'}%` },
-    { key: 'dim_institution', label: '机构持仓', tip: `机构持仓得分 ${alpha.dim_institution ?? '-'}\n机构持仓: ${snap.institution_holding_pct?.toFixed(1) ?? '未知'}%` },
-  ];
-
-  const fRows = [];
-  if (snap.revenue_yi != null) fRows.push(['营收', `${snap.revenue_yi.toFixed(2)} 亿`]);
-  if (snap.revenue_yoy_pct != null) fRows.push(['营收同比', `${snap.revenue_yoy_pct > 0 ? '+' : ''}${snap.revenue_yoy_pct.toFixed(1)}%`]);
-  if (snap.net_profit_yi != null) fRows.push(['净利润', `${snap.net_profit_yi.toFixed(2)} 亿`]);
-  if (snap.net_profit_yoy_pct != null) fRows.push(['净利同比', `${snap.net_profit_yoy_pct > 0 ? '+' : ''}${snap.net_profit_yoy_pct.toFixed(1)}%`]);
-  if (snap.gross_margin_pct != null) fRows.push(['毛利率', `${snap.gross_margin_pct.toFixed(1)}%`]);
-  if (snap.roe_pct != null) fRows.push(['ROE', `${snap.roe_pct.toFixed(1)}%`]);
-  if (snap.debt_ratio_pct != null) fRows.push(['负债率', `${snap.debt_ratio_pct.toFixed(1)}%`]);
-  if (snap.consensus_pe != null) fRows.push(['预期PE', `${snap.consensus_pe.toFixed(1)}x`]);
-  if (snap.analyst_report_count != null) fRows.push(['机构覆盖', `${snap.analyst_report_count} 家`]);
-
-  return `
-    <div class="drawer-score-grid">
-      <div class="drawer-score-box"><div class="val val-accent">${f.toFixed(2)}</div><div class="lbl">最终评分</div></div>
-      <div class="drawer-score-box"><div class="val val-yellow">${q.toFixed(1)}</div><div class="lbl">质量分</div></div>
-      <div class="drawer-score-box"><div class="val val-green">${a.toFixed(1)}</div><div class="lbl">预期差</div></div>
-    </div>
-    <div class="drawer-section"><h4>企业简介</h4><p style="font-size:13px;line-height:1.7">${c.supplier?.description || c.description || '暂无企业简介'}</p></div>
-    ${c.supplier?.products?.length ? `
-    <div class="drawer-section"><h4>核心产品</h4><div class="p2-product-tags">${(c.supplier.products || []).map(p => `<span class="p2-product-tag">${p}</span>`).join('')}</div></div>
-    ` : ''}
-    <div class="drawer-section"><h4>五维评分 <small style="color:var(--muted);font-weight:400">（悬停查看详情）</small></h4><div class="dim-bar-list">
-      ${['market_position', 'customer_validation', 'capacity', 'financial_health', 'valuation'].map(k => {
-        const labels = { market_position: '市场地位', customer_validation: '客户验证', capacity: '产能状况', financial_health: '财务健康', valuation: '估值水平' };
-        const val = k === 'capacity' ? (c.capacity_status ?? c.capacity ?? c.scores?.capacity ?? 0) : (c[k] ?? c.scores?.[k] ?? 0);
-        const tip = dimTips[k] || '';
-        return `<div class="dim-bar-row" title="${tip}"><span class="dim-bar-label">${labels[k]}</span><div class="dim-bar-track"><div class="dim-bar-fill" style="width:${val * 10}%"></div></div><span class="dim-bar-val">${val.toFixed(1)}</span></div>`;
-      }).join('')}
-    </div></div>
-    ${alpha.alpha_score != null ? `
-    <div class="drawer-section"><h4>预期差分析 <small style="color:var(--muted);font-weight:400">（悬停查看详情）</small></h4><div class="dim-bar-list">
-      ${alphaDims.map(d => {
-        const val = alpha[d.key] ?? 0;
-        return `<div class="dim-bar-row" title="${d.tip}"><span class="dim-bar-label">${d.label}</span><div class="dim-bar-track"><div class="dim-bar-fill dim-bar-fill--alpha" style="width:${val * 11.1}%"></div></div><span class="dim-bar-val">${val.toFixed(1)}</span></div>`;
-      }).join('')}
-    </div></div>` : ''}
-    ${fRows.length ? `
-    <div class="drawer-section"><h4>财务与市场</h4><div class="fin-grid">
-      ${fRows.map(([l, v]) => {
-        const isUp = v.includes('+');
-        const isDown = v.startsWith('-');
-        return `<div class="fin-cell"><span class="fin-label">${l}</span><span class="fin-val${isUp ? ' val-up' : isDown ? ' val-down' : ''}">${v}</span></div>`;
-      }).join('')}
-    </div></div>` : ''}
-    <div class="drawer-section"><h4>股价走势 <small style="color:var(--muted);font-weight:400">（点击放大）</small></h4>
-      <div id="drawer-kline" style="height:280px;width:100%;cursor:pointer"></div>
-    </div>
-    ${c.strengths?.length || c.weaknesses?.length ? `
-    <div class="drawer-section"><h4>优势与风险</h4><div class="drawer-strengths">
-      <div><h5 style="color:var(--success)">优势</h5>${(c.strengths || []).map(s => `<div class="s-item s-good">✅ ${s}</div>`).join('')}</div>
-      <div><h5 style="color:var(--danger)">风险</h5>${(c.weaknesses || c.risks || []).map(r => `<div class="s-item s-bad">⚠️ ${r}</div>`).join('')}</div>
-    </div></div>` : ''}
-  `;
 }
 
 /* ── 赛道管理 ──────────────────────────────── */
@@ -2284,7 +1377,7 @@ export function initWizard() {
   });
   document.querySelectorAll('.p3-chart-card .ai-regen-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      _fetchAiInterp(btn.dataset.chartType, true);
+      fetchAiInterp(btn.dataset.chartType, true);
     });
   });
 
@@ -2667,12 +1760,13 @@ async function loadWizardAnalysis(analysisId) {
       state.aiReports = data.ai_reports;
       for (const key of ['scatter', 'radar', 'bar', 'stack']) {
         if (state.aiReports[key]?.text) {
-          _updateTriggerBtn(key, true);
+          updateTriggerBtn(key, true);
         }
       }
     }
 
     updateSidebarStatus();
+    updateNav();
     logMsg('历史分析载入完成', 'done');
   } catch (err) {
     logMsg(`载入失败: ${err.message}`, 'error');
@@ -3010,4 +2104,4 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-export { state as wizardState, goToPhase, openDrawer };
+export { state as wizardState, goToPhase, openDrawer, getScoreColor, scoreNeedsDarkText };

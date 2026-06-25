@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 try:
@@ -282,7 +282,7 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
         # IPO 日期
         ipo_ts = info.get("firstTradeDateEpochUtc")
         if ipo_ts:
-            snap.days_since_ipo = (datetime.now() - datetime.utcfromtimestamp(ipo_ts)).days
+            snap.days_since_ipo = (datetime.now(timezone.utc) - datetime.fromtimestamp(ipo_ts, timezone.utc)).days
 
         eps_fwd = info.get("forwardEps")
         pe_fwd = info.get("forwardPE")

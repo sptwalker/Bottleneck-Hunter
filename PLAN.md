@@ -203,10 +203,20 @@ BottleneckHunter/
 | P0 | Phase 7B - 测试补充 | ✅ 已完成 | 74 个新测试，165 项全部通过 |
 | P1 | Phase 7D - 体验优化 | ✅ 已完成 | 真流式 + 断连重试 + 模块拆分 |
 | P0 | Phase 8A - 观察池骨架 | ✅ 已完成 | 观察池 CRUD + 数据管道 + 策略大脑系统 |
-| P0 | Phase 8B - 交易决策系统 | 🔲 待开发 | LLM驱动四层决策 + 投委会 + 闭环反馈 |
-| P1 | Phase 8C - 复盘系统 | 🔲 待开发 | 交易复盘 + 经验卡片 + 调优闭环 |
+| P0 | Phase 8B.1 - L1/L2 决策引擎 | ✅ 已完成 | 宏观策略 + 组合策略 + 催化剂监控 + 14张DB表 + API端点 |
+| P0 | Phase 8B.2 - L3/L4 + 投委会 | ✅ 已完成 | 战术引擎 + 执行引擎 + 4成员投委会 + 完整流程串联 + 26项测试 |
+| P0 | Phase 8B.3 - 交易执行 + 前端 | ✅ 已完成 | 模拟交易执行 + 决策中心前端UI + 仓位管理 + AI模型配置 |
+| P1 | Phase 8B.4 - 闭环反馈 | ✅ 已完成 | 交易复盘 + 经验卡片 + 催化剂时效 + 反馈闭环 |
+| P1 | Phase 8B.5 - 集成测试 + 调优 | ✅ 已完成 | L1/L2/E2E/Budget/数据收集 24 项测试，全套 264 项通过 |
+| P1 | Phase 8C - 复盘系统 | ✅ 已合并至 8B.4 | — |
+| P1 | Phase 9A - 绩效报告与调优系统 | ✅ 已完成 | 绩效统计+调优建议+前端仪表盘，15 项测试，全套 279 项通过 |
+| P1 | Phase 9B - 代码质量优化 | ✅ 已完成 | CSS 模块化(7237→9模块+索引)、JS 拆分(phases.js→4子模块)、DeprecationWarning 修复 |
+| P1 | Phase 9C - A股深度适配 | ✅ 已完成 | 观察池双市场支持：price_pipeline(akshare)、news_pipeline(中文新闻)、scheduler(6任务UTC双市场)、store(get_tickers_by_market) |
 
-**下一步**：Phase 8B — 交易决策系统（基于 `docs/TRADING_DECISION_SYSTEM.md` 设计）
+| P0 | Phase 10A - 测试加固 | ✅ 已完成 | 4 个测试文件(store/price/news/scheduler)，40 项新测试，全套 319 项通过 |
+| P0 | Phase 10B - 决策引擎市场分化 | ✅ 已完成 | 8个提示词注入{market_context}、notice_pipeline(A股公告)、committee市场感知、23项新测试，全套342项通过 |
+
+**下一步**：Phase 10C — 前端体验优化（市场筛选器 + 批量 tier + 笔记编辑）
 
 ---
 
@@ -655,7 +665,7 @@ llm_budget（LLM 成本控制）
 | 8B.1 信息输入 + L1-L2 | 2 周 | MarketContextCollector + ChartGenerator + SignalPerception + 宏观策略管理器 + 组合策略定位器 | macro_strategies + strategic_plans 表 |
 | 8B.2 战术执行 + 模拟交易 | 2 周 | TacticalEngine + AccountExecutor + SimulatedTrading | tactical_plans + account_strategies + sim_* 表 |
 | 8B.3 投委会 + 用户接口 | 1.5 周 | InvestmentCommittee（4 成员独立审查+共识）+ WebSocket 实时对话 | committee_reviews + user_preferences 表 |
-| 8B.4 闭环反馈系统 | 1 周 | 交易确认/拒绝跟踪 + 催化剂时效管理 + 自动复盘 + 经验卡片 | trade_feedback + catalyst_tracking + auto_reviews 表 |
+| 8B.4 闭环反馈系统 | 1 周 | 交易确认/拒绝跟踪 + 催化剂时效管理 + 自动复盘 + 经验卡片 | trade_feedback + catalyst_tracking + auto_reviews + experience_cards 表 ✅ |
 | 8B.5 集成测试 + 调优 | 1 周 | E2E 测试 + 性能优化 + LLM 成本优化 | 全流程验证通过 |
 
 #### 关键设计决策

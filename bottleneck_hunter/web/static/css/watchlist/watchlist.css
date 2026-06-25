@@ -1,0 +1,1247 @@
+/* ============================================================
+   Watchlist — 观察池样式
+   ============================================================ */
+
+.wl-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 20px;
+}
+
+/* ── Toolbar ─── */
+.wl-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.wl-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.wl-page-title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.wl-count-badge {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  background: var(--panel-bg);
+  padding: 2px 10px;
+  border-radius: 12px;
+}
+
+.wl-toolbar-center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.wl-search-input {
+  width: 180px;
+  padding: 5px 10px !important;
+  font-size: var(--fs-sm) !important;
+}
+
+.wl-filter-select {
+  padding: 5px 28px 5px 8px !important;
+  font-size: var(--fs-xs) !important;
+  min-width: 90px;
+}
+
+.wl-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.wl-view-toggle {
+  display: flex;
+  background: var(--panel-bg);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.wl-view-btn {
+  background: none;
+  border: none;
+  padding: 4px 10px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  color: var(--muted);
+  transition: all var(--transition);
+}
+
+.wl-view-btn.active {
+  background: var(--accent);
+  color: var(--surface);
+}
+
+.wl-view-btn:hover:not(.active) {
+  color: var(--ink);
+}
+
+/* ── Refresh bar ─── */
+.wl-refresh-bar {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: oklch(0.55 0.15 250 / 0.06);
+  border-radius: var(--radius);
+  border: 1px solid oklch(0.55 0.15 250 / 0.15);
+}
+
+.wl-refresh-msg {
+  font-size: var(--fs-xs);
+  color: var(--accent);
+}
+
+/* ── Table view ─── */
+.wl-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 16px;
+}
+
+.wl-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.wl-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface);
+  padding: 8px 10px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+
+.wl-table tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background var(--transition);
+  cursor: pointer;
+}
+
+.wl-table tbody tr:hover {
+  background: oklch(0.97 0.003 250);
+}
+
+.wl-table tbody td {
+  padding: 10px 10px;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  vertical-align: middle;
+}
+
+.wl-th-tier { width: 72px; }
+.wl-th-actions { width: 80px; text-align: center; }
+.wl-th-check { width: 36px; text-align: center; }
+.wl-td-check { text-align: center; }
+
+/* Batch action bar */
+.wl-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  margin-bottom: 8px;
+  background: oklch(0.3 0.02 250 / 0.5);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  font-size: var(--fs-sm);
+}
+.wl-batch-count {
+  font-weight: 600;
+  color: var(--accent);
+  margin-right: auto;
+}
+
+/* Notes section in drawer */
+.wl-notes-input {
+  width: 100%;
+  min-height: 60px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  font-family: inherit;
+  resize: vertical;
+}
+.wl-notes-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Tier badge in table */
+.wl-tier-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.wl-tier-badge--focus  { background: oklch(0.55 0.18 25 / 0.1);  color: oklch(0.55 0.18 25); }
+.wl-tier-badge--normal { background: oklch(0.55 0.15 250 / 0.1); color: oklch(0.55 0.15 250); }
+.wl-tier-badge--track  { background: oklch(0.55 0.12 155 / 0.1); color: oklch(0.55 0.12 155); }
+
+.wl-tier-badge .wl-tier-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Price change in table */
+.wl-change-up   { color: oklch(0.55 0.12 155); font-weight: 500; }
+.wl-change-down { color: oklch(0.55 0.15 25);  font-weight: 500; }
+
+/* Score in table */
+.wl-score-cell {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* MACD signal */
+.wl-macd-bull { color: oklch(0.55 0.12 155); font-size: var(--fs-xs); }
+.wl-macd-bear { color: oklch(0.55 0.15 25);  font-size: var(--fs-xs); }
+.wl-macd-flat { color: var(--muted);          font-size: var(--fs-xs); }
+
+/* Table action buttons */
+.wl-row-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+}
+
+.wl-row-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--muted);
+  transition: all var(--transition);
+}
+
+.wl-row-btn:hover {
+  background: var(--panel-bg);
+  color: var(--ink);
+}
+
+.wl-row-btn--danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Table empty row */
+.wl-table-empty td {
+  text-align: center;
+  padding: 40px;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+/* ── Footer bar ─── */
+.wl-footer-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.wl-pipe-status {
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.wl-pipe-status span {
+  white-space: nowrap;
+}
+
+.wl-pipe-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 3px;
+  vertical-align: middle;
+}
+
+.wl-pipe-dot--ok    { background: var(--success); }
+.wl-pipe-dot--stale { background: var(--warning); }
+.wl-pipe-dot--err   { background: var(--danger); }
+
+.wl-footer-bar .wl-budget-bar {
+  margin-top: 0;
+  flex: 1;
+  min-width: 200px;
+}
+
+/* ── Add panel ─── */
+.wl-add-panel {
+  display: flex;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--panel-bg);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.wl-add-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.wl-add-form .form-input {
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  max-width: 180px;
+}
+
+/* ── Tier sections ─── */
+.wl-tier-section {
+  margin-bottom: 20px;
+}
+
+.wl-tier-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.wl-tier-header h3 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.wl-tier-count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.wl-tier-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wl-dot-focus  { background: oklch(0.55 0.18 25); }
+.wl-dot-normal { background: oklch(0.55 0.15 250); }
+.wl-dot-track  { background: oklch(0.55 0.12 155); }
+
+/* ── Card grid ─── */
+.wl-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.wl-card-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  padding: 20px;
+}
+
+.wl-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  transition: box-shadow var(--transition);
+  cursor: default;
+  position: relative;
+}
+
+.wl-card:hover {
+  box-shadow: var(--shadow-card);
+}
+
+.wl-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.wl-card-ticker {
+  font-weight: 700;
+  font-size: var(--fs-sm);
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.wl-card-score {
+  font-size: var(--fs-xs);
+  background: var(--panel-bg);
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.wl-card-name {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 8px;
+}
+
+.wl-card-price {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.wl-card-price-val {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.wl-card-change {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+
+.wl-card-change.wl-up   { color: oklch(0.55 0.12 155); }
+.wl-card-change.wl-down { color: oklch(0.55 0.15 25); }
+
+.wl-card-indicators {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.wl-card-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.wl-card:hover .wl-card-actions {
+  opacity: 1;
+}
+
+.wl-card-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--muted);
+  transition: background var(--transition);
+}
+
+.wl-card-btn:hover {
+  background: var(--panel-bg);
+}
+
+.wl-card-btn-remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* ── Empty state ─── */
+.wl-empty {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--muted);
+}
+
+.wl-empty p:first-child {
+  font-size: var(--fs-lg);
+  margin-bottom: 8px;
+}
+
+.wl-empty-hint {
+  font-size: var(--fs-sm);
+}
+
+/* ── Budget bar ─── */
+.wl-budget-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 8px 12px;
+  background: var(--panel-bg);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.wl-budget-label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.wl-budget-gauge {
+  flex: 1;
+  height: 6px;
+  background: var(--skeleton);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.wl-budget-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.wl-budget-fill.wl-budget-warn   { background: var(--warning); }
+.wl-budget-fill.wl-budget-danger { background: var(--danger); }
+
+.wl-budget-text {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ── Phase 4 加入观察池 ─── */
+.wl-p4-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.wl-p4-status {
+  font-size: var(--fs-sm);
+  color: var(--accent);
+}
+
+/* ── Phase 4 加入观察池按钮 ─── */
+.wl-p4-add-btn {
+  white-space: nowrap;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.wl-p4-add-recommended {
+  background: oklch(0.55 0.12 155);
+  border-color: oklch(0.55 0.12 155);
+  color: #fff;
+}
+
+.wl-p4-add-recommended:hover {
+  background: oklch(0.48 0.12 155);
+}
+
+.wl-p4-add-normal {
+  background: var(--panel-bg);
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.wl-p4-add-normal:hover {
+  background: var(--border);
+  color: var(--ink);
+}
+
+.wl-p4-add-done {
+  background: var(--skeleton) !important;
+  border-color: var(--border) !important;
+  color: var(--muted) !important;
+  cursor: default;
+}
+
+/* ── Watchlist Drawer ─── */
+#wl-drawer {
+  width: 900px;
+  max-width: 90vw;
+}
+#wl-drawer .drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.wl-drawer-price {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--ink);
+  margin-left: 12px;
+}
+
+.wl-drawer-change {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+.wl-drawer-change.wl-change-up   { color: oklch(0.55 0.12 155); }
+.wl-drawer-change.wl-change-down { color: oklch(0.55 0.15 25); }
+
+.wl-drawer-tier-badge {
+  margin-left: 8px;
+}
+
+/* Drawer tabs */
+.wl-drawer-tabs {
+  display: flex;
+  border-bottom: 2px solid var(--border);
+  padding: 0 20px;
+  gap: 0;
+}
+
+.wl-drawer-tab {
+  background: none;
+  border: none;
+  padding: 10px 16px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.wl-drawer-tab:hover {
+  color: var(--ink);
+}
+
+.wl-drawer-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Tab panes */
+.wl-tab-pane {
+  display: none;
+  padding: 20px;
+}
+
+.wl-tab-pane.active {
+  display: block;
+}
+
+/* ── Price tab ─── */
+.wl-price-chart {
+  width: 100%;
+  height: 300px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.wl-indicators {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.wl-indicator-card {
+  background: var(--panel-bg);
+  border-radius: var(--radius);
+  padding: 12px;
+  text-align: center;
+}
+
+.wl-indicator-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.wl-indicator-value {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* ── News tab ─── */
+.wl-news-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wl-news-item {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: box-shadow var(--transition);
+}
+
+.wl-news-item:hover {
+  box-shadow: var(--shadow-card);
+}
+
+.wl-news-sentiment {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 8px;
+  height: fit-content;
+  margin-top: 2px;
+}
+
+.wl-news-sentiment--positive { background: oklch(0.55 0.12 155 / 0.1); color: oklch(0.55 0.12 155); }
+.wl-news-sentiment--neutral  { background: var(--panel-bg); color: var(--muted); }
+.wl-news-sentiment--negative { background: oklch(0.55 0.15 25 / 0.1);  color: oklch(0.55 0.15 25); }
+
+.wl-news-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.wl-news-title {
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+
+.wl-news-title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.wl-news-title a:hover {
+  color: var(--accent);
+}
+
+.wl-news-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ── Capital tab ─── */
+.wl-capital-section {
+  margin-bottom: 20px;
+}
+
+.wl-capital-section h4 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.wl-insider-table,
+.wl-options-table,
+.wl-sec-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-xs);
+}
+
+.wl-insider-table th,
+.wl-options-table th,
+.wl-sec-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.wl-insider-table td,
+.wl-options-table td,
+.wl-sec-table td {
+  padding: 8px 8px;
+  border-bottom: 1px solid oklch(0.88 0.005 250 / 0.5);
+  color: var(--ink);
+}
+
+.wl-trade-buy  { color: oklch(0.55 0.12 155); }
+.wl-trade-sell { color: oklch(0.55 0.15 25); }
+
+/* ── UZI tab ─── */
+.wl-uzi-actions {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.wl-uzi-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all var(--transition);
+  text-align: left;
+}
+
+.wl-uzi-btn:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px oklch(0.55 0.15 250 / 0.08);
+}
+
+.wl-uzi-btn-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.wl-uzi-btn-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.wl-uzi-btn-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.wl-uzi-btn-desc {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.wl-uzi-btn.running {
+  border-color: var(--accent);
+  background: oklch(0.55 0.15 250 / 0.04);
+  pointer-events: none;
+}
+
+/* UZI progress */
+.wl-uzi-progress {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--panel-bg);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.wl-uzi-progress-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+
+.wl-uzi-progress-bar {
+  height: 6px;
+  background: var(--skeleton);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.wl-uzi-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.wl-uzi-progress-text {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* UZI history list */
+.wl-uzi-history {
+  margin-top: 20px;
+}
+
+.wl-uzi-history h4 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+
+.wl-uzi-history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid oklch(0.88 0.005 250 / 0.5);
+  font-size: var(--fs-xs);
+}
+
+.wl-uzi-history-type {
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 80px;
+}
+
+.wl-uzi-history-date {
+  color: var(--muted);
+}
+
+.wl-uzi-history-result {
+  margin-left: auto;
+  font-weight: 500;
+}
+
+.wl-uzi-history-link {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.wl-uzi-history-link:hover {
+  text-decoration: underline;
+}
+
+/* UZI result sections */
+.wl-uzi-result {
+  margin-top: 16px;
+}
+
+.wl-uzi-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.wl-uzi-result-title {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.wl-uzi-radar {
+  width: 100%;
+  height: 320px;
+  margin-bottom: 16px;
+}
+
+.wl-uzi-score-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.wl-uzi-score-item {
+  background: var(--panel-bg);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  text-align: center;
+}
+
+.wl-uzi-score-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.wl-uzi-score-value {
+  font-size: var(--fs-md);
+  font-weight: 700;
+}
+
+.wl-uzi-score-value.score-high { color: oklch(0.55 0.12 155); }
+.wl-uzi-score-value.score-mid  { color: oklch(0.6 0.14 85); }
+.wl-uzi-score-value.score-low  { color: oklch(0.55 0.15 25); }
+
+/* Trap detector badge */
+.wl-trap-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.wl-trap-badge--safe    { background: oklch(0.55 0.12 155 / 0.1); color: oklch(0.55 0.12 155); }
+.wl-trap-badge--caution { background: oklch(0.6 0.14 85 / 0.1);  color: oklch(0.6 0.14 85); }
+.wl-trap-badge--warning { background: oklch(0.6 0.16 60 / 0.1);  color: oklch(0.6 0.16 60); }
+.wl-trap-badge--danger  { background: oklch(0.55 0.15 25 / 0.1); color: oklch(0.55 0.15 25); }
+
+/* Trap signal list */
+.wl-trap-signals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.wl-trap-signal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  font-size: var(--fs-xs);
+}
+
+.wl-trap-signal--pass {
+  background: oklch(0.55 0.12 155 / 0.05);
+}
+
+.wl-trap-signal--fail {
+  background: oklch(0.55 0.15 25 / 0.05);
+}
+
+.wl-trap-signal-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* Investor panel result */
+.wl-panel-vote-chart {
+  width: 100%;
+  height: 260px;
+  margin-bottom: 16px;
+}
+
+.wl-panel-group-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.wl-panel-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wl-panel-group-name {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink);
+  min-width: 70px;
+  text-align: right;
+}
+
+.wl-panel-group-bar {
+  flex: 1;
+  height: 18px;
+  background: var(--skeleton);
+  border-radius: 3px;
+  overflow: hidden;
+  display: flex;
+}
+
+.wl-panel-bar-bull { background: oklch(0.55 0.12 155); }
+.wl-panel-bar-neut { background: oklch(0.6 0.14 85); }
+.wl-panel-bar-bear { background: oklch(0.55 0.15 25); }
+
+/* ── Info Tab (基本信息) ─── */
+.wl-info-meta {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.wl-info-meta-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  font-size: var(--fs-sm);
+}
+.wl-info-meta-row + .wl-info-meta-row { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
+.wl-info-meta-label { color: var(--muted); min-width: 80px; }
+.wl-info-source-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.wl-info-source--phase4 { background: oklch(0.55 0.15 250 / 0.15); color: oklch(0.55 0.15 250); }
+.wl-info-source--manual { background: oklch(0.6 0.1 85 / 0.15); color: oklch(0.6 0.14 85); }
+
+.wl-info-reason {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.wl-info-reason h4 { font-size: var(--fs-sm); font-weight: 600; margin: 0 0 12px; }
+.wl-info-reason-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+.wl-info-reason-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wl-info-reason-label { font-size: 11px; color: var(--muted); }
+.wl-info-reason-value { font-size: var(--fs-sm); font-weight: 500; }
+
+.wl-info-section {
+  margin-bottom: 16px;
+}
+.wl-info-section h4 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  margin: 0 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.wl-info-product-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.wl-info-product-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: var(--fs-xs);
+  background: oklch(0.55 0.15 250 / 0.1);
+  color: oklch(0.55 0.15 250);
+  border: 1px solid oklch(0.55 0.15 250 / 0.2);
+}
+
+/* ── Catalyst (催化剂事件) ─── */
+.wl-news-section-header {
+  margin-bottom: 8px;
+}
+.wl-news-section-header h4 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  margin: 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.wl-catalyst-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wl-catalyst-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: var(--fs-sm);
+}
+.wl-catalyst-type {
+  white-space: nowrap;
+  font-weight: 600;
+  color: oklch(0.55 0.15 250);
+  font-size: var(--fs-xs);
+  padding-top: 2px;
+}
+.wl-catalyst-body { flex: 1; }
+.wl-catalyst-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.wl-catalyst-footer {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: oklch(0.6 0.14 85 / 0.08);
+  border-radius: 6px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+/* ── Responsive ─── */
+@media (max-width: 960px) {
+  .wl-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .wl-toolbar-center {
+    order: 3;
+    flex-wrap: wrap;
+  }
+  .wl-search-input {
+    flex: 1;
+    width: auto;
+    min-width: 120px;
+  }
+  .wl-indicators {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .wl-uzi-actions {
+    grid-template-columns: 1fr;
+  }
+  #wl-drawer {
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 600px) {
+  .wl-container {
+    padding: 16px 12px;
+  }
+  .wl-toolbar-right .wl-view-toggle {
+    display: none;
+  }
+  .wl-indicators {
+    grid-template-columns: 1fr;
+  }
+}

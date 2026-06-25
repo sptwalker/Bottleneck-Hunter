@@ -20,3 +20,5 @@ package-lock.json
 test_banners*.png
 test_screenshot*.png
 test_hot_scan*.png
+dc_*.png
+screenshot_dc_*.png

@@ -1,6 +1,6 @@
 """Price data pipeline — fetch daily OHLCV + compute technical indicators.
 
-Uses yfinance for US stocks, same async pattern as chain/financial_data.py.
+Uses yfinance for US stocks, akshare for A-stocks.
 """
 
 from __future__ import annotations
@@ -8,10 +8,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import yfinance as yf
+
+try:
+    import akshare as ak
+except ImportError:
+    ak = None  # type: ignore[assignment]
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
@@ -81,6 +87,16 @@ def _safe(v) -> float | None:
         return None
 
 
+_ASTOCK_RE = re.compile(r"^(?:SH|SZ|sh|sz)?(\d{6})")
+
+
+def _extract_astock_code(ticker: str) -> str | None:
+    """从 ticker (如 '600519.SH', 'SH600519', '688012') 中提取 6 位代码。"""
+    code = ticker.split(".")[0].strip()
+    m = _ASTOCK_RE.match(code)
+    return m.group(1) if m else None
+
+
 # ---------------------------------------------------------------------------
 # Data fetching
 # ---------------------------------------------------------------------------
@@ -146,11 +162,75 @@ def _fetch_daily_data(ticker: str, days: int = 180) -> list[dict]:
         return []
 
 
-async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180) -> str:
+def _fetch_astock_daily(ticker: str, days: int = 180) -> list[dict]:
+    """Fetch A-stock OHLCV via akshare + compute RSI/MACD/SMA. Synchronous."""
+    if ak is None:
+        logger.warning("akshare not installed, cannot fetch A-stock data")
+        return []
+    code = _extract_astock_code(ticker)
+    if not code:
+        logger.warning("Cannot extract A-stock code from %s", ticker)
+        return []
+    try:
+        start_date = (datetime.now() - timedelta(days=max(days, 365))).strftime("%Y%m%d")
+        end_date = datetime.now().strftime("%Y%m%d")
+        df = ak.stock_zh_a_hist(
+            symbol=code, period="daily",
+            start_date=start_date, end_date=end_date,
+            adjust="qfq",
+        )
+        if df is None or df.empty:
+            logger.warning("No A-stock price data for %s", ticker)
+            return []
+
+        closes = [float(v) for v in df["收盘"]]
+        volumes = [int(v) for v in df["成交量"]]
+        opens = [float(v) for v in df["开盘"]]
+        highs = [float(v) for v in df["最高"]]
+        lows = [float(v) for v in df["最低"]]
+
+        rsi = _compute_rsi(closes)
+        macd_result = _compute_macd(closes)
+        sma_20 = _compute_sma(closes, 20)
+        sma_50 = _compute_sma(closes, 50)
+
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result = []
+        for i in range(max(0, len(df) - days), len(df)):
+            date_str = str(df.iloc[i]["日期"])[:10]
+            prev_close = closes[i - 1] if i > 0 else closes[i]
+            change_pct = ((closes[i] - prev_close) / prev_close * 100) if prev_close else 0.0
+            snap = {
+                "ticker": ticker,
+                "date": date_str,
+                "open": _safe(opens[i]),
+                "high": _safe(highs[i]),
+                "low": _safe(lows[i]),
+                "close": _safe(closes[i]),
+                "volume": volumes[i],
+                "change_pct": round(change_pct, 2),
+                "fetched_at": now_iso,
+            }
+            if i == len(df) - 1:
+                snap["rsi_14"] = rsi
+                snap["sma_20"] = sma_20
+                snap["sma_50"] = sma_50
+                if macd_result:
+                    snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
+            result.append(snap)
+        return result
+
+    except Exception as e:
+        logger.error("A-stock price fetch failed for %s: %s", ticker, e)
+        return []
+
+
+async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market: str = "us_stock") -> str:
     """Fetch one ticker asynchronously with semaphore. Returns status string."""
     async with _SEM:
         try:
-            snapshots = await asyncio.to_thread(_fetch_daily_data, ticker, days)
+            fetch_fn = _fetch_astock_daily if market == "a_stock" else _fetch_daily_data
+            snapshots = await asyncio.to_thread(fetch_fn, ticker, days)
             if snapshots:
                 store.save_snapshots(snapshots)
                 return "ok"
@@ -160,11 +240,11 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180) -> str
             return f"error: {e}"
 
 
-async def fetch_price_batch(tickers: list[str], store: WatchlistStore, days: int = 180) -> dict[str, str]:
+async def fetch_price_batch(tickers: list[str], store: WatchlistStore, days: int = 180, market: str = "us_stock") -> dict[str, str]:
     """Batch-fetch daily prices for all watchlist tickers. Returns {ticker: status}."""
     if not tickers:
         return {}
-    tasks = {t: asyncio.create_task(_fetch_one(t, store, days)) for t in tickers}
+    tasks = {t: asyncio.create_task(_fetch_one(t, store, days, market)) for t in tickers}
     results = {}
     for ticker, task in tasks.items():
         results[ticker] = await task

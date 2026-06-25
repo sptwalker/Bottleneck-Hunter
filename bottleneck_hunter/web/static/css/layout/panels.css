@@ -1,0 +1,389 @@
+
+/* ============================================================
+   2. Main Layout
+   ============================================================ */
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin-top: 48px;
+  margin-bottom: 32px;
+  min-height: 0;
+}
+
+
+
+/* ============================================================
+   3. Left Panel
+   ============================================================ */
+.panel {
+  width: var(--panel-width);
+  background: var(--panel-bg);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: calc(100vh - 48px - 32px);
+  position: sticky;
+  top: 48px;
+  display: flex;
+  flex-direction: column;
+  transition: width var(--transition);
+}
+
+.panel-section {
+  padding: 16px;
+}
+
+.panel-section + .panel-section {
+  border-top: 1px solid var(--border);
+}
+
+.panel-heading {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+}
+
+/* Form controls */
+.form-group {
+  margin-bottom: 12px;
+}
+
+.form-group:last-child {
+  margin-bottom: 0;
+}
+
+.form-label {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.form-input,
+.form-select,
+.form-textarea {
+  width: 100%;
+  font-size: var(--fs-sm);
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--ink);
+  transition: border-color var(--transition), box-shadow var(--transition);
+  outline: none;
+}
+
+.form-input:focus,
+.form-select:focus,
+.form-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px oklch(0.55 0.15 250 / 0.12);
+}
+
+.form-input::placeholder,
+.form-textarea::placeholder {
+  color: oklch(0.7 0.005 250);
+}
+
+.form-input:disabled,
+.form-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--skeleton);
+}
+.radio input[type="radio"]:disabled + span {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23777' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+  cursor: pointer;
+}
+
+.form-textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+
+.form-row {
+  display: flex;
+  gap: 10px;
+}
+
+.form-group--half {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Radio group */
+.radio-group {
+  display: flex;
+  gap: 6px;
+}
+
+.radio-item {
+  position: relative;
+  flex: 1;
+}
+
+.radio-item input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.radio-item label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--muted);
+  background: var(--surface);
+  transition: all var(--transition);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.radio-item input[type="radio"]:checked + label {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: oklch(0.55 0.15 250 / 0.06);
+}
+
+.radio-item label:hover {
+  border-color: var(--accent);
+}
+
+/* Toggle switch */
+.toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  user-select: none;
+}
+
+.toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: var(--border);
+  border-radius: 10px;
+  transition: background var(--transition);
+  flex-shrink: 0;
+}
+
+.toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--surface);
+  border-radius: 50%;
+  transition: transform var(--transition);
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.1);
+}
+
+.toggle input[type="checkbox"]:checked + .toggle-track {
+  background: var(--accent);
+}
+
+.toggle input[type="checkbox"]:checked + .toggle-track::after {
+  transform: translateX(16px);
+}
+
+.toggle-label {
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+
+/* Checkbox */
+.form-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.form-checkbox input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.checkbox-mark {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  flex-shrink: 0;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.checkbox-mark::after {
+  content: "";
+  position: absolute;
+  display: none;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.form-checkbox input[type="checkbox"]:checked + .checkbox-mark {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.form-checkbox input[type="checkbox"]:checked + .checkbox-mark::after {
+  display: block;
+}
+
+.checkbox-label {
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+
+/* CV model checkbox list */
+.cv-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+
+.cv-check-row {
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  transition: background var(--transition);
+}
+
+.cv-check-row:hover {
+  background: var(--surface-alt, rgba(0,0,0,0.03));
+}
+
+.cv-check-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.cv-check-label input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+.cv-check-label input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.cv-check-label input[type="checkbox"]:disabled ~ span {
+  opacity: 0.4;
+}
+
+.cv-check-name {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.cv-check-model {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cv-check-hint {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin: 4px 0 0 0;
+  text-align: right;
+}
+
+.cv-check-hint.cv-hint-full {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.cv-empty-hint {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin: 0;
+}
+
+/* Panel actions — sticky bottom */
+.panel-actions {
+  position: sticky;
+  bottom: 0;
+  padding: 12px 16px;
+  background: var(--panel-bg);
+  border-top: 1px solid var(--border);
+  margin-top: auto;
+}
+
+.panel-actions .btn {
+  width: 100%;
+}
+
+
+/* ============================================================
+   4. Content Area
+   ============================================================ */
+.content {
+  flex: 1;
+  padding: 0;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.view {
+  display: none;
+}
+
+.view.active {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}

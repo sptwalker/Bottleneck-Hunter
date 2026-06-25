@@ -11,7 +11,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -218,6 +218,204 @@ CREATE TABLE IF NOT EXISTS strategy_records (
     FOREIGN KEY (entry_id) REFERENCES watchlist(id) ON DELETE CASCADE,
     FOREIGN KEY (intelligence_id) REFERENCES stock_intelligence(id)
 );
+
+CREATE TABLE IF NOT EXISTS macro_strategies (
+    id                  TEXT PRIMARY KEY,
+    version             INTEGER NOT NULL DEFAULT 1,
+    regime              TEXT DEFAULT 'sideways',
+    risk_appetite       TEXT DEFAULT 'balanced',
+    recommended_cash_pct REAL DEFAULT 25.0,
+    market_summary      TEXT DEFAULT '',
+    key_signals         TEXT DEFAULT '[]',
+    sector_rotation     TEXT DEFAULT '{}',
+    risk_factors        TEXT DEFAULT '[]',
+    strategy_text       TEXT DEFAULT '',
+    valid_until_trigger TEXT DEFAULT '',
+    result_json         TEXT DEFAULT '{}',
+    status              TEXT DEFAULT 'valid' CHECK(status IN ('valid','needs_minor_tweak','needs_major_revision','superseded')),
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT,
+    expires_at          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS strategic_plans (
+    id                  TEXT PRIMARY KEY,
+    macro_strategy_id   TEXT,
+    version             INTEGER NOT NULL DEFAULT 1,
+    overall_stance      TEXT DEFAULT 'balanced',
+    target_allocation   TEXT DEFAULT '{}',
+    sector_targets      TEXT DEFAULT '{}',
+    stock_selection     TEXT DEFAULT '{}',
+    risk_limits         TEXT DEFAULT '{}',
+    rebalancing_triggers TEXT DEFAULT '[]',
+    strategy_text       TEXT DEFAULT '',
+    result_json         TEXT DEFAULT '{}',
+    status              TEXT DEFAULT 'valid' CHECK(status IN ('valid','superseded','invalidated')),
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tactical_plans (
+    id                  TEXT PRIMARY KEY,
+    strategic_plan_id   TEXT,
+    entry_id            TEXT,
+    ticker              TEXT NOT NULL,
+    plan_date           TEXT NOT NULL,
+    action              TEXT DEFAULT 'hold',
+    entry_plan          TEXT DEFAULT '{}',
+    exit_plan           TEXT DEFAULT '{}',
+    catalyst_watch      TEXT DEFAULT '[]',
+    confidence          INTEGER DEFAULT 5,
+    result_json         TEXT DEFAULT '{}',
+    status              TEXT DEFAULT 'active' CHECK(status IN ('active','executed','expired','cancelled')),
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS execution_plans (
+    id                  TEXT PRIMARY KEY,
+    tactical_plan_id    TEXT,
+    entry_id            TEXT,
+    ticker              TEXT NOT NULL,
+    action              TEXT NOT NULL,
+    shares              INTEGER DEFAULT 0,
+    target_price        REAL,
+    amount              REAL DEFAULT 0,
+    method              TEXT DEFAULT 'market',
+    priority            INTEGER DEFAULT 5,
+    confidence          INTEGER DEFAULT 5,
+    reasoning           TEXT DEFAULT '',
+    result_json         TEXT DEFAULT '{}',
+    status              TEXT DEFAULT 'pending' CHECK(status IN ('pending','confirmed','rejected','executed','expired')),
+    rejection_reason    TEXT DEFAULT '',
+    created_at          TEXT NOT NULL,
+    confirmed_at        TEXT,
+    executed_at         TEXT
+);
+
+CREATE TABLE IF NOT EXISTS committee_reviews (
+    id                  TEXT PRIMARY KEY,
+    execution_plan_id   TEXT NOT NULL,
+    member_role         TEXT NOT NULL,
+    model_provider      TEXT DEFAULT '',
+    model_name          TEXT DEFAULT '',
+    vote                TEXT DEFAULT 'approve',
+    confidence          INTEGER DEFAULT 5,
+    score               REAL,
+    key_concerns        TEXT DEFAULT '[]',
+    suggestions         TEXT DEFAULT '[]',
+    result_json         TEXT DEFAULT '{}',
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS committee_consensus (
+    id                  TEXT PRIMARY KEY,
+    execution_plan_id   TEXT NOT NULL,
+    final_verdict       TEXT NOT NULL,
+    approval_rate       REAL DEFAULT 0.0,
+    vote_detail         TEXT DEFAULT '{}',
+    consensus_modifications TEXT DEFAULT '[]',
+    final_execution_plan TEXT DEFAULT '[]',
+    key_risks_flagged   TEXT DEFAULT '[]',
+    minority_opinions   TEXT DEFAULT '[]',
+    summary             TEXT DEFAULT '',
+    result_json         TEXT DEFAULT '{}',
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS catalyst_tracking (
+    id                  TEXT PRIMARY KEY,
+    entry_id            TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    catalyst_type       TEXT DEFAULT 'event',
+    title               TEXT NOT NULL,
+    description         TEXT DEFAULT '',
+    expected_date       TEXT,
+    actual_date         TEXT,
+    impact_level        TEXT DEFAULT 'medium' CHECK(impact_level IN ('low','medium','high','critical')),
+    confidence          INTEGER DEFAULT 5,
+    status              TEXT DEFAULT 'pending' CHECK(status IN ('pending','monitoring','triggered','expired','cancelled')),
+    outcome             TEXT DEFAULT '',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS trade_feedback (
+    id                  TEXT PRIMARY KEY,
+    execution_plan_id   TEXT,
+    ticker              TEXT NOT NULL,
+    feedback_type       TEXT DEFAULT 'rejection',
+    reason              TEXT DEFAULT '',
+    user_note           TEXT DEFAULT '',
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auto_reviews (
+    id                  TEXT PRIMARY KEY,
+    sim_trade_id        TEXT,
+    ticker              TEXT NOT NULL,
+    review_type         TEXT DEFAULT 'trade_close',
+    entry_price         REAL,
+    exit_price          REAL,
+    return_pct          REAL,
+    lessons_learned     TEXT DEFAULT '',
+    experience_card     TEXT DEFAULT '{}',
+    result_json         TEXT DEFAULT '{}',
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sim_account (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT DEFAULT '默认模拟账户',
+    initial_capital     REAL DEFAULT 100000.0,
+    current_capital     REAL DEFAULT 100000.0,
+    cash_balance        REAL DEFAULT 100000.0,
+    total_equity        REAL DEFAULT 100000.0,
+    total_return_pct    REAL DEFAULT 0.0,
+    total_trades        INTEGER DEFAULT 0,
+    win_rate            REAL DEFAULT 0.0,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sim_positions (
+    id                  TEXT PRIMARY KEY,
+    account_id          TEXT NOT NULL,
+    entry_id            TEXT,
+    ticker              TEXT NOT NULL,
+    shares              INTEGER DEFAULT 0,
+    avg_cost            REAL DEFAULT 0.0,
+    current_price       REAL DEFAULT 0.0,
+    market_value        REAL DEFAULT 0.0,
+    unrealized_pnl      REAL DEFAULT 0.0,
+    weight_pct          REAL DEFAULT 0.0,
+    opened_at           TEXT NOT NULL,
+    updated_at          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sim_trades (
+    id                  TEXT PRIMARY KEY,
+    account_id          TEXT NOT NULL,
+    execution_plan_id   TEXT,
+    entry_id            TEXT,
+    ticker              TEXT NOT NULL,
+    side                TEXT NOT NULL CHECK(side IN ('buy','sell')),
+    shares              INTEGER NOT NULL,
+    price               REAL NOT NULL,
+    amount              REAL NOT NULL,
+    commission          REAL DEFAULT 0.0,
+    trade_type          TEXT DEFAULT 'entry',
+    reasoning           TEXT DEFAULT '',
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+    id                  TEXT PRIMARY KEY,
+    key                 TEXT NOT NULL UNIQUE,
+    value               TEXT NOT NULL,
+    category            TEXT DEFAULT 'general',
+    updated_at          TEXT NOT NULL
+);
 """
 
 _CREATE_INDEXES = """
@@ -236,9 +434,58 @@ CREATE INDEX IF NOT EXISTS idx_intelligence_ticker ON stock_intelligence(ticker,
 CREATE INDEX IF NOT EXISTS idx_strategy_entry ON strategy_records(entry_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_strategy_ticker ON strategy_records(ticker, version DESC);
 CREATE INDEX IF NOT EXISTS idx_strategy_signal ON strategy_records(signal, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_macro_version ON macro_strategies(version DESC);
+CREATE INDEX IF NOT EXISTS idx_macro_status ON macro_strategies(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategic_version ON strategic_plans(version DESC);
+CREATE INDEX IF NOT EXISTS idx_strategic_macro ON strategic_plans(macro_strategy_id);
+CREATE INDEX IF NOT EXISTS idx_tactical_date ON tactical_plans(plan_date DESC);
+CREATE INDEX IF NOT EXISTS idx_tactical_ticker ON tactical_plans(ticker, plan_date DESC);
+CREATE INDEX IF NOT EXISTS idx_tactical_strategic ON tactical_plans(strategic_plan_id);
+CREATE INDEX IF NOT EXISTS idx_execution_status ON execution_plans(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_execution_ticker ON execution_plans(ticker, status);
+CREATE INDEX IF NOT EXISTS idx_committee_execution ON committee_reviews(execution_plan_id);
+CREATE INDEX IF NOT EXISTS idx_consensus_execution ON committee_consensus(execution_plan_id);
+CREATE INDEX IF NOT EXISTS idx_catalyst_entry ON catalyst_tracking(entry_id, status);
+CREATE INDEX IF NOT EXISTS idx_catalyst_ticker ON catalyst_tracking(ticker, expected_date);
+CREATE INDEX IF NOT EXISTS idx_feedback_ticker ON trade_feedback(ticker, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sim_trades_ticker ON sim_trades(ticker, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sim_positions_account ON sim_positions(account_id);
 """
 
-_MIGRATIONS: list[str] = []
+_MIGRATIONS: list[str] = [
+    # 8B.4: experience_cards table
+    """CREATE TABLE IF NOT EXISTS experience_cards (
+        id              TEXT PRIMARY KEY,
+        scope           TEXT DEFAULT 'global' CHECK(scope IN ('global','sector','ticker')),
+        scope_key       TEXT DEFAULT '',
+        category        TEXT DEFAULT 'lesson' CHECK(category IN ('pattern','lesson','rule')),
+        title           TEXT NOT NULL,
+        content         TEXT NOT NULL,
+        evidence        TEXT DEFAULT '[]',
+        confidence      REAL DEFAULT 0.5,
+        applied_count   INTEGER DEFAULT 0,
+        source_review_id TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_exp_scope ON experience_cards(scope, scope_key)",
+    "CREATE INDEX IF NOT EXISTS idx_exp_confidence ON experience_cards(confidence DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_auto_reviews_ticker ON auto_reviews(ticker, created_at DESC)",
+    # 9A: tuning_log table
+    """CREATE TABLE IF NOT EXISTS tuning_log (
+        id              TEXT PRIMARY KEY,
+        type            TEXT DEFAULT 'weight' CHECK(type IN ('weight','threshold','prompt','rule')),
+        parameter_name  TEXT NOT NULL,
+        old_value       TEXT DEFAULT '',
+        new_value       TEXT DEFAULT '',
+        reason          TEXT DEFAULT '',
+        evidence        TEXT DEFAULT '[]',
+        status          TEXT DEFAULT 'proposed' CHECK(status IN ('proposed','approved','rejected')),
+        proposed_at     TEXT NOT NULL,
+        decided_at      TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_tuning_status ON tuning_log(status, proposed_at DESC)",
+]
 
 
 def _now_iso() -> str:
@@ -424,6 +671,20 @@ class WatchlistStore:
         try:
             rows = conn.execute("SELECT ticker FROM watchlist WHERE is_active = 1").fetchall()
             return [r["ticker"] for r in rows]
+        finally:
+            conn.close()
+
+    def get_tickers_by_market(self) -> dict[str, list[str]]:
+        """按市场分组返回活跃 ticker。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT ticker, market FROM watchlist WHERE is_active = 1"
+            ).fetchall()
+            result: dict[str, list[str]] = {}
+            for r in rows:
+                result.setdefault(r["market"] or "us_stock", []).append(r["ticker"])
+            return result
         finally:
             conn.close()
 
@@ -1163,3 +1424,1060 @@ class WatchlistStore:
         finally:
             conn.close()
 
+    # ------------------------------------------------------------------
+    # Macro Strategies (L1)
+    # ------------------------------------------------------------------
+
+    def create_macro_strategy(self, result_json: dict) -> str:
+        sid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM macro_strategies"
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE macro_strategies SET status = 'superseded' WHERE status = 'valid'"
+            )
+            now = _now_iso()
+            rj = result_json or {}
+            conn.execute(
+                """INSERT INTO macro_strategies
+                   (id, version, regime, risk_appetite, recommended_cash_pct,
+                    market_summary, key_signals, sector_rotation, risk_factors,
+                    strategy_text, valid_until_trigger, result_json, status, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    sid, version,
+                    rj.get("regime", "sideways"),
+                    rj.get("risk_appetite", "balanced"),
+                    rj.get("recommended_cash_pct", 25.0),
+                    rj.get("market_summary", ""),
+                    json.dumps(rj.get("key_signals", []), ensure_ascii=False),
+                    json.dumps(rj.get("sector_rotation", {}), ensure_ascii=False),
+                    json.dumps(rj.get("risk_factors", []), ensure_ascii=False),
+                    rj.get("strategy_text", ""),
+                    rj.get("valid_until_trigger", ""),
+                    json.dumps(rj, ensure_ascii=False),
+                    "valid", now, now,
+                ),
+            )
+            conn.commit()
+            return sid
+        finally:
+            conn.close()
+
+    def get_latest_macro_strategy(self) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM macro_strategies WHERE status = 'valid' ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT * FROM macro_strategies ORDER BY version DESC LIMIT 1"
+                ).fetchone()
+            return self._parse_macro_row(row) if row else None
+        finally:
+            conn.close()
+
+    def get_macro_history(self, limit: int = 10) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT id, version, regime, risk_appetite, market_summary,
+                   status, created_at, updated_at
+                   FROM macro_strategies ORDER BY version DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def update_macro_status(self, strategy_id: str, status: str,
+                            minor_tweaks: list | None = None) -> bool:
+        conn = self._connect()
+        try:
+            parts = ["status = ?", "updated_at = ?"]
+            vals = [status, _now_iso()]
+            if minor_tweaks is not None:
+                row = conn.execute(
+                    "SELECT result_json FROM macro_strategies WHERE id = ?", (strategy_id,)
+                ).fetchone()
+                if row:
+                    rj = json.loads(row["result_json"] or "{}")
+                    rj["minor_tweaks"] = minor_tweaks
+                    parts.append("result_json = ?")
+                    vals.append(json.dumps(rj, ensure_ascii=False))
+            vals.append(strategy_id)
+            cur = conn.execute(
+                f"UPDATE macro_strategies SET {', '.join(parts)} WHERE id = ?", vals
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def _parse_macro_row(self, row) -> dict:
+        d = dict(row)
+        for field in ("key_signals", "risk_factors"):
+            if isinstance(d.get(field), str):
+                try:
+                    d[field] = json.loads(d[field])
+                except (json.JSONDecodeError, TypeError):
+                    d[field] = []
+        for field in ("sector_rotation", "result_json"):
+            if isinstance(d.get(field), str):
+                try:
+                    d[field] = json.loads(d[field])
+                except (json.JSONDecodeError, TypeError):
+                    d[field] = {}
+        return d
+
+    # ------------------------------------------------------------------
+    # Strategic Plans (L2)
+    # ------------------------------------------------------------------
+
+    def create_strategic_plan(self, macro_strategy_id: str, result_json: dict) -> str:
+        sid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM strategic_plans"
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE strategic_plans SET status = 'superseded' WHERE status = 'valid'"
+            )
+            now = _now_iso()
+            rj = result_json or {}
+            conn.execute(
+                """INSERT INTO strategic_plans
+                   (id, macro_strategy_id, version, overall_stance, target_allocation,
+                    sector_targets, stock_selection, risk_limits, rebalancing_triggers,
+                    strategy_text, result_json, status, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    sid, macro_strategy_id, version,
+                    rj.get("overall_stance", "balanced"),
+                    json.dumps(rj.get("target_allocation", {}), ensure_ascii=False),
+                    json.dumps(rj.get("sector_targets", {}), ensure_ascii=False),
+                    json.dumps(rj.get("stock_selection", {}), ensure_ascii=False),
+                    json.dumps(rj.get("risk_limits", {}), ensure_ascii=False),
+                    json.dumps(rj.get("rebalancing_triggers", []), ensure_ascii=False),
+                    rj.get("strategy_text", ""),
+                    json.dumps(rj, ensure_ascii=False),
+                    "valid", now, now,
+                ),
+            )
+            conn.commit()
+            return sid
+        finally:
+            conn.close()
+
+    def get_latest_strategic_plan(self) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM strategic_plans WHERE status = 'valid' ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT * FROM strategic_plans ORDER BY version DESC LIMIT 1"
+                ).fetchone()
+            return self._parse_strategic_row(row) if row else None
+        finally:
+            conn.close()
+
+    def get_strategic_history(self, limit: int = 10) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT id, macro_strategy_id, version, overall_stance,
+                   status, created_at, updated_at
+                   FROM strategic_plans ORDER BY version DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def _parse_strategic_row(self, row) -> dict:
+        d = dict(row)
+        for field in ("target_allocation", "sector_targets", "stock_selection",
+                      "risk_limits", "result_json"):
+            if isinstance(d.get(field), str):
+                try:
+                    d[field] = json.loads(d[field])
+                except (json.JSONDecodeError, TypeError):
+                    d[field] = {}
+        if isinstance(d.get("rebalancing_triggers"), str):
+            try:
+                d["rebalancing_triggers"] = json.loads(d["rebalancing_triggers"])
+            except (json.JSONDecodeError, TypeError):
+                d["rebalancing_triggers"] = []
+        return d
+
+    # ------------------------------------------------------------------
+    # Tactical Plans (L3)
+    # ------------------------------------------------------------------
+
+    def create_tactical_plan(self, strategic_plan_id: str, entry_id: str,
+                             ticker: str, plan_date: str, result_json: dict) -> str:
+        sid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            rj = result_json or {}
+            conn.execute(
+                """INSERT INTO tactical_plans
+                   (id, strategic_plan_id, entry_id, ticker, plan_date, action,
+                    entry_plan, exit_plan, catalyst_watch, confidence,
+                    result_json, status, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    sid, strategic_plan_id, entry_id, ticker, plan_date,
+                    rj.get("action", "hold"),
+                    json.dumps(rj.get("entry_plan", {}), ensure_ascii=False),
+                    json.dumps(rj.get("exit_plan", {}), ensure_ascii=False),
+                    json.dumps(rj.get("catalyst_watch", []), ensure_ascii=False),
+                    rj.get("confidence", 5),
+                    json.dumps(rj, ensure_ascii=False),
+                    "active", _now_iso(), _now_iso(),
+                ),
+            )
+            conn.commit()
+            return sid
+        finally:
+            conn.close()
+
+    def get_tactical_plans_by_date(self, plan_date: str | None = None) -> list[dict]:
+        plan_date = plan_date or _today()
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM tactical_plans WHERE plan_date = ? ORDER BY confidence DESC",
+                (plan_date,),
+            ).fetchall()
+            return [self._parse_json_fields(dict(r), ("entry_plan", "exit_plan", "result_json"),
+                                            ("catalyst_watch",)) for r in rows]
+        finally:
+            conn.close()
+
+    def get_tactical_plan_for_ticker(self, ticker: str, plan_date: str | None = None) -> dict | None:
+        plan_date = plan_date or _today()
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM tactical_plans WHERE ticker = ? AND plan_date = ? AND status = 'active' LIMIT 1",
+                (ticker, plan_date),
+            ).fetchone()
+            if not row:
+                return None
+            return self._parse_json_fields(dict(row), ("entry_plan", "exit_plan", "result_json"),
+                                           ("catalyst_watch",))
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Execution Plans (L4)
+    # ------------------------------------------------------------------
+
+    def create_execution_plan(self, tactical_plan_id: str, entry_id: str,
+                              ticker: str, result_json: dict) -> str:
+        sid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            rj = result_json or {}
+            conn.execute(
+                """INSERT INTO execution_plans
+                   (id, tactical_plan_id, entry_id, ticker, action, shares,
+                    target_price, amount, method, priority, confidence,
+                    reasoning, result_json, status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    sid, tactical_plan_id, entry_id, ticker,
+                    rj.get("action", "hold"),
+                    rj.get("shares", 0),
+                    rj.get("target_price") or rj.get("estimated_price"),
+                    rj.get("amount", 0) or rj.get("estimated_amount", 0),
+                    rj.get("method") or rj.get("execution_method", "market"),
+                    rj.get("priority", 5) if isinstance(rj.get("priority"), int) else 5,
+                    rj.get("confidence", 5),
+                    rj.get("reasoning") or rj.get("rationale", ""),
+                    json.dumps(rj, ensure_ascii=False),
+                    "pending", _now_iso(),
+                ),
+            )
+            conn.commit()
+            return sid
+        finally:
+            conn.close()
+
+    def get_pending_executions(self) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM execution_plans WHERE status = 'pending' ORDER BY priority ASC, created_at ASC"
+            ).fetchall()
+            return [self._parse_json_fields(dict(r), ("result_json",)) for r in rows]
+        finally:
+            conn.close()
+
+    def confirm_execution(self, plan_id: str) -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE execution_plans SET status = 'confirmed', confirmed_at = ? WHERE id = ? AND status = 'pending'",
+                (_now_iso(), plan_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def reject_execution(self, plan_id: str, reason: str = "") -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE execution_plans SET status = 'rejected', rejection_reason = ? WHERE id = ? AND status = 'pending'",
+                (reason, plan_id),
+            )
+            conn.commit()
+            if cur.rowcount > 0:
+                row = conn.execute("SELECT ticker FROM execution_plans WHERE id = ?", (plan_id,)).fetchone()
+                if row:
+                    self.create_trade_feedback(plan_id, row["ticker"], "rejection", reason)
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_execution_plan(self, plan_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM execution_plans WHERE id = ?", (plan_id,)).fetchone()
+            return self._parse_json_fields(dict(row), ("result_json",)) if row else None
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Committee Reviews
+    # ------------------------------------------------------------------
+
+    def create_committee_review(self, execution_plan_id: str, member_role: str,
+                                model_provider: str, model_name: str,
+                                result_json: dict) -> str:
+        rid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            rj = result_json or {}
+            conn.execute(
+                """INSERT INTO committee_reviews
+                   (id, execution_plan_id, member_role, model_provider, model_name,
+                    vote, confidence, score, key_concerns, suggestions,
+                    result_json, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    rid, execution_plan_id, member_role, model_provider, model_name,
+                    rj.get("vote", "approve"),
+                    rj.get("confidence", 5),
+                    rj.get("score") or rj.get("risk_score") or rj.get("growth_score")
+                    or rj.get("value_score") or rj.get("contrarian_score"),
+                    json.dumps(rj.get("key_concerns", []), ensure_ascii=False),
+                    json.dumps(rj.get("suggestions", []), ensure_ascii=False),
+                    json.dumps(rj, ensure_ascii=False),
+                    _now_iso(),
+                ),
+            )
+            conn.commit()
+            return rid
+        finally:
+            conn.close()
+
+    def get_reviews_for_execution(self, execution_plan_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM committee_reviews WHERE execution_plan_id = ? ORDER BY created_at",
+                (execution_plan_id,),
+            ).fetchall()
+            return [self._parse_json_fields(dict(r), ("result_json",),
+                                            ("key_concerns", "suggestions")) for r in rows]
+        finally:
+            conn.close()
+
+    def create_committee_consensus(self, execution_plan_id: str, result_json: dict) -> str:
+        cid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            rj = result_json or {}
+            conn.execute(
+                """INSERT INTO committee_consensus
+                   (id, execution_plan_id, final_verdict, approval_rate,
+                    vote_detail, consensus_modifications, final_execution_plan,
+                    key_risks_flagged, minority_opinions, summary, result_json, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    cid, execution_plan_id,
+                    rj.get("final_verdict", "approved"),
+                    rj.get("approval_rate", 0.0),
+                    json.dumps(rj.get("vote_detail", {}), ensure_ascii=False),
+                    json.dumps(rj.get("consensus_modifications", []), ensure_ascii=False),
+                    json.dumps(rj.get("final_execution_plan", []), ensure_ascii=False),
+                    json.dumps(rj.get("key_risks_flagged", []), ensure_ascii=False),
+                    json.dumps(rj.get("minority_opinions", []), ensure_ascii=False),
+                    rj.get("summary", ""),
+                    json.dumps(rj, ensure_ascii=False),
+                    _now_iso(),
+                ),
+            )
+            conn.commit()
+            return cid
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Catalyst Tracking
+    # ------------------------------------------------------------------
+
+    def create_catalyst(self, entry_id: str, ticker: str, title: str,
+                        catalyst_type: str = "event", description: str = "",
+                        expected_date: str | None = None,
+                        impact_level: str = "medium", confidence: int = 5) -> str:
+        cid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO catalyst_tracking
+                   (id, entry_id, ticker, catalyst_type, title, description,
+                    expected_date, impact_level, confidence, status, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (cid, entry_id, ticker, catalyst_type, title, description,
+                 expected_date, impact_level, confidence, "pending", _now_iso(), _now_iso()),
+            )
+            conn.commit()
+            return cid
+        finally:
+            conn.close()
+
+    def get_catalysts_for_entry(self, entry_id: str, active_only: bool = True) -> list[dict]:
+        conn = self._connect()
+        try:
+            if active_only:
+                rows = conn.execute(
+                    "SELECT * FROM catalyst_tracking WHERE entry_id = ? AND status IN ('pending','monitoring') ORDER BY expected_date",
+                    (entry_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM catalyst_tracking WHERE entry_id = ? ORDER BY created_at DESC",
+                    (entry_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def update_catalyst_status(self, catalyst_id: str, status: str,
+                               outcome: str = "", actual_date: str | None = None) -> bool:
+        conn = self._connect()
+        try:
+            parts = ["status = ?", "updated_at = ?"]
+            vals: list = [status, _now_iso()]
+            if outcome:
+                parts.append("outcome = ?")
+                vals.append(outcome)
+            if actual_date:
+                parts.append("actual_date = ?")
+                vals.append(actual_date)
+            vals.append(catalyst_id)
+            cur = conn.execute(
+                f"UPDATE catalyst_tracking SET {', '.join(parts)} WHERE id = ?", vals
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_upcoming_catalysts(self, days: int = 14) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT ct.*, w.company_name FROM catalyst_tracking ct
+                   LEFT JOIN watchlist w ON ct.entry_id = w.id
+                   WHERE ct.status IN ('pending','monitoring')
+                   AND ct.expected_date IS NOT NULL
+                   ORDER BY ct.expected_date ASC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def expire_past_catalysts(self) -> int:
+        conn = self._connect()
+        try:
+            today = _today()
+            cur = conn.execute(
+                """UPDATE catalyst_tracking SET status = 'expired', updated_at = ?
+                   WHERE expected_date < ? AND status IN ('pending', 'monitoring')""",
+                (_now_iso(), today),
+            )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
+    def get_expiring_catalysts(self, days: int = 7) -> list[dict]:
+        conn = self._connect()
+        try:
+            today = _today()
+            future = (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%d")
+            rows = conn.execute(
+                """SELECT ct.*, w.company_name FROM catalyst_tracking ct
+                   LEFT JOIN watchlist w ON ct.entry_id = w.id
+                   WHERE ct.status IN ('pending', 'monitoring')
+                   AND ct.expected_date IS NOT NULL
+                   AND ct.expected_date >= ? AND ct.expected_date <= ?
+                   ORDER BY ct.expected_date ASC""",
+                (today, future),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Trade Feedback
+    # ------------------------------------------------------------------
+
+    def create_trade_feedback(self, execution_plan_id: str, ticker: str,
+                              feedback_type: str = "rejection", reason: str = "",
+                              user_note: str = "") -> str:
+        fid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO trade_feedback
+                   (id, execution_plan_id, ticker, feedback_type, reason, user_note, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (fid, execution_plan_id, ticker, feedback_type, reason, user_note, _now_iso()),
+            )
+            conn.commit()
+            return fid
+        finally:
+            conn.close()
+
+    def get_rejection_patterns(self, ticker: str | None = None, limit: int = 50) -> list[dict]:
+        conn = self._connect()
+        try:
+            if ticker:
+                rows = conn.execute(
+                    "SELECT * FROM trade_feedback WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
+                    (ticker, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM trade_feedback ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Sim Account
+    # ------------------------------------------------------------------
+
+    def get_sim_account(self) -> dict:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM sim_account LIMIT 1").fetchone()
+            if row:
+                return dict(row)
+            aid = uuid.uuid4().hex[:12]
+            now = _now_iso()
+            conn.execute(
+                """INSERT INTO sim_account
+                   (id, name, initial_capital, current_capital, cash_balance,
+                    total_equity, total_return_pct, total_trades, win_rate, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (aid, "默认模拟账户", 100000.0, 100000.0, 100000.0,
+                 100000.0, 0.0, 0, 0.0, now, now),
+            )
+            conn.commit()
+            return {"id": aid, "name": "默认模拟账户", "initial_capital": 100000.0,
+                    "current_capital": 100000.0, "cash_balance": 100000.0,
+                    "total_equity": 100000.0, "total_return_pct": 0.0,
+                    "total_trades": 0, "win_rate": 0.0, "created_at": now, "updated_at": now}
+        finally:
+            conn.close()
+
+    def update_sim_account(self, **fields) -> bool:
+        allowed = {"current_capital", "cash_balance", "total_equity", "total_return_pct",
+                   "total_trades", "win_rate", "name", "initial_capital"}
+        parts, vals = [], []
+        for k, v in fields.items():
+            if k in allowed:
+                parts.append(f"{k} = ?")
+                vals.append(v)
+        if not parts:
+            return False
+        parts.append("updated_at = ?")
+        vals.append(_now_iso())
+        conn = self._connect()
+        try:
+            account = self.get_sim_account()
+            vals.append(account["id"])
+            cur = conn.execute(
+                f"UPDATE sim_account SET {', '.join(parts)} WHERE id = ?", vals
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Sim Positions & Trades
+    # ------------------------------------------------------------------
+
+    def get_sim_positions(self, account_id: str | None = None) -> list[dict]:
+        conn = self._connect()
+        try:
+            if account_id:
+                rows = conn.execute(
+                    "SELECT * FROM sim_positions WHERE account_id = ? AND shares > 0", (account_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM sim_positions WHERE shares > 0").fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def create_sim_trade(self, account_id: str, ticker: str, side: str,
+                         shares: int, price: float, amount: float,
+                         execution_plan_id: str | None = None,
+                         entry_id: str | None = None,
+                         trade_type: str = "entry", reasoning: str = "") -> str:
+        tid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO sim_trades
+                   (id, account_id, execution_plan_id, entry_id, ticker, side,
+                    shares, price, amount, trade_type, reasoning, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (tid, account_id, execution_plan_id, entry_id, ticker, side,
+                 shares, price, amount, trade_type, reasoning, _now_iso()),
+            )
+            conn.commit()
+            return tid
+        finally:
+            conn.close()
+
+    def get_sim_position(self, account_id: str, ticker: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM sim_positions WHERE account_id = ? AND ticker = ? AND shares > 0",
+                (account_id, ticker),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def create_sim_position(self, account_id: str, ticker: str,
+                            shares: int, avg_cost: float,
+                            entry_id: str | None = None) -> str:
+        pid = uuid.uuid4().hex[:12]
+        now = _now_iso()
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO sim_positions
+                   (id, account_id, entry_id, ticker, shares, avg_cost,
+                    current_price, market_value, unrealized_pnl, weight_pct,
+                    opened_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (pid, account_id, entry_id, ticker, shares, avg_cost,
+                 avg_cost, shares * avg_cost, 0.0, 0.0, now, now),
+            )
+            conn.commit()
+            return pid
+        finally:
+            conn.close()
+
+    def update_sim_position(self, position_id: str, **fields) -> bool:
+        allowed = {"shares", "avg_cost", "current_price", "market_value",
+                   "unrealized_pnl", "weight_pct", "entry_id"}
+        parts, vals = [], []
+        for k, v in fields.items():
+            if k in allowed:
+                parts.append(f"{k} = ?")
+                vals.append(v)
+        if not parts:
+            return False
+        parts.append("updated_at = ?")
+        vals.append(_now_iso())
+        vals.append(position_id)
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                f"UPDATE sim_positions SET {', '.join(parts)} WHERE id = ?", vals
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def delete_sim_position(self, position_id: str) -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.execute("DELETE FROM sim_positions WHERE id = ?", (position_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_sim_trades(self, ticker: str | None = None, limit: int = 50) -> list[dict]:
+        conn = self._connect()
+        try:
+            if ticker:
+                rows = conn.execute(
+                    "SELECT * FROM sim_trades WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
+                    (ticker, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM sim_trades ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # User Preferences
+    # ------------------------------------------------------------------
+
+    def save_preference(self, key: str, value: str, category: str = "general") -> str:
+        conn = self._connect()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM user_preferences WHERE key = ?", (key,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE user_preferences SET value = ?, category = ?, updated_at = ? WHERE key = ?",
+                    (value, category, _now_iso(), key),
+                )
+                conn.commit()
+                return existing["id"]
+            pid = uuid.uuid4().hex[:12]
+            conn.execute(
+                "INSERT INTO user_preferences (id, key, value, category, updated_at) VALUES (?,?,?,?,?)",
+                (pid, key, value, category, _now_iso()),
+            )
+            conn.commit()
+            return pid
+        finally:
+            conn.close()
+
+    def get_preferences(self, category: str | None = None) -> list[dict]:
+        conn = self._connect()
+        try:
+            if category:
+                rows = conn.execute(
+                    "SELECT * FROM user_preferences WHERE category = ?", (category,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM user_preferences").fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_preference(self, key: str, default: str = "") -> str:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT value FROM user_preferences WHERE key = ?", (key,)
+            ).fetchone()
+            return row["value"] if row else default
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Auto Reviews (复盘)
+    # ------------------------------------------------------------------
+
+    def create_auto_review(self, sim_trade_id: str, ticker: str,
+                           review_type: str = "trade_close",
+                           entry_price: float = 0, exit_price: float = 0,
+                           return_pct: float = 0, result_json: dict | None = None,
+                           lessons_learned: str = "",
+                           experience_card: dict | None = None) -> str:
+        rid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO auto_reviews
+                   (id, sim_trade_id, ticker, review_type, entry_price, exit_price,
+                    return_pct, lessons_learned, experience_card, result_json, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (rid, sim_trade_id, ticker, review_type,
+                 entry_price, exit_price, return_pct,
+                 lessons_learned,
+                 json.dumps(experience_card or {}, ensure_ascii=False),
+                 json.dumps(result_json or {}, ensure_ascii=False),
+                 _now_iso()),
+            )
+            conn.commit()
+            return rid
+        finally:
+            conn.close()
+
+    def get_auto_reviews(self, ticker: str | None = None, limit: int = 20) -> list[dict]:
+        conn = self._connect()
+        try:
+            if ticker:
+                rows = conn.execute(
+                    "SELECT * FROM auto_reviews WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
+                    (ticker, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM auto_reviews ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                self._parse_json_fields(d, dict_fields=("result_json", "experience_card"))
+                result.append(d)
+            return result
+        finally:
+            conn.close()
+
+    def get_auto_review(self, review_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM auto_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            self._parse_json_fields(d, dict_fields=("result_json", "experience_card"))
+            return d
+        finally:
+            conn.close()
+
+    def get_trades_without_review(self) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT st.* FROM sim_trades st
+                   LEFT JOIN auto_reviews ar ON ar.sim_trade_id = st.id
+                   WHERE st.side = 'sell' AND ar.id IS NULL
+                   ORDER BY st.created_at DESC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Experience Cards (经验卡片)
+    # ------------------------------------------------------------------
+
+    def create_experience_card(self, scope: str, scope_key: str,
+                               category: str, title: str, content: str,
+                               evidence: list | None = None,
+                               confidence: float = 0.5,
+                               source_review_id: str | None = None) -> str:
+        cid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO experience_cards
+                   (id, scope, scope_key, category, title, content, evidence,
+                    confidence, source_review_id, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (cid, scope, scope_key or "", category, title, content,
+                 json.dumps(evidence or [], ensure_ascii=False),
+                 confidence, source_review_id, _now_iso(), _now_iso()),
+            )
+            conn.commit()
+            return cid
+        finally:
+            conn.close()
+
+    def get_experience_cards(self, scope: str | None = None,
+                             scope_key: str | None = None,
+                             limit: int = 20) -> list[dict]:
+        conn = self._connect()
+        try:
+            conditions = []
+            params: list = []
+            if scope:
+                conditions.append("scope = ?")
+                params.append(scope)
+            if scope_key:
+                conditions.append("scope_key = ?")
+                params.append(scope_key)
+            where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+            params.append(limit)
+            rows = conn.execute(
+                f"SELECT * FROM experience_cards{where} ORDER BY confidence DESC, applied_count DESC LIMIT ?",
+                params,
+            ).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                self._parse_json_fields(d, list_fields=("evidence",))
+                result.append(d)
+            return result
+        finally:
+            conn.close()
+
+    def get_relevant_cards(self, ticker: str, sector: str = "",
+                           limit: int = 5) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM experience_cards
+                   WHERE (scope = 'global')
+                      OR (scope = 'ticker' AND scope_key = ?)
+                      OR (scope = 'sector' AND scope_key = ?)
+                   ORDER BY confidence DESC, applied_count DESC
+                   LIMIT ?""",
+                (ticker, sector, limit),
+            ).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                self._parse_json_fields(d, list_fields=("evidence",))
+                result.append(d)
+            return result
+        finally:
+            conn.close()
+
+    def increment_card_applied(self, card_id: str) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE experience_cards SET applied_count = applied_count + 1, updated_at = ? WHERE id = ?",
+                (_now_iso(), card_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_experience_card(self, card_id: str) -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.execute("DELETE FROM experience_cards WHERE id = ?", (card_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_trade_feedback_history(self, limit: int = 50) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trade_feedback ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Tuning Log (调优记录)
+    # ------------------------------------------------------------------
+
+    def create_tuning_proposal(self, type_: str, parameter_name: str,
+                                old_value: str, new_value: str,
+                                reason: str = "", evidence: list | None = None) -> str:
+        tid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO tuning_log
+                   (id, type, parameter_name, old_value, new_value,
+                    reason, evidence, status, proposed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (tid, type_, parameter_name, old_value, new_value,
+                 reason, json.dumps(evidence or [], ensure_ascii=False),
+                 "proposed", _now_iso()),
+            )
+            conn.commit()
+            return tid
+        finally:
+            conn.close()
+
+    def get_tuning_proposals(self, status: str | None = None, limit: int = 20) -> list[dict]:
+        conn = self._connect()
+        try:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM tuning_log WHERE status = ? ORDER BY proposed_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM tuning_log ORDER BY proposed_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                self._parse_json_fields(d, list_fields=("evidence",))
+                result.append(d)
+            return result
+        finally:
+            conn.close()
+
+    def approve_tuning(self, tuning_id: str) -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE tuning_log SET status = 'approved', decided_at = ? WHERE id = ? AND status = 'proposed'",
+                (_now_iso(), tuning_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def reject_tuning(self, tuning_id: str, reason: str = "") -> bool:
+        conn = self._connect()
+        try:
+            if reason:
+                cur = conn.execute(
+                    "UPDATE tuning_log SET status = 'rejected', decided_at = ?, reason = reason || ' | 拒绝: ' || ? WHERE id = ? AND status = 'proposed'",
+                    (_now_iso(), reason, tuning_id),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE tuning_log SET status = 'rejected', decided_at = ? WHERE id = ? AND status = 'proposed'",
+                    (_now_iso(), tuning_id),
+                )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _parse_json_fields(self, d: dict, dict_fields: tuple = (),
+                           list_fields: tuple = ()) -> dict:
+        for field in dict_fields:
+            if isinstance(d.get(field), str):
+                try:
+                    d[field] = json.loads(d[field])
+                except (json.JSONDecodeError, TypeError):
+                    d[field] = {}
+        for field in list_fields:
+            if isinstance(d.get(field), str):
+                try:
+                    d[field] = json.loads(d[field])
+                except (json.JSONDecodeError, TypeError):
+                    d[field] = []
+        return d

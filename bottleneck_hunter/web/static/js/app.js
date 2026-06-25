@@ -6,6 +6,7 @@ import { resizeAll, initChartFullscreen, initChainTabs, initWizChainTabs, initWi
 import { initSettings } from './settings.js';
 import { initWizard } from './phases.js';
 import { initWatchlist } from './watchlist.js';
+import { initDecision } from './decision.js';
 
 /* ── Global state ────────────────────────────────────── */
 window.appState = {
@@ -38,6 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initWizFullscreen();
   initWizard();
   initWatchlist();
+  initDecision();
 
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {

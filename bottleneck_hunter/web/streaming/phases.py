@@ -147,7 +147,8 @@ async def stream_phase1(
         "top_reports": [r.model_dump() for r in top_reports],
         "failed_nodes": failed_nodes,
         "config": {"sector": sector, "end_product": end_product, "max_depth": max_depth,
-                   "top_n": top_n, "language": language, "provider": provider, "model": model},
+                   "top_n": top_n, "language": language, "provider": provider, "model": model,
+                   "market": market, "max_market_cap_yi": max_market_cap_yi},
     }
     phase_cache.set_phase(analysis_id, 1, phase1_data)
 
@@ -209,6 +210,13 @@ async def stream_phase2(
         return
 
     market_enum = MARKET_MAP.get(market, MarketRegion.A_STOCK)
+    p1_config = p1.get("config", {})
+    if market == "us_stock" and p1_config.get("market") and p1_config["market"] != "us_stock":
+        market = p1_config["market"]
+        market_enum = MARKET_MAP.get(market, MarketRegion.A_STOCK)
+        logger.info("[stream-phase2] 从 Phase 1 缓存恢复市场参数: %s", market)
+    if max_market_cap_yi == 200 and p1_config.get("max_market_cap_yi") is not None:
+        max_market_cap_yi = p1_config["max_market_cap_yi"]
     chain = ChainGraph(**p1["chain"])
     all_reports = [BottleneckReport(**r) for r in p1["all_reports"]]
 

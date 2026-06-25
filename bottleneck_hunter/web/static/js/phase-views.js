@@ -47,7 +47,7 @@ function renderBottleneckBars(reports, chainNodes) {
   const h = Math.max(160, sorted.length * (barH + 6) + 30);
   container.style.height = h + 'px';
 
-  const chart = echarts.init(container);
+  const chart = echarts.getInstanceByDom(container) || echarts.init(container);
   chart.setOption({
     grid: { left: 280, right: 50, top: 8, bottom: 16 },
     xAxis: { type: 'value', max: 10, axisLabel: { fontSize: 10 } },
@@ -74,7 +74,7 @@ function renderBottleneckBars(reports, chainNodes) {
         return `${r.node_name}<br/>层级: ${label} (L${r.layer})<br/>瓶颈分: ${r.overall_score.toFixed(1)}`;
       },
     },
-  });
+  }, true);
 }
 
 function renderBnStats(data) {

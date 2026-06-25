@@ -1,6 +1,6 @@
 """News data pipeline — fetch headlines + LLM summarization & sentiment.
 
-Sources: yfinance Ticker.news + Google Finance RSS.
+Sources: yfinance Ticker.news + Google Finance RSS (US), akshare (A-stock).
 """
 
 from __future__ import annotations
@@ -9,11 +9,17 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 
 import httpx
 import yfinance as yf
+
+try:
+    import akshare as ak
+except ImportError:
+    ak = None  # type: ignore[assignment]
 
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.models import DegradationMode
@@ -93,6 +99,46 @@ async def _fetch_rss_news(ticker: str, limit: int = 5) -> list[dict]:
         return []
 
 
+_ASTOCK_RE = re.compile(r"^(?:SH|SZ|sh|sz)?(\d{6})")
+
+
+def _fetch_astock_news(ticker: str, limit: int = 10) -> list[dict]:
+    """Fetch A-stock news from akshare stock_news_em (sync)."""
+    if ak is None:
+        return []
+    code = ticker.split(".")[0].strip()
+    m = _ASTOCK_RE.match(code)
+    if not m:
+        return []
+    code_6 = m.group(1)
+    try:
+        df = ak.stock_news_em(symbol=code_6)
+        if df is None or df.empty:
+            return []
+        results = []
+        for _, row in df.head(limit).iterrows():
+            title = str(row.get("新闻标题", "")).strip()
+            if not title:
+                continue
+            pub_time = str(row.get("发布时间", ""))
+            date_str = pub_time[:10] if len(pub_time) >= 10 else ""
+            source_name = str(row.get("文章来源", ""))
+            source_url = str(row.get("新闻链接", ""))
+            news_id = hashlib.md5(f"{ticker}:{title}".encode()).hexdigest()[:12]
+            results.append({
+                "id": news_id,
+                "ticker": ticker,
+                "date": date_str,
+                "title": title,
+                "source_url": source_url,
+                "source_name": source_name,
+            })
+        return results
+    except Exception as e:
+        logger.warning("A-stock news failed for %s: %s", ticker, e)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # LLM summarization
 # ---------------------------------------------------------------------------
@@ -155,16 +201,18 @@ async def _summarize_with_llm(ticker: str, articles: list[dict], llm, budget: Bu
 # Batch pipeline
 # ---------------------------------------------------------------------------
 
-async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTracker) -> int:
+async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTracker, market: str = "us_stock") -> int:
     async with _SEM:
-        articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
-        rss = await _fetch_rss_news(ticker)
-        # 合并去重（按 title hash）
-        seen = {a["id"] for a in articles}
-        for r in rss:
-            if r["id"] not in seen:
-                articles.append(r)
-                seen.add(r["id"])
+        if market == "a_stock":
+            articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+        else:
+            articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
+            rss = await _fetch_rss_news(ticker)
+            seen = {a["id"] for a in articles}
+            for r in rss:
+                if r["id"] not in seen:
+                    articles.append(r)
+                    seen.add(r["id"])
 
         if not articles:
             return 0
@@ -187,6 +235,7 @@ async def fetch_news_batch(
     store: WatchlistStore,
     llm=None,
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> dict[str, int]:
     """Batch-fetch and summarize news. Returns {ticker: article_count}."""
     if not tickers:
@@ -195,9 +244,12 @@ async def fetch_news_batch(
     for ticker in tickers:
         try:
             if llm and budget:
-                count = await _fetch_one(ticker, store, llm, budget)
+                count = await _fetch_one(ticker, store, llm, budget, market=market)
             else:
-                articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
+                if market == "a_stock":
+                    articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+                else:
+                    articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
                 count = store.save_news(articles) if articles else 0
             results[ticker] = count
         except Exception as e:
