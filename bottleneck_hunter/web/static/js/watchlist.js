@@ -5,6 +5,11 @@
 
 const API = '/api/watchlist';
 
+function _debounce(fn, ms) {
+  let timer;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
+
 const wlState = {
   entries: [],
   counts: { focus: 0, normal: 0, track: 0 },
@@ -14,6 +19,7 @@ const wlState = {
   refreshingIntel: false,
   refreshingStrategy: false,
   strategyCache: {},
+  strategyCacheTime: 0,
   viewMode: 'table',
   filterTier: 'all',
   filterMarket: 'all',
@@ -23,8 +29,24 @@ const wlState = {
   drawerTab: 'info',
   uziRunning: null,
   pipeStatuses: [],
+  staleTickers: new Set(),
   selectedIds: new Set(),
 };
+
+/* ── Toast 通知 ─────────────────────────────────────── */
+
+function showToast(msg, type = 'success', duration = 3000) {
+  let el = document.getElementById('bh-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'bh-toast';
+    document.body.appendChild(el);
+  }
+  el.className = `bh-toast bh-toast--${type} bh-toast--show`;
+  el.textContent = msg;
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.remove('bh-toast--show'), duration);
+}
 
 /* ── API helpers ──────────────────────────────────────── */
 
@@ -48,6 +70,7 @@ async function loadWatchlist() {
     wlState.counts = data.counts || { focus: 0, normal: 0, track: 0 };
     wlState.total = data.total || 0;
     render();
+    checkDataHealth();
   } catch (e) {
     console.error('Failed to load watchlist:', e);
   }
@@ -69,6 +92,18 @@ async function loadPipelineStatus() {
     renderPipeStatus();
   } catch (e) {
     console.error('Failed to load pipeline status:', e);
+  }
+}
+
+async function checkDataHealth() {
+  try {
+    const data = await apiFetch('/health');
+    wlState.staleTickers = new Set((data.stale_tickers || []).map(t => t.ticker));
+    if (wlState.staleTickers.size > 0) {
+      showToast(`${wlState.staleTickers.size} 只股票数据已超过 48 小时未更新`, 'warning', 5000);
+    }
+  } catch (e) {
+    console.error('Failed to check data health:', e);
   }
 }
 
@@ -116,6 +151,10 @@ function getFilteredEntries() {
 /* ── Rendering ────────────────────────────────────────── */
 
 function render() {
+  if (wlState.strategyCacheTime && Date.now() - wlState.strategyCacheTime > 5 * 60 * 1000) {
+    loadStrategySummaries();
+  }
+
   const countBadge = document.getElementById('wl-count-badge');
   if (countBadge) countBadge.textContent = `${wlState.total} / 24`;
 
@@ -291,9 +330,12 @@ function renderPipeStatus() {
   el.innerHTML = wlState.pipeStatuses.map(p => {
     const ago = p.last_run_at ? timeAgo(p.last_run_at) : '未运行';
     const dotClass = p.last_status === 'success' ? 'ok'
+      : p.last_status === 'partial' ? 'warn'
       : p.last_status === 'error' ? 'err' : 'stale';
     const label = { price: '价格', news: '新闻', sec: 'SEC', options: '期权', notice: '公告' }[p.pipeline_name] || p.pipeline_name;
-    return `<span><span class="wl-pipe-dot wl-pipe-dot--${dotClass}"></span>${label}: ${ago}</span>`;
+    const errorTip = (p.last_status === 'error' || p.last_status === 'partial') && p.last_error
+      ? ` title="${escHtml(p.last_error)}"` : '';
+    return `<span${errorTip}><span class="wl-pipe-dot wl-pipe-dot--${dotClass}"></span>${label}: ${ago}</span>`;
   }).join('');
 }
 
@@ -474,6 +516,16 @@ async function loadInfoTab(entry) {
     <button class="btn btn-sm" id="wl-notes-save" style="margin-top:6px">保存备注</button>
   </div>`;
 
+  /* 17F.1 决策路径追溯面板 */
+  html += `<div class="wl-info-section">
+    <details class="wl-decision-trace">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--accent)">决策路径</summary>
+      <div id="wl-decision-trace-body" style="margin-top:8px">
+        <p style="color:var(--muted);font-size:12px">加载中...</p>
+      </div>
+    </details>
+  </div>`;
+
   pane.innerHTML = html;
 
   const market = entry.market || 'us_stock';
@@ -505,9 +557,47 @@ async function loadInfoTab(entry) {
         const e = wlState.entries.find(e => e.id === entry.id);
         if (e) e.notes = textarea.value;
       } catch (err) {
-        alert(`保存失败: ${err.message}`);
+        showToast(`保存失败: ${err.message}`, 'error');
       }
     });
+  }
+
+  /* 17F.1 加载决策路径追溯 */
+  loadDecisionTrace(entry.ticker);
+}
+
+/* 17F.1 决策路径追溯 */
+async function loadDecisionTrace(ticker) {
+  const body = document.getElementById('wl-decision-trace-body');
+  if (!body) return;
+  try {
+    const res = await fetch(`/api/decision/trace/${encodeURIComponent(ticker)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const layers = data.layers || [];
+    if (layers.length === 0) {
+      body.innerHTML = '<p style="color:var(--muted);font-size:12px">暂无决策数据，请先运行日常决策。</p>';
+      return;
+    }
+    let html = '<div class="wl-trace-chain">';
+    layers.forEach((layer, i) => {
+      const ts = (layer.updated_at || '').replace('T', ' ').slice(0, 16);
+      html += `<div class="wl-trace-layer">
+        <div class="wl-trace-level">${escHtml(layer.level)}</div>
+        <div class="wl-trace-content">
+          <div class="wl-trace-label">${escHtml(layer.label)}</div>
+          <div class="wl-trace-summary">${escHtml(layer.summary)}</div>
+          ${ts ? `<div class="wl-trace-time">${ts}</div>` : ''}
+        </div>
+      </div>`;
+      if (i < layers.length - 1) {
+        html += '<div class="wl-trace-arrow">&#x2193;</div>';
+      }
+    });
+    html += '</div>';
+    body.innerHTML = html;
+  } catch (e) {
+    body.innerHTML = `<p style="color:var(--muted);font-size:12px">决策路径加载失败: ${escHtml(e.message)}</p>`;
   }
 }
 
@@ -1283,7 +1373,7 @@ function initAddPanel() {
       document.getElementById('wl-add-name').value = '';
       await loadWatchlist();
     } catch (e) {
-      alert(`添加失败: ${e.message}`);
+      showToast(`添加失败: ${e.message}`, 'error');
     }
   });
 }
@@ -1331,7 +1421,7 @@ function initBatchActions() {
       wlState.selectedIds.clear();
       await loadWatchlist();
     } catch (e) {
-      alert(`批量操作失败: ${e.message}`);
+      showToast(`批量操作失败: ${e.message}`, 'error');
     }
   }
 
@@ -1344,13 +1434,15 @@ function initBatchActions() {
     if (ids.length === 0) return;
     if (!confirm(`确定移除选中的 ${ids.length} 只股票？`)) return;
     try {
-      for (const id of ids) {
-        await apiFetch(`/${id}`, { method: 'DELETE' });
-      }
+      await apiFetch('/batch-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids })
+      });
       wlState.selectedIds.clear();
       await loadWatchlist();
     } catch (e) {
-      alert(`批量删除失败: ${e.message}`);
+      showToast(`批量删除失败: ${e.message}`, 'error');
     }
   });
 }
@@ -1370,7 +1462,7 @@ function initTableActions() {
         await loadWatchlist();
         if (wlState.drawerEntryId === id) closeDrawer();
       } catch (err) {
-        alert(`移除失败: ${err.message}`);
+        showToast(`移除失败: ${err.message}`, 'error');
       }
       return;
     }
@@ -1405,7 +1497,7 @@ function initTableActions() {
         });
         await loadWatchlist();
       } catch (err) {
-        alert(`更新失败: ${err.message}`);
+        showToast(`更新失败: ${err.message}`, 'error');
         await loadWatchlist();
       }
     }
@@ -1425,7 +1517,7 @@ function initCardActions() {
         await apiFetch(`/${id}`, { method: 'DELETE' });
         await loadWatchlist();
       } catch (err) {
-        alert(`移除失败: ${err.message}`);
+        showToast(`移除失败: ${err.message}`, 'error');
       }
       return;
     }
@@ -1441,7 +1533,7 @@ function initCardActions() {
         await apiFetch(`/${id}`, { method: 'PATCH', body: JSON.stringify({ tier: nextTier }) });
         await loadWatchlist();
       } catch (err) {
-        alert(`更新失败: ${err.message}`);
+        showToast(`更新失败: ${err.message}`, 'error');
       }
       return;
     }
@@ -1458,9 +1550,10 @@ function initCardActions() {
 function initToolbar() {
   const searchInput = document.getElementById('wl-search');
   if (searchInput) {
+    const debouncedRender = _debounce(() => render(), 250);
     searchInput.addEventListener('input', () => {
       wlState.searchQuery = searchInput.value.trim();
-      render();
+      debouncedRender();
     });
   }
 
@@ -1567,7 +1660,17 @@ function finishRefresh(btn, refreshBar, statusEl) {
   if (statusEl) statusEl.textContent = '刷新完成';
   loadWatchlist();
   loadBudget();
-  loadPipelineStatus();
+  loadPipelineStatus().then(() => {
+    const errors = wlState.pipeStatuses.filter(p => p.last_status === 'error');
+    const partials = wlState.pipeStatuses.filter(p => p.last_status === 'partial');
+    if (errors.length > 0) {
+      showToast(`${errors.length} 条管道刷新失败`, 'error');
+    } else if (partials.length > 0) {
+      showToast(`刷新完成，${partials.length} 条管道部分成功`, 'warning');
+    } else {
+      showToast('数据刷新完成', 'success');
+    }
+  });
   setTimeout(() => {
     if (refreshBar) refreshBar.style.display = 'none';
   }, 3000);
@@ -1591,6 +1694,7 @@ async function loadStrategySummaries() {
   try {
     const data = await apiFetch('/strategy-summaries');
     wlState.strategyCache = data.summaries || {};
+    wlState.strategyCacheTime = Date.now();
     render();
   } catch (e) {
     console.error('Failed to load strategy summaries:', e);
@@ -1626,7 +1730,7 @@ function initRefreshIntel() {
       }
       await loadWatchlist();
     } catch (e) {
-      alert(`刷新失败: ${e.message}`);
+      showToast(`刷新失败: ${e.message}`, 'error');
     } finally {
       wlState.refreshingIntel = false;
       btn.textContent = '刷新信息';
@@ -1641,6 +1745,8 @@ function initRefreshStrategy() {
   btn.addEventListener('click', async () => {
     if (wlState.refreshingStrategy) return;
     wlState.refreshingStrategy = true;
+    wlState.strategyCache = {};
+    wlState.strategyCacheTime = 0;
     btn.textContent = '生成中...';
     btn.disabled = true;
     try {
@@ -1664,7 +1770,7 @@ function initRefreshStrategy() {
       }
       await loadStrategySummaries();
     } catch (e) {
-      alert(`更新失败: ${e.message}`);
+      showToast(`更新失败: ${e.message}`, 'error');
     } finally {
       wlState.refreshingStrategy = false;
       btn.textContent = '刷新策略';
@@ -1682,8 +1788,8 @@ async function loadIntelligenceTab(entry) {
 
   try {
     const [intelData, historyData] = await Promise.all([
-      apiFetch(`/${entry.id}/intelligence`),
-      apiFetch(`/${entry.id}/intelligence/history?limit=10`)
+      apiFetch(`/${entry.id}/intelligence`).catch(() => ({ intelligence: null })),
+      apiFetch(`/${entry.id}/intelligence/history?limit=10`).catch(() => ({ history: [] }))
     ]);
 
     const intel = intelData.intelligence;
@@ -1786,8 +1892,8 @@ async function loadStrategyTab(entry) {
 
   try {
     const [strategyData, historyData] = await Promise.all([
-      apiFetch(`/${entry.id}/strategy`),
-      apiFetch(`/${entry.id}/strategy/history?limit=10`)
+      apiFetch(`/${entry.id}/strategy`).catch(() => ({ strategy: null })),
+      apiFetch(`/${entry.id}/strategy/history?limit=10`).catch(() => ({ history: [] }))
     ]);
 
     const strategy = strategyData.strategy;

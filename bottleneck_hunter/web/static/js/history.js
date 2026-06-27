@@ -8,6 +8,7 @@ import {
   renderValidation, renderPicks, renderShortlist,
 } from './dashboard.js';
 import { restorePanelFromHistory } from './panel.js';
+import { buildAnalysisTag } from './analysis-tag.js';
 
 const MARKET_LABELS = {
   a_stock: 'A 股',
@@ -48,34 +49,19 @@ function renderHistoryList(analyses) {
   }
 
   const cards = analyses.map(a => {
-    const date = formatDate(a.created_at);
     const picks = (a.top_picks || []).join(', ') || '—';
-    const providerModel = [a.provider, a.model].filter(Boolean).join(' / ') || '—';
-    const marketLabel = MARKET_LABELS[a.market] || a.market || '—';
     const depthLabel = a.max_depth ? `${a.max_depth}层` : '—';
-    const seqLabel = a.seq_no ? `#${a.seq_no}` : '';
-    const cp = a.completed_phases || 0;
-    const PHASE_NAMES = ['瓶颈', '筛选', '验证', '会议'];
-    const phaseDots = PHASE_NAMES.map((n, i) =>
-      `<span class="phase-dot ${i < cp ? 'phase-done' : ''}" title="${n}">${n}</span>`
-    ).join('');
 
     return `
       <div class="history-card" data-id="${esc(a.id)}">
         <div class="history-card-header">
-          ${seqLabel ? `<span class="history-seq">${esc(seqLabel)}</span>` : ''}
-          <span class="history-sector">${esc(a.sector)}</span>
-          <span class="history-phase-progress">${phaseDots}</span>
-          <span class="history-date">${esc(date)}</span>
+          ${buildAnalysisTag(a)}
         </div>
         <div class="history-card-body">
           <div class="history-meta">
-            <span class="history-tag">终端: ${esc(a.end_product)}</span>
             <span class="history-tag">深度: ${esc(depthLabel)}</span>
-            <span class="history-tag">市场: ${esc(marketLabel)}</span>
             <span class="history-tag">瓶颈: ${a.bottleneck_count || 0}</span>
             <span class="history-tag">供应商: ${a.supplier_count || 0}</span>
-            <span class="history-tag">模型: ${esc(providerModel)}</span>
           </div>
           <div class="history-picks">推荐: ${esc(picks)}</div>
         </div>

@@ -154,7 +154,7 @@ class TestTradeExecutor:
         result = execute_trade(s, plan_id)
 
         assert "error" in result
-        assert "现金不足" in result["error"]
+        assert "约束校验不通过" in result["error"] or "现金不足" in result["error"]
 
     def test_insufficient_shares(self, store):
         s, entry_id, *_ = store
@@ -168,7 +168,7 @@ class TestTradeExecutor:
         result = execute_trade(s, plan_id)
 
         assert "error" in result
-        assert "持仓不足" in result["error"]
+        assert "约束校验不通过" in result["error"] or "持仓不足" in result["error"]
 
     def test_buy_adds_to_existing_position(self, store):
         s, entry_id, *_ = store

@@ -2,17 +2,19 @@
  * sse.js — 通用 SSE 流读取器（含断连重试）
  */
 
-export async function readSSEStream(url, body, { onEvent, onTick, onError, label = 'sse', maxRetries = 3, logFn = null, getAnalysisId = null } = {}) {
+export async function readSSEStream(url, body, { onEvent, onTick, onError, signal, label = 'sse', maxRetries = 3, logFn = null, getAnalysisId = null } = {}) {
   const delays = [1000, 3000, 5000];
   let attempt = 0;
   let receivedAny = false;
 
   while (attempt <= maxRetries) {
+    if (signal && signal.aborted) return;
     try {
       const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal,
       });
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);

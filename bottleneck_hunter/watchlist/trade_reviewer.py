@@ -48,6 +48,86 @@ def _get_llm():
     return None, "", ""
 
 
+def _rule_based_review(
+    ticker: str, entry_price: float, exit_price: float,
+    return_pct: float, holding_days: int,
+) -> dict:
+    """基于规则的简易复盘 — 当 LLM 不可用或调用失败时的 fallback。
+
+    不依赖 LLM，仅根据收益率和持仓天数给出基本评价和经验教训。
+    """
+    # 交易质量评分：按收益率和持仓合理性打分（1-10）
+    if return_pct >= 20:
+        quality = 8
+        outcome = "优秀"
+    elif return_pct >= 5:
+        quality = 7
+        outcome = "良好"
+    elif return_pct >= 0:
+        quality = 5
+        outcome = "保本"
+    elif return_pct >= -5:
+        quality = 4
+        outcome = "小亏"
+    elif return_pct >= -15:
+        quality = 3
+        outcome = "中等亏损"
+    else:
+        quality = 2
+        outcome = "大幅亏损"
+
+    # 持仓天数评价
+    if holding_days <= 3:
+        timing_note = "持仓过短，可能属于频繁交易"
+    elif holding_days <= 30:
+        timing_note = "短线持仓，注意交易频率"
+    elif holding_days <= 90:
+        timing_note = "中线持仓，持仓周期合理"
+    else:
+        timing_note = "长线持仓，检查是否错过止盈/止损时机"
+
+    lessons = []
+    if return_pct < -10:
+        lessons.append("止损纪律需加强，亏损超过 10%")
+    if return_pct > 0 and holding_days < 5:
+        lessons.append("盈利但持仓太短，可能错过更大利润空间")
+    if return_pct < 0 and holding_days > 60:
+        lessons.append("长期持有但亏损，需检查入场逻辑是否合理")
+    if not lessons:
+        lessons.append(f"交易结果{outcome}，继续保持当前策略纪律")
+
+    exp_card = None
+    # 只对显著盈亏生成经验卡片
+    if abs(return_pct) >= 10:
+        if return_pct >= 10:
+            exp_card = {
+                "scope": "ticker", "scope_key": ticker,
+                "category": "pattern",
+                "title": f"{ticker} 盈利 {return_pct:+.1f}% 模式（规则复盘）",
+                "content": f"入场价 {entry_price:.2f}，出场价 {exit_price:.2f}，"
+                           f"持仓 {holding_days} 天。{timing_note}",
+                "confidence": 0.4,
+            }
+        else:
+            exp_card = {
+                "scope": "ticker", "scope_key": ticker,
+                "category": "lesson",
+                "title": f"{ticker} 亏损 {return_pct:+.1f}% 教训（规则复盘）",
+                "content": f"入场价 {entry_price:.2f}，出场价 {exit_price:.2f}，"
+                           f"持仓 {holding_days} 天。{'; '.join(lessons)}",
+                "confidence": 0.4,
+            }
+
+    return {
+        "trade_quality_score": quality,
+        "outcome_summary": f"{ticker} {outcome}：收益 {return_pct:+.1f}%，持仓 {holding_days} 天",
+        "key_lessons": lessons,
+        "timing_analysis": timing_note,
+        "review_method": "rule_based_fallback",
+        "experience_card": exp_card or {},
+    }
+
+
 async def run_trade_review(
     store: WatchlistStore,
     trade_id: str,
@@ -119,51 +199,72 @@ async def run_trade_review(
           "expected_date": c.get("expected_date", "")} for c in catalysts[:5]],
         ensure_ascii=False) if catalysts else "无相关催化剂"
 
+    # ── 尝试 LLM 复盘，失败则降级为规则复盘 ──
+    use_fallback = False
+    fallback_reason = ""
+
     llm, provider, model = _get_llm()
     if not llm:
-        yield _sse("review_error", ticker=ticker, error="无可用 LLM，跳过复盘")
-        return
+        use_fallback = True
+        fallback_reason = "无可用 LLM"
+    elif budget and not budget.can_spend(estimated_tokens=2000):
+        use_fallback = True
+        fallback_reason = "预算不足"
 
-    if budget and not budget.can_spend(estimated_tokens=2000):
-        yield _sse("review_error", ticker=ticker, error="预算不足，跳过复盘")
-        return
+    result = None
+    if not use_fallback:
+        try:
+            prompt_template = (PROMPTS_DIR / "trade_review.md").read_text(encoding="utf-8")
+            prompt = (prompt_template
+                      .replace("{ticker}", ticker)
+                      .replace("{entry_price}", f"{entry_price:.2f}")
+                      .replace("{exit_price}", f"{exit_price:.2f}")
+                      .replace("{return_pct}", f"{return_pct:.2f}")
+                      .replace("{holding_days}", str(holding_days))
+                      .replace("{execution_plan}", execution_plan or "无执行计划记录")
+                      .replace("{committee_review}", committee_review or "无投委会评审记录")
+                      .replace("{catalyst_status}", catalyst_status))
 
-    try:
-        prompt_template = (PROMPTS_DIR / "trade_review.md").read_text(encoding="utf-8")
-        prompt = (prompt_template
-                  .replace("{ticker}", ticker)
-                  .replace("{entry_price}", f"{entry_price:.2f}")
-                  .replace("{exit_price}", f"{exit_price:.2f}")
-                  .replace("{return_pct}", f"{return_pct:.2f}")
-                  .replace("{holding_days}", str(holding_days))
-                  .replace("{execution_plan}", execution_plan or "无执行计划记录")
-                  .replace("{committee_review}", committee_review or "无投委会评审记录")
-                  .replace("{catalyst_status}", catalyst_status))
+            yield _sse("review_progress", ticker=ticker, message=f"{ticker} LLM 分析中...")
 
-        yield _sse("review_progress", ticker=ticker, message=f"{ticker} LLM 分析中...")
+            response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
 
-        response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+            if budget:
+                budget.record(provider, model, 1500, 800, "trade_review")
 
-        if budget:
-            budget.record(provider, model, 1500, 800, "trade_review")
+            result = extract_json_object(response)
 
-        result = extract_json_object(response)
+        except Exception as e:
+            logger.warning("LLM 复盘失败，降级为规则复盘: %s — %s", ticker, e)
+            use_fallback = True
+            fallback_reason = f"LLM 调用失败: {e}"
 
-        exp_card_data = result.get("experience_card", {})
-
-        review_id = store.create_auto_review(
-            sim_trade_id=trade_id,
-            ticker=ticker,
-            review_type="trade_close",
-            entry_price=entry_price,
-            exit_price=exit_price,
-            return_pct=return_pct,
-            result_json=result,
-            lessons_learned="; ".join(result.get("key_lessons", [])),
-            experience_card=exp_card_data,
+    # ── 规则化 fallback：无需 LLM 的简易复盘 ──
+    if use_fallback or result is None:
+        logger.info("使用规则化 fallback 复盘 %s（原因: %s）", ticker, fallback_reason)
+        yield _sse("review_progress", ticker=ticker,
+                   message=f"{ticker} 规则化复盘中（{fallback_reason}）...")
+        result = _rule_based_review(
+            ticker=ticker, entry_price=entry_price, exit_price=exit_price,
+            return_pct=return_pct, holding_days=holding_days,
         )
 
-        if exp_card_data and exp_card_data.get("title"):
+    exp_card_data = result.get("experience_card", {})
+
+    review_id = store.create_auto_review(
+        sim_trade_id=trade_id,
+        ticker=ticker,
+        review_type="trade_close",
+        entry_price=entry_price,
+        exit_price=exit_price,
+        return_pct=return_pct,
+        result_json=result,
+        lessons_learned="; ".join(result.get("key_lessons", [])),
+        experience_card=exp_card_data,
+    )
+
+    if exp_card_data and exp_card_data.get("title"):
+        try:
             store.create_experience_card(
                 scope=exp_card_data.get("scope", "global"),
                 scope_key=exp_card_data.get("scope_key", ""),
@@ -174,16 +275,14 @@ async def run_trade_review(
                 confidence=exp_card_data.get("confidence", 0.5),
                 source_review_id=review_id,
             )
+        except Exception as e:
+            logger.warning("经验卡片写入失败 %s: %s", ticker, e)
 
-        yield _sse("review_done", ticker=ticker, review_id=review_id,
-                    return_pct=return_pct,
-                    quality_score=result.get("trade_quality_score", 0),
-                    lessons=result.get("key_lessons", []),
-                    message=f"{ticker} 复盘完成：收益 {return_pct:+.1f}%，质量评分 {result.get('trade_quality_score', '?')}/10")
-
-    except Exception as e:
-        logger.exception("交易复盘失败: %s", ticker)
-        yield _sse("review_error", ticker=ticker, error=str(e))
+    yield _sse("review_done", ticker=ticker, review_id=review_id,
+                return_pct=return_pct,
+                quality_score=result.get("trade_quality_score", 0),
+                lessons=result.get("key_lessons", []),
+                message=f"{ticker} 复盘完成：收益 {return_pct:+.1f}%，质量评分 {result.get('trade_quality_score', '?')}/10")
 
 
 async def run_batch_review(

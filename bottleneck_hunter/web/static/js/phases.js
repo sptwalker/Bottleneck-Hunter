@@ -9,6 +9,7 @@ import { state, logMsg, clearLog, getScoreColor, scoreNeedsDarkText, SCORE_COLOR
 import { readSSEStream } from './sse.js';
 import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, MEETING_ROLES } from './ai-features.js';
 import { openDrawer, closeDrawer } from './drawer.js';
+import { buildAnalysisTag } from './analysis-tag.js';
 
 
 
@@ -42,7 +43,10 @@ function _updateP1Progress(pct, label) {
   const bar = document.getElementById('p1-progress-fill');
   const text = document.getElementById('p1-progress-text');
   if (wrap) wrap.style.display = '';
-  if (bar) bar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+  if (bar) {
+    bar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+    bar.classList.toggle('active', pct > 0 && pct < 100);
+  }
   if (text) text.textContent = label || '';
 }
 
@@ -52,7 +56,7 @@ function _startP1Timer() {
   const el = document.getElementById('p1-timer');
   if (el) el.style.display = '';
   _updateP1Timer();
-  _p1TimerInterval = setInterval(_updateP1Timer, 1000);
+  _p1TimerInterval = setInterval(_updateP1Timer, 200);
 }
 
 function _stopP1Timer() {
@@ -78,7 +82,7 @@ function _startP2Timer() {
   const el = document.getElementById('p2-timer');
   if (el) el.style.display = '';
   _updateP2Timer();
-  _p2TimerInterval = setInterval(_updateP2Timer, 1000);
+  _p2TimerInterval = setInterval(_updateP2Timer, 200);
 }
 
 function _stopP2Timer() {
@@ -104,7 +108,7 @@ function _startP4Timer() {
   const el = document.getElementById('p4-timer');
   if (el) el.style.display = '';
   _updateP4Timer();
-  _p4TimerInterval = setInterval(_updateP4Timer, 1000);
+  _p4TimerInterval = setInterval(_updateP4Timer, 200);
 }
 
 function _stopP4Timer() {
@@ -120,9 +124,12 @@ function _updateP4Timer() {
   if (val) val.textContent = `${String(m).padStart(2, '0')}分${String(s).padStart(2, '0')}秒`;
 }
 
-/* ── SSE reader 引用（用于暂停） ─────────────── */
-let _p1Reader = null;
-let _p2Reader = null;
+/* ── SSE AbortController（用于暂停） ─────────────── */
+let _p1Abort = null;
+let _p2Abort = null;
+let _p1LaunchTime = 0;
+let _p2LaunchTime = 0;
+const LAUNCH_GUARD_MS = 800;
 
 /* ── Phase 2 进度跟踪 ──────────────────────────── */
 const P2_STEPS = ['supplier_search', 'financial_fetch', 'supplier_eval', 'catalyst'];
@@ -132,8 +139,8 @@ let _p2EvalDone = 0;
 
 /* ── 新分析重置 ──────────────────────────── */
 function resetForNewAnalysis() {
-  if (_p1Reader) { try { _p1Reader.cancel(); } catch {} _p1Reader = null; }
-  if (_p2Reader) { try { _p2Reader.cancel(); } catch {} _p2Reader = null; }
+  if (_p1Abort) { try { _p1Abort.abort(); } catch {} _p1Abort = null; }
+  if (_p2Abort) { try { _p2Abort.abort(); } catch {} _p2Abort = null; }
   _stopP1Timer();
   _stopP2Timer();
   _stopP4Timer();
@@ -172,7 +179,7 @@ function resetForNewAnalysis() {
   });
   const bnStats = document.getElementById('wiz-bn-stats');
   if (bnStats) { bnStats.innerHTML = ''; bnStats.style.display = 'none'; }
-  hideP1Info(); hideP1Overlay(); _resetP1Progress(); _updateSeqBadge();
+  hideP1Info(); hideP1Overlay(); _resetP1Progress(); _updateAnalysisTags();
   const p1Timer = document.getElementById('p1-timer');
   if (p1Timer) p1Timer.style.display = 'none';
   const p1Prog = document.getElementById('wiz-p1-progress');
@@ -294,7 +301,7 @@ function goToPhase(phase) {
     showPage('wizard-start');
   } else {
     showPage(`wizard-phase${phase}`);
-    _updatePhaseTargets();
+    _updateAnalysisTags();
   }
   // 面板从 display:none 切换为可见后，ECharts 需要 resize
   requestAnimationFrame(() => {
@@ -306,19 +313,7 @@ function goToPhase(phase) {
   });
 }
 
-function _updatePhaseTargets() {
-  const market = state.config.market === 'a_stock' ? 'A股' : '美股';
-  const sector = state.config.sector || '-';
-  const product = state.config.product || '-';
-  const { provider } = getMainModel();
-  const labels = { deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Claude', qwen: 'Qwen', google: 'Gemini', glm: 'GLM', kimi: 'Kimi' };
-  const modelLabel = labels[provider] || provider;
-  const html = `<span>${market}</span><span class="phase-target-sep">·</span><span>${sector}</span><span class="phase-target-sep">·</span><span>${product}</span><span class="phase-target-sep">·</span><span>${modelLabel}</span>`;
-  ['p1-target', 'p2-target', 'p3-target', 'p4-target'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.innerHTML = html;
-  });
-}
+/* _updatePhaseTargets — 旧函数已被 _updateAnalysisTags 取代 */
 
 function _getPhaseStatus() {
   const s = (p, err, needs, data) => {
@@ -457,15 +452,60 @@ function setTriState(btnId, stateKey, newState) {
   btn.textContent = labels[newState] || labels.start;
 }
 
-/* ── 分析编号徽章 ───────────────────────────── */
-function _updateSeqBadge() {
-  const el = document.getElementById('analysis-seq-badge');
-  if (!el) return;
-  if (state.seqNo) {
-    el.textContent = `#${state.seqNo}`;
-    el.style.display = '';
-  } else {
-    el.style.display = 'none';
+/* ── 分析记录标签（替换旧的 seq badge + phase target） ── */
+function _updateAnalysisTags() {
+  const completedPhases = state.config.completed_phases || 0;
+
+  const data = {
+    seq_no: state.seqNo,
+    market: state.config.market || 'us_stock',
+    sector: state.config.sector || '',
+    end_product: state.config.product || '',
+    provider: '',
+    model: '',
+    completed_phases: completedPhases,
+    created_at: state.config.created_at || '',
+    run_count: state.config.run_count || 1,
+  };
+  const { provider, model } = getMainModel();
+  data.provider = provider || '';
+  data.model = model || '';
+
+  const hasData = data.sector || data.seq_no;
+  const fullHtml = hasData ? buildAnalysisTag(data) : '';
+
+  ['p1-analysis-tag', 'p2-analysis-tag', 'p3-analysis-tag', 'p4-analysis-tag'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = fullHtml;
+  });
+  const sidebar = document.getElementById('sidebar-analysis-tag');
+  if (sidebar) {
+    if (hasData) {
+      const seq = data.seq_no ? `#${data.seq_no}` : '';
+      const rc = String(data.run_count || 1).padStart(3, '0');
+      const sector = data.sector || '';
+      const mkt = data.market === 'a_stock' ? 'A股' : '美股';
+      const cp = data.completed_phases || 0;
+      const dots = [0,1,2,3].map(i => `<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${i < cp ? 'oklch(0.55 0.12 155)' : '#ccc'};margin:0 1px"></span>`).join('');
+      sidebar.innerHTML =
+        `<div style="display:flex;border:1px solid var(--border,#ddd);border-radius:8px;overflow:hidden;width:100%">` +
+          `<div style="display:flex;align-items:center;justify-content:center;padding:0 8px;font:800 16px/1 monospace;background:var(--surface,#f8f8f8);border-right:1px solid var(--border,#ddd)">${seq}</div>` +
+          `<div style="display:flex;flex-direction:column;flex:1;min-width:0">` +
+            `<div style="display:flex;align-items:center;justify-content:space-between;padding:3px 7px;border-bottom:1px solid #eee;background:var(--panel-bg,#fafafa)">` +
+              `<span style="font:600 11px/1 sans-serif">${mkt}</span>` +
+              `<span style="display:flex;align-items:center;gap:2px">${dots}</span>` +
+            `</div>` +
+            `<div style="display:flex;align-items:center;justify-content:space-between;padding:3px 7px;background:var(--surface,#f8f8f8)">` +
+              `<span style="font:600 11px/1 sans-serif;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${sector}</span>` +
+              `<span style="font:600 10px/1 monospace;color:oklch(0.50 0.10 155);background:oklch(0.95 0.03 155);padding:1px 4px;border-radius:3px;flex-shrink:0">${rc}</span>` +
+            `</div>` +
+          `</div>` +
+        `</div>`;
+      sidebar.style.display = '';
+    } else {
+      sidebar.innerHTML = `<div style="border:1px dashed var(--border,#ccc);border-radius:8px;padding:8px 10px;text-align:center;font-size:11px;color:var(--muted,#999);width:100%;box-sizing:border-box">待载入分析数据</div>`;
+      sidebar.style.display = '';
+    }
   }
 }
 
@@ -501,12 +541,21 @@ async function runPhase1(sector, product) {
   if (state.phase2) state.p2NeedsUpdate = true;
   if (state.phase3) state.p3NeedsUpdate = true;
   if (state.phase4) state.p4NeedsUpdate = true;
+
+  // 异步获取同赛道的累计分析次数（不阻塞启动流程）
+  fetch('/api/history').then(r => r.json()).then(d => {
+    const count = (d.analyses || []).filter(a => a.sector === sector && a.end_product === product).length;
+    state.config.run_count = count + 1; // +1 算上本次
+    _updateAnalysisTags();
+  }).catch(() => {});
+
   goToPhase(1);
 
   const nextBtn = document.getElementById('wiz-p1-next');
   nextBtn.disabled = true;
   nextBtn.style.display = 'none';
   setTriState('p1-tristate', 'p1TriState', 'pause');
+  _p1LaunchTime = Date.now();
   showP1Info('正在初始化...');
   showP1Overlay('正在初始化分析...');
 
@@ -533,10 +582,12 @@ async function runPhase1(sector, product) {
     language: 'zh', provider, model, market,
   };
 
+  _p1Abort = new AbortController();
   try {
     await readSSEStream('/api/phase1', body, {
       label: 'phase1-sse',
       logFn: logMsg,
+      signal: _p1Abort.signal,
       getAnalysisId: () => state.analysisId,
       onTick: _updateP1Timer,
       onEvent: (data) => handlePhase1Event(data),
@@ -559,7 +610,7 @@ async function runPhase1(sector, product) {
       setTriState('p1-tristate', 'p1TriState', 'restart');
     }
   }
-  _p1Reader = null;
+  _p1Abort = null;
   state.running = false;
   if (!state.phase1 && state.p1TriState === 'pause') {
     setTriState('p1-tristate', 'p1TriState', 'restart');
@@ -623,6 +674,8 @@ function handlePhase1Event(data) {
     state.p1Error = false;
     state.analysisId = data.analysis_id;
     if (data.seq_no) state.seqNo = data.seq_no;
+    if (data.run_count) state.config.run_count = data.run_count;
+    if (data.completed_phases) state.config.completed_phases = data.completed_phases;
     state.phase1 = data;
     state.phase2 = null;
     state.phase3 = null;
@@ -635,7 +688,7 @@ function handlePhase1Event(data) {
     const seqTag = state.seqNo ? `#${state.seqNo} ` : '';
     logMsg(`Phase 1 完成 — ${seqTag}瓶颈报告 ${reportCount} 条`, 'done');
     logMsg('本次分析数据存储成功', 'done');
-    _updateSeqBadge();
+    _updateAnalysisTags();
 
     renderPhase1(data);
 
@@ -707,6 +760,7 @@ async function runPhase2() {
   nextBtn.disabled = true;
 
   setTriState('p2-tristate', 'p2TriState', 'pause');
+  _p2LaunchTime = Date.now();
 
   _resetP2Progress();
   _updateP2Progress(0, '初始化...');
@@ -737,10 +791,12 @@ async function runPhase2() {
     language: 'zh', provider, model,
   };
 
+  _p2Abort = new AbortController();
   try {
     await readSSEStream('/api/phase2', body, {
       label: 'phase2-sse',
       logFn: logMsg,
+      signal: _p2Abort.signal,
       getAnalysisId: () => state.analysisId,
       onTick: _updateP2Timer,
       onEvent: (data) => handlePhase2Event(data, progress),
@@ -750,6 +806,7 @@ async function runPhase2() {
         _stopP2Timer();
         state.p2Error = true;
         state.autoMode = false;
+        setTriState('p2-tristate', 'p2TriState', 'restart');
       },
     });
   } catch (err) {
@@ -761,7 +818,7 @@ async function runPhase2() {
       state.autoMode = false;
     }
   }
-  _p2Reader = null;
+  _p2Abort = null;
   state.running = false;
   if (!state.phase2 && state.p2TriState === 'pause') {
     setTriState('p2-tristate', 'p2TriState', 'restart');
@@ -787,7 +844,8 @@ function handlePhase2Event(data, progress) {
 
   if (data.index !== undefined && data.step) {
     _p2StepIndex = data.index;
-    const stepPct = (data.index / P2_STEPS.length) * 100;
+    const isDone = data._sseEvent === 'step_done' || data.result !== undefined;
+    const stepPct = ((data.index + (isDone ? 1 : 0)) / P2_STEPS.length) * 100;
     _updateP2Progress(stepPct, data.message || data.step);
   }
 
@@ -833,6 +891,7 @@ function handlePhase2Event(data, progress) {
     state.phase4 = null;
     state.manualPicks = [];
     state.p2Error = false;
+    if (data.completed_phases) state.config.completed_phases = data.completed_phases;
     resetP2Selection();
     state.failedTickers = data.failed_tickers || [];
 
@@ -858,6 +917,7 @@ function handlePhase2Event(data, progress) {
     nextBtn.style.display = '';
     progress.innerHTML = '<div class="progress-msg progress-done">Phase 2 完成</div>';
     setTriState('p2-tristate', 'p2TriState', 'restart');
+    _updateAnalysisTags();
     updateSidebarStatus();
     updateNav();
     _savePhaseStatus();
@@ -879,7 +939,10 @@ function _updateP2Progress(pct, label) {
   const bar = document.getElementById('p2-progress-fill');
   const text = document.getElementById('p2-progress-text');
   const rounded = Math.min(100, Math.max(0, Math.round(pct)));
-  if (bar) bar.style.width = `${rounded}%`;
+  if (bar) {
+    bar.style.width = `${rounded}%`;
+    bar.classList.toggle('active', rounded > 0 && rounded < 100);
+  }
   if (text) text.textContent = label || `${rounded}%`;
 }
 
@@ -966,6 +1029,7 @@ function runPhase3(wQ, wA) {
   }).catch(() => {});
 
   _savePhaseStatus();
+  _updateAnalysisTags();
   _autoChainNext();
 }
 
@@ -1063,6 +1127,7 @@ function handlePhase4Event(data, progress) {
   if (data.validations || data.recommendations) {
     state.phase4 = data;
     state.p4Error = false;
+    if (data.completed_phases) state.config.completed_phases = data.completed_phases;
     renderPhase4Table(data.validations || [], data.recommendations || [], state.phase3?.ranked_results || []);
     const vCount = (data.validations || []).length;
     logMsg(`Phase 4 完成 — 验证 ${vCount} 家公司`, 'done');
@@ -1071,6 +1136,7 @@ function handlePhase4Event(data, progress) {
     updateSidebarStatus();
     updateNav();
     _savePhaseStatus();
+    _updateAnalysisTags();
     _autoChainNext();
   }
 }
@@ -1281,7 +1347,8 @@ export function initWizard() {
         runPhase1(state.config.sector, state.config.product);
       }
     } else if (state.p1TriState === 'pause') {
-      if (_p1Reader) { try { _p1Reader.cancel(); } catch {} _p1Reader = null; }
+      if (Date.now() - _p1LaunchTime < LAUNCH_GUARD_MS) return;
+      if (_p1Abort) { try { _p1Abort.abort(); } catch {} _p1Abort = null; }
       _stopP1Timer();
       state.running = false;
       logMsg('分析已暂停');
@@ -1303,7 +1370,8 @@ export function initWizard() {
         runPhase2();
       }
     } else if (state.p2TriState === 'pause') {
-      if (_p2Reader) { try { _p2Reader.cancel(); } catch {} _p2Reader = null; }
+      if (Date.now() - _p2LaunchTime < LAUNCH_GUARD_MS) return;
+      if (_p2Abort) { try { _p2Abort.abort(); } catch {} _p2Abort = null; }
       _stopP2Timer();
       state.running = false;
       logMsg('筛选已暂停');
@@ -1560,26 +1628,17 @@ async function loadWizardHistory() {
 
     const analyses = (data.analyses || []).slice(0, 8);
     if (analyses.length === 0) {
-      list.innerHTML = '<tr><td colspan="10" class="empty-text">暂无历史记录</td></tr>';
+      list.innerHTML = '<tr><td colspan="6" class="empty-text">暂无历史记录</td></tr>';
       return;
     }
 
-    const MARKET_MAP = { a_stock: 'A股', us_stock: '美股', all: '全部' };
-    const PH = ['瓶颈', '筛选', '验证', '会议'];
     list.innerHTML = analyses.map(a => {
-      const cp = a.completed_phases || 0;
-      const dots = PH.map((n, i) => `<span class="phase-dot ${i < cp ? 'phase-done' : ''}">${n}</span>`).join('');
       return `
       <tr data-id="${a.id}" class="company-row-clickable">
-        <td><span class="history-seq">${a.seq_no ? '#' + a.seq_no : ''}</span></td>
-        <td><span class="hist-mkt">${MARKET_MAP[a.market] || a.market || '-'}</span></td>
-        <td class="hist-sector">${a.sector}</td>
-        <td>${a.end_product}</td>
+        <td>${buildAnalysisTag(a)}</td>
         <td>${a.max_market_cap_yi ? '≤' + a.max_market_cap_yi + '亿' : '-'}</td>
         <td>${a.max_depth || '-'}层</td>
-        <td class="hist-model">${a.model || '-'}</td>
         <td>${a.supplier_count || 0}</td>
-        <td><span class="history-phase-progress">${dots}</span></td>
         <td>${_fmtHistDate(a)}</td>
       </tr>`;
     }).join('');
@@ -1587,7 +1646,7 @@ async function loadWizardHistory() {
     list.querySelectorAll('tr[data-id]').forEach(row => {
       row.addEventListener('click', () => {
         const id = row.dataset.id;
-        const sector = row.querySelector('.hist-sector')?.textContent || '';
+        const sector = row.querySelector('.at-sector')?.textContent || '';
         if (confirm(`是否载入该分析数据？\n\n赛道: ${sector}`)) {
           loadWizardAnalysis(id);
         }
@@ -1614,6 +1673,9 @@ async function loadWizardAnalysis(analysisId) {
       sector: data.sector,
       product: data.end_product,
       market: data.market,
+      created_at: data.created_at,
+      completed_phases: data.completed_phases || 0,
+      run_count: data.run_count || 0,
     };
     state.phase1 = null;
     state.phase2 = null;
@@ -1625,7 +1687,7 @@ async function loadWizardAnalysis(analysisId) {
       state.phase1 = { ...p1, analysis_id: data.analysis_id };
       goToPhase(1);
       renderPhase1(state.phase1);
-      _updateSeqBadge();
+      _updateAnalysisTags();
 
       // ── 恢复模型选择器 ──
       const p1Model = document.getElementById('wiz-p1-model');
@@ -1786,26 +1848,17 @@ async function loadAllHistory() {
     const analyses = data.analyses || [];
 
     if (analyses.length === 0) {
-      list.innerHTML = '<tr><td colspan="11" class="empty-text">暂无历史记录</td></tr>';
+      list.innerHTML = '<tr><td colspan="6" class="empty-text">暂无历史记录</td></tr>';
       return;
     }
 
-    const MARKET_MAP = { a_stock: 'A股', us_stock: '美股', all: '全部' };
-    const PH = ['瓶颈', '筛选', '验证', '会议'];
     list.innerHTML = analyses.map(a => {
-      const cp = a.completed_phases || 0;
-      const dots = PH.map((n, i) => `<span class="phase-dot ${i < cp ? 'phase-done' : ''}">${n}</span>`).join('');
       return `
       <tr data-id="${a.id}">
-        <td><span class="history-seq">${a.seq_no ? '#' + a.seq_no : ''}</span></td>
-        <td><span class="hist-mkt">${MARKET_MAP[a.market] || a.market || '-'}</span></td>
-        <td class="hist-sector">${a.sector}</td>
-        <td>${a.end_product}</td>
+        <td>${buildAnalysisTag(a)}</td>
         <td>${a.max_market_cap_yi ? '≤' + a.max_market_cap_yi + '亿' : '-'}</td>
         <td>${a.max_depth || '-'}层</td>
-        <td class="hist-model">${a.model || '-'}</td>
         <td>${a.supplier_count || 0}</td>
-        <td><span class="history-phase-progress">${dots}</span></td>
         <td>${_fmtHistDate(a)}</td>
         <td>
           <button class="btn btn-primary btn-sm hist-load-btn" data-id="${a.id}">载入</button>
@@ -1819,7 +1872,7 @@ async function loadAllHistory() {
         e.stopPropagation();
         const id = btn.dataset.id;
         const row = btn.closest('tr');
-        const sector = row.querySelector('.hist-sector')?.textContent || '';
+        const sector = row.querySelector('.at-sector')?.textContent || '';
         if (confirm(`是否载入该分析数据？\n\n赛道: ${sector}`)) {
           loadWizardAnalysis(id);
         }
@@ -1841,7 +1894,7 @@ async function loadAllHistory() {
       });
     });
   } catch (e) {
-    list.innerHTML = `<tr><td colspan="9" class="empty-text">加载失败: ${e.message}</td></tr>`;
+    list.innerHTML = `<tr><td colspan="6" class="empty-text">加载失败: ${e.message}</td></tr>`;
   }
 }
 

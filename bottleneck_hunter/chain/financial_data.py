@@ -197,6 +197,18 @@ def _fetch_astock_financial(code_6: str) -> FinancialSnapshot:
                 snap.revenue_yoy_pct = latest.revenue_yoy_pct
                 snap.net_profit_yoy_pct = latest.net_profit_yoy_pct
 
+                # 最新期同比可能为空（年报/季报首期），往前找有数据的期
+                if snap.revenue_yoy_pct is None:
+                    for q in quarters[1:4]:
+                        if q.revenue_yoy_pct is not None:
+                            snap.revenue_yoy_pct = q.revenue_yoy_pct
+                            break
+                if snap.net_profit_yoy_pct is None:
+                    for q in quarters[1:4]:
+                        if q.net_profit_yoy_pct is not None:
+                            snap.net_profit_yoy_pct = q.net_profit_yoy_pct
+                            break
+
                 # 从 col_map 中提取 debt_ratio_pct / cashflow_per_share（只需最新期）
                 row0 = df.iloc[0]
                 debt_cols = [c for c in cols if "资产负债率" in c]

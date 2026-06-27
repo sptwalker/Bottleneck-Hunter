@@ -7,12 +7,14 @@ import { initSettings } from './settings.js';
 import { initWizard } from './phases.js';
 import { initWatchlist } from './watchlist.js';
 import { initDecision } from './decision.js';
+import { initAdmin } from './admin.js';
 
 /* ── Global state ────────────────────────────────────── */
 window.appState = {
   view: 'wizard',
   running: false,
   results: {},
+  user: null,
 };
 
 export function showView(viewName) {
@@ -30,9 +32,35 @@ export function showView(viewName) {
   window.appState.view = viewName === 'screen' ? 'wizard' : viewName;
 }
 
+/* ── Auth ───────────────────────────────────────────── */
+async function initAuth() {
+  try {
+    const resp = await fetch('/api/auth/me');
+    if (resp.ok) {
+      const user = await resp.json();
+      window.appState.user = user;
+      const nameEl = document.getElementById('user-display-name');
+      if (nameEl) nameEl.textContent = user.display_name || user.username;
+    }
+  } catch (e) {
+    console.warn('Auth check failed:', e);
+  }
+
+  // 退出按钮
+  const logoutBtn = document.getElementById('btn-logout');
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', async () => {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/login';
+    });
+  }
+}
+
 /* ── Bootstrap ───────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
+  initAuth();
   initSettings();
+  initAdmin();
   initChartFullscreen();
   initChainTabs();
   initWizChainTabs();

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
@@ -21,6 +22,15 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
         raise ValueError(f"执行计划 {plan_id} 不存在")
 
     account = store.get_sim_account()
+
+    # 约束硬验证
+    from bottleneck_hunter.watchlist.constraint_validator import validate_execution_plan
+    positions = store.get_sim_positions(account["id"])
+    validation = validate_execution_plan(plan, account, positions)
+    if not validation.valid:
+        store.reject_execution(plan_id, "; ".join(validation.violations))
+        return {"error": "约束校验不通过", "violations": validation.violations, "plan_id": plan_id}
+
     result_json = plan.get("result_json", {}) if isinstance(plan.get("result_json"), dict) else {}
 
     action = plan.get("action") or result_json.get("action", "")
@@ -44,6 +54,15 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
 
     if "error" not in result:
         _recalc_account(store, account["id"])
+        if action in ("sell", "reduce"):
+            trade_id = result.get("trade_id", "")
+            if trade_id:
+                try:
+                    asyncio.get_event_loop().create_task(
+                        _auto_review_sell(store, trade_id)
+                    )
+                except RuntimeError:
+                    logger.debug("No event loop for auto-review, skipping")
 
     return result
 
@@ -179,3 +198,21 @@ def _find_avg_cost(trades: list[dict], ticker: str) -> float:
     total_shares = sum(t.get("shares", 0) for t in buys)
     total_amount = sum(t.get("amount", 0) for t in buys)
     return total_amount / total_shares if total_shares else 0.0
+
+
+async def _auto_review_sell(store: WatchlistStore, trade_id: str) -> None:
+    """卖出后自动触发 LLM 复盘（后台任务，不阻塞执行响应）。"""
+    try:
+        from bottleneck_hunter.watchlist.budget import BudgetTracker
+        budget = BudgetTracker(store)
+        if not budget.can_spend():
+            logger.info("预算不足，跳过自动复盘 %s", trade_id)
+            return
+        from bottleneck_hunter.watchlist.trade_reviewer import run_trade_review
+        async for evt in run_trade_review(store, trade_id, budget):
+            data = evt.get("data", {})
+            if isinstance(data, dict) and "error" in data.get("event", ""):
+                logger.warning("自动复盘失败 %s: %s", trade_id, data)
+        logger.info("自动复盘完成 %s", trade_id)
+    except Exception as e:
+        logger.error("自动复盘异常 %s: %s", trade_id, e)

@@ -1,0 +1,187 @@
+/* ============================================================
+   BottleneckHunter — Auth Page Styles
+   ============================================================ */
+
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: oklch(0.97 0.005 250);
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+.auth-card {
+  width: 400px;
+  max-width: 90vw;
+  background: oklch(1.0 0 0);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px oklch(0 0 0 / 0.08);
+  padding: 40px 36px 32px;
+}
+
+.auth-brand {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.auth-brand svg {
+  color: oklch(0.55 0.15 250);
+  margin-bottom: 12px;
+}
+
+.auth-brand h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: oklch(0.2 0.02 250);
+  margin: 0 0 4px;
+}
+
+.auth-brand p {
+  font-size: 0.875rem;
+  color: oklch(0.55 0.01 250);
+  margin: 0;
+}
+
+/* Tab 切换 */
+.auth-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid oklch(0.88 0.005 250);
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 10px 0;
+  text-align: center;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: oklch(0.55 0.01 250);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 180ms ease-out;
+}
+
+.auth-tab.active {
+  color: oklch(0.55 0.15 250);
+  border-bottom-color: oklch(0.55 0.15 250);
+}
+
+.auth-tab:hover:not(.active) {
+  color: oklch(0.35 0.02 250);
+}
+
+/* 表单 */
+.auth-form {
+  display: none;
+}
+
+.auth-form.active {
+  display: block;
+}
+
+.auth-field {
+  margin-bottom: 16px;
+}
+
+.auth-field label {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: oklch(0.35 0.02 250);
+  margin-bottom: 6px;
+}
+
+.auth-field input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 0.9375rem;
+  border: 1px solid oklch(0.88 0.005 250);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 180ms ease-out;
+  box-sizing: border-box;
+  color: oklch(0.2 0.02 250);
+  background: oklch(0.985 0.005 250);
+}
+
+.auth-field input:focus {
+  border-color: oklch(0.55 0.15 250);
+  box-shadow: 0 0 0 3px oklch(0.55 0.15 250 / 0.1);
+}
+
+.auth-field input::placeholder {
+  color: oklch(0.7 0.01 250);
+}
+
+.auth-field .field-hint {
+  font-size: 0.75rem;
+  color: oklch(0.55 0.01 250);
+  margin-top: 4px;
+}
+
+/* 按钮 */
+.auth-btn {
+  width: 100%;
+  padding: 11px 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #fff;
+  background: oklch(0.55 0.15 250);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 180ms ease-out;
+  margin-top: 8px;
+}
+
+.auth-btn:hover:not(:disabled) {
+  background: oklch(0.48 0.15 250);
+}
+
+.auth-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 错误提示 */
+.auth-error {
+  display: none;
+  padding: 10px 14px;
+  font-size: 0.8125rem;
+  color: oklch(0.45 0.15 25);
+  background: oklch(0.95 0.04 25);
+  border-radius: 6px;
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+
+.auth-error.visible {
+  display: block;
+}
+
+/* 成功提示 */
+.auth-success {
+  display: none;
+  padding: 10px 14px;
+  font-size: 0.8125rem;
+  color: oklch(0.35 0.12 155);
+  background: oklch(0.95 0.04 155);
+  border-radius: 6px;
+  margin-bottom: 16px;
+}
+
+.auth-success.visible {
+  display: block;
+}
+
+/* footer */
+.auth-footer {
+  text-align: center;
+  margin-top: 24px;
+  font-size: 0.75rem;
+  color: oklch(0.65 0.01 250);
+}

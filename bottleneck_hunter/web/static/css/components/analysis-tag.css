@@ -1,0 +1,306 @@
+/* ── Analysis Tag — 多段式彩色分析记录标签 ──────────── */
+
+.analysis-tag {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: default;
+  flex-shrink: 0;
+}
+
+/* 每段基础 */
+.at-seg {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-right: 1px solid oklch(0.88 0.005 250 / 0.6);
+  transition: filter 0.15s;
+}
+.at-seg:last-child {
+  border-right: none;
+}
+
+/* 序号段 */
+.at-seq {
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-weight: 800;
+  font-size: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 4px 8px;
+  letter-spacing: -0.5px;
+}
+
+/* 市场段 */
+.at-market {
+  font-weight: 600;
+  font-size: 11px;
+  gap: 3px;
+}
+
+/* 产业段 */
+.at-sector {
+  font-weight: 600;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 产品段 */
+.at-product {
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 模型段 */
+.at-model {
+  font-weight: 600;
+  font-size: 11px;
+}
+
+/* 阶段圆点段 */
+.at-phases {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 6px;
+  background: var(--surface);
+}
+.at-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: oklch(0.88 0.005 250);
+  flex-shrink: 0;
+}
+.at-dot.done {
+  background: oklch(0.55 0.12 155);
+}
+
+/* 累计次数段 */
+.at-runs {
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: oklch(0.50 0.10 155);
+  background: oklch(0.95 0.03 155);
+  padding: 4px 6px;
+  letter-spacing: -0.3px;
+}
+
+/* 日期段 */
+.at-date {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel-bg);
+  padding: 4px 7px;
+}
+
+/* ── 紧凑版 ─────────────────────────────────── */
+.analysis-tag.compact {
+  font-size: 11px;
+  border-radius: 6px;
+}
+.analysis-tag.compact .at-seg {
+  padding: 3px 6px;
+}
+.analysis-tag.compact .at-seq {
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.analysis-tag.compact .at-product,
+.analysis-tag.compact .at-model,
+.analysis-tag.compact .at-date {
+  display: none;
+}
+.analysis-tag.compact .at-sector {
+  max-width: 72px;
+}
+.analysis-tag.compact .at-dot {
+  width: 5px;
+  height: 5px;
+}
+
+/* ── Hover 效果 ──────────────────────────────── */
+.analysis-tag:hover {
+  box-shadow: 0 2px 8px oklch(0.5 0.02 250 / 0.15);
+}
+
+/* ── Tooltip ─────────────────────────────────── */
+.analysis-tag[data-tooltip] {
+  position: relative;
+}
+.analysis-tag[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: oklch(0.2 0.02 250);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 400;
+  padding: 6px 10px;
+  border-radius: 6px;
+  white-space: pre-line;
+  max-width: 280px;
+  line-height: 1.5;
+  z-index: 1000;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.analysis-tag[data-tooltip]:hover::after {
+  opacity: 1;
+}
+
+/* ── 标签插槽布局 ────────────────────────────── */
+.analysis-tag-slot {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ── 侧边栏标签 ─────────────────────────────── */
+.wiz-sidebar-tag {
+  padding: 8px 10px 4px;
+  list-style: none;
+}
+
+/* ── 侧边栏双行标签 ────────────────────────────── */
+.at-sidebar {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: default;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 左侧序号：占满高度，大字居中 */
+.at-sb-seq {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-weight: 800;
+  font-size: 16px;
+  padding: 0 8px;
+  background: var(--surface);
+  color: var(--ink);
+  border-right: 1px solid oklch(0.88 0.005 250 / 0.6);
+  letter-spacing: -0.5px;
+  flex-shrink: 0;
+}
+
+/* 右侧两行容器 */
+.at-sb-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 每行 */
+.at-sb-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 7px;
+  gap: 4px;
+}
+.at-sb-row:first-child {
+  border-bottom: 1px solid oklch(0.88 0.005 250 / 0.4);
+  background: var(--panel-bg);
+}
+.at-sb-row:last-child {
+  background: var(--surface);
+}
+
+/* 上行：市场 */
+.at-sb-market {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 上行：阶段圆点 */
+.at-sb-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.at-sb-dots .at-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: oklch(0.88 0.005 250);
+}
+.at-sb-dots .at-dot.done {
+  background: oklch(0.55 0.12 155);
+}
+
+/* 下行：产业 */
+.at-sb-sector {
+  font-size: 11px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* 下行：累计次数 */
+.at-sb-runs {
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: oklch(0.50 0.10 155);
+  background: oklch(0.95 0.03 155);
+  padding: 1px 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  letter-spacing: -0.3px;
+}
+
+/* 侧边栏标签 tooltip */
+.at-sidebar[data-tooltip] {
+  position: relative;
+}
+.at-sidebar[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: oklch(0.2 0.02 250);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 400;
+  padding: 6px 10px;
+  border-radius: 6px;
+  white-space: pre-line;
+  max-width: 280px;
+  line-height: 1.5;
+  z-index: 1000;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.at-sidebar[data-tooltip]:hover::after {
+  opacity: 1;
+}
+
+/* 侧边栏收起时隐藏标签 */
+.wiz-sidebar.collapsed .wiz-sidebar-tag {
+  display: none !important;
+}

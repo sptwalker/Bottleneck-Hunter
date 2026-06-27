@@ -228,6 +228,11 @@ export function handleMeetingEvent(data) {
     return;
   }
 
+  if (data._sseEvent === 'meeting_saved' && data.completed_phases) {
+    state.config.completed_phases = data.completed_phases;
+    return;
+  }
+
   if (data.result) {
     state.meetingResult = data.result;
     renderMeetingResult(data.result);

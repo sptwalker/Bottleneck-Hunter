@@ -51,6 +51,9 @@ _MIGRATIONS = [
     "ALTER TABLE analyses ADD COLUMN updated_at TEXT",
     "ALTER TABLE analyses ADD COLUMN seq_no INTEGER",
     "ALTER TABLE analyses ADD COLUMN completed_phases INTEGER DEFAULT 0",
+    # Phase 16B: 多用户
+    "ALTER TABLE analyses ADD COLUMN user_id TEXT DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_analyses_user ON analyses(user_id)",
 ]
 
 # 列表查询不返回 result_json（体积大），只返回摘要
@@ -64,10 +67,34 @@ _LIST_COLS = [
 class AnalysisStore:
     """轻量级 SQLite 存储，管理分析历史。"""
 
-    def __init__(self, db_path: str | Path | None = None):
+    def __init__(self, db_path: str | Path | None = None, user_id: str = ""):
         self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
+        self._user_id = user_id
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+
+    def for_user(self, user_id: str) -> "AnalysisStore":
+        """返回绑定指定用户的 store 克隆。"""
+        clone = object.__new__(AnalysisStore)
+        clone.db_path = self.db_path
+        clone._user_id = user_id
+        return clone
+
+    def _user_filter(self, query: str, params: tuple = ()) -> tuple[str, tuple]:
+        """为 SQL 查询自动追加 user_id 过滤条件。"""
+        if not self._user_id:
+            return query, params
+        upper = query.upper()
+        has_where = " WHERE " in upper
+        clause = " AND user_id = ?" if has_where else " WHERE user_id = ?"
+        search_start = upper.find(" WHERE ") + 7 if has_where else 0
+        insert_pos = len(query)
+        for kw in (" ORDER BY ", " GROUP BY ", " LIMIT "):
+            idx = upper.find(kw, search_start)
+            if idx != -1 and idx < insert_pos:
+                insert_pos = idx
+        query = query[:insert_pos] + clause + query[insert_pos:]
+        return query, params + (self._user_id,)
 
     # ── 内部方法 ──────────────────────────────────────
 
@@ -151,15 +178,19 @@ class AnalysisStore:
         supplier_count = len(result_dict.get("supplier_scorecards", []))
 
         with self._connect() as conn:
-            row = conn.execute("SELECT COALESCE(MAX(seq_no), 0) FROM analyses").fetchone()
+            q, p = self._user_filter("SELECT COALESCE(MAX(seq_no), 0) FROM analyses")
+            row = conn.execute(q, p).fetchone()
             seq_no = (row[0] or 0) + 1
 
+            uid_col = ", user_id" if self._user_id else ""
+            uid_val = ", ?" if self._user_id else ""
+            uid_param = (self._user_id,) if self._user_id else ()
             conn.execute(
-                """INSERT INTO analyses
+                f"""INSERT INTO analyses
                    (id, seq_no, completed_phases, sector, end_product, provider, model, market,
                     max_depth, top_n, max_market_cap_yi, language, created_at, updated_at,
-                    top_picks, bottleneck_count, supplier_count, result_json, report_path)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    top_picks, bottleneck_count, supplier_count, result_json, report_path{uid_col})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{uid_val})""",
                 (
                     analysis_id,
                     seq_no,
@@ -180,7 +211,7 @@ class AnalysisStore:
                     supplier_count,
                     json.dumps(result_dict, ensure_ascii=False, default=str),
                     report_path,
-                ),
+                ) + uid_param,
             )
             conn.commit()
 
@@ -190,12 +221,17 @@ class AnalysisStore:
     def list_all(self) -> list[dict]:
         """返回所有记录的摘要列表（按时间倒序，不含 result_json）。"""
         cols = ", ".join(_LIST_COLS)
+        q, p = self._user_filter(f"SELECT {cols} FROM analyses ORDER BY created_at DESC")
         with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT {cols} FROM analyses ORDER BY created_at DESC"
-            ).fetchall()
+            rows = conn.execute(q, p).fetchall()
 
         results = []
+        # 统计每个 sector+end_product 的累计分析次数
+        combo_count: dict[str, int] = {}
+        for row in rows:
+            key = (row["sector"] or "") + "|" + (row["end_product"] or "")
+            combo_count[key] = combo_count.get(key, 0) + 1
+
         for row in rows:
             d = dict(row)
             # 将 top_picks 从 JSON 字符串解析为列表
@@ -203,20 +239,33 @@ class AnalysisStore:
                 d["top_picks"] = json.loads(d["top_picks"] or "[]")
             except (json.JSONDecodeError, TypeError):
                 d["top_picks"] = []
+            # 同一赛道的累计分析次数
+            key = (d.get("sector") or "") + "|" + (d.get("end_product") or "")
+            d["run_count"] = combo_count.get(key, 1)
             results.append(d)
         return results
 
     def get(self, analysis_id: str) -> dict | None:
         """返回完整记录（含 result_json）。"""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM analyses WHERE id = ?", (analysis_id,)
-            ).fetchone()
+            q, p = self._user_filter("SELECT * FROM analyses WHERE id = ?", (analysis_id,))
+            row = conn.execute(q, p).fetchone()
 
-        if not row:
-            return None
+            if not row:
+                return None
 
-        d = dict(row)
+            d = dict(row)
+
+            # 同一赛道的累计分析次数
+            sector = d.get("sector") or ""
+            end_product = d.get("end_product") or ""
+            q2, p2 = self._user_filter(
+                "SELECT COUNT(*) FROM analyses WHERE COALESCE(sector,'') = ? AND COALESCE(end_product,'') = ?",
+                (sector, end_product),
+            )
+            count_row = conn.execute(q2, p2).fetchone()
+            d["run_count"] = count_row[0] if count_row else 1
+
         try:
             d["top_picks"] = json.loads(d["top_picks"] or "[]")
         except (json.JSONDecodeError, TypeError):
@@ -230,13 +279,24 @@ class AnalysisStore:
     def delete(self, analysis_id: str) -> bool:
         """删除一条记录，返回是否实际删除。"""
         with self._connect() as conn:
-            cur = conn.execute("DELETE FROM analyses WHERE id = ?", (analysis_id,))
+            q, p = self._user_filter("DELETE FROM analyses WHERE id = ?", (analysis_id,))
+            cur = conn.execute(q, p)
             conn.commit()
             deleted = cur.rowcount > 0
 
         if deleted:
             logger.info(f"分析已删除: {analysis_id}")
         return deleted
+
+    def count_by_sector(self, sector: str, end_product: str) -> int:
+        """返回同一 sector+end_product 的累计分析记录数。"""
+        with self._connect() as conn:
+            q, p = self._user_filter(
+                "SELECT COUNT(*) FROM analyses WHERE COALESCE(sector,'') = ? AND COALESCE(end_product,'') = ?",
+                (sector or "", end_product or ""),
+            )
+            row = conn.execute(q, p).fetchone()
+            return row[0] if row else 0
 
     def update_cross_validations(
         self, analysis_id: str, cross_validations: list[dict]
@@ -264,7 +324,7 @@ class AnalysisStore:
         result["top_picks"] = top_picks
 
         with self._connect() as conn:
-            conn.execute(
+            q, p = self._user_filter(
                 """UPDATE analyses
                    SET result_json = ?, top_picks = ?,
                        completed_phases = MAX(COALESCE(completed_phases, 0), 3),
@@ -277,6 +337,7 @@ class AnalysisStore:
                     analysis_id,
                 ),
             )
+            conn.execute(q, p)
             conn.commit()
 
         logger.info(f"交叉验证已更新: {analysis_id}")
@@ -292,7 +353,7 @@ class AnalysisStore:
         result["meeting_result"] = meeting_result
 
         with self._connect() as conn:
-            conn.execute(
+            q, p = self._user_filter(
                 """UPDATE analyses SET result_json = ?,
                        completed_phases = MAX(COALESCE(completed_phases, 0), 4),
                        updated_at = ? WHERE id = ?""",
@@ -302,6 +363,7 @@ class AnalysisStore:
                     analysis_id,
                 ),
             )
+            conn.execute(q, p)
             conn.commit()
 
         logger.info(f"圆桌会议结果已保存: {analysis_id}")
@@ -342,7 +404,7 @@ class AnalysisStore:
         supplier_count = len(supplier_scorecards)
 
         with self._connect() as conn:
-            conn.execute(
+            q, p = self._user_filter(
                 """UPDATE analyses
                    SET result_json = ?, top_picks = ?, supplier_count = ?,
                        max_market_cap_yi = COALESCE(?, max_market_cap_yi),
@@ -358,6 +420,7 @@ class AnalysisStore:
                     analysis_id,
                 ),
             )
+            conn.execute(q, p)
             conn.commit()
 
         logger.info(f"供应商数据已更新: {analysis_id}")
@@ -384,11 +447,12 @@ class AnalysisStore:
         }
 
         with self._connect() as conn:
-            conn.execute(
+            q, p = self._user_filter(
                 "UPDATE analyses SET result_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(result, ensure_ascii=False, default=str),
                  datetime.now().isoformat(timespec="seconds"), analysis_id),
             )
+            conn.execute(q, p)
             conn.commit()
 
         logger.info(f"AI 评点已保存: {analysis_id}/{report_key}")
@@ -403,10 +467,11 @@ class AnalysisStore:
         result["_phase_status"] = phase_status
         now = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
-            conn.execute(
+            q, p = self._user_filter(
                 "UPDATE analyses SET result_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(result, ensure_ascii=False, default=str), now, analysis_id),
             )
+            conn.execute(q, p)
             conn.commit()
         return True
 

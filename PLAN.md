@@ -215,8 +215,35 @@ BottleneckHunter/
 
 | P0 | Phase 10A - 测试加固 | ✅ 已完成 | 4 个测试文件(store/price/news/scheduler)，40 项新测试，全套 319 项通过 |
 | P0 | Phase 10B - 决策引擎市场分化 | ✅ 已完成 | 8个提示词注入{market_context}、notice_pipeline(A股公告)、committee市场感知、23项新测试，全套342项通过 |
+| P0 | Phase 10C - 前端体验优化 | ✅ 已完成 | 市场筛选器、批量tier操作、笔记编辑、checkbox列，全套342项通过 |
+| P0 | Phase 11A - 统一重试框架 | ✅ 已完成 | retry.py(@with_retry装饰器+fetch_with_timeout)、5条管道改造(price/news/sec/options/notice)、9项新测试，全套351项通过 |
+| P0 | Phase 11B - 管道健康追踪 | ✅ 已完成 | scheduler精细化状态(partial/error/success)、store.get_stale_tickers()、/health API端点、7项新测试，全套358项通过 |
+| P0 | Phase 11C - 前端错误展示 | ✅ 已完成 | 统一Toast组件(替换所有alert)、管道partial状态+hover错误详情、数据过期告警、刷新结果精准反馈 |
+| P0 | Phase 12A - Semaphore延迟初始化 | ✅ 已完成 | 5条管道_SEM改为_get_sem()延迟创建，避免跨事件循环崩溃，16项新测试 |
+| P0 | Phase 12B - httpx客户端复用 | ✅ 已完成 | retry.py新增get_http_client()共享连接池，news/sec管道改用复用客户端，app.py shutdown关闭，2项新测试 |
+| P0 | Phase 12C - scheduler异常日志 | ✅ 已完成 | shutdown_scheduler异常从静默pass改为logger.warning |
+| P0 | Phase 12D - 前端健壮性 | ✅ 已完成 | 批量删除API(/batch-delete)、Promise.all加.catch()、搜索debounce(250ms)、策略缓存5分钟TTL |
+| P1 | Phase 13A - test_bottleneck.py | ✅ 已完成 | 瓶颈评分算法测试：权重验证、加权计算、上下文构建、分析流程（含排序/失败追踪/进度回调），15项 |
+| P1 | Phase 13B - test_graph.py | ✅ 已完成 | ChainGraph遍历测试：节点查找、层过滤、上下游导航、三层链/菱形依赖，14项 |
+| P1 | Phase 13C - test_strategy_engine.py | ✅ 已完成 | 策略信号解析测试：bullish/bearish/neutral提取、信心评分（含越界夹紧）、多空论据、条件/风险/目标解析、差异比较，19项。附带修复_compute_strategy_diff的None参数bug |
+| P1 | Phase 13D - test_watchlist_api.py | ✅ 已完成 | API端点契约测试(TestClient)：CRUD完整链路(list/add/get/update/delete)、批量删除/批量tier、容量限制(409)、子资源404，23项 |
+| P0 | Phase 14 - 决策自动调度闭环 | ✅ 已完成 | 美股4任务定时调度(daily_decision/catalyst_scan/weekly_strategy/auto_review)、_drain_sse消费器、BudgetTracker三级降级、卖出自动复盘、21项新测试(test_scheduler_jobs)、13项新测试(test_trade_executor) |
+| P0 | Phase 15 - UZI测试+A股决策调度 | ✅ 已完成 | UZI Runner 44项测试覆盖(从0到100%)、A股4任务决策调度(cn_daily_decision/catalyst_scan/weekly_strategy/auto_review)、前端调度栏双市场分组显示 |
+| P0 | Phase 16A - 认证基础设施 | ✅ 已完成 | JWT HttpOnly cookie认证、AuthStore(users/invite_codes/system_config三表)、登录注册页、AuthMiddleware ASGI中间件、默认admin/admin账户 |
+| P0 | Phase 16B - 数据隔离 | ✅ 已完成 | WatchlistStore.for_user()工厂+_user_filter()注入、AnalysisStore user_id参数、30+张表加user_id列、老数据迁移归属admin、Scheduler多用户遍历 |
+| P0 | Phase 16C - Per-User API KEY | ✅ 已完成 | AES-256-GCM加密存储(user_api_keys表)、用户KEY→.env全局KEY fallback链、Settings面板11 provider配置、KEY hint显示(sk-...xxxx) |
+| P0 | Phase 16D - 管理员后台 | ✅ 已完成 | 用户管理(冻结/解冻/删除+级联清理)、邀请码管理(批量生成/作废)、系统配置(开放注册/默认上限)、数据统计、admin.js/admin.css前端面板 |
+| P0 | **系统全面评审** | ✅ 已完成 | 5维度深度审计(决策引擎/数据管道/产业链/风控/前端)，38个问题，综合评分5.2/10，详见 [评审报告](docs/SYSTEM_AUDIT_REPORT.md) |
+| P0 | Phase 17A - 数据基础修复 | ⬜ 待开始 | market_snapshots加market列、宏观数据接入L1(VIX/美债/DXY/北向资金)、Form 4真实解析、A股基本面增强、机构持仓+分析师评级 |
+| P0 | Phase 17B - 技术缺陷修复 | ⬜ 待开始 | L4约束硬验证引擎、夏令时动态处理、SQLite连接安全加固、SSE自动重连、composite_score实际生效 |
+| P0 | Phase 17C - 风控量化体系 | ⬜ 待开始 | 回测框架(Sharpe/Sortino/MaxDD/基准对比)、组合风控(VaR/Beta/HHI/相关性矩阵)、仓位算法(Kelly/波动率缩放/风险平价) |
+| P1 | Phase 17D - 闭环反馈贯通 | ⬜ 待开始 | 模拟交易流程验证、自动复盘链路修复、经验卡片生成应用、催化剂结果判定、用户偏好学习 |
+| P1 | Phase 17E - 规则引擎优化 | ⬜ 待开始 | 可投性过滤(TAM/客户数/毛利率/流动性门槛)、分行业瓶颈权重、LLM评分规则化+锚定、产业链版本管理 |
+| P2 | Phase 17F - 体验与可视化 | ⬜ 待开始 | 决策链路追溯、风险仪表盘、催化剂日历、A/B对比分析 |
 
-**下一步**：Phase 10C — 前端体验优化（市场筛选器 + 批量 tier + 笔记编辑）
+**当前版本**：60+ Python 模块，32 测试文件，530+ 项测试全部通过
+
+**下一步**：Phase 17A 数据基础修复，详见 [改进完善计划](docs/IMPROVEMENT_PLAN.md)
 
 ---
 

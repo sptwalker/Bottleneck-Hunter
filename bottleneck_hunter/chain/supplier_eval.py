@@ -15,6 +15,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from bottleneck_hunter.chain.json_utils import strip_fences
+from bottleneck_hunter.chain.investability_filter import InvestabilityFilter
 from bottleneck_hunter.chain.models import (
     AlphaScore,
     BottleneckReport,
@@ -29,6 +30,134 @@ from bottleneck_hunter.chain.models import (
 logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+# ---------------------------------------------------------------------------
+# 数据驱动评分：用真实财务数据计算 financial_health / valuation
+# LLM 对 A 股公司知识有限，各维度打分倾向 5-7 分。
+# 这两个维度可以客观量化，有数据时按 70% 数据 + 30% LLM 混合。
+# ---------------------------------------------------------------------------
+
+def _data_financial_health(
+    snap: FinancialSnapshot | None,
+    supplier: SupplierInfo,
+) -> float | None:
+    """从真实财务数据计算 financial_health (0-10)。"""
+    if not snap:
+        return None
+
+    components: list[tuple[float, float]] = []
+
+    growth = snap.revenue_yoy_pct
+    if growth is None:
+        growth = supplier.revenue_growth
+    if growth is not None:
+        if growth > 50:     s = 9.5
+        elif growth > 30:   s = 8.0
+        elif growth > 15:   s = 7.0
+        elif growth > 5:    s = 5.5
+        elif growth > 0:    s = 4.5
+        elif growth > -10:  s = 3.5
+        else:               s = 2.0
+        components.append((s, 0.30))
+
+    gm = snap.gross_margin_pct
+    if gm is None:
+        gm = supplier.gross_margin
+    if gm is not None:
+        if gm > 60:     s = 9.5
+        elif gm > 45:   s = 8.0
+        elif gm > 30:   s = 6.5
+        elif gm > 20:   s = 5.0
+        elif gm > 10:   s = 3.5
+        else:            s = 2.0
+        components.append((s, 0.25))
+
+    if snap.roe_pct is not None:
+        roe = snap.roe_pct
+        if roe > 25:     s = 9.5
+        elif roe > 15:   s = 8.0
+        elif roe > 8:    s = 6.0
+        elif roe > 3:    s = 4.5
+        elif roe > 0:    s = 3.5
+        else:            s = 2.0
+        components.append((s, 0.25))
+
+    if snap.debt_ratio_pct is not None:
+        debt = snap.debt_ratio_pct
+        if debt < 25:    s = 9.0
+        elif debt < 40:  s = 7.5
+        elif debt < 55:  s = 6.0
+        elif debt < 70:  s = 4.5
+        else:            s = 3.0
+        components.append((s, 0.20))
+
+    if len(components) < 2:
+        return None
+    total_w = sum(w for _, w in components)
+    return round(sum(s * w for s, w in components) / total_w, 1)
+
+
+def _data_valuation(
+    snap: FinancialSnapshot | None,
+    supplier: SupplierInfo,
+) -> float | None:
+    """从真实财务数据计算 valuation (0-10)。低估值 → 高分。
+
+    A 股整体估值中枢偏高（科创/创业板 PE 50-100+ 常见），
+    用和美股相同的 PE 区间会导致 A 股估值分全部垫底。
+    因此按市场分别设定 PE 评分区间。
+    """
+    if not snap:
+        return None
+
+    pe = snap.consensus_pe
+    if pe is None:
+        pe = supplier.pe_ratio
+    if pe is None:
+        return None
+
+    if pe < 0:
+        return 3.0
+
+    growth = snap.revenue_yoy_pct
+    if growth is None:
+        growth = supplier.revenue_growth
+
+    # PEG 优先（有增速时），PEG 是跨市场可比的
+    if growth is not None and growth > 1:
+        peg = pe / growth
+        if peg < 0.5:   return 9.5
+        if peg < 1.0:   return 8.0
+        if peg < 1.5:   return 6.5
+        if peg < 2.0:   return 5.0
+        if peg < 3.0:   return 4.0
+        return 2.5
+
+    # PE-only fallback：A 股用更宽的区间
+    is_astock = getattr(supplier, "market", "") == "a_stock"
+    if is_astock:
+        if pe < 15:   return 9.0
+        if pe < 30:   return 8.0
+        if pe < 50:   return 7.0
+        if pe < 80:   return 5.5
+        if pe < 120:  return 4.0
+        if pe < 200:  return 3.0
+        return 2.0
+    else:
+        if pe < 10:   return 9.0
+        if pe < 20:   return 7.5
+        if pe < 35:   return 6.0
+        if pe < 50:   return 4.5
+        if pe < 80:   return 3.5
+        return 2.0
+
+
+def _blend(llm: float, data: float | None, data_weight: float = 0.7) -> float:
+    """LLM 分与数据驱动分混合。有数据时以数据为主。"""
+    if data is None:
+        return llm
+    return round(llm * (1 - data_weight) + data * data_weight, 1)
 
 
 def _format_financial_block(snap: FinancialSnapshot) -> str:
@@ -88,11 +217,13 @@ class SupplierEvaluator:
         self,
         llm: BaseChatModel,
         language: str = "zh",
+        investability_filter: InvestabilityFilter | None = None,
     ):
         self.llm = llm
         self.language = language
         self._system_prompt = _load_prompt("supplier_eval")
         self._on_progress = None
+        self._investability_filter = investability_filter or InvestabilityFilter()
 
     async def evaluate(
         self,
@@ -102,6 +233,39 @@ class SupplierEvaluator:
     ) -> SupplierScorecard:
         """Evaluate a single supplier against a bottleneck node."""
         lang_note = "请用中文回答" if self.language == "zh" else "Answer in English"
+
+        # 合并财务数据：优先使用 financial_snapshot 的真实数据覆盖 SupplierInfo 的 None 字段
+        pe_ratio = supplier.pe_ratio
+        revenue_growth = supplier.revenue_growth
+        gross_margin = supplier.gross_margin
+        if financial_snapshot:
+            if pe_ratio is None and financial_snapshot.consensus_pe is not None:
+                pe_ratio = financial_snapshot.consensus_pe
+            if revenue_growth is None and financial_snapshot.revenue_yoy_pct is not None:
+                revenue_growth = financial_snapshot.revenue_yoy_pct
+            if gross_margin is None and financial_snapshot.gross_margin_pct is not None:
+                gross_margin = financial_snapshot.gross_margin_pct
+
+        # 构造基本面行，跳过无数据字段避免 "None" 污染 prompt
+        basic_lines = [
+            f"- 公司名称: {supplier.name}",
+            f"- 代码: {supplier.ticker}",
+            f"- 市场: {'A股' if supplier.market == 'a_stock' else '美股'}",
+        ]
+        cap_unit = '亿' if supplier.market == 'a_stock' else 'B'
+        if supplier.market_cap is not None:
+            basic_lines.append(f"- 市值: {supplier.market_cap}{cap_unit}")
+        if supplier.sector:
+            basic_lines.append(f"- 行业: {supplier.sector}")
+        if supplier.description:
+            basic_lines.append(f"- 描述: {supplier.description}")
+        if pe_ratio is not None:
+            basic_lines.append(f"- 市盈率(PE): {pe_ratio:.1f}")
+        if revenue_growth is not None:
+            basic_lines.append(f"- 营收增速: {revenue_growth:.1f}%")
+        if gross_margin is not None:
+            basic_lines.append(f"- 毛利率: {gross_margin:.1f}%")
+        basic_block = "\n".join(basic_lines)
 
         financial_block = ""
         if financial_snapshot:
@@ -116,45 +280,43 @@ class SupplierEvaluator:
 - 关键洞察: {', '.join(bottleneck.key_insights)}
 
 ## 候选供应商
-- 公司名称: {supplier.name}
-- 代码: {supplier.ticker}
-- 市场: {supplier.market}
-- 市值: {supplier.market_cap} {'亿' if supplier.market == 'a_stock' else 'B'}
-- 行业: {supplier.sector}
-- 描述: {supplier.description}
-- 市盈率: {supplier.pe_ratio}
-- 营收增速: {supplier.revenue_growth}
-- 毛利率: {supplier.gross_margin}
+{basic_block}
 {financial_block}
 
-请对该供应商进行评估，对以下5个维度各打0-10分:
-1. market_position: 市场地位（市占率、垄断/寡头地位）
-2. customer_validation: 客户验证（是否有大客户订单、已验证）
-3. capacity_status: 产能状况（利用率、扩产计划）
-4. financial_health: 财务健康（营收增速、毛利率、现金流）
-5. valuation: 估值水平（PE/PB相对行业均值）
+请对该供应商进行评估，对以下5个维度各打0-10分（务必根据实际数据差异化打分，不同公司的评分应有显著区别）:
+1. market_position: 市场地位（市占率、垄断/寡头地位）— 行业龙头8-10分，中等5-7分，小企业2-4分
+2. customer_validation: 客户验证（是否有大客户订单、已验证）— 有明确大客户8-10分，无信息3-5分
+3. capacity_status: 产能状况（利用率、扩产计划）— 产能紧张且扩产中8-10分，信息不足给4-5分
+4. financial_health: 财务健康（营收增速、毛利率、现金流）— 增速>30%且毛利>40%给8-10分，增速<10%或毛利<20%给3-5分
+5. valuation: 估值水平（PE/PB相对行业均值）— PE低于行业均值8-10分，高估值泡沫2-4分
 
 另外，请评估以下4个护城河维度（0-10分）:
-6. patent_moat: 专利/技术壁垒（核心专利数量、技术领先程度、研发投入占比）
-7. switching_cost: 客户转换成本（认证周期、定制化程度、生态锁定）
-8. capacity_lead_time: 产能/交期优势（扩产周期、良率优势、设备壁垒）
-9. cost_advantage: 成本优势（规模效应、工艺领先、原料自给）
+6. patent_moat: 专利/技术壁垒（核心专利数量、技术领先程度、研发投入占比）— 有核心专利壁垒8-10分，技术同质化2-4分
+7. switching_cost: 客户转换成本（认证周期、定制化程度、生态锁定）— 认证周期长/强锁定8-10分，易替代2-4分
+8. capacity_lead_time: 产能/交期优势（扩产周期、良率优势、设备壁垒）— 行业领先8-10分，无特殊优势3-5分
+9. cost_advantage: 成本优势（规模效应、工艺领先、原料自给）— 显著成本优势8-10分，无优势3-5分
 并用一句话总结该公司的核心护城河（moat_reasoning）。
+
+⚠ 重要评分原则:
+- 每个维度必须独立评估，分数应反映该公司的真实差异
+- 如果某维度数据不足无法判断，给4-5分（中性），不要默认给高分
+- 优秀企业的总分应在7-9分，普通企业5-6分，劣势企业3-4分
+- 不同公司之间的评分必须有差异，避免所有公司得分相同
 
 同时列出:
 - strengths: 优势（2-3条）
 - weaknesses: 风险/劣势（1-2条）
 
-返回严格 JSON:
+返回严格 JSON（注意：下面的数值仅为格式示例，你必须根据实际情况给出不同的分数）:
 {{
-  "market_position": 8,
-  "customer_validation": 7,
+  "market_position": 5,
+  "customer_validation": 4,
   "capacity_status": 6,
-  "financial_health": 7,
-  "valuation": 5,
-  "patent_moat": 7,
-  "switching_cost": 6,
-  "capacity_lead_time": 5,
+  "financial_health": 3,
+  "valuation": 7,
+  "patent_moat": 4,
+  "switching_cost": 5,
+  "capacity_lead_time": 3,
   "cost_advantage": 6,
   "moat_reasoning": "...",
   "strengths": ["...", "..."],
@@ -175,14 +337,24 @@ class SupplierEvaluator:
             text = strip_fences(text)
             data = json.loads(text)
 
-            scores = [
-                data.get("market_position", 0),
-                data.get("customer_validation", 0),
-                data.get("capacity_status", 0),
-                data.get("financial_health", 0),
-                data.get("valuation", 0),
-            ]
-            base_overall = sum(scores) / len(scores) if scores else 0
+            llm_fh = data.get("financial_health", 0)
+            llm_val = data.get("valuation", 0)
+
+            data_fh = _data_financial_health(financial_snapshot, supplier)
+            data_val = _data_valuation(financial_snapshot, supplier)
+            fh = _blend(llm_fh, data_fh)
+            val = _blend(llm_val, data_val)
+
+            # 加权平均：数据驱动维度（财务/估值）给更高权重以拉开区分度
+            # LLM 维度权重 1.0，数据维度权重 1.5（有数据时）
+            mp = data.get("market_position", 0)
+            cv = data.get("customer_validation", 0)
+            cs = data.get("capacity_status", 0)
+            fh_w = 1.5 if data_fh is not None else 1.0
+            val_w = 1.5 if data_val is not None else 1.0
+            weighted_sum = mp * 1.0 + cv * 1.0 + cs * 1.0 + fh * fh_w + val * val_w
+            total_weight = 3.0 + fh_w + val_w
+            base_overall = weighted_sum / total_weight
 
             moat_fields = ["patent_moat", "switching_cost", "capacity_lead_time", "cost_advantage"]
             moat_scores = [data.get(f, 0) for f in moat_fields]
@@ -205,8 +377,8 @@ class SupplierEvaluator:
                 market_position=data.get("market_position", 0),
                 customer_validation=data.get("customer_validation", 0),
                 capacity_status=data.get("capacity_status", 0),
-                financial_health=data.get("financial_health", 0),
-                valuation=data.get("valuation", 0),
+                financial_health=fh,
+                valuation=val,
                 overall_score=overall,
                 strengths=data.get("strengths", []),
                 weaknesses=data.get("weaknesses", []),
@@ -275,11 +447,34 @@ class SupplierEvaluator:
         total_suppliers = sum(len(v) for v in supplier_map.values())
         evaluated = 0
 
+        # ---- 可投性预筛选 ----
+        filtered_map: dict[str, list[SupplierInfo]] = {}
+        total_rejected = 0
+        for node_name, suppliers in supplier_map.items():
+            passed, rejected = self._investability_filter.filter_batch(
+                suppliers, financial_map,
+            )
+            filtered_map[node_name] = passed
+            total_rejected += len(rejected)
+            if rejected and self._on_progress:
+                for sup, result in rejected:
+                    await self._on_progress(
+                        f"✗ 可投性淘汰: {sup.name} — {'; '.join(result.reasons)}"
+                    )
+
+        if total_rejected > 0:
+            remaining = total_suppliers - total_rejected
+            if self._on_progress:
+                await self._on_progress(
+                    f"── 可投性预筛选: {total_rejected} 家淘汰, {remaining} 家进入评估 ──"
+                )
+            total_suppliers = remaining
+
         if self._on_progress:
             await self._on_progress(f"── 开始评估 {total_suppliers} 家候选供应商 ──")
 
         for bn in bottlenecks:
-            suppliers = supplier_map.get(bn.node_name, [])
+            suppliers = filtered_map.get(bn.node_name, [])
             if not suppliers:
                 continue
 
@@ -447,13 +642,18 @@ class AlphaScorer:
         if snap and snap.price_change_3m_pct is not None:
             s_price = cls._tier_score(snap.price_change_3m_pct, cls.PRICE_3M_TIERS)
 
-        # ---- 维度 5: 机构持仓 (25%) ----
+        # ---- 维度 5: 机构持仓 (25%, 仅美股) ----
         s_inst = 5.0
+        has_inst = False
         if is_us and snap and snap.institution_holding_pct is not None:
             s_inst = cls._tier_score(snap.institution_holding_pct, cls.INST_TIERS_US)
+            has_inst = True
 
         # ---- 加权汇总 ----
-        raw = s_cap * 0.15 + s_analyst * 0.20 + s_vol * 0.25 + s_price * 0.15 + s_inst * 0.25
+        if has_inst:
+            raw = s_cap * 0.15 + s_analyst * 0.20 + s_vol * 0.25 + s_price * 0.15 + s_inst * 0.25
+        else:
+            raw = s_cap * 0.20 + s_analyst * 0.267 + s_vol * 0.333 + s_price * 0.20
 
         ipo_bonus = 0
         if snap and snap.days_since_ipo is not None and snap.days_since_ipo < 365:
@@ -493,7 +693,7 @@ class AlphaScorer:
                 parts.append("连续放量")
         if snap and snap.price_change_3m_pct is not None:
             parts.append(f"3月涨幅{snap.price_change_3m_pct:+.0f}%")
-        if is_us and snap and snap.institution_holding_pct is not None:
+        if has_inst:
             parts.append(f"机构持仓{snap.institution_holding_pct:.0f}%")
         parts.append(f"关注度{market_attention}")
         parts.append(f"瓶颈分{bottleneck_score}")
@@ -527,7 +727,7 @@ class AlphaScorer:
             dim_analyst=s_analyst,
             dim_volume=s_vol,
             dim_price=s_price,
-            dim_institution=s_inst,
+            dim_institution=s_inst if has_inst else None,
             ipo_bonus=ipo_bonus,
             vp_discount=vp_discount,
             reasoning=reasoning,

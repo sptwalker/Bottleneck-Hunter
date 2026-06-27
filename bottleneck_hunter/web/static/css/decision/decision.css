@@ -203,6 +203,13 @@
   flex-wrap: wrap;
 }
 
+.dc-scheduler-bar {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 0 8px;
+  letter-spacing: 0.02em;
+}
+
 .dc-progress {
   margin-bottom: 12px;
 }
@@ -954,4 +961,213 @@
 
 @media (max-width: 640px) {
   .dc-perf-cards { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── 17F.1 决策路径追溯 ─────────────────────────────────── */
+
+.wl-trace-chain {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.wl-trace-layer {
+  display: flex;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.wl-trace-level {
+  flex-shrink: 0;
+  width: 50px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  padding-top: 2px;
+}
+
+.wl-trace-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.wl-trace-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.wl-trace-summary {
+  font-size: 12px;
+  color: oklch(0.40 0.02 250);
+  line-height: 1.5;
+}
+
+.wl-trace-time {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.wl-trace-arrow {
+  text-align: center;
+  font-size: 14px;
+  color: var(--accent);
+  padding: 2px 0;
+  line-height: 1;
+}
+
+/* ── 17F.2 风险仪表盘 ───────────────────────────────────── */
+
+.dc-risk-metrics .dc-stat-value {
+  font-size: 18px;
+}
+
+.dc-risk-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dc-risk-warning-item {
+  font-size: 12px;
+  color: oklch(0.65 0.22 25);
+  padding: 4px 8px;
+  background: oklch(0.5 0.18 25 / 0.08);
+  border-radius: 4px;
+  border-left: 3px solid oklch(0.65 0.22 25);
+}
+
+/* ── 17F.3 催化剂日历 ───────────────────────────────────── */
+
+.dc-view-switch {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.dc-view-btn {
+  background: transparent;
+  border: none;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--muted);
+  transition: all 0.15s;
+}
+
+.dc-view-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.dc-view-btn:hover:not(.active) {
+  background: var(--bg);
+}
+
+.dc-cal-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.dc-cal-nav-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.dc-cal-nav-btn:hover {
+  background: var(--bg);
+}
+
+.dc-cal-nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 80px;
+  text-align: center;
+}
+
+.dc-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.dc-cal-dow {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 0;
+  text-transform: uppercase;
+}
+
+.dc-cal-cell {
+  min-height: 52px;
+  border: 1px solid oklch(0.92 0.005 250);
+  border-radius: 4px;
+  padding: 2px 3px;
+  font-size: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.dc-cal-empty {
+  border-color: transparent;
+  background: transparent;
+}
+
+.dc-cal-today {
+  border-color: var(--accent);
+  background: oklch(0.55 0.15 250 / 0.05);
+}
+
+.dc-cal-urgent {
+  border-color: oklch(0.65 0.22 25);
+  background: oklch(0.5 0.18 25 / 0.05);
+}
+
+.dc-cal-day {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 1px;
+}
+
+.dc-cal-event {
+  font-size: 9px;
+  padding: 1px 3px;
+  border-radius: 2px;
+  background: oklch(0.55 0.15 250 / 0.15);
+  color: oklch(0.45 0.12 250);
+  margin-bottom: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dc-cal-urgent .dc-cal-event {
+  background: oklch(0.5 0.18 25 / 0.15);
+  color: oklch(0.55 0.18 25);
+}
+
+.dc-cal-more {
+  background: oklch(0.88 0.01 250);
+  color: var(--muted);
+  text-align: center;
 }

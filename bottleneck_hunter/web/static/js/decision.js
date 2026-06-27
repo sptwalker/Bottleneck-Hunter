@@ -10,6 +10,9 @@ const dcState = {
   loading: false,
   chartAlloc: null,
   chartEquity: null,
+  catalystView: 'list',
+  calendarMonth: null,
+  riskChart: null,
 };
 
 /* ── helpers ─────────────────────────────────────────── */
@@ -141,6 +144,7 @@ function renderAll(data) {
   renderPending(data.pending_executions || []);
   renderAccount(data.account, data.positions || []);
   renderCatalysts(data.upcoming_catalysts || []);
+  loadRiskDashboard();
 }
 
 /* ── L1 宏观 ──────────────────────────────────────── */
@@ -611,6 +615,22 @@ export function initDecision() {
   document.getElementById('dc-btn-ai-config')?.addEventListener('click', openAIConfig);
   document.getElementById('dc-btn-review')?.addEventListener('click', openReviewPanel);
   document.getElementById('dc-btn-performance')?.addEventListener('click', openPerformance);
+  document.getElementById('dc-btn-compare')?.addEventListener('click', openComparePanel);
+
+  // 催化剂视图切换
+  document.getElementById('dc-catalyst-list-btn')?.addEventListener('click', () => {
+    document.getElementById('dc-catalyst-list-btn')?.classList.add('active');
+    document.getElementById('dc-catalyst-cal-btn')?.classList.remove('active');
+    dcState.catalystView = 'list';
+    if (dcState.overview) renderCatalysts(dcState.overview.upcoming_catalysts || []);
+  });
+  document.getElementById('dc-catalyst-cal-btn')?.addEventListener('click', () => {
+    document.getElementById('dc-catalyst-cal-btn')?.classList.add('active');
+    document.getElementById('dc-catalyst-list-btn')?.classList.remove('active');
+    dcState.catalystView = 'calendar';
+    dcState.calendarMonth = null; // 当前月
+    loadCatalystCalendar();
+  });
 
   document.getElementById('dc-review-close')?.addEventListener('click', closeReviewPanel);
   document.getElementById('dc-review-modal-close')?.addEventListener('click', closeReviewPanel);
@@ -651,14 +671,60 @@ export function initDecision() {
   if (navBtn) {
     navBtn.addEventListener('click', () => {
       if (!dcState.overview) loadOverview();
+      loadSchedulerStatus();
     });
   }
 
   window.addEventListener('resize', () => {
     dcState.chartAlloc?.resize();
     dcState.chartEquity?.resize();
+    dcState.riskChart?.resize();
     perfState.equityChart?.resize();
   });
+}
+
+/* ── 调度状态栏 ──────────────────────────────────── */
+
+async function loadSchedulerStatus() {
+  const bar = document.getElementById('dc-scheduler-bar');
+  if (!bar) return;
+  try {
+    const data = await dcFetch('/scheduler-status');
+    const jobs = data.jobs || [];
+    if (jobs.length === 0) {
+      bar.style.display = 'none';
+      return;
+    }
+    const nameMap = {
+      'us_daily_decision': '决策',
+      'us_catalyst_scan': '催化',
+      'us_weekly_strategy': '周策略',
+      'us_auto_review': '复盘',
+      'cn_daily_decision': '决策',
+      'cn_catalyst_scan': '催化',
+      'cn_weekly_strategy': '周策略',
+      'cn_auto_review': '复盘',
+    };
+    const decisionJobs = jobs.filter(j => nameMap[j.id]);
+    if (decisionJobs.length === 0) {
+      bar.style.display = 'none';
+      return;
+    }
+    const fmtTime = j => j.next_run_at ? new Date(j.next_run_at).toLocaleString('zh-CN', {
+      hour: '2-digit', minute: '2-digit', timeZone: 'UTC'
+    }) + ' UTC' : '--';
+
+    const usJobs = decisionJobs.filter(j => j.id.startsWith('us_'));
+    const cnJobs = decisionJobs.filter(j => j.id.startsWith('cn_'));
+    const groupStr = group => group.map(j => `${nameMap[j.id]} ${fmtTime(j)}`).join(' | ');
+    const segments = [];
+    if (usJobs.length) segments.push('美股: ' + groupStr(usJobs));
+    if (cnJobs.length) segments.push('A股: ' + groupStr(cnJobs));
+    bar.textContent = '自动调度 | ' + segments.join(' — ');
+    bar.style.display = '';
+  } catch {
+    bar.style.display = 'none';
+  }
 }
 
 /* ── AI 模型配置 ────────────────────────────────────── */
@@ -1227,3 +1293,330 @@ async function rejectTuning(id) {
 window.approveTuning = approveTuning;
 window.rejectTuning = rejectTuning;
 
+/* ── 17F.2 风险仪表盘 ──────────────────────────────────── */
+
+async function loadRiskDashboard() {
+  const body = document.getElementById('dc-risk-body');
+  if (!body) return;
+  try {
+    const data = await dcFetch('/risk-dashboard');
+    renderRisk(data);
+  } catch (e) {
+    body.innerHTML = `<p class="dc-empty-hint">风险数据加载失败: ${escDC(e.message)}</p>`;
+  }
+}
+
+function renderRisk(data) {
+  const body = document.getElementById('dc-risk-body');
+  if (!body) return;
+
+  const warnings = data.warnings || [];
+  const weights = data.weights || [];
+
+  let html = `<div class="dc-stat-grid dc-risk-metrics">
+    <div class="dc-stat">
+      <span class="dc-stat-value">${fmtNum(data.var_95, 0)}</span>
+      <span class="dc-stat-label">VaR(95%)</span>
+    </div>
+    <div class="dc-stat">
+      <span class="dc-stat-value">${fmtNum(data.cvar_95, 0)}</span>
+      <span class="dc-stat-label">CVaR(95%)</span>
+    </div>
+    <div class="dc-stat">
+      <span class="dc-stat-value">${data.portfolio_beta != null ? data.portfolio_beta.toFixed(2) : '--'}</span>
+      <span class="dc-stat-label">Beta</span>
+    </div>
+    <div class="dc-stat">
+      <span class="dc-stat-value ${data.concentration_index > 0.25 ? 'dc-pnl-neg' : ''}">${data.concentration_index != null ? data.concentration_index.toFixed(3) : '--'}</span>
+      <span class="dc-stat-label">HHI 集中度</span>
+    </div>
+  </div>`;
+
+  // 持仓饼图容器
+  if (weights.length > 0) {
+    html += `<div id="dc-risk-pie" style="height:200px;margin-top:12px"></div>`;
+  }
+
+  // 预警列表
+  if (warnings.length > 0) {
+    html += `<div class="dc-risk-warnings" style="margin-top:12px">`;
+    for (const w of warnings) {
+      html += `<div class="dc-risk-warning-item">${escDC(w)}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  // 相关性对
+  const pairs = data.correlation_pairs || [];
+  if (pairs.length > 0) {
+    html += `<div style="margin-top:10px;font-size:12px;color:var(--muted)">`;
+    html += `<strong>高相关持仓对:</strong>`;
+    for (const p of pairs) {
+      html += ` <span>${escDC(p.ticker_a)}-${escDC(p.ticker_b)} (${p.correlation.toFixed(2)})</span>`;
+    }
+    html += `</div>`;
+  }
+
+  body.innerHTML = html;
+
+  // 渲染饼图
+  const pieEl = document.getElementById('dc-risk-pie');
+  if (pieEl && typeof echarts !== 'undefined' && weights.length > 0) {
+    const chart = dcState.riskChart || echarts.init(pieEl);
+    dcState.riskChart = chart;
+    chart.setOption({
+      tooltip: { trigger: 'item', formatter: '{b}: {c}%' },
+      series: [{
+        type: 'pie',
+        radius: ['35%', '65%'],
+        label: { fontSize: 11 },
+        data: weights.map(w => ({ name: w.ticker, value: w.weight_pct })),
+      }],
+    });
+  }
+}
+
+/* ── 17F.3 催化剂日历视图 ──────────────────────────────── */
+
+async function loadCatalystCalendar(monthStr) {
+  const body = document.getElementById('dc-catalysts-body');
+  if (!body) return;
+  body.innerHTML = '<p class="dc-empty-hint">加载日历...</p>';
+  try {
+    const qs = monthStr ? `?month=${monthStr}` : '';
+    const data = await dcFetch(`/catalysts/calendar${qs}`);
+    renderCatalystCalendar(data);
+  } catch (e) {
+    body.innerHTML = `<p class="dc-empty-hint">日历加载失败: ${escDC(e.message)}</p>`;
+  }
+}
+
+function renderCatalystCalendar(data) {
+  const body = document.getElementById('dc-catalysts-body');
+  if (!body) return;
+
+  const year = data.year;
+  const month = data.month;
+  const events = data.events || {};
+
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+  // 计算日历网格
+  const firstDay = new Date(year, month - 1, 1);
+  const lastDay = new Date(year, month, 0);
+  const startDow = firstDay.getDay(); // 0=Sun
+  const totalDays = lastDay.getDate();
+
+  const monthNames = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+
+  // 上月/下月
+  const prevMonth = month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, '0')}`;
+  const nextMonth = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`;
+
+  let html = `<div class="dc-cal-nav">
+    <button class="dc-cal-nav-btn" data-month="${prevMonth}">&lt;</button>
+    <span class="dc-cal-nav-title">${year}年${monthNames[month - 1]}</span>
+    <button class="dc-cal-nav-btn" data-month="${nextMonth}">&gt;</button>
+  </div>`;
+
+  html += `<div class="dc-cal-grid">
+    <div class="dc-cal-dow">日</div><div class="dc-cal-dow">一</div><div class="dc-cal-dow">二</div>
+    <div class="dc-cal-dow">三</div><div class="dc-cal-dow">四</div><div class="dc-cal-dow">五</div>
+    <div class="dc-cal-dow">六</div>`;
+
+  // 空格填充
+  for (let i = 0; i < startDow; i++) {
+    html += `<div class="dc-cal-cell dc-cal-empty"></div>`;
+  }
+
+  for (let d = 1; d <= totalDays; d++) {
+    const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const dayEvents = events[dateStr] || [];
+    const isToday = dateStr === todayStr;
+
+    // 计算倒数天数
+    const dateParsed = new Date(year, month - 1, d);
+    const diffDays = Math.ceil((dateParsed - today) / (1000 * 60 * 60 * 24));
+    const isUrgent = diffDays >= 0 && diffDays <= 3 && dayEvents.length > 0;
+
+    let cellClass = 'dc-cal-cell';
+    if (isToday) cellClass += ' dc-cal-today';
+    if (isUrgent) cellClass += ' dc-cal-urgent';
+
+    html += `<div class="${cellClass}">
+      <span class="dc-cal-day">${d}</span>`;
+    for (const evt of dayEvents.slice(0, 3)) {
+      html += `<div class="dc-cal-event" title="${escDC(evt.title)}">${escDC(evt.ticker)}</div>`;
+    }
+    if (dayEvents.length > 3) {
+      html += `<div class="dc-cal-event dc-cal-more">+${dayEvents.length - 3}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  body.innerHTML = html;
+
+  // 绑定月份切换
+  body.querySelectorAll('.dc-cal-nav-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const m = btn.dataset.month;
+      dcState.calendarMonth = m;
+      loadCatalystCalendar(m);
+    });
+  });
+}
+
+/* ── 17F.4 A/B 对比面板 ─────────────────────────────────── */
+
+function openComparePanel() {
+  let modal = document.getElementById('dc-compare-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'dc-compare-modal';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `<div class="modal-content" style="max-width:700px">
+      <div class="modal-header">
+        <h3>A/B 参数对比</h3>
+        <button class="modal-close" id="dc-compare-close">&#10005;</button>
+      </div>
+      <div class="modal-body" style="padding:16px">
+        <div class="dc-compare-actions" style="display:flex;gap:8px;margin-bottom:16px;align-items:center">
+          <input type="text" id="dc-compare-label" placeholder="快照名称（可选）" class="dc-ai-model-input" style="max-width:200px">
+          <button class="btn btn-sm btn-primary" id="dc-compare-save">保存当前快照</button>
+          <span id="dc-compare-status" style="font-size:12px"></span>
+        </div>
+        <div id="dc-compare-snapshots" style="margin-bottom:16px"></div>
+        <div id="dc-compare-result"></div>
+      </div>
+    </div>`;
+    document.body.appendChild(modal);
+
+    modal.addEventListener('click', (e) => {
+      if (e.target.classList.contains('modal-overlay')) closeComparePanel();
+    });
+    document.getElementById('dc-compare-close').addEventListener('click', closeComparePanel);
+    document.getElementById('dc-compare-save').addEventListener('click', saveCompareSnapshot);
+  }
+  modal.style.display = '';
+  loadCompareSnapshots();
+}
+
+function closeComparePanel() {
+  const modal = document.getElementById('dc-compare-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function saveCompareSnapshot() {
+  const labelEl = document.getElementById('dc-compare-label');
+  const statusEl = document.getElementById('dc-compare-status');
+  const label = labelEl?.value?.trim() || '';
+  try {
+    statusEl.textContent = '保存中...';
+    statusEl.className = '';
+    await dcFetch('/compare/snapshot', {
+      method: 'POST',
+      body: JSON.stringify({ label }),
+    });
+    statusEl.textContent = '已保存';
+    statusEl.style.color = 'oklch(0.72 0.19 145)';
+    if (labelEl) labelEl.value = '';
+    await loadCompareSnapshots();
+  } catch (e) {
+    statusEl.textContent = `失败: ${e.message}`;
+    statusEl.style.color = 'oklch(0.65 0.22 25)';
+  }
+}
+
+async function loadCompareSnapshots() {
+  const container = document.getElementById('dc-compare-snapshots');
+  if (!container) return;
+  try {
+    const data = await dcFetch('/compare/snapshots');
+    const snapshots = data.snapshots || [];
+    if (snapshots.length === 0) {
+      container.innerHTML = '<p style="color:var(--muted);font-size:12px">暂无快照。保存一个当前配置快照开始使用。</p>';
+      return;
+    }
+    let html = '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">选择两个快照进行对比:</div>';
+    html += '<div class="dc-compare-select" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+    html += '<select id="dc-compare-a" class="dc-ai-select" style="width:auto;min-width:180px"><option value="">快照 A</option>';
+    for (const s of snapshots) {
+      const ts = (s.created_at || '').replace('T', ' ').slice(0, 16);
+      html += `<option value="${escDC(s.id)}">${escDC(s.label)} (${ts})</option>`;
+    }
+    html += '</select><span style="color:var(--muted)">vs</span>';
+    html += '<select id="dc-compare-b" class="dc-ai-select" style="width:auto;min-width:180px"><option value="">快照 B</option>';
+    for (const s of snapshots) {
+      const ts = (s.created_at || '').replace('T', ' ').slice(0, 16);
+      html += `<option value="${escDC(s.id)}">${escDC(s.label)} (${ts})</option>`;
+    }
+    html += '</select>';
+    html += '<button class="btn btn-sm btn-primary" id="dc-compare-run">对比</button>';
+    html += '</div>';
+    container.innerHTML = html;
+
+    document.getElementById('dc-compare-run')?.addEventListener('click', runCompare);
+  } catch (e) {
+    container.innerHTML = `<p style="color:var(--danger);font-size:12px">加载失败: ${escDC(e.message)}</p>`;
+  }
+}
+
+async function runCompare() {
+  const selA = document.getElementById('dc-compare-a');
+  const selB = document.getElementById('dc-compare-b');
+  const resultEl = document.getElementById('dc-compare-result');
+  if (!selA || !selB || !resultEl) return;
+
+  const idA = selA.value;
+  const idB = selB.value;
+  if (!idA || !idB) {
+    resultEl.innerHTML = '<p style="color:var(--danger);font-size:12px">请选择两个快照</p>';
+    return;
+  }
+  if (idA === idB) {
+    resultEl.innerHTML = '<p style="color:var(--danger);font-size:12px">请选择不同的快照</p>';
+    return;
+  }
+
+  resultEl.innerHTML = '<p style="color:var(--muted);font-size:12px">对比中...</p>';
+
+  try {
+    const data = await dcFetch(`/compare/${idA}/${idB}`);
+    renderCompareResult(data, resultEl);
+  } catch (e) {
+    resultEl.innerHTML = `<p style="color:var(--danger);font-size:12px">对比失败: ${escDC(e.message)}</p>`;
+  }
+}
+
+function renderCompareResult(data, container) {
+  const diffs = data.diffs || [];
+  const a = data.snapshot_a || {};
+  const b = data.snapshot_b || {};
+
+  let html = `<div style="font-size:13px;margin-bottom:8px">
+    <strong>${escDC(a.label)}</strong> vs <strong>${escDC(b.label)}</strong>
+    — 共 ${data.total_params} 个参数，${data.changed_params} 个差异
+  </div>`;
+
+  if (diffs.length === 0) {
+    html += '<p style="color:var(--muted);font-size:12px">两个快照参数完全一致，无差异。</p>';
+  } else {
+    html += `<table class="dc-table dc-table-sm"><thead><tr>
+      <th>参数</th><th>A: ${escDC(a.label)}</th><th>B: ${escDC(b.label)}</th>
+    </tr></thead><tbody>`;
+    for (const d of diffs) {
+      const valA = d.value_a != null ? String(d.value_a) : '--';
+      const valB = d.value_b != null ? String(d.value_b) : '--';
+      html += `<tr>
+        <td><strong>${escDC(d.parameter)}</strong></td>
+        <td>${escDC(valA)}</td>
+        <td>${escDC(valB)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  container.innerHTML = html;
+}

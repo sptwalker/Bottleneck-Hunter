@@ -717,6 +717,9 @@ async def run_daily_decision(
             yield _sse("decision_info", layer="committee",
                        message="无待评审执行计划，跳过投委会")
 
+    # Step 6: 更新观察池综合评分
+    _update_composite_scores(store)
+
     yield _sse("daily_done", message="日常决策流程完成")
 
 
@@ -745,6 +748,7 @@ async def run_full_refresh(
         async for evt in run_committee_review(store, pending, budget):
             yield evt
 
+    _update_composite_scores(store)
     yield _sse("refresh_done", message="全量决策刷新完成")
 
 
@@ -754,6 +758,8 @@ async def run_full_refresh(
 
 async def _collect_market_context(store: WatchlistStore) -> dict:
     """收集市场宏观数据（从观察池数据中聚合），并附带市场类型列表。"""
+    from bottleneck_hunter.watchlist.macro_data import fetch_macro_data
+
     by_market = store.get_tickers_by_market()
     active_markets = [m for m, ts in by_market.items() if ts]
     tickers = [t for ts in by_market.values() for t in ts]
@@ -796,6 +802,15 @@ async def _collect_market_context(store: WatchlistStore) -> dict:
             news_items.append({"ticker": ticker, "title": n.get("title", ""),
                                "sentiment": n.get("sentiment", "")})
 
+    try:
+        macro = await fetch_macro_data(store, active_markets)
+    except Exception as e:
+        logger.warning("宏观数据采集失败，使用缓存: %s", e)
+        macro = {}
+        cached = store.get_latest_macro_snapshots()
+        for row in cached:
+            macro[row["indicator"]] = {"value": row["value"], "change_pct": 0.0, "label": row["indicator"]}
+
     return {
         "indices": {
             "watchlist_avg_change_pct": round(avg_change, 2),
@@ -811,7 +826,7 @@ async def _collect_market_context(store: WatchlistStore) -> dict:
             ),
             "stocks_total": len(all_snapshots),
         },
-        "macro": {},
+        "macro": macro,
         "news": news_items[:10],
         "markets": active_markets,
     }
@@ -844,3 +859,67 @@ def _collect_watchlist_signals(store: WatchlistStore) -> list[dict]:
         })
 
     return signals
+
+
+def _update_composite_scores(store: WatchlistStore) -> None:
+    """根据策略信心、投委会评分、催化剂活跃度计算并更新观察池综合评分。"""
+    entries = store.list_all()
+    strategy_summaries = store.get_all_strategy_summaries()
+
+    for entry in entries:
+        entry_id = entry["id"]
+        ticker = entry["ticker"]
+
+        strategy = strategy_summaries.get(entry_id, {})
+        confidence = strategy.get("confidence", 5)
+
+        reviews = _get_latest_reviews_for_ticker(store, ticker)
+        if reviews:
+            avg_score = sum(r.get("score", 5) or 5 for r in reviews) / len(reviews)
+        else:
+            avg_score = 5.0
+
+        catalysts = store.get_catalysts_for_ticker(ticker)
+        active_catalysts = [c for c in catalysts if c.get("status") in ("pending", "monitoring")]
+        catalyst_score = min(len(active_catalysts) * 3, 10)
+
+        snap = store.get_latest_snapshot(ticker)
+        if snap and snap.get("fetched_at"):
+            from datetime import datetime, timezone
+            try:
+                fetched = datetime.fromisoformat(snap["fetched_at"].replace("Z", "+00:00"))
+                age_hours = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
+                freshness = max(0, min(10, 10 - age_hours / 12))
+            except (ValueError, TypeError):
+                freshness = 5.0
+        else:
+            freshness = 0.0
+
+        composite = round(
+            avg_score * 0.4 +
+            confidence * 0.3 +
+            catalyst_score * 0.15 +
+            freshness * 0.15,
+            2,
+        )
+
+        store.update(entry_id, composite_score=composite)
+
+    logger.info("更新了 %d 个标的的综合评分", len(entries))
+
+
+def _get_latest_reviews_for_ticker(store: WatchlistStore, ticker: str) -> list[dict]:
+    """获取某 ticker 最近一批投委会评审。"""
+    conn = store._connect()
+    try:
+        q, p = store._user_filter(
+            """SELECT cr.score FROM committee_reviews cr
+               JOIN execution_plans ep ON cr.execution_plan_id = ep.id
+               WHERE ep.ticker = ?
+               ORDER BY cr.created_at DESC LIMIT 4""",
+            (ticker,),
+        )
+        rows = conn.execute(q, p).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()

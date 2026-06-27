@@ -169,10 +169,13 @@ async def stream_phase1(
             analysis_id = saved_id
             phase_cache.clear(phase1_data.get("_old_aid", ""))
             phase_cache.set_phase(analysis_id, 1, phase1_data)
+            # 计算同赛道累计分析次数
+            _run_count = store.count_by_sector(sector, end_product)
         except Exception:
             logger.exception("Phase1 保存失败")
 
-    yield _sse("phase1_complete", analysis_id=analysis_id, seq_no=locals().get("saved_seq", 0), **phase1_data)
+    yield _sse("phase1_complete", analysis_id=analysis_id, seq_no=locals().get("saved_seq", 0),
+               run_count=locals().get("_run_count", 0), completed_phases=1, **phase1_data)
 
 
 async def stream_phase2(
@@ -318,7 +321,7 @@ async def stream_phase2(
                         d = _json.loads(msg) if isinstance(msg, str) else msg
                         se_eval_current = d.get("message", "")
                     except Exception:
-                        pass
+                        logger.debug("SSE 消息解析跳过")
             except asyncio.TimeoutError:
                 if se_task.done():
                     break
@@ -448,6 +451,7 @@ async def stream_phase2(
         },
         "stats": {"total_searched": total_suppliers, "after_eval": total_before, "after_filter": len(scorecards)},
         "failed_tickers": failed_tickers,
+        "completed_phases": 2,
     }
     phase_cache.set_phase(analysis_id, 2, phase2_data)
 
@@ -540,6 +544,7 @@ async def stream_phase4(
     phase4_data = {
         "validations": [v.model_dump() for v in validations],
         "recommendations": recommendations,
+        "completed_phases": 3,
     }
     phase_cache.set_phase(analysis_id, 4, phase4_data)
 

@@ -210,3 +210,159 @@ def _extract_catalysts_from_strategy(strategy: dict | None) -> list[dict]:
                 catalysts.append({"title": val, "type": "event"})
 
     return catalysts[:3]
+
+
+# ---------------------------------------------------------------------------
+# 催化剂结果判定 (17D.4)
+# ---------------------------------------------------------------------------
+
+def judge_catalyst_outcome(
+    store: WatchlistStore, ticker: str, catalyst: dict,
+) -> dict:
+    """基于规则判定催化剂是否已兑现。
+
+    收集事件预期日期前后 5 天的价格变化和新闻标题，
+    不调用 LLM，用简单规则判定。
+
+    返回:
+        {"outcome": "realized"|"failed"|"partial",
+         "impact": float (-5 ~ +5),
+         "reason": str}
+    """
+    expected_date = catalyst.get("expected_date", "")
+    if not expected_date:
+        return {"outcome": "failed", "impact": 0, "reason": "无预期日期，无法判定"}
+
+    impact_level = catalyst.get("impact_level", "medium")
+    catalyst_type = catalyst.get("catalyst_type", "event")
+    title = catalyst.get("title", "")
+
+    # ── 收集价格数据：预期日期前后 5 天 ──
+    snapshots = store.get_snapshots(ticker, days=30)
+    if not snapshots:
+        return {"outcome": "partial", "impact": 0, "reason": "无价格数据，无法确认"}
+
+    # 按日期排序（升序）
+    snapshots.sort(key=lambda s: s.get("date", ""))
+
+    # 找到预期日期前后各 5 天的快照
+    before_price = None
+    after_price = None
+    for snap in snapshots:
+        snap_date = snap.get("date", "")
+        if not snap_date:
+            continue
+        if snap_date <= expected_date and snap.get("close"):
+            before_price = snap.get("close")
+        if snap_date > expected_date and snap.get("close") and after_price is None:
+            after_price = snap.get("close")
+
+    # 计算价格变动
+    price_change_pct = 0.0
+    if before_price and after_price and before_price > 0:
+        price_change_pct = ((after_price - before_price) / before_price) * 100
+
+    # ── 收集新闻标题：检查是否有相关新闻 ──
+    news_items = store.get_news(ticker, limit=30)
+    related_news_count = 0
+    title_keywords = [kw for kw in title.lower().replace("，", " ").replace(",", " ").split() if len(kw) >= 2]
+    for news in news_items:
+        news_date = news.get("date", "")
+        # 只看预期日期前后 5 天的新闻
+        if not news_date or abs(_date_diff(news_date, expected_date)) > 5:
+            continue
+        news_title = news.get("title", "").lower()
+        if any(kw in news_title for kw in title_keywords):
+            related_news_count += 1
+
+    # ── 判定规则 ──
+    # 影响度基准（根据 impact_level）
+    impact_base = {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(impact_level, 2)
+
+    abs_change = abs(price_change_pct)
+
+    # 规则 1：价格变动超过 3% 且有相关新闻 → realized
+    if abs_change >= 3.0 and related_news_count >= 1:
+        # 判断方向：催化剂通常是正面事件
+        direction = 1 if price_change_pct > 0 else -1
+        impact = direction * min(abs_change / 2, 5)  # 归一化到 -5 ~ +5
+        return {
+            "outcome": "realized",
+            "impact": round(impact, 1),
+            "reason": f"价格变动 {price_change_pct:+.1f}%，{related_news_count} 条相关新闻"
+        }
+
+    # 规则 2：价格变动超过 3% 但无相关新闻 → partial
+    if abs_change >= 3.0:
+        direction = 1 if price_change_pct > 0 else -1
+        impact = direction * min(abs_change / 3, 3)
+        return {
+            "outcome": "partial",
+            "impact": round(impact, 1),
+            "reason": f"价格变动 {price_change_pct:+.1f}%，但无直接相关新闻佐证"
+        }
+
+    # 规则 3：有相关新闻但价格变动不大 → partial
+    if related_news_count >= 1 and abs_change >= 1.0:
+        direction = 1 if price_change_pct > 0 else -1
+        impact = direction * impact_base * 0.5
+        return {
+            "outcome": "partial",
+            "impact": round(impact, 1),
+            "reason": f"有 {related_news_count} 条相关新闻，但价格仅变动 {price_change_pct:+.1f}%"
+        }
+
+    # 规则 4：无显著变动，无相关新闻 → failed
+    return {
+        "outcome": "failed",
+        "impact": 0,
+        "reason": f"价格变动 {price_change_pct:+.1f}%，无相关新闻，事件可能未发生"
+    }
+
+
+def _date_diff(date_a: str, date_b: str) -> int:
+    """计算两个 YYYY-MM-DD 日期之间的天数差（a - b）"""
+    try:
+        from datetime import datetime as dt
+        da = dt.strptime(date_a[:10], "%Y-%m-%d")
+        db = dt.strptime(date_b[:10], "%Y-%m-%d")
+        return (da - db).days
+    except (ValueError, TypeError):
+        return 999
+
+
+async def judge_expired_catalysts(
+    store: WatchlistStore,
+) -> AsyncGenerator[dict, None]:
+    """批量判定已过期但未判定的催化剂"""
+    unjudged = store.get_unjudged_expired_catalysts()
+    if not unjudged:
+        yield _sse("catalyst_judge_done", judged=0, message="无需判定的催化剂")
+        return
+
+    yield _sse("catalyst_judge_start", total=len(unjudged),
+               message=f"开始判定 {len(unjudged)} 个过期催化剂...")
+
+    judged_count = 0
+    for catalyst in unjudged:
+        ticker = catalyst.get("ticker", "")
+        cid = catalyst.get("id", "")
+        if not ticker or not cid:
+            continue
+
+        try:
+            result = judge_catalyst_outcome(store, ticker, catalyst)
+            store.judge_catalyst(
+                catalyst_id=cid,
+                outcome=result["outcome"],
+                impact=result["impact"],
+                actual_date=catalyst.get("expected_date"),
+            )
+            judged_count += 1
+            logger.info("催化剂 %s (%s) 判定: %s, 影响度: %s — %s",
+                        cid, ticker, result["outcome"], result["impact"], result["reason"])
+        except Exception as e:
+            logger.warning("催化剂判定失败 %s (%s): %s", cid, ticker, e)
+
+    yield _sse("catalyst_judge_done", judged=judged_count,
+               message=f"催化剂判定完成：{judged_count}/{len(unjudged)} 个")

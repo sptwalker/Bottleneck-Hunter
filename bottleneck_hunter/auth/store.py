@@ -1,0 +1,310 @@
+"""AuthStore — 用户、邀请码、系统配置的 SQLite 存储。"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+import bcrypt as _bcrypt
+
+from .models import InviteCode, UserInDB, UserInfo
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_DB = Path("data/auth.db")
+
+
+class AuthStore:
+    """认证数据存储层。线程安全（每次调用建立新连接）。"""
+
+    def __init__(self, db_path: Optional[Path] = None):
+        self._db_path = db_path or _DEFAULT_DB
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_tables()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _init_tables(self):
+        with self._conn() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    display_name TEXT DEFAULT '',
+                    password_hash TEXT NOT NULL,
+                    role TEXT DEFAULT 'user',
+                    is_active INTEGER DEFAULT 1,
+                    watchlist_limit INTEGER DEFAULT 24,
+                    created_at TEXT,
+                    last_login_at TEXT,
+                    settings_json TEXT DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS invite_codes (
+                    code TEXT PRIMARY KEY,
+                    created_by TEXT DEFAULT '',
+                    used_by TEXT,
+                    created_at TEXT,
+                    used_at TEXT,
+                    expires_at TEXT,
+                    is_active INTEGER DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS system_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+                CREATE TABLE IF NOT EXISTS user_api_keys (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    encrypted_key TEXT NOT NULL,
+                    key_hint TEXT DEFAULT '',
+                    created_at TEXT,
+                    updated_at TEXT,
+                    UNIQUE(user_id, provider)
+                );
+            """)
+
+    # ── 系统配置 ──────────────────────────────────────────
+
+    def get_config(self, key: str, default: str = "") -> str:
+        with self._conn() as conn:
+            row = conn.execute("SELECT value FROM system_config WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row else default
+
+    def set_config(self, key: str, value: str):
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO system_config (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def is_registration_open(self) -> bool:
+        # 兼容两种存储格式: "1"/"0" 和 "true"/"false"
+        val = self.get_config("open_registration", "0").lower()
+        return val in ("1", "true")
+
+    # ── 用户 CRUD ─────────────────────────────────────────
+
+    def _row_to_user(self, row: sqlite3.Row) -> UserInDB:
+        return UserInDB(
+            id=row["id"],
+            username=row["username"],
+            display_name=row["display_name"] or "",
+            password_hash=row["password_hash"],
+            role=row["role"] or "user",
+            is_active=bool(row["is_active"]),
+            watchlist_limit=row["watchlist_limit"] or 24,
+            created_at=row["created_at"],
+            last_login_at=row["last_login_at"],
+            settings_json=row["settings_json"] or "{}",
+        )
+
+    def get_user_by_username(self, username: str) -> Optional[UserInDB]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+            return self._row_to_user(row) if row else None
+
+    def get_user_by_id(self, user_id: str) -> Optional[UserInDB]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            return self._row_to_user(row) if row else None
+
+    def list_users(self) -> list[UserInDB]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
+            return [self._row_to_user(r) for r in rows]
+
+    def count_users(self) -> int:
+        with self._conn() as conn:
+            row = conn.execute("SELECT COUNT(*) AS cnt FROM users").fetchone()
+            return row["cnt"] if row else 0
+
+    def create_user(
+        self, username: str, password: str, role: str = "user",
+        display_name: str = "", watchlist_limit: int = 24,
+    ) -> UserInDB:
+        user_id = uuid.uuid4().hex[:16]
+        pw_hash = _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+        now = datetime.utcnow().isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name, password_hash, role, is_active, "
+                "watchlist_limit, created_at, settings_json) VALUES (?, ?, ?, ?, ?, 1, ?, ?, '{}')",
+                (user_id, username, display_name, pw_hash, role, watchlist_limit, now),
+            )
+        return self.get_user_by_id(user_id)  # type: ignore[return-value]
+
+    def verify_password(self, user: UserInDB, password: str) -> bool:
+        return _bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("utf-8"))
+
+    def update_last_login(self, user_id: str):
+        now = datetime.utcnow().isoformat()
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now, user_id))
+
+    def change_password(self, user_id: str, new_password: str):
+        pw_hash = bcrypt.hash(new_password)
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (pw_hash, user_id))
+
+    def update_user(self, user_id: str, **fields):
+        """更新用户字段（role, is_active, watchlist_limit, display_name）。"""
+        allowed = {"role", "is_active", "watchlist_limit", "display_name", "settings_json"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [user_id]
+        with self._conn() as conn:
+            conn.execute(f"UPDATE users SET {set_clause} WHERE id = ?", values)
+
+    def delete_user(self, user_id: str):
+        with self._conn() as conn:
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    def list_active_user_ids(self) -> list[str]:
+        """返回所有活跃用户 ID。"""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT id FROM users WHERE is_active = 1").fetchall()
+            return [r["id"] for r in rows]
+
+    # ── 默认管理员 ────────────────────────────────────────
+
+    def ensure_default_admin(self) -> Optional[UserInDB]:
+        """如果无用户，创建 admin/admin 并返回。否则返回 None。"""
+        if self.count_users() > 0:
+            return None
+        admin = self.create_user("admin", "admin", role="admin", display_name="管理员")
+        logger.warning("⚠️  已创建默认管理员 admin/admin — 请尽快修改密码！")
+        return admin
+
+    # ── 邀请码 ────────────────────────────────────────────
+
+    def create_invite_codes(self, count: int, created_by: str, expires_days: int = 30) -> list[str]:
+        codes = []
+        now = datetime.utcnow()
+        expires = (now + timedelta(days=expires_days)).isoformat() if expires_days > 0 else None
+        with self._conn() as conn:
+            for _ in range(count):
+                code = uuid.uuid4().hex[:8].upper()
+                conn.execute(
+                    "INSERT INTO invite_codes (code, created_by, created_at, expires_at, is_active) "
+                    "VALUES (?, ?, ?, ?, 1)",
+                    (code, created_by, now.isoformat(), expires),
+                )
+                codes.append(code)
+        return codes
+
+    def validate_invite_code(self, code: str) -> Optional[InviteCode]:
+        """验证邀请码：存在、未使用、未过期、未作废。"""
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM invite_codes WHERE code = ?", (code,)).fetchone()
+            if not row:
+                return None
+            ic = InviteCode(
+                code=row["code"], created_by=row["created_by"] or "",
+                used_by=row["used_by"], created_at=row["created_at"],
+                used_at=row["used_at"], expires_at=row["expires_at"],
+                is_active=bool(row["is_active"]),
+            )
+            if not ic.is_active or ic.used_by:
+                return None
+            if ic.expires_at and ic.expires_at < datetime.utcnow().isoformat():
+                return None
+            return ic
+
+    def consume_invite_code(self, code: str, user_id: str):
+        now = datetime.utcnow().isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE invite_codes SET used_by = ?, used_at = ?, is_active = 0 WHERE code = ?",
+                (user_id, now, code),
+            )
+
+    def list_invite_codes(self) -> list[InviteCode]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM invite_codes ORDER BY created_at DESC").fetchall()
+            return [
+                InviteCode(
+                    code=r["code"], created_by=r["created_by"] or "",
+                    used_by=r["used_by"], created_at=r["created_at"],
+                    used_at=r["used_at"], expires_at=r["expires_at"],
+                    is_active=bool(r["is_active"]),
+                )
+                for r in rows
+            ]
+
+    def revoke_invite_code(self, code: str):
+        with self._conn() as conn:
+            conn.execute("UPDATE invite_codes SET is_active = 0 WHERE code = ?", (code,))
+
+    # ── 用户 API KEY ─────────────────────────────────────
+
+    def save_user_api_key(self, user_id: str, provider: str,
+                          encrypted_key: str, key_hint: str) -> str:
+        """保存或更新用户的 API KEY（已加密）。返回 record id。"""
+        now = datetime.utcnow().isoformat()
+        record_id = uuid.uuid4().hex[:16]
+        with self._conn() as conn:
+            # UPSERT: 同一用户+provider 只保留一条
+            existing = conn.execute(
+                "SELECT id FROM user_api_keys WHERE user_id = ? AND provider = ?",
+                (user_id, provider),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE user_api_keys SET encrypted_key = ?, key_hint = ?, updated_at = ? "
+                    "WHERE user_id = ? AND provider = ?",
+                    (encrypted_key, key_hint, now, user_id, provider),
+                )
+                return existing["id"]
+            else:
+                conn.execute(
+                    "INSERT INTO user_api_keys (id, user_id, provider, encrypted_key, key_hint, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (record_id, user_id, provider, encrypted_key, key_hint, now, now),
+                )
+                return record_id
+
+    def get_user_api_keys(self, user_id: str) -> list[dict]:
+        """返回用户所有 API KEY（不含明文，只有 hint）。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, provider, key_hint, created_at, updated_at "
+                "FROM user_api_keys WHERE user_id = ? ORDER BY provider",
+                (user_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_user_api_key_encrypted(self, user_id: str, provider: str) -> str | None:
+        """返回指定 provider 的加密 KEY（用于解密后传给 LLM factory）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT encrypted_key FROM user_api_keys WHERE user_id = ? AND provider = ?",
+                (user_id, provider),
+            ).fetchone()
+            return row["encrypted_key"] if row else None
+
+    def delete_user_api_key(self, user_id: str, provider: str) -> bool:
+        """删除用户某 provider 的 KEY。返回是否有删除。"""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM user_api_keys WHERE user_id = ? AND provider = ?",
+                (user_id, provider),
+            )
+            return cur.rowcount > 0
+
+    def delete_all_user_api_keys(self, user_id: str) -> int:
+        """删除用户所有 KEY（用于删除用户时清理）。"""
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM user_api_keys WHERE user_id = ?", (user_id,))
+            return cur.rowcount

@@ -19,11 +19,19 @@ try:
 except ImportError:
     ak = None  # type: ignore[assignment]
 
+from bottleneck_hunter.watchlist.retry import with_retry
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 
-_SEM = asyncio.Semaphore(4)
+_SEM: asyncio.Semaphore | None = None
+
+
+def _get_sem() -> asyncio.Semaphore:
+    global _SEM
+    if _SEM is None:
+        _SEM = asyncio.Semaphore(4)
+    return _SEM
 
 
 # ---------------------------------------------------------------------------
@@ -101,69 +109,112 @@ def _extract_astock_code(ticker: str) -> str | None:
 # Data fetching
 # ---------------------------------------------------------------------------
 
+@with_retry(max_retries=3, base_delay=1.0)
 def _fetch_daily_data(ticker: str, days: int = 180) -> list[dict]:
     """Fetch OHLCV from yfinance and compute RSI/MACD/SMA. Synchronous."""
-    try:
-        t = yf.Ticker(ticker)
-        period = "1y" if days > 180 else "6mo"
-        df: pd.DataFrame = t.history(period=period)
-        if df is None or df.empty:
-            logger.warning("No price data for %s", ticker)
-            return []
-
-        closes = df["Close"].tolist()
-        volumes = df["Volume"].tolist()
-        opens = df["Open"].tolist()
-        highs = df["High"].tolist()
-        lows = df["Low"].tolist()
-
-        rsi = _compute_rsi(closes)
-        macd_result = _compute_macd(closes)
-        sma_20 = _compute_sma(closes, 20)
-        sma_50 = _compute_sma(closes, 50)
-
-        info = {}
-        try:
-            info = t.info or {}
-        except Exception:
-            pass
-
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        result = []
-        for i in range(max(0, len(df) - days), len(df)):
-            date_str = df.index[i].strftime("%Y-%m-%d")
-            prev_close = closes[i - 1] if i > 0 else closes[i]
-            change_pct = ((closes[i] - prev_close) / prev_close * 100) if prev_close else 0.0
-            snap = {
-                "ticker": ticker,
-                "date": date_str,
-                "open": _safe(opens[i]),
-                "high": _safe(highs[i]),
-                "low": _safe(lows[i]),
-                "close": _safe(closes[i]),
-                "volume": int(volumes[i]) if volumes[i] else None,
-                "change_pct": round(change_pct, 2),
-                "fetched_at": now_iso,
-            }
-            # 技术指标只挂在最后一天
-            if i == len(df) - 1:
-                snap["rsi_14"] = rsi
-                snap["sma_20"] = sma_20
-                snap["sma_50"] = sma_50
-                snap["market_cap"] = _safe(info.get("marketCap"))
-                snap["pe_ratio"] = _safe(info.get("forwardPE") or info.get("trailingPE"))
-                if macd_result:
-                    snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
-            result.append(snap)
-        return result
-
-    except Exception as e:
-        logger.error("Price fetch failed for %s: %s", ticker, e)
+    t = yf.Ticker(ticker)
+    period = "1y" if days > 180 else "6mo"
+    df: pd.DataFrame = t.history(period=period)
+    if df is None or df.empty:
+        logger.warning("No price data for %s", ticker)
         return []
 
+    closes = df["Close"].tolist()
+    volumes = df["Volume"].tolist()
+    opens = df["Open"].tolist()
+    highs = df["High"].tolist()
+    lows = df["Low"].tolist()
 
+    rsi = _compute_rsi(closes)
+    macd_result = _compute_macd(closes)
+    sma_20 = _compute_sma(closes, 20)
+    sma_50 = _compute_sma(closes, 50)
+
+    info = {}
+    try:
+        info = t.info or {}
+    except Exception as e:
+        logger.debug("获取 %s info 失败: %s", ticker, e)
+
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result = []
+    for i in range(max(0, len(df) - days), len(df)):
+        date_str = df.index[i].strftime("%Y-%m-%d")
+        prev_close = closes[i - 1] if i > 0 else closes[i]
+        change_pct = ((closes[i] - prev_close) / prev_close * 100) if prev_close else 0.0
+        snap = {
+            "ticker": ticker,
+            "date": date_str,
+            "open": _safe(opens[i]),
+            "high": _safe(highs[i]),
+            "low": _safe(lows[i]),
+            "close": _safe(closes[i]),
+            "volume": int(volumes[i]) if volumes[i] else None,
+            "change_pct": round(change_pct, 2),
+            "fetched_at": now_iso,
+        }
+        if i == len(df) - 1:
+            snap["rsi_14"] = rsi
+            snap["sma_20"] = sma_20
+            snap["sma_50"] = sma_50
+            snap["market_cap"] = _safe(info.get("marketCap"))
+            snap["pe_ratio"] = _safe(info.get("forwardPE") or info.get("trailingPE"))
+            if macd_result:
+                snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
+        result.append(snap)
+    return result
+
+
+def _fetch_astock_fundamentals(code: str) -> dict:
+    """通过 akshare 获取 A 股基本面数据（PE/PB/总市值）。
+
+    优先使用 stock_individual_info_em（单只股票，轻量）；
+    若失败则回退到 stock_zh_a_spot_em（全市场快照过滤）。
+    两者都失败时返回空 dict，不影响价格数据采集。
+    """
+    result: dict = {}
+    if ak is None:
+        return result
+
+    # ── 方案 1: stock_individual_info_em（单股信息，字段丰富） ──
+    try:
+        df_info = ak.stock_individual_info_em(symbol=code)
+        if df_info is not None and not df_info.empty:
+            info = dict(zip(df_info["item"], df_info["value"]))
+            result["market_cap"] = _safe(info.get("总市值"))
+            result["pe_ratio"] = _safe(info.get("市盈率(动态)"))
+            # 如果 PE 已获取，直接返回
+            if result.get("pe_ratio") is not None:
+                logger.debug("A股基本面(%s): 通过 stock_individual_info_em 获取成功", code)
+                return result
+    except Exception as e:
+        logger.debug("stock_individual_info_em(%s) 失败: %s", code, e)
+
+    # ── 方案 2: stock_zh_a_spot_em（全市场快照，按代码过滤） ──
+    try:
+        df_spot = ak.stock_zh_a_spot_em()
+        if df_spot is not None and not df_spot.empty:
+            row = df_spot[df_spot["代码"] == code]
+            if not row.empty:
+                r = row.iloc[0]
+                pe_val = r.get("市盈率-动态")
+                if pe_val not in ("", "-", None):
+                    result["pe_ratio"] = _safe(pe_val)
+                pb_val = r.get("市净率")
+                if pb_val not in ("", "-", None):
+                    result["pb"] = _safe(pb_val)
+                if not result.get("market_cap"):
+                    result["market_cap"] = _safe(r.get("总市值"))
+                logger.debug("A股基本面(%s): 通过 stock_zh_a_spot_em 获取成功", code)
+    except Exception as e:
+        logger.debug("stock_zh_a_spot_em(%s) 失败: %s", code, e)
+
+    return result
+
+
+@with_retry(max_retries=3, base_delay=1.0)
 def _fetch_astock_daily(ticker: str, days: int = 180) -> list[dict]:
-    """Fetch A-stock OHLCV via akshare + compute RSI/MACD/SMA. Synchronous."""
+    """Fetch A-stock OHLCV via akshare + compute RSI/MACD/SMA + PE/市值. Synchronous."""
     if ak is None:
         logger.warning("akshare not installed, cannot fetch A-stock data")
         return []
@@ -171,67 +222,69 @@ def _fetch_astock_daily(ticker: str, days: int = 180) -> list[dict]:
     if not code:
         logger.warning("Cannot extract A-stock code from %s", ticker)
         return []
-    try:
-        start_date = (datetime.now() - timedelta(days=max(days, 365))).strftime("%Y%m%d")
-        end_date = datetime.now().strftime("%Y%m%d")
-        df = ak.stock_zh_a_hist(
-            symbol=code, period="daily",
-            start_date=start_date, end_date=end_date,
-            adjust="qfq",
-        )
-        if df is None or df.empty:
-            logger.warning("No A-stock price data for %s", ticker)
-            return []
-
-        closes = [float(v) for v in df["收盘"]]
-        volumes = [int(v) for v in df["成交量"]]
-        opens = [float(v) for v in df["开盘"]]
-        highs = [float(v) for v in df["最高"]]
-        lows = [float(v) for v in df["最低"]]
-
-        rsi = _compute_rsi(closes)
-        macd_result = _compute_macd(closes)
-        sma_20 = _compute_sma(closes, 20)
-        sma_50 = _compute_sma(closes, 50)
-
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        result = []
-        for i in range(max(0, len(df) - days), len(df)):
-            date_str = str(df.iloc[i]["日期"])[:10]
-            prev_close = closes[i - 1] if i > 0 else closes[i]
-            change_pct = ((closes[i] - prev_close) / prev_close * 100) if prev_close else 0.0
-            snap = {
-                "ticker": ticker,
-                "date": date_str,
-                "open": _safe(opens[i]),
-                "high": _safe(highs[i]),
-                "low": _safe(lows[i]),
-                "close": _safe(closes[i]),
-                "volume": volumes[i],
-                "change_pct": round(change_pct, 2),
-                "fetched_at": now_iso,
-            }
-            if i == len(df) - 1:
-                snap["rsi_14"] = rsi
-                snap["sma_20"] = sma_20
-                snap["sma_50"] = sma_50
-                if macd_result:
-                    snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
-            result.append(snap)
-        return result
-
-    except Exception as e:
-        logger.error("A-stock price fetch failed for %s: %s", ticker, e)
+    start_date = (datetime.now() - timedelta(days=max(days, 365))).strftime("%Y%m%d")
+    end_date = datetime.now().strftime("%Y%m%d")
+    df = ak.stock_zh_a_hist(
+        symbol=code, period="daily",
+        start_date=start_date, end_date=end_date,
+        adjust="qfq",
+    )
+    if df is None or df.empty:
+        logger.warning("No A-stock price data for %s", ticker)
         return []
+
+    closes = [float(v) for v in df["收盘"]]
+    volumes = [int(v) for v in df["成交量"]]
+    opens = [float(v) for v in df["开盘"]]
+    highs = [float(v) for v in df["最高"]]
+    lows = [float(v) for v in df["最低"]]
+
+    rsi = _compute_rsi(closes)
+    macd_result = _compute_macd(closes)
+    sma_20 = _compute_sma(closes, 20)
+    sma_50 = _compute_sma(closes, 50)
+
+    # 获取 A 股基本面数据（PE/PB/总市值）
+    fundamentals = _fetch_astock_fundamentals(code)
+
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result = []
+    for i in range(max(0, len(df) - days), len(df)):
+        date_str = str(df.iloc[i]["日期"])[:10]
+        prev_close = closes[i - 1] if i > 0 else closes[i]
+        change_pct = ((closes[i] - prev_close) / prev_close * 100) if prev_close else 0.0
+        snap = {
+            "ticker": ticker,
+            "date": date_str,
+            "open": _safe(opens[i]),
+            "high": _safe(highs[i]),
+            "low": _safe(lows[i]),
+            "close": _safe(closes[i]),
+            "volume": volumes[i],
+            "change_pct": round(change_pct, 2),
+            "fetched_at": now_iso,
+        }
+        if i == len(df) - 1:
+            snap["rsi_14"] = rsi
+            snap["sma_20"] = sma_20
+            snap["sma_50"] = sma_50
+            snap["market_cap"] = fundamentals.get("market_cap")
+            snap["pe_ratio"] = fundamentals.get("pe_ratio")
+            if macd_result:
+                snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
+        result.append(snap)
+    return result
 
 
 async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market: str = "us_stock") -> str:
     """Fetch one ticker asynchronously with semaphore. Returns status string."""
-    async with _SEM:
+    async with _get_sem():
         try:
             fetch_fn = _fetch_astock_daily if market == "a_stock" else _fetch_daily_data
             snapshots = await asyncio.to_thread(fetch_fn, ticker, days)
             if snapshots:
+                for snap in snapshots:
+                    snap["market"] = market
                 store.save_snapshots(snapshots)
                 return "ok"
             return "no_data"

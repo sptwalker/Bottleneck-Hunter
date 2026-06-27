@@ -82,6 +82,9 @@ class ChainGraph(BaseModel):
     links: list[ChainLink] = Field(default_factory=list)
     max_depth: int = Field(default=3, description="How many layers were decomposed")
     metadata: dict = Field(default_factory=dict)
+    version: int = Field(default=1, description="产业链版本号")
+    created_at: str = Field(default="", description="创建时间 ISO 格式")
+    model_used: str = Field(default="", description="拆解使用的 LLM 模型名称")
 
     def get_node(self, name: str) -> Optional[IndustryNode]:
         return next((n for n in self.nodes if n.name == name), None)
@@ -220,7 +223,7 @@ class AlphaScore(BaseModel):
     dim_analyst: float = Field(default=5.0, description="分析师覆盖维度得分 0-9")
     dim_volume: float = Field(default=5.0, description="成交量动量维度得分 0-9")
     dim_price: float = Field(default=5.0, description="近3月涨幅维度得分 0-9")
-    dim_institution: float = Field(default=5.0, description="机构持仓维度得分 0-9")
+    dim_institution: float | None = Field(default=5.0, description="机构持仓维度得分 0-9（A股无数据时为None）")
     ipo_bonus: float = Field(default=0.0, description="IPO加分 (0 or 2)")
     vp_discount: float = Field(default=1.0, description="量价背离折扣系数 (1.0 or 0.8)")
     reasoning: str = ""

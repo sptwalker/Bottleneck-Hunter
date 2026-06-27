@@ -11,6 +11,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
+from bottleneck_hunter.watchlist.retry import with_retry
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 try:
@@ -20,7 +21,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_SEM = asyncio.Semaphore(4)
+_SEM: asyncio.Semaphore | None = None
+
+
+def _get_sem() -> asyncio.Semaphore:
+    global _SEM
+    if _SEM is None:
+        _SEM = asyncio.Semaphore(4)
+    return _SEM
 
 _ASTOCK_RE = re.compile(r"^(?:SH|SZ|sh|sz)?(\d{6})")
 
@@ -57,6 +65,7 @@ def _extract_code(ticker: str) -> str | None:
     return m.group(1) if m else None
 
 
+@with_retry(max_retries=3, base_delay=1.0)
 def _fetch_notices_sync(ticker: str, limit: int = 15) -> list[dict]:
     """同步获取单只 A 股的公告列表。"""
     if ak is None:
@@ -64,39 +73,35 @@ def _fetch_notices_sync(ticker: str, limit: int = 15) -> list[dict]:
     code = _extract_code(ticker)
     if not code:
         return []
-    try:
-        df = ak.stock_notice_report(symbol=code)
-        if df is None or df.empty:
-            return []
-
-        results = []
-        for _, row in df.head(limit).iterrows():
-            title = str(row.get("公告标题", row.get("标题", ""))).strip()
-            if not title:
-                continue
-            date_str = str(row.get("公告日期", row.get("日期", "")))[:10]
-            source_url = str(row.get("公告链接", row.get("链接", "")))
-            fid = hashlib.md5(f"{ticker}:{title}:{date_str}".encode()).hexdigest()[:12]
-            category = _classify_notice(title)
-            results.append({
-                "id": fid,
-                "ticker": ticker,
-                "filing_type": category,
-                "filed_date": date_str,
-                "title": title,
-                "url": source_url,
-                "is_insider_trade": category in ("insider_sell", "insider_buy"),
-                "accession": fid,
-            })
-        return results
-    except Exception as e:
-        logger.warning("A 股公告获取失败 %s: %s", ticker, e)
+    df = ak.stock_notice_report(symbol=code)
+    if df is None or df.empty:
         return []
+
+    results = []
+    for _, row in df.head(limit).iterrows():
+        title = str(row.get("公告标题", row.get("标题", ""))).strip()
+        if not title:
+            continue
+        date_str = str(row.get("公告日期", row.get("日期", "")))[:10]
+        source_url = str(row.get("公告链接", row.get("链接", "")))
+        fid = hashlib.md5(f"{ticker}:{title}:{date_str}".encode()).hexdigest()[:12]
+        category = _classify_notice(title)
+        results.append({
+            "id": fid,
+            "ticker": ticker,
+            "filing_type": category,
+            "filed_date": date_str,
+            "title": title,
+            "url": source_url,
+            "is_insider_trade": category in ("insider_sell", "insider_buy"),
+            "accession": fid,
+        })
+    return results
 
 
 async def _fetch_one(ticker: str, store: WatchlistStore) -> dict:
     """异步获取单只 A 股的公告并存储。"""
-    async with _SEM:
+    async with _get_sem():
         filings = await asyncio.to_thread(_fetch_notices_sync, ticker)
         if not filings:
             return {"filings": 0, "trades": 0}
@@ -139,5 +144,5 @@ async def fetch_notice_batch(tickers: list[str], store: WatchlistStore) -> dict[
             results[ticker] = await _fetch_one(ticker, store)
         except Exception as e:
             logger.error("A 股公告管道错误 %s: %s", ticker, e)
-            results[ticker] = {"filings": 0, "trades": 0}
+            results[ticker] = {"filings": -1, "trades": 0, "error": str(e)}
     return results

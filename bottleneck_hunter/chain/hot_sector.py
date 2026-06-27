@@ -576,8 +576,8 @@ async def llm_recommend_hot_sectors(
                         chg = row.get("涨跌幅", 0)
                         lines.append(f"{name}（涨跌幅{chg:.1f}%）")
                     return "；".join(lines)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("AKShare 板块数据获取失败: %s", e)
             return ""
 
         market_context = await asyncio.wait_for(

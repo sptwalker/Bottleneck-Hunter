@@ -222,6 +222,18 @@ class ChainDecomposer:
                 f"（节点异常 {fail_count} 次，超时放弃 {timeout_count} 次，重试 {retry_count} 次）"
             )
 
+        # 自动保存产业链版本
+        model_name = getattr(self.llm, "model_name", "") or getattr(self.llm, "model", "") or ""
+        graph.model_used = str(model_name)
+        try:
+            from datetime import datetime, timezone
+            graph.created_at = datetime.now(timezone.utc).isoformat()
+            from bottleneck_hunter.chain.chain_store import ChainStore
+            store = ChainStore()
+            store.save_chain(end_product, graph.model_dump(), model_used=str(model_name))
+        except Exception:
+            logger.exception("产业链版本保存失败，不影响拆解结果")
+
         self._on_progress = None
         return graph
 

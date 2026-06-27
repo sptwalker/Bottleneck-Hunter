@@ -82,7 +82,7 @@ class TestAlphaScorer:
         assert 0 <= alpha.dim_analyst <= 9
         assert 0 <= alpha.dim_volume <= 9
         assert 0 <= alpha.dim_price <= 9
-        assert 0 <= alpha.dim_institution <= 9
+        assert alpha.dim_institution is None or 0 <= alpha.dim_institution <= 9
         assert alpha.ipo_bonus in (0, 2)
         assert alpha.vp_discount in (0.8, 1.0)
 

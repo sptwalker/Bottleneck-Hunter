@@ -41,13 +41,20 @@ function renderProviders(containerId) {
   list.innerHTML = providers.map((p, i) => {
     const placeholder = p.configured ? p.masked : (p.is_url ? 'http://localhost:11434' : '未配置');
     const inputType = p.is_url ? 'text' : 'password';
+    const sourceTag = p.source === 'user' ? '<span class="key-source user">个人</span>'
+                    : p.source === 'global' ? '<span class="key-source global">全局</span>'
+                    : '';
+    const deleteBtn = p.source === 'user'
+      ? `<button type="button" class="btn-delete-key" data-provider="${p.id}" title="删除个人 KEY">✕</button>`
+      : '';
     return `
       <div class="provider-row" data-provider-id="${p.id}">
         <span class="provider-status ${p.configured ? 'configured' : ''}"></span>
-        <span class="provider-label">${escapeHtml(p.name)}</span>
+        <span class="provider-label">${escapeHtml(p.name)}${sourceTag}</span>
         <div class="provider-input-wrap">
           <input type="${inputType}" data-env="${p.env_var}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false">
           ${p.is_url ? '' : '<button type="button" class="btn-toggle-vis" data-idx="' + i + '" title="显示/隐藏">👁</button>'}
+          ${deleteBtn}
         </div>
         <span class="provider-test-status" data-test-id="${p.id}"></span>
       </div>`;
@@ -58,6 +65,20 @@ function renderProviders(containerId) {
       const row = btn.closest('.provider-input-wrap');
       const input = row.querySelector('input');
       input.type = input.type === 'password' ? 'text' : 'password';
+    });
+  });
+
+  list.querySelectorAll('.btn-delete-key').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const provider = btn.dataset.provider;
+      if (!confirm(`确定删除 ${provider} 的个人 API KEY？将回退到全局 KEY（如有）。`)) return;
+      try {
+        const res = await fetch(`/api/user/api-keys/${provider}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await fetchAndRender(containerId);
+      } catch (err) {
+        alert(`删除失败: ${err.message}`);
+      }
     });
   });
 }

@@ -34,6 +34,62 @@ DEFAULT_WEIGHTS: dict[BottleneckDimension, float] = {
     BottleneckDimension.TECH_BARRIER: 0.15,
 }
 
+# 分行业瓶颈评分权重 —— 不同行业的瓶颈特征侧重不同
+INDUSTRY_WEIGHTS: dict[str, dict[BottleneckDimension, float]] = {
+    "半导体": {
+        BottleneckDimension.SCARCITY: 0.15,
+        BottleneckDimension.IRREPLACEABILITY: 0.20,
+        BottleneckDimension.SUPPLY_DEMAND_GAP: 0.20,
+        BottleneckDimension.PRICING_POWER: 0.15,
+        BottleneckDimension.TECH_BARRIER: 0.30,
+    },
+    "医药": {
+        BottleneckDimension.SCARCITY: 0.15,
+        BottleneckDimension.IRREPLACEABILITY: 0.30,
+        BottleneckDimension.SUPPLY_DEMAND_GAP: 0.20,
+        BottleneckDimension.PRICING_POWER: 0.20,
+        BottleneckDimension.TECH_BARRIER: 0.15,
+    },
+    "新能源": {
+        BottleneckDimension.SCARCITY: 0.20,
+        BottleneckDimension.IRREPLACEABILITY: 0.15,
+        BottleneckDimension.SUPPLY_DEMAND_GAP: 0.30,
+        BottleneckDimension.PRICING_POWER: 0.20,
+        BottleneckDimension.TECH_BARRIER: 0.15,
+    },
+    "消费": {
+        BottleneckDimension.SCARCITY: 0.10,
+        BottleneckDimension.IRREPLACEABILITY: 0.15,
+        BottleneckDimension.SUPPLY_DEMAND_GAP: 0.20,
+        BottleneckDimension.PRICING_POWER: 0.35,
+        BottleneckDimension.TECH_BARRIER: 0.20,
+    },
+}
+
+
+def get_industry_weights(industry: str) -> dict[BottleneckDimension, float]:
+    """根据行业名称获取瓶颈评分权重。
+
+    支持模糊匹配：如果行业名包含预设关键词则使用对应权重。
+    如果行业不在预设列表中，使用 DEFAULT_WEIGHTS。
+
+    Args:
+        industry: 行业名称（如 "半导体"、"AI芯片" 等）
+
+    Returns:
+        对应行业的瓶颈维度权重字典
+    """
+    # 精确匹配
+    if industry in INDUSTRY_WEIGHTS:
+        return INDUSTRY_WEIGHTS[industry]
+
+    # 模糊匹配：行业名包含关键词
+    for key in INDUSTRY_WEIGHTS:
+        if key in industry or industry in key:
+            return INDUSTRY_WEIGHTS[key]
+
+    return DEFAULT_WEIGHTS
+
 
 def _load_prompt(name: str) -> str:
     path = PROMPTS_DIR / f"{name}.md"
@@ -51,6 +107,56 @@ DIMENSION_DESC = {
 }
 
 
+def normalize_scores(reports: list[BottleneckReport]) -> list[BottleneckReport]:
+    """对同一批次的评分进行 z-score 标准化，消除 LLM 评分偏差。
+
+    对每个维度独立做 z-score，然后重新映射回 0-10 区间。
+    当样本量 <3 时跳过标准化（样本太少无统计意义）。
+
+    Args:
+        reports: 同一批次 LLM 返回的 BottleneckReport 列表
+
+    Returns:
+        原地修改后的同一列表（overall_score 会被重新计算）
+    """
+    if len(reports) < 3:
+        return reports
+
+    from statistics import mean, stdev
+
+    for dim in BottleneckDimension:
+        # 收集该维度的所有分数
+        dim_scores: list[tuple[int, float]] = []  # (report_idx, score)
+        for i, rpt in enumerate(reports):
+            for s in rpt.scores:
+                if s.dimension == dim.value:
+                    dim_scores.append((i, s.score))
+                    break
+
+        if len(dim_scores) < 3:
+            continue
+
+        values = [v for _, v in dim_scores]
+        mu = mean(values)
+        sigma = stdev(values)
+
+        # 方差为 0（所有分数相同）时跳过该维度
+        if sigma < 1e-6:
+            continue
+
+        # z-score → 重新映射到 0-10（以 5 为中心，1 个标准差 = 2 分）
+        for idx, raw in dim_scores:
+            z = (raw - mu) / sigma
+            normalized = max(0.0, min(10.0, round(5.0 + z * 2.0, 1)))
+            # 更新 report 中对应维度的分数
+            for s in reports[idx].scores:
+                if s.dimension == dim.value:
+                    s.score = normalized
+                    break
+
+    return reports
+
+
 class BottleneckAnalyzer:
     """Analyzes chain nodes for bottleneck characteristics."""
 
@@ -63,9 +169,17 @@ class BottleneckAnalyzer:
         llm: BaseChatModel,
         weights: dict[BottleneckDimension, float] | None = None,
         language: str = "zh",
+        industry: str = "",
     ):
         self.llm = llm
-        self.weights = weights or DEFAULT_WEIGHTS
+        # 优先使用显式传入的 weights，其次按行业查找，最后用默认权重
+        if weights is not None:
+            self.weights = weights
+        elif industry:
+            self.weights = get_industry_weights(industry)
+        else:
+            self.weights = DEFAULT_WEIGHTS
+        self.industry = industry
         self.language = language
         self._system_prompt = _load_prompt("bottleneck")
         self._timeout_count = 0
@@ -121,6 +235,11 @@ class BottleneckAnalyzer:
                 continue
             if r is not None:
                 reports.append(r)
+
+        # z-score 标准化消除 LLM 评分偏差，然后重算加权总分
+        normalize_scores(reports)
+        for rpt in reports:
+            rpt.overall_score = round(self._weighted_score(rpt.scores), 2)
 
         reports.sort(key=lambda r: r.overall_score, reverse=True)
         for i, rpt in enumerate(reports):

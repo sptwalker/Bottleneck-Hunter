@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
+from bottleneck_hunter.auth.dependencies import get_current_user
 from bottleneck_hunter.watchlist.models import (
     AddToWatchlistRequest,
     UpdateBudgetRequest,
@@ -38,13 +39,18 @@ def _get_store() -> WatchlistStore:
     return _store
 
 
+def _user_store(user: dict) -> WatchlistStore:
+    """返回绑定当前用户的 store 实例。"""
+    return _get_store().for_user(user["sub"])
+
+
 # ─────────────────────────────────────────────────────────────
 # Fixed-path routes FIRST (before /{entry_id})
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/pipeline-status")
-async def pipeline_status():
-    store = _get_store()
+async def pipeline_status(user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     from bottleneck_hunter.watchlist.scheduler import get_job_statuses
     return {
         "pipelines": store.get_pipeline_statuses(),
@@ -53,16 +59,16 @@ async def pipeline_status():
 
 
 @router.get("/budget")
-async def get_budget():
-    store = _get_store()
+async def get_budget(user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     from bottleneck_hunter.watchlist.budget import BudgetTracker
     tracker = BudgetTracker(store)
     return tracker.get_status()
 
 
 @router.patch("/budget")
-async def update_budget(req: UpdateBudgetRequest):
-    store = _get_store()
+async def update_budget(req: UpdateBudgetRequest, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     from bottleneck_hunter.watchlist.budget import BudgetTracker
     tracker = BudgetTracker(store)
     tracker.set_limits(daily=req.daily_limit_usd, monthly=req.monthly_limit_usd)
@@ -70,11 +76,12 @@ async def update_budget(req: UpdateBudgetRequest):
 
 
 @router.post("/refresh")
-async def refresh_all(request: Request):
+async def refresh_all(request: Request, user: dict = Depends(get_current_user)):
     from bottleneck_hunter.watchlist.scheduler import run_manual_refresh
+    store = _user_store(user)
 
     async def event_generator():
-        async for event in run_manual_refresh():
+        async for event in run_manual_refresh(user_store=store):
             if await request.is_disconnected():
                 break
             yield event
@@ -83,15 +90,16 @@ async def refresh_all(request: Request):
 
 
 @router.post("/refresh/{pipeline}")
-async def refresh_pipeline(pipeline: str, request: Request):
+async def refresh_pipeline(pipeline: str, request: Request, user: dict = Depends(get_current_user)):
     valid = {"price", "news", "sec", "options"}
     if pipeline not in valid:
         raise HTTPException(status_code=400, detail=f"Unknown pipeline: {pipeline}. Valid: {valid}")
 
     from bottleneck_hunter.watchlist.scheduler import run_manual_refresh
+    store = _user_store(user)
 
     async def event_generator():
-        async for event in run_manual_refresh(pipeline):
+        async for event in run_manual_refresh(pipeline, user_store=store):
             if await request.is_disconnected():
                 break
             yield event
@@ -104,12 +112,12 @@ async def refresh_pipeline(pipeline: str, request: Request):
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/refresh-intelligence")
-async def refresh_intelligence(request: Request):
+async def refresh_intelligence(request: Request, user: dict = Depends(get_current_user)):
     """SSE 流：刷新所有股票的情报聚合"""
     from bottleneck_hunter.watchlist.strategy_engine import refresh_intelligence_all
     from bottleneck_hunter.watchlist.budget import BudgetTracker
 
-    store = _get_store()
+    store = _user_store(user)
     budget = BudgetTracker(store)
 
     async def event_generator():
@@ -125,12 +133,12 @@ async def refresh_intelligence(request: Request):
 
 
 @router.post("/refresh-strategy")
-async def refresh_strategy(request: Request):
+async def refresh_strategy(request: Request, user: dict = Depends(get_current_user)):
     """SSE 流：刷新所有股票的策略生成"""
     from bottleneck_hunter.watchlist.strategy_engine import refresh_strategy_all
     from bottleneck_hunter.watchlist.budget import BudgetTracker
 
-    store = _get_store()
+    store = _user_store(user)
     budget = BudgetTracker(store)
 
     async def event_generator():
@@ -146,9 +154,9 @@ async def refresh_strategy(request: Request):
 
 
 @router.get("/strategy-summaries")
-async def get_strategy_summaries():
+async def get_strategy_summaries(user: dict = Depends(get_current_user)):
     """批量获取所有股票的最新策略信号（避免 N+1）"""
-    store = _get_store()
+    store = _user_store(user)
     summaries = store.get_all_strategy_summaries()
     return {"summaries": summaries}
 
@@ -158,8 +166,8 @@ async def get_strategy_summaries():
 # ─────────────────────────────────────────────────────────────
 
 @router.get("")
-async def list_watchlist(tier: str | None = None):
-    store = _get_store()
+async def list_watchlist(tier: str | None = None, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entries = store.list_all(tier=tier)
     counts = store.count_by_tier()
     for e in entries:
@@ -169,8 +177,8 @@ async def list_watchlist(tier: str | None = None):
 
 
 @router.post("")
-async def add_to_watchlist(req: AddToWatchlistRequest):
-    store = _get_store()
+async def add_to_watchlist(req: AddToWatchlistRequest, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     try:
         entry_id = store.add(req.model_dump())
         return {"id": entry_id, "status": "added"}
@@ -179,8 +187,8 @@ async def add_to_watchlist(req: AddToWatchlistRequest):
 
 
 @router.put("/batch-tier")
-async def batch_update_tier(req: Request):
-    store = _get_store()
+async def batch_update_tier(req: Request, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     body = await req.json()
     ids = body.get("ids", [])
     tier = body.get("tier")
@@ -193,13 +201,36 @@ async def batch_update_tier(req: Request):
     return {"status": "ok", "updated": updated}
 
 
+@router.post("/batch-delete")
+async def batch_delete(req: Request, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
+    body = await req.json()
+    ids = body.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids required")
+    removed = 0
+    for eid in ids:
+        if store.remove(eid):
+            removed += 1
+    return {"status": "ok", "removed": removed}
+
+
+@router.get("/health")
+async def pipeline_health(user: dict = Depends(get_current_user)):
+    """返回管道状态 + 过期 ticker 列表。"""
+    store = _user_store(user)
+    statuses = store.get_pipeline_statuses()
+    stale = store.get_stale_tickers(max_age_hours=48)
+    return {"pipelines": statuses, "stale_tickers": stale}
+
+
 # ─────────────────────────────────────────────────────────────
 # Entry detail + sub-resources (parameterized /{entry_id})
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/{entry_id}")
-async def get_watchlist_entry(entry_id: str):
-    store = _get_store()
+async def get_watchlist_entry(entry_id: str, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -209,8 +240,8 @@ async def get_watchlist_entry(entry_id: str):
 
 
 @router.delete("/{entry_id}")
-async def remove_from_watchlist(entry_id: str):
-    store = _get_store()
+async def remove_from_watchlist(entry_id: str, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     removed = store.remove(entry_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -218,8 +249,8 @@ async def remove_from_watchlist(entry_id: str):
 
 
 @router.patch("/{entry_id}")
-async def update_watchlist_entry(entry_id: str, req: UpdateWatchlistRequest):
-    store = _get_store()
+async def update_watchlist_entry(entry_id: str, req: UpdateWatchlistRequest, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if "tier" in fields:
         fields["tier"] = fields["tier"].value if hasattr(fields["tier"], "value") else fields["tier"]
@@ -230,9 +261,9 @@ async def update_watchlist_entry(entry_id: str, req: UpdateWatchlistRequest):
 
 
 @router.get("/{entry_id}/source-scorecard")
-async def source_scorecard(entry_id: str):
+async def source_scorecard(entry_id: str, user: dict = Depends(get_current_user)):
     """Retrieve the original SupplierScorecard from the pipeline analysis."""
-    store = _get_store()
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -242,7 +273,7 @@ async def source_scorecard(entry_id: str):
         return {"scorecard": None, "analysis_meta": None, "cross_validation": None, "rank": None}
 
     from bottleneck_hunter.dataflows.store import AnalysisStore
-    analysis_store = AnalysisStore()
+    analysis_store = AnalysisStore().for_user(user["sub"])
     record = analysis_store.get(aid)
     if not record:
         return {"scorecard": None, "analysis_meta": None, "cross_validation": None, "rank": None}
@@ -282,8 +313,8 @@ async def source_scorecard(entry_id: str):
 
 
 @router.get("/{entry_id}/snapshots")
-async def get_snapshots(entry_id: str, days: int = 90):
-    store = _get_store()
+async def get_snapshots(entry_id: str, days: int = 90, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -291,8 +322,8 @@ async def get_snapshots(entry_id: str, days: int = 90):
 
 
 @router.get("/{entry_id}/news")
-async def get_news(entry_id: str, limit: int = 20):
-    store = _get_store()
+async def get_news(entry_id: str, limit: int = 20, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -300,8 +331,8 @@ async def get_news(entry_id: str, limit: int = 20):
 
 
 @router.get("/{entry_id}/filings")
-async def get_filings(entry_id: str, filing_type: str | None = None, limit: int = 20):
-    store = _get_store()
+async def get_filings(entry_id: str, filing_type: str | None = None, limit: int = 20, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -309,8 +340,8 @@ async def get_filings(entry_id: str, filing_type: str | None = None, limit: int 
 
 
 @router.get("/{entry_id}/insider-trades")
-async def get_insider_trades(entry_id: str, limit: int = 20):
-    store = _get_store()
+async def get_insider_trades(entry_id: str, limit: int = 20, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -318,8 +349,8 @@ async def get_insider_trades(entry_id: str, limit: int = 20):
 
 
 @router.get("/{entry_id}/options")
-async def get_options(entry_id: str, limit: int = 10):
-    store = _get_store()
+async def get_options(entry_id: str, limit: int = 10, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -327,8 +358,8 @@ async def get_options(entry_id: str, limit: int = 10):
 
 
 @router.get("/{entry_id}/earnings")
-async def get_earnings(entry_id: str):
-    store = _get_store()
+async def get_earnings(entry_id: str, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -340,8 +371,8 @@ async def get_earnings(entry_id: str):
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/{entry_id}/uzi/history")
-async def uzi_history(entry_id: str, limit: int = 20):
-    store = _get_store()
+async def uzi_history(entry_id: str, limit: int = 20, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -349,8 +380,8 @@ async def uzi_history(entry_id: str, limit: int = 20):
 
 
 @router.get("/{entry_id}/uzi/{analysis_id}")
-async def uzi_result(entry_id: str, analysis_id: str):
-    store = _get_store()
+async def uzi_result(entry_id: str, analysis_id: str, user: dict = Depends(get_current_user)):
+    store = _user_store(user)
     record = store.get_uzi_analysis(analysis_id)
     if not record or record["entry_id"] != entry_id:
         raise HTTPException(status_code=404, detail="Analysis not found")
@@ -365,10 +396,10 @@ async def uzi_result(entry_id: str, analysis_id: str):
 
 
 @router.post("/{entry_id}/uzi/{analysis_type}")
-async def uzi_trigger(entry_id: str, analysis_type: str, request: Request):
+async def uzi_trigger(entry_id: str, analysis_type: str, request: Request, user: dict = Depends(get_current_user)):
     from bottleneck_hunter.watchlist.uzi_runner import ANALYSIS_TYPES, run_uzi_analysis
 
-    store = _get_store()
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -391,9 +422,9 @@ async def uzi_trigger(entry_id: str, analysis_type: str, request: Request):
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/{entry_id}/intelligence")
-async def get_intelligence(entry_id: str):
+async def get_intelligence(entry_id: str, user: dict = Depends(get_current_user)):
     """获取最新情报"""
-    store = _get_store()
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -402,9 +433,9 @@ async def get_intelligence(entry_id: str):
 
 
 @router.get("/{entry_id}/intelligence/history")
-async def get_intelligence_history(entry_id: str, limit: int = 10):
+async def get_intelligence_history(entry_id: str, limit: int = 10, user: dict = Depends(get_current_user)):
     """获取情报历史"""
-    store = _get_store()
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -413,9 +444,9 @@ async def get_intelligence_history(entry_id: str, limit: int = 10):
 
 
 @router.get("/{entry_id}/strategy")
-async def get_strategy(entry_id: str):
+async def get_strategy(entry_id: str, user: dict = Depends(get_current_user)):
     """获取最新策略"""
-    store = _get_store()
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -424,9 +455,9 @@ async def get_strategy(entry_id: str):
 
 
 @router.get("/{entry_id}/strategy/history")
-async def get_strategy_history(entry_id: str, limit: int = 10):
+async def get_strategy_history(entry_id: str, limit: int = 10, user: dict = Depends(get_current_user)):
     """获取策略历史"""
-    store = _get_store()
+    store = _user_store(user)
     entry = store.get(entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")

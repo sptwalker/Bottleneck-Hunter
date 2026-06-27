@@ -23,85 +23,87 @@ except ImportError:
 
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.models import DegradationMode
+from bottleneck_hunter.watchlist.retry import with_retry, get_http_client
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 
-_SEM = asyncio.Semaphore(4)
+_SEM: asyncio.Semaphore | None = None
+
+
+def _get_sem() -> asyncio.Semaphore:
+    global _SEM
+    if _SEM is None:
+        _SEM = asyncio.Semaphore(4)
+    return _SEM
 
 
 # ---------------------------------------------------------------------------
 # Raw news fetching
 # ---------------------------------------------------------------------------
 
+@with_retry(max_retries=3, base_delay=1.0)
 def _fetch_yfinance_news(ticker: str, limit: int = 10) -> list[dict]:
     """Fetch news from yfinance Ticker.news (sync)."""
-    try:
-        t = yf.Ticker(ticker)
-        raw = t.news or []
-        results = []
-        for item in raw[:limit]:
-            title = item.get("title", "")
-            if not title:
-                continue
-            pub_ts = item.get("providerPublishTime", 0)
-            date_str = datetime.fromtimestamp(pub_ts, tz=timezone.utc).strftime("%Y-%m-%d") if pub_ts else ""
-            news_id = hashlib.md5(f"{ticker}:{title}".encode()).hexdigest()[:12]
-            results.append({
-                "id": news_id,
-                "ticker": ticker,
-                "date": date_str,
-                "title": title,
-                "source_url": item.get("link", ""),
-                "source_name": item.get("publisher", ""),
-            })
-        return results
-    except Exception as e:
-        logger.warning("yfinance news failed for %s: %s", ticker, e)
-        return []
+    t = yf.Ticker(ticker)
+    raw = t.news or []
+    results = []
+    for item in raw[:limit]:
+        title = item.get("title", "")
+        if not title:
+            continue
+        pub_ts = item.get("providerPublishTime", 0)
+        date_str = datetime.fromtimestamp(pub_ts, tz=timezone.utc).strftime("%Y-%m-%d") if pub_ts else ""
+        news_id = hashlib.md5(f"{ticker}:{title}".encode()).hexdigest()[:12]
+        results.append({
+            "id": news_id,
+            "ticker": ticker,
+            "date": date_str,
+            "title": title,
+            "source_url": item.get("link", ""),
+            "source_name": item.get("publisher", ""),
+        })
+    return results
 
 
+@with_retry(max_retries=3, base_delay=1.0)
 async def _fetch_rss_news(ticker: str, limit: int = 5) -> list[dict]:
     """Fetch from Google Finance RSS (async)."""
     url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                return []
-        # feedparser 是可选依赖
-        try:
-            import feedparser
-            feed = feedparser.parse(resp.text)
-        except ImportError:
-            logger.debug("feedparser not installed, skipping RSS")
-            return []
-
-        results = []
-        for entry in feed.entries[:limit]:
-            title = entry.get("title", "")
-            if not title:
-                continue
-            pub = entry.get("published_parsed")
-            date_str = datetime(*pub[:3], tzinfo=timezone.utc).strftime("%Y-%m-%d") if pub else ""
-            news_id = hashlib.md5(f"{ticker}:rss:{title}".encode()).hexdigest()[:12]
-            results.append({
-                "id": news_id,
-                "ticker": ticker,
-                "date": date_str,
-                "title": title,
-                "source_url": entry.get("link", ""),
-                "source_name": "Google News",
-            })
-        return results
-    except Exception as e:
-        logger.warning("RSS fetch failed for %s: %s", ticker, e)
+    client = get_http_client()
+    resp = await client.get(url)
+    if resp.status_code != 200:
         return []
+    try:
+        import feedparser
+        feed = feedparser.parse(resp.text)
+    except ImportError:
+        logger.debug("feedparser not installed, skipping RSS")
+        return []
+
+    results = []
+    for entry in feed.entries[:limit]:
+        title = entry.get("title", "")
+        if not title:
+            continue
+        pub = entry.get("published_parsed")
+        date_str = datetime(*pub[:3], tzinfo=timezone.utc).strftime("%Y-%m-%d") if pub else ""
+        news_id = hashlib.md5(f"{ticker}:rss:{title}".encode()).hexdigest()[:12]
+        results.append({
+            "id": news_id,
+            "ticker": ticker,
+            "date": date_str,
+            "title": title,
+            "source_url": entry.get("link", ""),
+            "source_name": "Google News",
+        })
+    return results
 
 
 _ASTOCK_RE = re.compile(r"^(?:SH|SZ|sh|sz)?(\d{6})")
 
 
+@with_retry(max_retries=3, base_delay=1.0)
 def _fetch_astock_news(ticker: str, limit: int = 10) -> list[dict]:
     """Fetch A-stock news from akshare stock_news_em (sync)."""
     if ak is None:
@@ -111,32 +113,28 @@ def _fetch_astock_news(ticker: str, limit: int = 10) -> list[dict]:
     if not m:
         return []
     code_6 = m.group(1)
-    try:
-        df = ak.stock_news_em(symbol=code_6)
-        if df is None or df.empty:
-            return []
-        results = []
-        for _, row in df.head(limit).iterrows():
-            title = str(row.get("新闻标题", "")).strip()
-            if not title:
-                continue
-            pub_time = str(row.get("发布时间", ""))
-            date_str = pub_time[:10] if len(pub_time) >= 10 else ""
-            source_name = str(row.get("文章来源", ""))
-            source_url = str(row.get("新闻链接", ""))
-            news_id = hashlib.md5(f"{ticker}:{title}".encode()).hexdigest()[:12]
-            results.append({
-                "id": news_id,
-                "ticker": ticker,
-                "date": date_str,
-                "title": title,
-                "source_url": source_url,
-                "source_name": source_name,
-            })
-        return results
-    except Exception as e:
-        logger.warning("A-stock news failed for %s: %s", ticker, e)
+    df = ak.stock_news_em(symbol=code_6)
+    if df is None or df.empty:
         return []
+    results = []
+    for _, row in df.head(limit).iterrows():
+        title = str(row.get("新闻标题", "")).strip()
+        if not title:
+            continue
+        pub_time = str(row.get("发布时间", ""))
+        date_str = pub_time[:10] if len(pub_time) >= 10 else ""
+        source_name = str(row.get("文章来源", ""))
+        source_url = str(row.get("新闻链接", ""))
+        news_id = hashlib.md5(f"{ticker}:{title}".encode()).hexdigest()[:12]
+        results.append({
+            "id": news_id,
+            "ticker": ticker,
+            "date": date_str,
+            "title": title,
+            "source_url": source_url,
+            "source_name": source_name,
+        })
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +200,7 @@ async def _summarize_with_llm(ticker: str, articles: list[dict], llm, budget: Bu
 # ---------------------------------------------------------------------------
 
 async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTracker, market: str = "us_stock") -> int:
-    async with _SEM:
+    async with _get_sem():
         if market == "a_stock":
             articles = await asyncio.to_thread(_fetch_astock_news, ticker)
         else:
@@ -254,5 +252,5 @@ async def fetch_news_batch(
             results[ticker] = count
         except Exception as e:
             logger.error("News pipeline error for %s: %s", ticker, e)
-            results[ticker] = 0
+            results[ticker] = -1
     return results

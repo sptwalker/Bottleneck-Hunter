@@ -9,21 +9,50 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 import httpx
 
+from bottleneck_hunter.watchlist.retry import with_retry, get_http_client
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 
-_SEM = asyncio.Semaphore(8)
+_SEM: asyncio.Semaphore | None = None
+
+
+def _get_sem() -> asyncio.Semaphore:
+    global _SEM
+    if _SEM is None:
+        _SEM = asyncio.Semaphore(8)
+    return _SEM
 _HEADERS = {
     "User-Agent": "BottleneckHunter research@bottleneckhunter.com",
     "Accept": "application/json",
 }
+_HEADERS_XML = {
+    "User-Agent": "BottleneckHunter research@bottleneckhunter.com",
+    "Accept": "application/xml, text/xml, text/html, */*",
+}
 _CIK_CACHE: dict[str, str] = {}
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+
+# Transaction code mapping
+_TX_CODES = {
+    "P": "Purchase",
+    "S": "Sale",
+    "A": "Grant/Award",
+    "D": "Disposition (non-open-market)",
+    "F": "Tax withholding",
+    "M": "Option exercise",
+    "G": "Gift",
+    "C": "Conversion",
+    "J": "Other",
+    "V": "Voluntary reporting",
+    "I": "Discretionary",
+    "W": "Will/inheritance",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -35,11 +64,11 @@ async def _load_cik_map() -> dict[str, str]:
     if _CIK_CACHE:
         return _CIK_CACHE
     try:
-        async with httpx.AsyncClient(timeout=20, headers=_HEADERS) as client:
-            resp = await client.get(_TICKERS_URL)
-            if resp.status_code != 200:
-                logger.warning("SEC tickers endpoint returned %d", resp.status_code)
-                return {}
+        client = get_http_client()
+        resp = await client.get(_TICKERS_URL, headers=_HEADERS)
+        if resp.status_code != 200:
+            logger.warning("SEC tickers endpoint returned %d", resp.status_code)
+            return {}
         data = resp.json()
         for item in data.values():
             tk = str(item.get("ticker", "")).upper()
@@ -61,68 +90,282 @@ async def _get_cik(ticker: str) -> str | None:
 # Filing fetching
 # ---------------------------------------------------------------------------
 
+@with_retry(max_retries=3, base_delay=2.0)
 async def _fetch_filings(cik: str, form_types: list[str], limit: int = 10) -> list[dict]:
     """Fetch recent filings from EDGAR."""
     url = f"https://efts.sec.gov/LATEST/search-index?q=&dateRange=custom&startdt=2025-01-01&forms={','.join(form_types)}&entities={cik}"
-    # 更可靠的方式：使用 EDGAR submissions API
     submissions_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-    try:
-        async with httpx.AsyncClient(timeout=20, headers=_HEADERS) as client:
-            await asyncio.sleep(0.15)  # SEC rate limit
-            resp = await client.get(submissions_url)
-            if resp.status_code != 200:
-                return []
-
-        data = resp.json()
-        recent = data.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])
-        dates = recent.get("filingDate", [])
-        accessions = recent.get("accessionNumber", [])
-        descriptions = recent.get("primaryDocDescription", [])
-
-        results = []
-        for i in range(min(len(forms), 200)):
-            if forms[i] not in form_types:
-                continue
-            if len(results) >= limit:
-                break
-            acc_clean = accessions[i].replace("-", "")
-            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{acc_clean}/{accessions[i]}-index.htm"
-            fid = hashlib.md5(f"{cik}:{accessions[i]}".encode()).hexdigest()[:12]
-            results.append({
-                "id": fid,
-                "filing_type": forms[i],
-                "filed_date": dates[i],
-                "title": descriptions[i] if i < len(descriptions) else "",
-                "url": filing_url,
-                "is_insider_trade": forms[i] in ("4", "4/A"),
-                "accession": accessions[i],
-            })
-        return results
-    except Exception as e:
-        logger.warning("EDGAR fetch failed for CIK %s: %s", cik, e)
+    client = get_http_client()
+    await asyncio.sleep(0.15)  # SEC rate limit
+    resp = await client.get(submissions_url, headers=_HEADERS)
+    if resp.status_code != 200:
         return []
 
+    data = resp.json()
+    recent = data.get("filings", {}).get("recent", {})
+    forms = recent.get("form", [])
+    dates = recent.get("filingDate", [])
+    accessions = recent.get("accessionNumber", [])
+    descriptions = recent.get("primaryDocDescription", [])
 
-def _parse_insider_trades_from_filings(ticker: str, filings: list[dict]) -> list[dict]:
-    """Extract basic insider trade records from Form 4 filings."""
+    results = []
+    for i in range(min(len(forms), 200)):
+        if forms[i] not in form_types:
+            continue
+        if len(results) >= limit:
+            break
+        acc_clean = accessions[i].replace("-", "")
+        filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{acc_clean}/{accessions[i]}-index.htm"
+        fid = hashlib.md5(f"{cik}:{accessions[i]}".encode()).hexdigest()[:12]
+        results.append({
+            "id": fid,
+            "filing_type": forms[i],
+            "filed_date": dates[i],
+            "title": descriptions[i] if i < len(descriptions) else "",
+            "url": filing_url,
+            "is_insider_trade": forms[i] in ("4", "4/A"),
+            "accession": accessions[i],
+        })
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Form 4 XML parsing
+# ---------------------------------------------------------------------------
+
+def _parse_form4_xml(xml_text: str) -> list[dict]:
+    """Parse Form 4 XML and extract insider transaction records.
+
+    Returns a list of dicts with keys:
+        insider_name, insider_title, transaction_type, shares, price,
+        total_value, date
+    Each non-derivative transaction becomes one record.
+    Falls back to empty list on any parse error.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        logger.debug("Form 4 XML parse error: %s", e)
+        return []
+
+    # --- reporting owner info ---
+    owner_name = "Unknown"
+    owner_title = ""
+    # Try <reportingOwner> / <reportingOwnerId> / <rptOwnerName>
+    for owner_el in root.iter("reportingOwner"):
+        name_el = owner_el.find(".//rptOwnerName")
+        if name_el is not None and name_el.text:
+            owner_name = name_el.text.strip()
+        # Title in <reportingOwnerRelationship> / <officerTitle>
+        title_el = owner_el.find(".//officerTitle")
+        if title_el is not None and title_el.text:
+            owner_title = title_el.text.strip()
+        break  # use first reporting owner
+
+    # --- non-derivative transactions ---
+    records = []
+    for txn in root.iter("nonDerivativeTransaction"):
+        record = _extract_transaction(txn, owner_name, owner_title)
+        if record:
+            records.append(record)
+
+    # Also check derivativeTransaction (option exercises often have
+    # an underlying transaction we care about)
+    for txn in root.iter("derivativeTransaction"):
+        record = _extract_transaction(txn, owner_name, owner_title)
+        if record:
+            records.append(record)
+
+    return records
+
+
+def _extract_transaction(txn_el: ET.Element, owner_name: str, owner_title: str) -> dict | None:
+    """Extract a single transaction record from a transaction XML element."""
+    # Transaction date
+    date_el = txn_el.find(".//transactionDate/value")
+    txn_date = date_el.text.strip() if date_el is not None and date_el.text else None
+
+    # Transaction code (P, S, M, A, etc.)
+    coding_el = txn_el.find(".//transactionCoding/transactionCode")
+    txn_code = coding_el.text.strip() if coding_el is not None and coding_el.text else ""
+
+    # Shares
+    shares_el = txn_el.find(".//transactionAmounts/transactionShares/value")
+    shares = 0.0
+    if shares_el is not None and shares_el.text:
+        try:
+            shares = float(shares_el.text.strip())
+        except (ValueError, TypeError):
+            pass
+
+    # Price per share
+    price_el = txn_el.find(".//transactionAmounts/transactionPricePerShare/value")
+    price = None
+    if price_el is not None and price_el.text:
+        try:
+            price = float(price_el.text.strip())
+        except (ValueError, TypeError):
+            pass
+
+    # Skip transactions with no meaningful data
+    if shares == 0 and price is None:
+        return None
+
+    # Compute total value
+    total_value = None
+    if price is not None and shares > 0:
+        total_value = round(price * shares, 2)
+
+    # Build human-readable transaction type
+    txn_type = _TX_CODES.get(txn_code, txn_code) if txn_code else "unknown"
+
+    return {
+        "insider_name": owner_name,
+        "insider_title": owner_title,
+        "transaction_type": txn_type,
+        "shares": int(shares) if shares == int(shares) else shares,
+        "price": price,
+        "total_value": total_value,
+        "date": txn_date,
+        "transaction_code": txn_code,  # raw code for filtering
+    }
+
+
+async def _fetch_filing_documents(cik: str, accession: str) -> list[dict]:
+    """Fetch the filing index JSON to find the primary XML document.
+
+    SEC EDGAR provides a JSON index at:
+      https://www.sec.gov/Archives/edgar/data/{cik}/{acc-no-dashes}/{acc}.json
+    which is not always available. Alternatively, we parse the index page.
+
+    Returns list of {name, url} for XML documents found.
+    """
+    cik_stripped = cik.lstrip("0")
+    acc_clean = accession.replace("-", "")
+
+    # Try the JSON index first (most reliable)
+    index_json_url = f"https://www.sec.gov/Archives/edgar/data/{cik_stripped}/{acc_clean}/{accession}-index.json"
+    client = get_http_client()
+
+    await asyncio.sleep(0.15)  # SEC rate limit
+    try:
+        resp = await client.get(index_json_url, headers=_HEADERS)
+        if resp.status_code == 200:
+            data = resp.json()
+            docs = []
+            for item in data.get("directory", {}).get("item", []):
+                name = item.get("name", "")
+                if name.endswith(".xml") and not name.startswith("R"):
+                    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_stripped}/{acc_clean}/{name}"
+                    docs.append({"name": name, "url": doc_url})
+            if docs:
+                return docs
+    except Exception as e:
+        logger.debug("Filing index JSON fetch failed for %s: %s", accession, e)
+
+    # Fallback: try common Form 4 XML filename patterns
+    # Form 4 XMLs are typically named like: doc4.xml, form4.xml, {accession}.xml, primary_doc.xml
+    base_url = f"https://www.sec.gov/Archives/edgar/data/{cik_stripped}/{acc_clean}"
+    candidates = [
+        f"{base_url}/doc4.xml",
+        f"{base_url}/form4.xml",
+        f"{base_url}/primary_doc.xml",
+        f"{base_url}/{accession}.xml",
+    ]
+    return [{"name": c.split("/")[-1], "url": c} for c in candidates]
+
+
+async def _fetch_form4_xml(cik: str, filing: dict) -> list[dict]:
+    """Fetch and parse Form 4 XML for a filing.
+
+    Returns a list of transaction dicts, or empty list on failure.
+    """
+    accession = filing.get("accession", "")
+    if not accession:
+        return []
+
+    docs = await _fetch_filing_documents(cik, accession)
+    client = get_http_client()
+
+    for doc in docs:
+        await asyncio.sleep(0.15)  # SEC rate limit
+        try:
+            resp = await client.get(doc["url"], headers=_HEADERS_XML)
+            if resp.status_code != 200:
+                continue
+            content = resp.text
+            # Quick sanity check: is this actually Form 4 XML?
+            if "<ownershipDocument" not in content:
+                continue
+            records = _parse_form4_xml(content)
+            if records:
+                logger.debug("Parsed %d transactions from %s", len(records), doc["url"])
+                return records
+        except Exception as e:
+            logger.debug("Failed to fetch/parse %s: %s", doc["url"], e)
+            continue
+
+    return []
+
+
+def _make_stub_trade(ticker: str, filing: dict) -> dict:
+    """Create a stub/placeholder insider trade record from filing metadata only."""
+    tid = hashlib.md5(f"{ticker}:insider:{filing['id']}".encode()).hexdigest()[:12]
+    return {
+        "id": tid,
+        "ticker": ticker,
+        "insider_name": filing.get("title", "Unknown"),
+        "insider_title": "",
+        "transaction_type": "unknown",
+        "shares": 0,
+        "price": None,
+        "total_value": None,
+        "date": filing["filed_date"],
+        "source_filing_id": filing["id"],
+    }
+
+
+async def _parse_insider_trades_from_filings(cik: str, ticker: str, filings: list[dict]) -> list[dict]:
+    """Extract insider trade records from Form 4 filings.
+
+    For each Form 4 filing, attempts to fetch and parse the actual XML to get
+    real transaction data (insider name, shares, price, etc.).
+    Falls back to stub records if XML parsing fails.
+    """
     trades = []
     for f in filings:
         if not f.get("is_insider_trade"):
             continue
-        tid = hashlib.md5(f"{ticker}:insider:{f['id']}".encode()).hexdigest()[:12]
-        trades.append({
-            "id": tid,
-            "ticker": ticker,
-            "insider_name": f.get("title", "Unknown"),
-            "insider_title": "",
-            "transaction_type": "unknown",
-            "shares": 0,
-            "price": None,
-            "total_value": None,
-            "date": f["filed_date"],
-            "source_filing_id": f["id"],
-        })
+
+        # Try to parse real Form 4 XML data
+        try:
+            xml_records = await _fetch_form4_xml(cik, f)
+        except Exception as e:
+            logger.warning("Form 4 XML fetch failed for %s/%s: %s", ticker, f.get("accession", ""), e)
+            xml_records = []
+
+        if xml_records:
+            # Create a trade record for each transaction in the XML
+            for i, rec in enumerate(xml_records):
+                tid = hashlib.md5(
+                    f"{ticker}:insider:{f['id']}:{i}".encode()
+                ).hexdigest()[:12]
+                trades.append({
+                    "id": tid,
+                    "ticker": ticker,
+                    "insider_name": rec["insider_name"],
+                    "insider_title": rec.get("insider_title", ""),
+                    "transaction_type": rec["transaction_type"],
+                    "shares": rec["shares"],
+                    "price": rec["price"],
+                    "total_value": rec["total_value"],
+                    "date": rec.get("date") or f["filed_date"],
+                    "source_filing_id": f["id"],
+                })
+        else:
+            # Fall back to stub record
+            trades.append(_make_stub_trade(ticker, f))
+
     return trades
 
 
@@ -132,7 +375,7 @@ def _parse_insider_trades_from_filings(ticker: str, filings: list[dict]) -> list
 
 async def _fetch_one(ticker: str, store: WatchlistStore) -> dict:
     """Fetch SEC data for one ticker."""
-    async with _SEM:
+    async with _get_sem():
         cik = await _get_cik(ticker)
         if not cik:
             return {"filings": 0, "trades": 0}
@@ -148,7 +391,7 @@ async def _fetch_one(ticker: str, store: WatchlistStore) -> dict:
         ]
         fcount = store.save_filings(filing_dicts)
 
-        trades = _parse_insider_trades_from_filings(ticker, filings)
+        trades = await _parse_insider_trades_from_filings(cik, ticker, filings)
         for t in trades:
             t["fetched_at"] = now_iso
         tcount = store.save_insider_trades(trades)

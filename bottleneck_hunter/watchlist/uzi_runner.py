@@ -405,6 +405,6 @@ def _get_llm():
         ]:
             if os.getenv(key_env):
                 return create_llm(provider, model, temperature=0.3)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("无法创建 LLM: %s", e)
     return None

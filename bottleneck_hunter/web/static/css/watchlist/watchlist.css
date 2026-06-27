@@ -296,6 +296,7 @@
 }
 
 .wl-pipe-dot--ok    { background: var(--success); }
+.wl-pipe-dot--warn  { background: #f59e0b; }
 .wl-pipe-dot--stale { background: var(--warning); }
 .wl-pipe-dot--err   { background: var(--danger); }
 
@@ -1244,4 +1245,35 @@
   .wl-indicators {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── Toast 通知 ─── */
+.bh-toast {
+  position: fixed;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  padding: 10px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+  z-index: 10000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s, transform 0.3s;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.bh-toast--show {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+.bh-toast--success { background: #059669; }
+.bh-toast--warning { background: #d97706; }
+.bh-toast--error   { background: #dc2626; }
+
+/* ── 管道 hover 提示 ─── */
+#wl-pipe-summary span[title] {
+  cursor: help;
 }

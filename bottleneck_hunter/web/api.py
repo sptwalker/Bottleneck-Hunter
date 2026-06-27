@@ -12,7 +12,7 @@ from typing import Optional
 from pathlib import Path
 
 from dotenv import dotenv_values, set_key
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -24,6 +24,8 @@ from bottleneck_hunter.web.streaming import (
 from bottleneck_hunter.web import phase_cache
 from bottleneck_hunter.chain.supplier_eval import FinalScorer
 
+from bottleneck_hunter.auth.dependencies import get_current_user
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -34,6 +36,11 @@ ENV_PATH = Path.cwd() / ".env"
 from bottleneck_hunter.dataflows.store import AnalysisStore
 
 _store = AnalysisStore()
+
+
+def _user_analysis_store(user: dict) -> AnalysisStore:
+    """返回绑定当前用户的 AnalysisStore 实例。"""
+    return _store.for_user(user["sub"])
 
 PROVIDER_REGISTRY = [
     {"id": "openai",     "name": "OpenAI",       "env_var": "OPENAI_API_KEY"},
@@ -71,9 +78,11 @@ class ScreenRequest(BaseModel):
 
 
 @router.post("/screen")
-async def screen(request: Request, config: ScreenRequest):
+async def screen(request: Request, config: ScreenRequest, user: dict = Depends(get_current_user)):
+    store = _user_analysis_store(user)
+
     async def event_generator():
-        async for event in stream_screening(config, store=_store):
+        async for event in stream_screening(config, store=store):
             if await request.is_disconnected():
                 break
             yield event
@@ -88,7 +97,7 @@ class CrossValidateRequest(BaseModel):
 
 
 @router.post("/cross-validate")
-async def cross_validate(req: CrossValidateRequest):
+async def cross_validate(req: CrossValidateRequest, user: dict = Depends(get_current_user)):
     """单独运行交叉验证，返回 SSE 事件流。"""
     async def event_generator():
         async for event in run_cross_validation(req.scorecards, req.validation_models, req.language):
@@ -108,7 +117,7 @@ class RefreshSuppliersRequest(BaseModel):
 
 
 @router.post("/refresh-suppliers")
-async def refresh_suppliers(req: RefreshSuppliersRequest):
+async def refresh_suppliers(req: RefreshSuppliersRequest, user: dict = Depends(get_current_user)):
     """重新运行供应商搜索+评估，返回 SSE 事件流。"""
     async def event_generator():
         async for event in run_refresh_suppliers(
@@ -129,7 +138,7 @@ class RetryBottleneckRequest(BaseModel):
 
 
 @router.post("/retry-bottleneck")
-async def retry_bottleneck(req: RetryBottleneckRequest):
+async def retry_bottleneck(req: RetryBottleneckRequest, user: dict = Depends(get_current_user)):
     """使用备选引擎对失败节点补充瓶颈分析，返回 SSE 事件流。"""
     async def event_generator():
         async for event in run_retry_bottleneck(
@@ -146,7 +155,7 @@ class RefetchDataRequest(BaseModel):
 
 
 @router.post("/refetch-data")
-async def refetch_data(req: RefetchDataRequest):
+async def refetch_data(req: RefetchDataRequest, user: dict = Depends(get_current_user)):
     """为指定 ticker 重新拉取财务数据和聪明钱信号。"""
     from bottleneck_hunter.chain.models import SupplierInfo, MarketRegion
     from bottleneck_hunter.chain.financial_data import fetch_batch
@@ -217,14 +226,16 @@ class Phase4Request(BaseModel):
 
 
 @router.post("/phase1")
-async def phase1(request: Request, req: Phase1Request):
+async def phase1(request: Request, req: Phase1Request, user: dict = Depends(get_current_user)):
+    store = _user_analysis_store(user)
+
     async def event_generator():
         async for event in stream_phase1(
             sector=req.sector, end_product=req.end_product,
             max_depth=req.max_depth, top_n=req.top_n,
             language=req.language, provider=req.provider, model=req.model,
             market=req.market, max_market_cap_yi=req.max_market_cap_yi,
-            store=_store,
+            store=store,
         ):
             if await request.is_disconnected():
                 break
@@ -233,7 +244,9 @@ async def phase1(request: Request, req: Phase1Request):
 
 
 @router.post("/phase2")
-async def phase2(request: Request, req: Phase2Request):
+async def phase2(request: Request, req: Phase2Request, user: dict = Depends(get_current_user)):
+    store = _user_analysis_store(user)
+
     async def event_generator():
         async for event in stream_phase2(
             analysis_id=req.analysis_id,
@@ -244,7 +257,7 @@ async def phase2(request: Request, req: Phase2Request):
             market=req.market, max_market_cap_yi=req.max_market_cap_yi,
             max_suppliers=req.max_suppliers,
             language=req.language, provider=req.provider, model=req.model,
-            store=_store,
+            store=store,
         ):
             if await request.is_disconnected():
                 break
@@ -253,9 +266,11 @@ async def phase2(request: Request, req: Phase2Request):
 
 
 @router.post("/phase3/score")
-async def phase3_score(req: Phase3Request):
+async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user)):
     """Phase 3: 即时重算最终评分（纯计算，无 LLM）。"""
     from bottleneck_hunter.chain.models import SupplierScorecard
+
+    store = _user_analysis_store(user)
 
     p2 = phase_cache.get_phase(req.analysis_id, 2)
     if not p2:
@@ -294,9 +309,9 @@ async def phase3_score(req: Phase3Request):
     }
     phase_cache.set_phase(req.analysis_id, 3, phase3_data)
 
-    if _store:
+    if store:
         try:
-            _store.update_suppliers(
+            store.update_suppliers(
                 req.analysis_id, [sc.model_dump() for sc in scorecards],
                 scoring_config=scoring_cfg,
             )
@@ -307,13 +322,15 @@ async def phase3_score(req: Phase3Request):
 
 
 @router.post("/phase4")
-async def phase4(request: Request, req: Phase4Request):
+async def phase4(request: Request, req: Phase4Request, user: dict = Depends(get_current_user)):
+    store = _user_analysis_store(user)
+
     async def event_generator():
         vm = [{"provider": m.provider, "model": m.model} for m in req.validation_models]
         async for event in stream_phase4(
             analysis_id=req.analysis_id, top_n=req.top_n,
             validation_models=vm, language=req.language,
-            store=_store,
+            store=store,
         ):
             if await request.is_disconnected():
                 break
@@ -329,7 +346,9 @@ class MeetingRequest(BaseModel):
 
 
 @router.post("/phase4/meeting")
-async def phase4_meeting(request: Request, req: MeetingRequest):
+async def phase4_meeting(request: Request, req: MeetingRequest, user: dict = Depends(get_current_user)):
+    store = _user_analysis_store(user)
+
     async def event_generator():
         vm = [{"provider": m.provider, "model": m.model} for m in req.validation_models]
         ra = None
@@ -339,7 +358,7 @@ async def phase4_meeting(request: Request, req: MeetingRequest):
             analysis_id=req.analysis_id,
             validation_models=vm, language=req.language,
             role_assignments=ra,
-            store=_store,
+            store=store,
         ):
             if await request.is_disconnected():
                 break
@@ -348,7 +367,7 @@ async def phase4_meeting(request: Request, req: MeetingRequest):
 
 
 @router.get("/phase/{analysis_id}/{phase_num}")
-async def get_phase_data(analysis_id: str, phase_num: int):
+async def get_phase_data(analysis_id: str, phase_num: int, user: dict = Depends(get_current_user)):
     """获取已缓存的 Phase 结果。"""
     data = phase_cache.get_phase(analysis_id, phase_num)
     if data is None:
@@ -358,7 +377,7 @@ async def get_phase_data(analysis_id: str, phase_num: int):
 
 
 @router.get("/hot-sectors")
-async def hot_sectors():
+async def hot_sectors(user: dict = Depends(get_current_user)):
     import asyncio
     from bottleneck_hunter.chain.hot_sector import HotSectorDetector
 
@@ -397,7 +416,7 @@ async def hot_sectors():
 
 
 @router.get("/hot-recommendations")
-async def hot_recommendations():
+async def hot_recommendations(user: dict = Depends(get_current_user)):
     """返回 top 5 推荐赛道（产业方向 + 终端产品），基于实时热门板块数据。"""
     import asyncio
     from bottleneck_hunter.chain.hot_sector import HotSectorDetector
@@ -429,7 +448,7 @@ class HotScanRequest(BaseModel):
 
 
 @router.post("/hot-scan")
-async def hot_scan(req: HotScanRequest):
+async def hot_scan(req: HotScanRequest, user: dict = Depends(get_current_user)):
     """LLM 智能热点赛道推荐 — 可靠替代纯 AKShare 方案。"""
     from bottleneck_hunter.chain.hot_sector import llm_recommend_hot_sectors
 
@@ -438,7 +457,7 @@ async def hot_scan(req: HotScanRequest):
 
 
 @router.get("/report")
-async def download_report(path: str):
+async def download_report(path: str, user: dict = Depends(get_current_user)):
     """Download a generated report file."""
     report_path = Path(path)
     if not report_path.exists() or not report_path.suffix == ".md":
@@ -455,15 +474,17 @@ async def download_report(path: str):
 
 
 @router.get("/history")
-async def list_history():
+async def list_history(user: dict = Depends(get_current_user)):
     """返回所有历史分析摘要（按时间倒序）。"""
-    return {"analyses": _store.list_all()}
+    store = _user_analysis_store(user)
+    return {"analyses": store.list_all()}
 
 
 @router.get("/history/{analysis_id}")
-async def get_history(analysis_id: str):
+async def get_history(analysis_id: str, user: dict = Depends(get_current_user)):
     """返回完整分析结果（含 result_json）。"""
-    record = _store.get(analysis_id)
+    store = _user_analysis_store(user)
+    record = store.get(analysis_id)
     if not record:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Analysis not found")
@@ -471,9 +492,10 @@ async def get_history(analysis_id: str):
 
 
 @router.delete("/history/{analysis_id}")
-async def delete_history(analysis_id: str):
+async def delete_history(analysis_id: str, user: dict = Depends(get_current_user)):
     """删除一条历史分析记录。"""
-    deleted = _store.delete(analysis_id)
+    store = _user_analysis_store(user)
+    deleted = store.delete(analysis_id)
     if not deleted:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Analysis not found")
@@ -481,22 +503,24 @@ async def delete_history(analysis_id: str):
 
 
 @router.patch("/history/{analysis_id}/phase-status")
-async def update_phase_status(analysis_id: str, body: dict):
+async def update_phase_status(analysis_id: str, body: dict, user: dict = Depends(get_current_user)):
     """更新信号灯状态。"""
+    store = _user_analysis_store(user)
     ps = body.get("phase_status", {})
-    if _store:
-        _store.update_phase_status(analysis_id, ps)
+    if store:
+        store.update_phase_status(analysis_id, ps)
     return {"ok": True}
 
 
 @router.post("/history/{analysis_id}/restore")
-async def restore_history(analysis_id: str):
+async def restore_history(analysis_id: str, user: dict = Depends(get_current_user)):
     """从历史记录恢复数据到 phase_cache，返回完整数据供前端渲染。"""
     from fastapi import HTTPException
     from fastapi.responses import JSONResponse
     import math
 
-    record = _store.get(analysis_id)
+    store = _user_analysis_store(user)
+    record = store.get(analysis_id)
     if not record:
         raise HTTPException(status_code=404, detail="Analysis not found")
 
@@ -515,6 +539,9 @@ async def restore_history(analysis_id: str):
         "max_depth": record.get("max_depth", 4),
         "top_n": record.get("top_n", 5),
         "max_market_cap_yi": record.get("max_market_cap_yi"),
+        "completed_phases": record.get("completed_phases", 0),
+        "created_at": record.get("created_at", ""),
+        "run_count": record.get("run_count", 0),
         "_phase_status": result.get("_phase_status", {}),
         "phases": {},
     }
@@ -612,9 +639,10 @@ class UpdateCvRequest(BaseModel):
 
 
 @router.patch("/history/{analysis_id}/cross-validation")
-async def update_cross_validation(analysis_id: str, req: UpdateCvRequest):
+async def update_cross_validation(analysis_id: str, req: UpdateCvRequest, user: dict = Depends(get_current_user)):
     """更新指定分析记录的交叉验证结果。"""
-    updated = _store.update_cross_validations(analysis_id, req.cross_validations)
+    store = _user_analysis_store(user)
+    updated = store.update_cross_validations(analysis_id, req.cross_validations)
     if not updated:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Analysis not found")
@@ -627,9 +655,10 @@ class UpdateSuppliersRequest(BaseModel):
 
 
 @router.patch("/history/{analysis_id}/suppliers")
-async def update_suppliers(analysis_id: str, req: UpdateSuppliersRequest):
+async def update_suppliers(analysis_id: str, req: UpdateSuppliersRequest, user: dict = Depends(get_current_user)):
     """更新指定分析记录的供应商评估和交叉验证结果。"""
-    updated = _store.update_suppliers(
+    store = _user_analysis_store(user)
+    updated = store.update_suppliers(
         analysis_id, req.supplier_scorecards, req.cross_validations
     )
     if not updated:
@@ -651,24 +680,24 @@ class AiReportRequest(BaseModel):
 
 
 @router.get("/ai-report/{analysis_id}")
-async def get_ai_reports(analysis_id: str):
+async def get_ai_reports(analysis_id: str, user: dict = Depends(get_current_user)):
     """读取已保存的所有 AI 评点。"""
-    if not _store:
-        return {"ai_reports": {}}
-    return {"ai_reports": _store.get_ai_reports(analysis_id)}
+    store = _user_analysis_store(user)
+    return {"ai_reports": store.get_ai_reports(analysis_id)}
 
 
 @router.post("/ai-report")
-async def ai_report(req: AiReportRequest):
+async def ai_report(req: AiReportRequest, user: dict = Depends(get_current_user)):
     """AI 生成横向对比报告或图表解读，返回 SSE 流。生成完毕后自动持久化。"""
     from bottleneck_hunter.chain.models import SupplierScorecard
     from bottleneck_hunter.llm_clients.factory import create_llm
     from langchain_core.messages import SystemMessage, HumanMessage
 
+    _user_store = _user_analysis_store(user)
     p2 = phase_cache.get_phase(req.analysis_id, 2)
     _db_record = None
-    if (not p2 or not p2.get("scorecards")) and _store:
-        _db_record = _store.get(req.analysis_id)
+    if (not p2 or not p2.get("scorecards")) and _user_store:
+        _db_record = _user_store.get(req.analysis_id)
         if _db_record and _db_record.get("result_json", {}).get("supplier_scorecards"):
             p2 = {
                 "scorecards": _db_record["result_json"]["supplier_scorecards"],
@@ -682,17 +711,17 @@ async def ai_report(req: AiReportRequest):
 
     report_key = req.chart_type if req.report_type == "chart_interp" else "comparison"
     p3 = phase_cache.get_phase(req.analysis_id, 3)
-    if not p3 and _store:
+    if not p3 and _user_store:
         if not _db_record:
-            _db_record = _store.get(req.analysis_id)
+            _db_record = _user_store.get(req.analysis_id)
         if _db_record:
             scoring_config = _db_record.get("result_json", {}).get("scoring_config", {"quality_weight": 0.5, "alpha_weight": 0.5})
             p3 = {"scoring_config": scoring_config}
             phase_cache.set_phase(req.analysis_id, 3, p3)
     current_scoring = (p3 or {}).get("scoring_config", {"quality_weight": 0.5, "alpha_weight": 0.5})
 
-    if not req.force and _store:
-        cached = _store.get_ai_reports(req.analysis_id).get(report_key)
+    if not req.force and _user_store:
+        cached = _user_store.get_ai_reports(req.analysis_id).get(report_key)
         if cached and cached.get("scoring_config") == current_scoring:
             async def cached_generator():
                 text = cached["text"]
@@ -708,8 +737,8 @@ async def ai_report(req: AiReportRequest):
 
     # ── 获取产业链上下文 ──
     sector_ctx = ""
-    if _store:
-        record = _store.get(req.analysis_id)
+    if _user_store:
+        record = _user_store.get(req.analysis_id)
         if record:
             s = record.get("sector", "")
             ep = record.get("end_product", "")
@@ -966,9 +995,9 @@ analysis='''请结合方法论背景和数据，对堆叠图进行系统解读�
                 "generated_at": gen_at,
             }, ensure_ascii=False)}
 
-            if _store:
+            if _user_store:
                 try:
-                    _store.update_ai_report(
+                    _user_store.update_ai_report(
                         _aid, report_key, full_text.strip(), _sc,
                         model=_model, provider=_provider, generated_at=gen_at,
                     )
@@ -994,34 +1023,66 @@ def _mask_value(val: str | None, is_url: bool = False) -> str:
     return "***" + val[-4:]
 
 
-def _build_providers_response() -> list[dict]:
+def _build_providers_response(user_id: str = "") -> list[dict]:
+    """构建 providers 列表，合并全局 KEY + 用户 KEY 状态。"""
     env_vals = dotenv_values(ENV_PATH) if ENV_PATH.exists() else {}
+
+    # 获取用户已配置的 KEY hint
+    user_keys: dict[str, str] = {}
+    if user_id:
+        try:
+            from bottleneck_hunter.web.user_api import _store as _user_auth_store
+            store = _user_auth_store()
+            for k in store.get_user_api_keys(user_id):
+                user_keys[k["provider"]] = k["key_hint"]
+        except Exception:
+            pass
+
     result = []
     for p in PROVIDER_REGISTRY:
         env_var = p["env_var"]
         is_url = p.get("is_url", False)
         raw = os.environ.get(env_var, "") or env_vals.get(env_var, "")
+        has_global = bool(raw)
+        has_user = p["id"] in user_keys
+
+        # 优先显示用户 KEY 状态
+        if has_user:
+            masked = user_keys[p["id"]]
+            configured = True
+            source = "user"
+        elif has_global:
+            masked = _mask_value(raw, is_url)
+            configured = True
+            source = "global"
+        else:
+            masked = ""
+            configured = False
+            source = ""
+
         result.append({
             "id": p["id"],
             "name": p["name"],
             "env_var": env_var,
             "is_url": is_url,
-            "configured": bool(raw),
-            "masked": _mask_value(raw, is_url),
+            "configured": configured,
+            "masked": masked,
+            "source": source,          # "user" | "global" | ""
+            "has_global": has_global,  # 是否有全局 fallback
         })
     return result
 
 
 @router.get("/stock/{ticker}/kline")
-async def stock_kline(ticker: str, market: str = "us_stock"):
+async def stock_kline(ticker: str, market: str = "us_stock", user: dict = Depends(get_current_user)):
     from bottleneck_hunter.chain.financial_data import fetch_kline
     data = await fetch_kline(ticker, market)
     return data
 
 
 @router.get("/settings")
-async def get_settings():
-    return {"providers": _build_providers_response()}
+async def get_settings(user: dict = Depends(get_current_user)):
+    return {"providers": _build_providers_response(user.get("sub", ""))}
 
 
 class SaveSettingsRequest(BaseModel):
@@ -1029,10 +1090,20 @@ class SaveSettingsRequest(BaseModel):
 
 
 @router.post("/settings")
-async def save_settings(req: SaveSettingsRequest):
+async def save_settings(req: SaveSettingsRequest, user: dict = Depends(get_current_user)):
+    """保存 API KEY。
+
+    所有用户的 KEY 都保存到用户级加密存储。
+    admin 额外写入 .env 作为全局 fallback。
+    """
+    from bottleneck_hunter.auth.crypto import encrypt, make_hint
+    from bottleneck_hunter.llm_clients.factory import PROVIDER_KEY_MAP
+
     allowed_vars = {p["env_var"] for p in PROVIDER_REGISTRY}
-    if not ENV_PATH.exists():
-        ENV_PATH.write_text("", encoding="utf-8")
+    # env_var → provider id 反查
+    env_to_provider = {p["env_var"]: p["id"] for p in PROVIDER_REGISTRY}
+    user_id = user.get("sub", "")
+    is_admin = user.get("role") == "admin"
 
     for key, value in req.settings.items():
         if key not in allowed_vars:
@@ -1040,10 +1111,27 @@ async def save_settings(req: SaveSettingsRequest):
         value = value.strip()
         if not value:
             continue
-        set_key(str(ENV_PATH), key, value)
-        os.environ[key] = value
 
-    return {"ok": True, "providers": _build_providers_response()}
+        provider_id = env_to_provider.get(key, "")
+        if provider_id and user_id:
+            # 保存到用户级加密存储
+            try:
+                from bottleneck_hunter.web.user_api import _store as _get_auth
+                store = _get_auth()
+                encrypted = encrypt(value)
+                hint = make_hint(value)
+                store.save_user_api_key(user_id, provider_id, encrypted, hint)
+            except Exception as e:
+                logger.warning(f"保存用户 KEY 失败 ({provider_id}): {e}")
+
+        # admin 同时写入 .env 作为全局 fallback
+        if is_admin:
+            if not ENV_PATH.exists():
+                ENV_PATH.write_text("", encoding="utf-8")
+            set_key(str(ENV_PATH), key, value)
+            os.environ[key] = value
+
+    return {"ok": True, "providers": _build_providers_response(user_id)}
 
 
 # ── 测试 Provider 连通性 ────────────────────────────────
@@ -1063,27 +1151,41 @@ DEFAULT_TEST_MODELS = {
 
 
 @router.post("/test-providers")
-async def test_providers():
+async def test_providers(user: dict = Depends(get_current_user)):
     """测试所有已配置 Key 的 Provider 能否正常调用 LLM。"""
     from langchain_core.messages import HumanMessage
     from bottleneck_hunter.llm_clients.factory import create_llm
+
+    user_id = user.get("sub", "")
 
     configured = []
     for p in PROVIDER_REGISTRY:
         env_var = p["env_var"]
         is_url = p.get("is_url", False)
-        raw = os.environ.get(env_var, "").strip()
-        if not raw:
+        # 检查是否有 KEY（用户级优先，全局 fallback）
+        user_key = None
+        if user_id:
+            try:
+                from bottleneck_hunter.web.user_api import resolve_user_api_key
+                user_key = resolve_user_api_key(user_id, p["id"])
+            except Exception:
+                pass
+        global_key = os.environ.get(env_var, "").strip()
+
+        if not user_key and not global_key:
             continue
         model = DEFAULT_TEST_MODELS.get(p["id"], "")
         if not model:
             continue
-        configured.append({"id": p["id"], "name": p["name"], "model": model, "is_url": is_url})
+        configured.append({
+            "id": p["id"], "name": p["name"], "model": model,
+            "is_url": is_url, "api_key": user_key,
+        })
 
     async def _test_one(info: dict) -> dict:
         pid = info["id"]
         try:
-            llm = create_llm(pid, info["model"])
+            llm = create_llm(pid, info["model"], api_key=info.get("api_key"))
             await asyncio.wait_for(
                 llm.ainvoke([HumanMessage(content="hi")]),
                 timeout=60,
@@ -1131,7 +1233,7 @@ class PreflightRequest(BaseModel):
 
 
 @router.post("/meeting/preflight")
-async def meeting_preflight(req: PreflightRequest):
+async def meeting_preflight(req: PreflightRequest, user: dict = Depends(get_current_user)):
     """会前连通性预检：并行测试所有指定模型。"""
     seen = set()
     tasks = []
@@ -1146,7 +1248,7 @@ async def meeting_preflight(req: PreflightRequest):
 
 
 @router.post("/validate-models")
-async def validate_models(req: ValidateModelsRequest):
+async def validate_models(req: ValidateModelsRequest, user: dict = Depends(get_current_user)):
     """验证指定的主模型、交叉验证模型和财务数据接口是否可用。"""
 
     async def _test_financial_api(market: str) -> dict:

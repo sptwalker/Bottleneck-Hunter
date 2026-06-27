@@ -115,6 +115,7 @@ async def stream_roundtable(
             if store:
                 try:
                     store.update_meeting_result(analysis_id, result.model_dump())
+                    await queue.put(_sse("meeting_saved", completed_phases=4))
                 except Exception:
                     logger.exception("会议结果保存失败")
         except asyncio.TimeoutError:

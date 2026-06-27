@@ -710,25 +710,26 @@ def _parse_strategy_response(response: str) -> dict:
     return sections
 
 
-def _compute_strategy_diff(new_sections: dict, previous_strategy: dict) -> dict:
+def _compute_strategy_diff(new_sections: dict, previous_strategy: dict | None) -> dict:
     """对比新旧策略，生成变化日志"""
     changes = []
+    prev = previous_strategy or {}
 
     # 信号变化
     new_signal = new_sections.get("signal", "neutral")
-    old_signal = previous_strategy.get("signal", "neutral")
+    old_signal = prev.get("signal", "neutral")
     if new_signal != old_signal:
         changes.append(f"信号变化：{old_signal} → {new_signal}")
 
     # 信心变化
     new_conf = new_sections.get("confidence", 5)
-    old_conf = previous_strategy.get("confidence", 5)
+    old_conf = prev.get("confidence", 5)
     if abs(new_conf - old_conf) >= 2:
         changes.append(f"信心显著变化：{old_conf}/10 → {new_conf}/10")
 
     # 核心逻辑变化
     new_logic = new_sections.get("core_logic", "")
-    old_logic = previous_strategy.get("core_logic", "")
+    old_logic = prev.get("core_logic", "")
     if new_logic and old_logic and new_logic != old_logic:
         changes.append("核心逻辑已更新")
 
