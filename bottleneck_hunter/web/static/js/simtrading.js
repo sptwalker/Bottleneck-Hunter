@@ -91,6 +91,15 @@ function switchTab(tab) {
   }
 }
 
+/** 进入模拟交易视图时确保当前标签页已加载（修复首次切入空白问题） */
+export function ensureSimTradingLoaded() {
+  const tab = stState.activeTab || 'account';
+  if (!stState.tabLoaded[tab]) {
+    stState.tabLoaded[tab] = true;
+    loadTabData(tab);
+  }
+}
+
 function loadTabData(tab) {
   switch (tab) {
     case 'account': loadAccountData(); break;

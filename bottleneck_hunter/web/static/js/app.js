@@ -7,7 +7,7 @@ import { initSettings } from './settings.js';
 import { initWizard } from './phases.js';
 import { initWatchlist } from './watchlist.js';
 import { initDecision } from './decision.js';
-import { initSimTrading } from './simtrading.js';
+import { initSimTrading, ensureSimTradingLoaded } from './simtrading.js';
 import { initAIConfig } from './ai-config.js';
 import { initAdmin } from './admin.js';
 
@@ -33,9 +33,12 @@ export function showView(viewName) {
   document.body.classList.toggle('wizard-active', viewName === 'screen');
   window.appState.view = viewName === 'screen' ? 'wizard' : viewName;
 
-  if (viewName === 'simtrading' && window.appState.tradingDirty) {
-    window.appState.tradingDirty = false;
-    window.dispatchEvent(new CustomEvent('st-refresh'));
+  if (viewName === 'simtrading') {
+    ensureSimTradingLoaded();
+    if (window.appState.tradingDirty) {
+      window.appState.tradingDirty = false;
+      window.dispatchEvent(new CustomEvent('st-refresh'));
+    }
   }
 }
 
