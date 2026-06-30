@@ -920,41 +920,6 @@ async def get_risk_dashboard(market: str = "us_stock", user: dict = Depends(get_
 # 17F.4 A/B 对比
 # ─────────────────────────────────────────────────────────
 
-class SnapshotRequest(BaseModel):
-    label: str = ""
-
-
-@router.post("/compare/snapshot")
-async def create_snapshot(req: SnapshotRequest, user: dict = Depends(get_current_user)):
-    """保存当前配置参数快照"""
-    from bottleneck_hunter.watchlist.ab_compare import ABCompare
-    store = _user_store(user)
-    ab = ABCompare(store)
-    params = ab.get_current_params()
-    label = req.label or f"快照 {len(ab.list_snapshots()) + 1}"
-    snapshot_id = ab.snapshot_params(label, params)
-    return {"snapshot_id": snapshot_id, "label": label, "params_count": len(params)}
-
-
-@router.get("/compare/snapshots")
-async def list_snapshots(user: dict = Depends(get_current_user)):
-    """列出所有参数快照"""
-    from bottleneck_hunter.watchlist.ab_compare import ABCompare
-    store = _user_store(user)
-    ab = ABCompare(store)
-    return {"snapshots": ab.list_snapshots()}
-
-
-@router.get("/compare/{id_a}/{id_b}")
-async def compare_snapshots(id_a: str, id_b: str, user: dict = Depends(get_current_user)):
-    """对比两个参数快照的差异"""
-    from bottleneck_hunter.watchlist.ab_compare import ABCompare
-    store = _user_store(user)
-    ab = ABCompare(store)
-    result = ab.compare(id_a, id_b)
-    if "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
-    return result
 
 
 # ─────────────────────────────────────────────────────────
