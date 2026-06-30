@@ -1839,13 +1839,25 @@ function renderMeetingDetail(data, container) {
     if (agreements.length > 0) {
       html += `<div class="dc-mtg-list dc-mtg-agree">
         <div class="dc-mtg-list-title">共识</div>
-        ${agreements.map(a => `<div class="dc-mtg-list-item">${escDC(typeof a === 'string' ? a : JSON.stringify(a))}</div>`).join('')}
+        ${agreements.map(a => {
+          if (typeof a === 'string') return `<div class="dc-mtg-list-item">${escDC(a)}</div>`;
+          // 对象格式：提取关键字段
+          const text = a.opinion || a.point || a.content || JSON.stringify(a);
+          return `<div class="dc-mtg-list-item">${escDC(text)}</div>`;
+        }).join('')}
       </div>`;
     }
     if (disagreements.length > 0) {
       html += `<div class="dc-mtg-list dc-mtg-disagree">
         <div class="dc-mtg-list-title">分歧</div>
-        ${disagreements.map(d => `<div class="dc-mtg-list-item">${escDC(typeof d === 'string' ? d : JSON.stringify(d))}</div>`).join('')}
+        ${disagreements.map(d => {
+          if (typeof d === 'string') return `<div class="dc-mtg-list-item">${escDC(d)}</div>`;
+          // 对象格式：member + opinion + recommendation
+          const member = d.member ? `<strong>${escDC(d.member)}:</strong> ` : '';
+          const opinion = escDC(d.opinion || d.point || '');
+          const rec = d.recommendation ? `<div style="margin-top:4px;color:var(--muted);font-size:12px">💡 ${escDC(d.recommendation)}</div>` : '';
+          return `<div class="dc-mtg-list-item">${member}${opinion}${rec}</div>`;
+        }).join('')}
       </div>`;
     }
     html += `</div>`;
@@ -1856,7 +1868,12 @@ function renderMeetingDetail(data, container) {
     html += `<div class="drawer-section">
       <h4>风险警示</h4>
       <div class="dc-mtg-list dc-mtg-risks">
-        ${risks.map(r => `<div class="dc-mtg-list-item dc-mtg-risk-item">${escDC(typeof r === 'string' ? r : JSON.stringify(r))}</div>`).join('')}
+        ${risks.map(r => {
+          if (typeof r === 'string') return `<div class="dc-mtg-list-item dc-mtg-risk-item">${escDC(r)}</div>`;
+          // 对象格式：提取关键字段
+          const text = r.warning || r.risk || r.content || r.description || JSON.stringify(r);
+          return `<div class="dc-mtg-list-item dc-mtg-risk-item">${escDC(text)}</div>`;
+        }).join('')}
       </div>
     </div>`;
   }
