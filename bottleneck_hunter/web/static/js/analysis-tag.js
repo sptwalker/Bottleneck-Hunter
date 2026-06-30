@@ -62,14 +62,14 @@ function _oklchBgLight(hue) {
 /* ── 安全转义 ────────────────────────────────── */
 function _esc(s) {
   if (!s) return '';
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 /* ── 阶段圆点 ────────────────────────────────── */
 function _phaseDots(completed) {
   const n = completed || 0;
-  return [0, 1, 2, 3].map(i =>
-    `<span class="at-dot${i < n ? ' done' : ''}" title="${['瓶颈','筛选','验证','会议'][i]}"></span>`
+  return [0, 1, 2, 3, 4].map(i =>
+    `<span class="at-dot${i < n ? ' done' : ''}" title="${['瓶颈','筛选','评分','验证','会议'][i]}"></span>`
   ).join('');
 }
 
@@ -95,7 +95,7 @@ function _buildTooltip(data) {
     parts.push(`模型: ${modelStr}`);
   }
   const cp = data.completed_phases || 0;
-  parts.push(`进度: ${cp}/4 阶段`);
+  parts.push(`进度: ${cp}/5 阶段`);
   const rc = data.run_count || data.analysis_count;
   if (rc) parts.push(`累计分析: ${String(rc).padStart(3, '0')}`);
   if (data.bottleneck_count) parts.push(`瓶颈: ${data.bottleneck_count}`);

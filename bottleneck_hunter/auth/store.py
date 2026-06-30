@@ -70,6 +70,18 @@ class AuthStore:
                     updated_at TEXT,
                     UNIQUE(user_id, provider)
                 );
+                CREATE TABLE IF NOT EXISTS custom_providers (
+                    id TEXT PRIMARY KEY,
+                    provider_id TEXT UNIQUE NOT NULL,
+                    display_name TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    api_key_encrypted TEXT DEFAULT '',
+                    api_key_hint TEXT DEFAULT '',
+                    default_model TEXT NOT NULL,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
             """)
 
     # ── 系统配置 ──────────────────────────────────────────
@@ -152,7 +164,7 @@ class AuthStore:
             conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now, user_id))
 
     def change_password(self, user_id: str, new_password: str):
-        pw_hash = bcrypt.hash(new_password)
+        pw_hash = _bcrypt.hashpw(new_password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
         with self._conn() as conn:
             conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (pw_hash, user_id))
 
@@ -180,11 +192,13 @@ class AuthStore:
     # ── 默认管理员 ────────────────────────────────────────
 
     def ensure_default_admin(self) -> Optional[UserInDB]:
-        """如果无用户，创建 admin/admin 并返回。否则返回 None。"""
+        """如果无用户，创建 admin 并生成随机密码（仅终端打印一次）。"""
         if self.count_users() > 0:
             return None
-        admin = self.create_user("admin", "admin", role="admin", display_name="管理员")
-        logger.warning("⚠️  已创建默认管理员 admin/admin — 请尽快修改密码！")
+        import secrets as _secrets
+        default_pw = _secrets.token_urlsafe(12)
+        admin = self.create_user("admin", default_pw, role="admin", display_name="管理员")
+        logger.critical("⚠️  已创建默认管理员 admin，临时密码: %s（仅显示一次，请尽快修改）", default_pw)
         return admin
 
     # ── 邀请码 ────────────────────────────────────────────
@@ -308,3 +322,64 @@ class AuthStore:
         with self._conn() as conn:
             cur = conn.execute("DELETE FROM user_api_keys WHERE user_id = ?", (user_id,))
             return cur.rowcount
+
+    # ── 自定义 Provider ───────────────────────────────────
+
+    def save_custom_provider(
+        self, provider_id: str, display_name: str, base_url: str,
+        encrypted_key: str, key_hint: str, default_model: str,
+    ) -> str:
+        """保存或更新自定义 OpenAI 兼容 provider。返回 record id。"""
+        now = datetime.utcnow().isoformat()
+        record_id = uuid.uuid4().hex[:16]
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM custom_providers WHERE provider_id = ?",
+                (provider_id,),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE custom_providers SET display_name = ?, base_url = ?, "
+                    "api_key_encrypted = ?, api_key_hint = ?, default_model = ?, "
+                    "updated_at = ? WHERE provider_id = ?",
+                    (display_name, base_url, encrypted_key, key_hint,
+                     default_model, now, provider_id),
+                )
+                return existing["id"]
+            else:
+                conn.execute(
+                    "INSERT INTO custom_providers (id, provider_id, display_name, base_url, "
+                    "api_key_encrypted, api_key_hint, default_model, is_active, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                    (record_id, provider_id, display_name, base_url,
+                     encrypted_key, key_hint, default_model, now, now),
+                )
+                return record_id
+
+    def list_custom_providers(self) -> list[dict]:
+        """返回所有自定义 provider（不含明文 key）。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, provider_id, display_name, base_url, api_key_hint, "
+                "default_model, is_active, created_at, updated_at "
+                "FROM custom_providers ORDER BY created_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_custom_provider(self, provider_id: str) -> dict | None:
+        """返回指定自定义 provider（含 encrypted_key，用于 factory 注册）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM custom_providers WHERE provider_id = ?",
+                (provider_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def delete_custom_provider(self, provider_id: str) -> bool:
+        """删除自定义 provider。返回是否有删除。"""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM custom_providers WHERE provider_id = ?",
+                (provider_id,),
+            )
+            return cur.rowcount > 0

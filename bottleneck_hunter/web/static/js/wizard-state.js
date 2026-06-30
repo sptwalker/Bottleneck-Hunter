@@ -83,6 +83,14 @@ export function getMainModel() {
 
 /* ── Markdown 格式化 ─────────────────────── */
 export function formatMarkdown(text) {
+  if (!text) return '';
+  if (typeof marked !== 'undefined' && marked.parse) {
+    try {
+      return marked.parse(text, { breaks: true, gfm: true });
+    } catch (e) {
+      console.warn('marked.parse failed, fallback', e);
+    }
+  }
   return text
     .replace(/^### (.+)$/gm, '<h4>$1</h4>')
     .replace(/^## (.+)$/gm, '<h3>$1</h3>')

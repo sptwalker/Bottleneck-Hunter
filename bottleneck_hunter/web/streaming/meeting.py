@@ -31,20 +31,32 @@ async def stream_roundtable(
     p2 = phase_cache.get_phase(analysis_id, 2)
     p4 = phase_cache.get_phase(analysis_id, 4)
     _db_record = None
-    if not p2 and store:
+    if (not p1 or not p2 or not p4) and store:
         _db_record = store.get(analysis_id)
-        if _db_record and _db_record.get("result_json", {}).get("supplier_scorecards"):
+    if not p1 and _db_record:
+        rj = _db_record.get("result_json", {})
+        if rj.get("chain"):
+            p1 = {
+                "chain": rj["chain"],
+                "top_reports": rj.get("bottleneck_reports", []),
+                "config": {"market": _db_record.get("market", "us_stock"),
+                           "sector": rj.get("sector", ""),
+                           "end_product": rj.get("chain", {}).get("end_product", "")},
+            }
+            phase_cache.set_phase(analysis_id, 1, p1)
+    if not p2 and _db_record:
+        rj = _db_record.get("result_json", {})
+        if rj.get("supplier_scorecards"):
             p2 = {
-                "scorecards": _db_record["result_json"]["supplier_scorecards"],
+                "scorecards": rj["supplier_scorecards"],
                 "config": {"market": _db_record.get("market", "us_stock")},
             }
             phase_cache.set_phase(analysis_id, 2, p2)
-    if not p4 and store:
-        if not _db_record:
-            _db_record = store.get(analysis_id)
-        if _db_record and _db_record.get("result_json", {}).get("cross_validations"):
+    if not p4 and _db_record:
+        rj = _db_record.get("result_json", {})
+        if rj.get("cross_validations"):
             p4 = {
-                "cross_validations": _db_record["result_json"]["cross_validations"],
+                "validations": rj["cross_validations"],
             }
             phase_cache.set_phase(analysis_id, 4, p4)
     if not p2:
@@ -68,7 +80,7 @@ async def stream_roundtable(
     scorecards = scorecards[:10]
 
     chain_data = p1.get("chain") if p1 else None
-    bottleneck_reports = p1.get("top_reports") or (p1.get("all_reports") if p1 else None)
+    bottleneck_reports = (p1.get("top_reports") or p1.get("all_reports")) if p1 else None
     analysis_config = p1.get("config") if p1 else None
     market = analysis_config.get("market", "a_stock") if analysis_config else "a_stock"
 
@@ -115,7 +127,7 @@ async def stream_roundtable(
             if store:
                 try:
                     store.update_meeting_result(analysis_id, result.model_dump())
-                    await queue.put(_sse("meeting_saved", completed_phases=4))
+                    await queue.put(_sse("meeting_saved", completed_phases=5))
                 except Exception:
                     logger.exception("会议结果保存失败")
         except asyncio.TimeoutError:

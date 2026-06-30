@@ -53,10 +53,10 @@ async def list_api_keys(user: dict = Depends(get_current_user)):
 async def save_api_key(req: SaveApiKeyRequest, user: dict = Depends(get_current_user)):
     """保存或更新某 provider 的 API KEY（加密存储）。"""
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
-    from bottleneck_hunter.llm_clients.factory import PROVIDER_KEY_MAP
+    from bottleneck_hunter.llm_clients.factory import PROVIDER_KEY_MAP, get_custom_provider
 
     provider = req.provider.lower().strip()
-    if provider not in PROVIDER_KEY_MAP:
+    if provider not in PROVIDER_KEY_MAP and not get_custom_provider(provider):
         raise HTTPException(status_code=400, detail=f"不支持的 provider: {provider}")
 
     encrypted = encrypt(req.api_key)
@@ -88,10 +88,10 @@ async def test_api_key(req: TestApiKeyRequest, user: dict = Depends(get_current_
     """
     import asyncio
     from langchain_core.messages import HumanMessage
-    from bottleneck_hunter.llm_clients.factory import create_llm, PROVIDER_KEY_MAP
+    from bottleneck_hunter.llm_clients.factory import create_llm, PROVIDER_KEY_MAP, get_custom_provider
 
     provider = req.provider.lower().strip()
-    if provider not in PROVIDER_KEY_MAP:
+    if provider not in PROVIDER_KEY_MAP and not get_custom_provider(provider):
         raise HTTPException(status_code=400, detail=f"不支持的 provider: {provider}")
 
     # 确定要测试的 KEY

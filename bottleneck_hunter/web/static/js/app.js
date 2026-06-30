@@ -7,6 +7,8 @@ import { initSettings } from './settings.js';
 import { initWizard } from './phases.js';
 import { initWatchlist } from './watchlist.js';
 import { initDecision } from './decision.js';
+import { initSimTrading } from './simtrading.js';
+import { initAIConfig } from './ai-config.js';
 import { initAdmin } from './admin.js';
 
 /* ── Global state ────────────────────────────────────── */
@@ -30,6 +32,11 @@ export function showView(viewName) {
 
   document.body.classList.toggle('wizard-active', viewName === 'screen');
   window.appState.view = viewName === 'screen' ? 'wizard' : viewName;
+
+  if (viewName === 'simtrading' && window.appState.tradingDirty) {
+    window.appState.tradingDirty = false;
+    window.dispatchEvent(new CustomEvent('st-refresh'));
+  }
 }
 
 /* ── Auth ───────────────────────────────────────────── */
@@ -68,6 +75,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initWizard();
   initWatchlist();
   initDecision();
+  initSimTrading();
+  initAIConfig();
 
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {

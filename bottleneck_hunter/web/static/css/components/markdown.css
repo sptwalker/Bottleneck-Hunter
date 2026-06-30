@@ -1,0 +1,127 @@
+/* ── Markdown 渲染体样式 ─────────────────────── */
+
+.md-body {
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+  color: var(--ink);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child  { margin-bottom: 0; }
+
+/* 标题 */
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  margin: 1.2em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+}
+.md-body h1 { font-size: 1.3em; }
+.md-body h2 { font-size: 1.15em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+.md-body h3 { font-size: 1.05em; }
+.md-body h4 { font-size: 1em; color: var(--muted); }
+
+/* 段落 */
+.md-body p { margin: 0.6em 0; }
+
+/* 加粗 / 斜体 */
+.md-body strong { font-weight: 600; }
+.md-body em     { font-style: italic; }
+
+/* 列表 */
+.md-body ul,
+.md-body ol {
+  margin: 0.5em 0;
+  padding-left: 1.6em;
+}
+.md-body li {
+  margin: 0.25em 0;
+}
+.md-body li > p { margin: 0.2em 0; }
+
+/* 表格 */
+.md-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.8em 0;
+  font-size: var(--fs-xs);
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.md-body th {
+  background: var(--panel-bg);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.md-body tr:nth-child(even) {
+  background: oklch(0.98 0.003 250);
+}
+
+/* 代码 */
+.md-body code {
+  background: var(--panel-bg);
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+  font-size: 0.9em;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+}
+.md-body pre {
+  background: oklch(0.18 0.01 250);
+  color: oklch(0.9 0.005 250);
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  margin: 0.8em 0;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+.md-body pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* 引用 */
+.md-body blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 0.8em 0;
+  padding: 0.4em 0 0.4em 1em;
+  color: var(--muted);
+}
+.md-body blockquote p { margin: 0.3em 0; }
+
+/* 水平线 */
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+
+/* 链接 */
+.md-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.md-body a:hover { text-decoration: underline; }
+
+/* 圆桌会议气泡内的 markdown — 紧凑间距 */
+.meeting-msg.md-body h2,
+.meeting-msg.md-body h3 {
+  font-size: 1em;
+  margin: 0.8em 0 0.3em;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.meeting-msg.md-body p { margin: 0.3em 0; }
+.meeting-msg.md-body ul,
+.meeting-msg.md-body ol { margin: 0.3em 0; }

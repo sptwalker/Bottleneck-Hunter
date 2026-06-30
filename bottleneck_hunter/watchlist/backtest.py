@@ -90,10 +90,11 @@ class BacktestEngine:
         return result
 
     def _build_equity_curve(self, trades: list[dict]) -> list[dict]:
-        """从交易记录构建日级净值曲线。"""
+        """从交易记录构建日级净值曲线（含滑点和佣金）。"""
         cash = self._initial_capital
         positions: dict[str, dict] = {}
         curve = []
+        commission_rate = 0.001
 
         date_groups: dict[str, list[dict]] = {}
         for t in trades:
@@ -106,10 +107,14 @@ class BacktestEngine:
                 ticker = t.get("ticker", "")
                 shares = t.get("shares", 0)
                 price = t.get("price", 0)
-                amount = t.get("amount", 0)
+
+                # sim_trades 中的 price 已包含滑点调整（exec_price），
+                # 不再重复计算 calc_slippage，直接使用记录价格
+                amount = round(shares * price, 2)
+                commission = round(amount * commission_rate, 2)
 
                 if side == "buy":
-                    cash -= amount
+                    cash -= (amount + commission)
                     if ticker in positions:
                         pos = positions[ticker]
                         old_total = pos["shares"] * pos["avg_cost"]
@@ -119,7 +124,7 @@ class BacktestEngine:
                         positions[ticker] = {"shares": shares, "avg_cost": price}
 
                 elif side == "sell":
-                    cash += amount
+                    cash += (amount - commission)
                     if ticker in positions:
                         positions[ticker]["shares"] -= shares
                         if positions[ticker]["shares"] <= 0:

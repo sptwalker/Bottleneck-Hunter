@@ -44,54 +44,6 @@ class TestSseHelper:
         assert result["data"]["b"] == "two"
 
 
-# ---------------------------------------------------------------------------
-# TestGetLlm
-# ---------------------------------------------------------------------------
-
-
-class TestGetLlm:
-    def test_env_override(self):
-        """DC_MODEL_L4_EXECUTION 环境变量优先。"""
-        mock_llm = MagicMock()
-        with patch.dict("os.environ", {"DC_MODEL_L4_EXECUTION": "deepseek:deepseek-chat"}, clear=False), \
-             patch("bottleneck_hunter.llm_clients.factory.create_llm", return_value=mock_llm):
-            llm, provider, model = tuning_engine._get_llm()
-        assert llm is mock_llm
-        assert provider == "deepseek"
-        assert model == "deepseek-chat"
-
-    def test_fallback_order(self):
-        """无 DC_MODEL_L4_EXECUTION 时按优先级尝试 API key。"""
-        mock_llm = MagicMock()
-        with patch.dict("os.environ", {
-            "DC_MODEL_L4_EXECUTION": "",
-            "DEEPSEEK_API_KEY": "",
-            "DASHSCOPE_API_KEY": "qwen-key-123",
-        }, clear=False), \
-             patch("bottleneck_hunter.llm_clients.factory.create_llm", return_value=mock_llm):
-            llm, provider, model = tuning_engine._get_llm()
-        assert provider == "qwen"
-        assert model == "qwen-plus"
-
-    def test_no_key_returns_none(self):
-        """所有 API key 都不存在时返回 (None, '', '')。"""
-        with patch.dict("os.environ", {
-            "DC_MODEL_L4_EXECUTION": "",
-            "DEEPSEEK_API_KEY": "",
-            "DASHSCOPE_API_KEY": "",
-            "MOONSHOT_API_KEY": "",
-            "ZHIPU_API_KEY": "",
-        }, clear=False):
-            llm, provider, model = tuning_engine._get_llm()
-        assert llm is None
-
-    def test_exception_returns_none(self):
-        """create_llm 抛异常时返回 None。"""
-        with patch.dict("os.environ", {"DC_MODEL_L4_EXECUTION": "bad:model"}, clear=False), \
-             patch("bottleneck_hunter.llm_clients.factory.create_llm", side_effect=Exception("boom")):
-            llm, provider, model = tuning_engine._get_llm()
-        assert llm is None
-
 
 # ---------------------------------------------------------------------------
 # TestGenerateTuningSuggestions
@@ -123,7 +75,7 @@ class TestGenerateTuningSuggestions:
             for i in range(5)
         ]
         with patch.object(store, "get_auto_reviews", return_value=mock_reviews), \
-             patch("bottleneck_hunter.watchlist.tuning_engine._get_llm", return_value=(None, "", "")):
+             patch("bottleneck_hunter.watchlist.tuning_engine.get_llm_for_position", return_value=(None, "", "")):
             events = await _collect(tuning_engine.generate_tuning_suggestions(store))
 
         event_types = [e["event"] for e in events]
@@ -142,7 +94,7 @@ class TestGenerateTuningSuggestions:
         mock_llm = MagicMock()
 
         with patch.object(store, "get_auto_reviews", return_value=mock_reviews), \
-             patch("bottleneck_hunter.watchlist.tuning_engine._get_llm", return_value=(mock_llm, "test", "model")):
+             patch("bottleneck_hunter.watchlist.tuning_engine.get_llm_for_position", return_value=(mock_llm, "test", "model")):
             events = await _collect(tuning_engine.generate_tuning_suggestions(store, budget=mock_budget))
 
         event_types = [e["event"] for e in events]
@@ -179,7 +131,7 @@ class TestGenerateTuningSuggestions:
         prompt_text = "{performance_overview}\n{reviews_summary}\n{common_lessons}"
 
         with patch.object(store, "get_auto_reviews", return_value=mock_reviews), \
-             patch("bottleneck_hunter.watchlist.tuning_engine._get_llm", return_value=(mock_llm, "test", "model")), \
+             patch("bottleneck_hunter.watchlist.tuning_engine.get_llm_for_position", return_value=(mock_llm, "test", "model")), \
              patch("bottleneck_hunter.watchlist.performance_stats.PerformanceCalculator", return_value=mock_calc), \
              patch("bottleneck_hunter.watchlist.tuning_engine.PROMPTS_DIR") as mock_dir, \
              patch("bottleneck_hunter.watchlist.tuning_engine.asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
@@ -211,7 +163,7 @@ class TestGenerateTuningSuggestions:
         prompt_text = "{performance_overview}\n{reviews_summary}\n{common_lessons}"
 
         with patch.object(store, "get_auto_reviews", return_value=mock_reviews), \
-             patch("bottleneck_hunter.watchlist.tuning_engine._get_llm", return_value=(mock_llm, "test", "model")), \
+             patch("bottleneck_hunter.watchlist.tuning_engine.get_llm_for_position", return_value=(mock_llm, "test", "model")), \
              patch("bottleneck_hunter.watchlist.performance_stats.PerformanceCalculator", return_value=mock_calc), \
              patch("bottleneck_hunter.watchlist.tuning_engine.PROMPTS_DIR") as mock_dir, \
              patch("bottleneck_hunter.watchlist.tuning_engine.asyncio.to_thread", new_callable=AsyncMock, side_effect=RuntimeError("LLM 挂了")):

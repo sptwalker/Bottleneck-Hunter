@@ -94,18 +94,92 @@
   color: var(--ink);
 }
 
+/* ── Text buttons (borderless) ─── */
+.wl-text-btn {
+  background: none;
+  border: none;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  transition: color 0.2s, background 0.2s;
+  white-space: nowrap;
+}
+.wl-text-btn:hover { color: var(--accent); background: oklch(0.55 0.15 250 / 0.08); }
+.wl-text-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
 /* ── Refresh bar ─── */
 .wl-refresh-bar {
-  padding: 8px 12px;
+  padding: 10px 14px;
   margin-bottom: 12px;
   background: oklch(0.55 0.15 250 / 0.06);
   border-radius: var(--radius);
   border: 1px solid oklch(0.55 0.15 250 / 0.15);
 }
 
+.wl-refresh-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
 .wl-refresh-msg {
   font-size: var(--fs-xs);
   color: var(--accent);
+}
+
+.wl-refresh-timer {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.wl-refresh-track {
+  height: 6px;
+  background: var(--skeleton);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.wl-refresh-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.wl-refresh-fill.active {
+  background-image: linear-gradient(
+    -45deg,
+    rgba(255,255,255,0.2) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255,255,255,0.2) 50%,
+    rgba(255,255,255,0.2) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 20px 20px;
+  animation: progress-stripes 0.8s linear infinite;
+}
+
+.wl-refresh-fill.indeterminate {
+  width: 30%;
+  animation: wl-indeterminate 1.5s ease-in-out infinite;
+}
+
+@keyframes wl-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+@keyframes progress-stripes {
+  from { background-position: 20px 0; }
+  to   { background-position: 0 0; }
 }
 
 /* ── Table view ─── */
@@ -215,8 +289,10 @@
 }
 
 /* Price change in table */
-.wl-change-up   { color: oklch(0.55 0.12 155); font-weight: 500; }
-.wl-change-down { color: oklch(0.55 0.15 25);  font-weight: 500; }
+.wl-change-up   { color: var(--success); font-weight: 500; }
+.wl-change-down { color: var(--danger);  font-weight: 500; }
+.wl-change-up::before  { content: "↑ "; }
+.wl-change-down::before { content: "↓ "; }
 
 /* Score in table */
 .wl-score-cell {
@@ -304,30 +380,6 @@
   margin-top: 0;
   flex: 1;
   min-width: 200px;
-}
-
-/* ── Add panel ─── */
-.wl-add-panel {
-  display: flex;
-  margin-bottom: 16px;
-  padding: 12px;
-  background: var(--panel-bg);
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-}
-
-.wl-add-form {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  width: 100%;
-}
-
-.wl-add-form .form-input {
-  padding: 6px 10px;
-  font-size: var(--fs-sm);
-  max-width: 180px;
 }
 
 /* ── Tier sections ─── */
@@ -445,8 +497,10 @@
   font-weight: 500;
 }
 
-.wl-card-change.wl-up   { color: oklch(0.55 0.12 155); }
-.wl-card-change.wl-down { color: oklch(0.55 0.15 25); }
+.wl-card-change.wl-up   { color: var(--success); }
+.wl-card-change.wl-down { color: var(--danger); }
+.wl-card-change.wl-up::before   { content: "↑ "; }
+.wl-card-change.wl-down::before { content: "↓ "; }
 
 .wl-card-indicators {
   display: flex;
@@ -624,8 +678,8 @@
   margin-left: 4px;
 }
 
-.wl-drawer-change.wl-change-up   { color: oklch(0.55 0.12 155); }
-.wl-drawer-change.wl-change-down { color: oklch(0.55 0.15 25); }
+.wl-drawer-change.wl-change-up   { color: var(--success); }
+.wl-drawer-change.wl-change-down { color: var(--danger); }
 
 .wl-drawer-tier-badge {
   margin-left: 8px;
@@ -1158,6 +1212,131 @@
   border: 1px solid oklch(0.55 0.15 250 / 0.2);
 }
 
+/* ── Overview cards ─── */
+.wl-overview-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.wl-quote-card,
+.wl-tech-card {
+  padding: 14px 16px;
+  background: var(--panel-bg);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.wl-quote-empty {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  text-align: center;
+  padding: 20px 0;
+}
+
+.wl-quote-price-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.wl-quote-price { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.wl-quote-change { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.wl-quote-details {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+}
+.wl-quote-item { display: flex; justify-content: space-between; font-size: var(--fs-xs); }
+.wl-quote-label { color: var(--muted); }
+
+.wl-tech-card h5 { margin: 0 0 10px; font-size: var(--fs-sm); font-weight: 600; }
+.wl-tech-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.wl-tech-item { display: flex; justify-content: space-between; font-size: var(--fs-xs); }
+.wl-tech-label { color: var(--muted); }
+.wl-tech-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+.wl-tech-val small { font-weight: 400; color: var(--muted); margin-left: 4px; }
+
+/* ── Overview news ─── */
+.wl-overview-news { display: flex; flex-direction: column; gap: 8px; }
+.wl-overview-news-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.wl-overview-news-sentiment { font-size: 14px; flex-shrink: 0; padding-top: 1px; }
+.wl-overview-news-body { flex: 1; min-width: 0; }
+.wl-overview-news-title {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.4;
+}
+.wl-overview-news-title a { color: var(--accent); text-decoration: none; }
+.wl-overview-news-title a:hover { text-decoration: underline; }
+.wl-overview-news-summary {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-top: 3px;
+  line-height: 1.5;
+}
+.wl-overview-news-meta { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+/* ── Overview mini table ─── */
+.wl-overview-mini-table {
+  overflow-x: auto;
+}
+.wl-overview-mini-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-xs);
+}
+.wl-overview-mini-table th,
+.wl-overview-mini-table td {
+  padding: 5px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.wl-overview-mini-table th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+/* ── Overview options row ─── */
+.wl-overview-options-row {
+  display: flex;
+  gap: 20px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  background: var(--surface);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.wl-overview-options-row b { color: var(--ink); }
+
+/* ── Institutional grid ─── */
+.wl-overview-inst-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.wl-overview-inst-col h5 {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  margin: 0 0 6px;
+  color: var(--muted);
+}
+
 /* ── Catalyst (催化剂事件) ─── */
 .wl-news-section-header {
   margin-bottom: 8px;
@@ -1250,7 +1429,7 @@
 /* ── Toast 通知 ─── */
 .bh-toast {
   position: fixed;
-  bottom: 32px;
+  bottom: 36px;
   left: 50%;
   transform: translateX(-50%) translateY(20px);
   padding: 10px 24px;
@@ -1276,4 +1455,167 @@
 /* ── 管道 hover 提示 ─── */
 #wl-pipe-summary span[title] {
   cursor: help;
+}
+
+/* ── JSON 格式化渲染 ──────────────────────────────────── */
+
+.wl-json-table {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1px;
+  font-size: var(--fs-sm);
+}
+
+.wl-json-row {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid oklch(0.5 0 0 / 0.06);
+}
+.wl-json-row:last-child { border-bottom: none; }
+
+.wl-json-label {
+  min-width: 120px;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-transform: capitalize;
+}
+
+.wl-json-value {
+  flex: 1;
+  word-break: break-word;
+}
+
+.wl-json-nested {
+  flex-direction: column;
+  gap: 4px;
+}
+.wl-json-nested > .wl-json-label {
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 2px;
+}
+.wl-json-nested > .wl-json-value {
+  padding-left: 12px;
+  border-left: 2px solid oklch(0.55 0.15 250 / 0.15);
+}
+
+.wl-json-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--fs-sm);
+}
+.wl-json-list li {
+  padding: 2px 0;
+  line-height: 1.5;
+}
+
+.wl-json-card {
+  background: oklch(0.5 0 0 / 0.03);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 6px;
+}
+.wl-json-card:last-child { margin-bottom: 0; }
+
+.wl-muted { color: var(--muted); font-style: italic; }
+
+/* ── 空状态提示 ───────────────────────────────────────── */
+
+.wl-empty-hint {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--muted);
+}
+.wl-empty-hint p:first-child {
+  font-size: var(--fs-base);
+  margin-bottom: 8px;
+}
+.wl-empty-hint p:last-child {
+  font-size: var(--fs-sm);
+  opacity: 0.7;
+}
+
+/* ── 企业基本面 Profile ─────────────────────────────────── */
+
+.wl-profile-section { }
+.wl-profile-section h4 {
+  margin-bottom: 10px;
+}
+
+.wl-profile-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.wl-profile-tag {
+  display: inline-block;
+  padding: 2px 10px;
+  font-size: var(--fs-sm);
+  border-radius: 12px;
+  background: oklch(0.5 0.05 250 / 0.12);
+  color: var(--text);
+}
+
+.wl-profile-desc {
+  margin-bottom: 10px;
+}
+.wl-profile-desc-text {
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text);
+  margin: 0;
+  white-space: pre-wrap;
+}
+.wl-profile-desc-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  padding: 4px 0;
+  margin-top: 4px;
+}
+.wl-profile-desc-toggle:hover {
+  text-decoration: underline;
+}
+
+.wl-profile-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-top: 6px;
+}
+.wl-profile-meta a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.wl-profile-meta a:hover {
+  text-decoration: underline;
+}
+
+.wl-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 2px;
+}
+.wl-profile-grid-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: oklch(0.5 0 0 / 0.03);
+  border-radius: 4px;
+  font-size: var(--fs-sm);
+}
+.wl-profile-grid-label {
+  color: var(--muted);
+}
+.wl-profile-grid-value {
+  font-weight: 600;
+  color: var(--text);
 }

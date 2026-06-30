@@ -36,6 +36,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+datasources = [
+    "efinance>=0.5",
+    "pytdx>=1.72",
+    "finnhub-python>=2.4.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

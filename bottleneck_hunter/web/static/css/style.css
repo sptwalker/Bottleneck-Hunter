@@ -10,7 +10,10 @@
 @import url('layout/panels.css');
 @import url('components/common.css');
 @import url('components/modals.css');
+@import url('components/markdown.css');
 @import url('components/analysis-tag.css');
 @import url('wizard/wizard.css');
 @import url('watchlist/watchlist.css');
 @import url('decision/decision.css');
+@import url('simtrading/simtrading.css');
+@import url('aiconfig/aiconfig.css');

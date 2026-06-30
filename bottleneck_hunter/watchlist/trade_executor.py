@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from bottleneck_hunter.watchlist.slippage import calc_slippage
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -21,17 +22,18 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     if not plan:
         raise ValueError(f"执行计划 {plan_id} 不存在")
 
+    result_json = plan.get("result_json", {}) if isinstance(plan.get("result_json"), dict) else {}
+    market = plan.get("market") or result_json.get("market", "us_stock")
+    store = store.for_market(market)
+
     account = store.get_sim_account()
 
-    # 约束硬验证
     from bottleneck_hunter.watchlist.constraint_validator import validate_execution_plan
     positions = store.get_sim_positions(account["id"])
     validation = validate_execution_plan(plan, account, positions)
     if not validation.valid:
         store.reject_execution(plan_id, "; ".join(validation.violations))
         return {"error": "约束校验不通过", "violations": validation.violations, "plan_id": plan_id}
-
-    result_json = plan.get("result_json", {}) if isinstance(plan.get("result_json"), dict) else {}
 
     action = plan.get("action") or result_json.get("action", "")
     ticker = plan.get("ticker", "")
@@ -45,10 +47,12 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
 
     if action in ("buy", "add"):
         result = _execute_buy(store, account, plan_id, ticker, shares, target_price,
-                              plan.get("entry_id"), result_json.get("reasoning", ""))
+                              plan.get("entry_id"), result_json.get("reasoning", ""),
+                              market=market)
     elif action in ("sell", "reduce"):
         result = _execute_sell(store, account, plan_id, ticker, shares, target_price,
-                               plan.get("entry_id"), result_json.get("reasoning", ""))
+                               plan.get("entry_id"), result_json.get("reasoning", ""),
+                               market=market)
     else:
         return {"error": f"不支持的操作类型: {action}", "plan_id": plan_id}
 
@@ -56,6 +60,8 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
         _recalc_account(store, account["id"])
         if action in ("sell", "reduce"):
             trade_id = result.get("trade_id", "")
+            is_win = result.get("realized_pnl", 0) > 0
+            _update_card_outcomes(store, plan_id, is_win)
             if trade_id:
                 try:
                     asyncio.get_event_loop().create_task(
@@ -69,8 +75,12 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
 
 def _execute_buy(store: WatchlistStore, account: dict,
                  plan_id: str, ticker: str, shares: int, price: float,
-                 entry_id: str | None, reasoning: str) -> dict:
-    amount = shares * price
+                 entry_id: str | None, reasoning: str,
+                 market: str = "us_stock") -> dict:
+    avg_vol = _get_avg_volume(store, ticker)
+    exec_price, slippage_bps = calc_slippage(price, shares, "buy", market, avg_vol)
+
+    amount = round(shares * exec_price, 2)
     commission = round(amount * COMMISSION_RATE, 2)
     total_cost = amount + commission
 
@@ -80,27 +90,28 @@ def _execute_buy(store: WatchlistStore, account: dict,
 
     trade_id = store.create_sim_trade(
         account_id=account["id"], ticker=ticker, side="buy",
-        shares=shares, price=price, amount=amount,
+        shares=shares, price=exec_price, amount=amount,
         execution_plan_id=plan_id, entry_id=entry_id,
         trade_type="entry", reasoning=reasoning,
+        slippage_bps=slippage_bps,
     )
 
-    pos = store.get_sim_position(account["id"], ticker)
+    pos = store.get_sim_position_any(account["id"], ticker)
     if pos:
         old_shares = pos["shares"]
         old_cost = pos["avg_cost"]
         new_shares = old_shares + shares
-        new_avg_cost = round((old_shares * old_cost + amount) / new_shares, 4)
+        new_avg_cost = round((old_shares * old_cost + amount) / new_shares, 4) if new_shares else exec_price
         store.update_sim_position(pos["id"],
                                   shares=new_shares,
                                   avg_cost=new_avg_cost,
-                                  current_price=price,
-                                  market_value=round(new_shares * price, 2),
-                                  unrealized_pnl=round(new_shares * (price - new_avg_cost), 2))
+                                  current_price=exec_price,
+                                  market_value=round(new_shares * exec_price, 2),
+                                  unrealized_pnl=round(new_shares * (exec_price - new_avg_cost), 2))
     else:
         store.create_sim_position(
             account_id=account["id"], ticker=ticker,
-            shares=shares, avg_cost=price, entry_id=entry_id,
+            shares=shares, avg_cost=exec_price, entry_id=entry_id,
         )
 
     new_cash = round(account["cash_balance"] - total_cost, 2)
@@ -108,48 +119,56 @@ def _execute_buy(store: WatchlistStore, account: dict,
 
     return {
         "trade_id": trade_id, "side": "buy", "ticker": ticker,
-        "shares": shares, "price": price, "amount": amount,
+        "shares": shares, "price": exec_price, "target_price": price,
+        "slippage_bps": slippage_bps, "amount": amount,
         "commission": commission, "cash_after": new_cash,
     }
 
 
 def _execute_sell(store: WatchlistStore, account: dict,
                   plan_id: str, ticker: str, shares: int, price: float,
-                  entry_id: str | None, reasoning: str) -> dict:
+                  entry_id: str | None, reasoning: str,
+                  market: str = "us_stock") -> dict:
     pos = store.get_sim_position(account["id"], ticker)
     if not pos or pos["shares"] < shares:
         return {"error": "持仓不足", "required": shares,
                 "available": pos["shares"] if pos else 0}
 
-    amount = shares * price
+    avg_vol = _get_avg_volume(store, ticker)
+    exec_price, slippage_bps = calc_slippage(price, shares, "sell", market, avg_vol)
+
+    amount = round(shares * exec_price, 2)
     commission = round(amount * COMMISSION_RATE, 2)
     net_proceeds = amount - commission
 
     trade_id = store.create_sim_trade(
         account_id=account["id"], ticker=ticker, side="sell",
-        shares=shares, price=price, amount=amount,
+        shares=shares, price=exec_price, amount=amount,
         execution_plan_id=plan_id, entry_id=entry_id,
         trade_type="exit", reasoning=reasoning,
+        slippage_bps=slippage_bps,
     )
 
-    realized_pnl = round((price - pos["avg_cost"]) * shares - commission, 2)
+    realized_pnl = round((exec_price - pos["avg_cost"]) * shares - commission, 2)
 
     remaining = pos["shares"] - shares
     if remaining <= 0:
-        store.delete_sim_position(pos["id"])
+        store.update_sim_position(pos["id"], shares=0, current_price=exec_price,
+                                  market_value=0, unrealized_pnl=0, weight_pct=0)
     else:
         store.update_sim_position(pos["id"],
                                   shares=remaining,
-                                  current_price=price,
-                                  market_value=round(remaining * price, 2),
-                                  unrealized_pnl=round(remaining * (price - pos["avg_cost"]), 2))
+                                  current_price=exec_price,
+                                  market_value=round(remaining * exec_price, 2),
+                                  unrealized_pnl=round(remaining * (exec_price - pos["avg_cost"]), 2))
 
     new_cash = round(account["cash_balance"] + net_proceeds, 2)
     store.update_sim_account(cash_balance=new_cash)
 
     return {
         "trade_id": trade_id, "side": "sell", "ticker": ticker,
-        "shares": shares, "price": price, "amount": amount,
+        "shares": shares, "price": exec_price, "target_price": price,
+        "slippage_bps": slippage_bps, "amount": amount,
         "commission": commission, "realized_pnl": realized_pnl,
         "cash_after": new_cash,
     }
@@ -216,3 +235,34 @@ async def _auto_review_sell(store: WatchlistStore, trade_id: str) -> None:
         logger.info("自动复盘完成 %s", trade_id)
     except Exception as e:
         logger.error("自动复盘异常 %s: %s", trade_id, e)
+
+
+def _get_avg_volume(store: WatchlistStore, ticker: str) -> int | None:
+    """获取近期日均成交量，供滑点计算使用"""
+    try:
+        snapshots = store.get_snapshots(ticker, days=20)
+        volumes = [s.get("volume", 0) for s in snapshots if s.get("volume")]
+        return int(sum(volumes) / len(volumes)) if volumes else None
+    except Exception:
+        return None
+
+
+def _update_card_outcomes(store: WatchlistStore, plan_id: str, is_win: bool) -> None:
+    """卖出后根据盈亏更新关联经验卡片的置信度"""
+    try:
+        plan = store.get_execution_plan(plan_id)
+        if not plan:
+            return
+        result_json = plan.get("result_json", {})
+        if isinstance(result_json, str):
+            import json
+            try:
+                result_json = json.loads(result_json)
+            except (json.JSONDecodeError, TypeError):
+                return
+        card_ids = result_json.get("applied_card_ids", [])
+        for cid in card_ids:
+            store.update_card_outcome(cid, is_win)
+            logger.info("经验卡片 %s 结果更新: %s", cid, "盈利" if is_win else "亏损")
+    except Exception as e:
+        logger.warning("更新经验卡片结果失败: %s", e)

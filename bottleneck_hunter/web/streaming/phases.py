@@ -16,7 +16,7 @@ from bottleneck_hunter.chain.models import MarketRegion
 from bottleneck_hunter.chain.smart_money import track_batch as smart_money_batch
 from bottleneck_hunter.chain.supplier_eval import AlphaScorer, FinalScorer, SupplierEvaluator
 from bottleneck_hunter.chain.supplier_search import SupplierSearcher
-from bottleneck_hunter.llm_clients.factory import create_llm
+from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_position
 from bottleneck_hunter.web import phase_cache
 
 from ._common import (
@@ -55,12 +55,15 @@ async def stream_phase1(
     analysis_id = str(_uuid.uuid4())
 
     try:
-        deep_llm = create_llm(provider, model)
+        if provider:
+            deep_llm = create_llm(provider, model)
+        else:
+            deep_llm, provider, model = get_llm_for_position("pipeline_decompose")
+            if deep_llm is None:
+                raise ValueError("未配置可用的 LLM provider，请在 AI 配置中设置")
     except Exception as e:
         yield _sse("error", step="init", message=f"LLM 初始化失败: {e}")
         return
-
-    # ── 拆解 ──
     try:
         yield _sse("step_start", step="decompose", index=0, message=STEP_LABELS["decompose"])
         decomposer = ChainDecomposer(
@@ -104,7 +107,11 @@ async def stream_phase1(
     # ── 瓶颈 ──
     try:
         yield _sse("step_start", step="bottleneck", index=1, message=STEP_LABELS["bottleneck"])
-        analyzer = BottleneckAnalyzer(llm=deep_llm, language=language)
+        from bottleneck_hunter.llm_clients.factory import get_models_for_role
+        bottleneck_llms = get_models_for_role("bottleneck")
+        if not bottleneck_llms:
+            bottleneck_llms = [(deep_llm, provider, model)]
+        analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=language)
         bn_queue = asyncio.Queue()
         bn_task = asyncio.create_task(
             _run_bottleneck_with_progress(analyzer, chain, top_n, bn_queue)
@@ -204,7 +211,12 @@ async def stream_phase2(
         return
 
     try:
-        deep_llm = create_llm(provider, model)
+        if provider:
+            deep_llm = create_llm(provider, model)
+        else:
+            deep_llm, provider, model = get_llm_for_position("pipeline_eval")
+            if deep_llm is None:
+                raise ValueError("未配置可用的 LLM provider，请在 AI 配置中设置")
         llm_info = f"{provider}/{getattr(deep_llm, 'model_name', None) or getattr(deep_llm, 'model', model)}"
         logger.info("[stream-phase2] LLM创建成功 | %s | base_url=%s",
                      llm_info, getattr(getattr(deep_llm, 'client', None), '_base_url', '未知'))
@@ -544,7 +556,7 @@ async def stream_phase4(
     phase4_data = {
         "validations": [v.model_dump() for v in validations],
         "recommendations": recommendations,
-        "completed_phases": 3,
+        "completed_phases": 4,
     }
     phase_cache.set_phase(analysis_id, 4, phase4_data)
 

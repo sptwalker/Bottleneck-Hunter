@@ -91,11 +91,12 @@ class TestCollectMarketContext:
 
     async def test_returns_markets_field(self, store):
         from bottleneck_hunter.watchlist.decision_engine import _collect_market_context
+        # 新契约：按 market 参数返回，默认 us_stock；a_stock 需显式传入
         result = await _collect_market_context(store)
         assert "markets" in result
-        markets = result["markets"]
-        assert "us_stock" in markets
-        assert "a_stock" in markets
+        assert result["markets"] == ["us_stock"]
+        result_cn = await _collect_market_context(store, "a_stock")
+        assert result_cn["markets"] == ["a_stock"]
 
     async def test_us_only_store(self, us_only_store):
         from bottleneck_hunter.watchlist.decision_engine import _collect_market_context
@@ -105,8 +106,9 @@ class TestCollectMarketContext:
     async def test_empty_store(self, tmp_path):
         from bottleneck_hunter.watchlist.decision_engine import _collect_market_context
         empty_store = WatchlistStore(tmp_path / "empty.db")
+        # 新契约：默认返回 ["us_stock"]，不再自动检测空库
         result = await _collect_market_context(empty_store)
-        assert result["markets"] == []
+        assert result["markets"] == ["us_stock"]
 
 
 # ---------------------------------------------------------------------------

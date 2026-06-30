@@ -1,0 +1,531 @@
+/* ============================================================
+   SimTrading — 模拟交易模块样式
+   前缀: st-
+   ============================================================ */
+
+/* ── 标签页导航 ── */
+.st-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+
+.st-tab {
+  position: relative;
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color var(--transition);
+  white-space: nowrap;
+}
+
+.st-tab:hover {
+  color: var(--ink);
+}
+
+.st-tab.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.st-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+}
+
+/* ── 标签页内容 ── */
+.st-tab-pane {
+  display: none;
+}
+
+.st-tab-pane.active {
+  display: block;
+}
+
+/* ── 统计卡片网格 ── */
+.st-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .st-stat-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+@media (max-width: 520px) {
+  .st-stat-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.st-stat-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 16px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.st-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.st-stat-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ── 卡片 ── */
+.st-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.st-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.st-card-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.st-card-body {
+  padding: 16px;
+}
+
+/* ── 表格 ── */
+.st-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.st-table th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.st-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.st-table tr:hover td {
+  background: var(--bg);
+}
+
+/* ── 持仓特殊样式 ── */
+.st-pos-zero td {
+  opacity: 0.45;
+  font-style: italic;
+}
+
+.st-pos-zero:hover td {
+  opacity: 0.7;
+}
+
+.st-pos-expand {
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.2s;
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+}
+
+.st-pos-expand.open {
+  transform: rotate(90deg);
+}
+
+.st-pos-history td {
+  background: oklch(0.97 0.005 250);
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 10px 4px 36px;
+}
+
+.st-btn-delete {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.st-btn-delete:hover {
+  color: var(--danger);
+  background: oklch(0.95 0.03 25);
+}
+
+/* ── 图表范围切换 ── */
+.st-chart-range {
+  display: flex;
+  gap: 2px;
+}
+
+.st-range-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.st-range-btn:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.st-range-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: oklch(0.55 0.15 250 / 0.08);
+}
+
+/* ── 筛选栏 ── */
+.st-history-filters {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.st-input {
+  padding: 5px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  outline: none;
+  width: 120px;
+}
+
+.st-input:focus {
+  border-color: var(--accent);
+}
+
+.st-select {
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  outline: none;
+}
+
+/* ── 分页 ── */
+.st-pagination {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.st-page-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.st-page-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.st-page-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── 操作面板网格 ── */
+.st-ops-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.st-ops-grid > .st-card:last-child {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 700px) {
+  .st-ops-grid { grid-template-columns: 1fr; }
+}
+
+/* ── 操作表单 ── */
+.st-op-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.st-op-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.st-op-row label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  min-width: 70px;
+}
+
+.st-op-row .st-input,
+.st-op-row .st-select {
+  flex: 1;
+  width: auto;
+}
+
+.st-op-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+/* ── 复盘和经验卡片 ── */
+.st-review-item {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+
+.st-review-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.st-review-ticker {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.st-review-return {
+  font-weight: 600;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.st-review-body {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.st-exp-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+
+.st-exp-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.st-exp-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.st-exp-content {
+  font-size: 12px;
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+.st-btn-delete-card {
+  float: right;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+}
+
+.st-btn-delete-card:hover {
+  color: var(--danger);
+}
+
+/* ── 绩效网格 ── */
+.st-perf-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 700px) {
+  .st-perf-grid { grid-template-columns: 1fr; }
+}
+
+/* ── 调优建议 ── */
+.st-tuning-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.st-tuning-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.st-tuning-param {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.st-tuning-change {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.st-tuning-reason {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.st-tuning-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* ── 复盘状态 ── */
+.st-review-status {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 8px;
+}
+
+.st-refresh-status {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 8px;
+}
+
+/* ── 切换标签 ── */
+.st-toggle-label {
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.st-toggle-label input {
+  cursor: pointer;
+}
+
+/* ── 通用 ── */
+.st-empty-hint {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 20px 0;
+}
+
+.st-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.st-badge-buy {
+  background: oklch(0.5 0.16 145 / 0.2);
+  color: oklch(0.75 0.16 145);
+}
+
+.st-badge-sell {
+  background: oklch(0.5 0.18 25 / 0.2);
+  color: oklch(0.75 0.18 25);
+}
+
+/* ── 资金操作历史 ── */
+.st-fund-history {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.st-fund-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  font-size: 12px;
+  border-bottom: 1px solid oklch(0.95 0.005 250);
+}
+
+.st-fund-item:last-child {
+  border-bottom: none;
+}
+
+/* ── 盈亏色 ── */
+.st-pnl-pos { color: oklch(0.65 0.18 145); }
+.st-pnl-neg { color: oklch(0.65 0.18 25); }
+.st-pnl-zero { color: var(--muted); }

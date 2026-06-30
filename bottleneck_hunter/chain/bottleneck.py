@@ -112,6 +112,8 @@ def normalize_scores(reports: list[BottleneckReport]) -> list[BottleneckReport]:
 
     对每个维度独立做 z-score，然后重新映射回 0-10 区间。
     当样本量 <3 时跳过标准化（样本太少无统计意义）。
+    当某维度所有分数完全相同（sigma=0）时，利用该维度 reasoning 长度差异
+    作为微扰因子，避免排名完全并列。
 
     Args:
         reports: 同一批次 LLM 返回的 BottleneckReport 列表
@@ -124,13 +126,16 @@ def normalize_scores(reports: list[BottleneckReport]) -> list[BottleneckReport]:
 
     from statistics import mean, stdev
 
+    zero_sigma_dims = 0
+
     for dim in BottleneckDimension:
-        # 收集该维度的所有分数
-        dim_scores: list[tuple[int, float]] = []  # (report_idx, score)
+        dim_scores: list[tuple[int, float]] = []
+        dim_reasoning_lens: list[tuple[int, int]] = []
         for i, rpt in enumerate(reports):
             for s in rpt.scores:
                 if s.dimension == dim.value:
                     dim_scores.append((i, s.score))
+                    dim_reasoning_lens.append((i, len(s.reasoning)))
                     break
 
         if len(dim_scores) < 3:
@@ -140,25 +145,47 @@ def normalize_scores(reports: list[BottleneckReport]) -> list[BottleneckReport]:
         mu = mean(values)
         sigma = stdev(values)
 
-        # 方差为 0（所有分数相同）时跳过该维度
         if sigma < 1e-6:
+            zero_sigma_dims += 1
+            r_lens = [l for _, l in dim_reasoning_lens]
+            r_mu = mean(r_lens) if r_lens else 1
+            if r_mu < 1:
+                r_mu = 1
+            for idx, raw in dim_scores:
+                r_len = next((l for j, l in dim_reasoning_lens if j == idx), 0)
+                offset = (r_len - r_mu) / r_mu * 0.5
+                offset = max(-1.0, min(1.0, offset))
+                normalized = max(0.0, min(10.0, round(raw + offset, 1)))
+                for s in reports[idx].scores:
+                    if s.dimension == dim.value:
+                        s.score = normalized
+                        break
             continue
 
-        # z-score → 重新映射到 0-10（以 5 为中心，1 个标准差 = 2 分）
         for idx, raw in dim_scores:
             z = (raw - mu) / sigma
             normalized = max(0.0, min(10.0, round(5.0 + z * 2.0, 1)))
-            # 更新 report 中对应维度的分数
             for s in reports[idx].scores:
                 if s.dimension == dim.value:
                     s.score = normalized
                     break
 
+    if zero_sigma_dims >= 3:
+        logger.warning(
+            "瓶颈评分警告: %d/5 个维度所有节点分数完全相同 — "
+            "LLM 可能直接复制了示例值，已使用 reasoning 长度微扰",
+            zero_sigma_dims,
+        )
+
     return reports
 
 
 class BottleneckAnalyzer:
-    """Analyzes chain nodes for bottleneck characteristics."""
+    """Analyzes chain nodes for bottleneck characteristics.
+
+    支持单模型和多模型交叉评分两种模式。
+    多模型时每个节点独立调用所有模型，取加权中位数合成。
+    """
 
     LLM_TIMEOUT = 120
     MAX_CONCURRENCY = 4
@@ -166,13 +193,21 @@ class BottleneckAnalyzer:
 
     def __init__(
         self,
-        llm: BaseChatModel,
+        llm: BaseChatModel | None = None,
+        llms: list[tuple[BaseChatModel, str, str]] | None = None,
         weights: dict[BottleneckDimension, float] | None = None,
         language: str = "zh",
         industry: str = "",
+        calibration_weights: dict[str, float] | None = None,
     ):
-        self.llm = llm
-        # 优先使用显式传入的 weights，其次按行业查找，最后用默认权重
+        if llms:
+            self.llms = llms
+        elif llm:
+            self.llms = [(llm, "unknown", "unknown")]
+        else:
+            raise ValueError("必须提供 llm 或 llms 参数")
+
+        self.calibration_weights = calibration_weights or {}
         if weights is not None:
             self.weights = weights
         elif industry:
@@ -187,6 +222,10 @@ class BottleneckAnalyzer:
         self._failed_nodes: list[dict] = []
 
     @property
+    def use_cross_scoring(self) -> bool:
+        return len(self.llms) >= 2
+
+    @property
     def failed_nodes(self) -> list[dict]:
         return list(self._failed_nodes)
 
@@ -196,16 +235,22 @@ class BottleneckAnalyzer:
         self._retry_count = 0
         self._failed_nodes = []
         self._on_progress = on_progress
+        use_cross = self.use_cross_scoring
 
         candidates = [n for n in graph.nodes if n.layer > 0]
         total = len(candidates)
-        semaphore = asyncio.Semaphore(self.MAX_CONCURRENCY)
+        concurrency = 2 if use_cross else self.MAX_CONCURRENCY
+        semaphore = asyncio.Semaphore(concurrency)
 
         async def _task(node, idx):
             async with semaphore:
+                mode = "交叉" if use_cross else ""
                 if on_progress:
-                    await on_progress(f"▸ 分析: {node.name} ({idx + 1}/{total})")
-                result = await self._analyze_node(node.name, node.description, node.layer, graph)
+                    await on_progress(f"▸ {mode}分析: {node.name} ({idx + 1}/{total})")
+                if use_cross:
+                    result = await self._analyze_node_multi(node.name, node.description, node.layer, graph)
+                else:
+                    result = await self._analyze_node(node.name, node.description, node.layer, graph)
                 if result and on_progress:
                     await on_progress(f"✓ {node.name}: {result.overall_score:.1f} 分 ({idx + 1}/{total})")
                 elif not result:
@@ -300,8 +345,124 @@ class BottleneckAnalyzer:
         self._on_progress = None
         return reports
 
+    async def _analyze_node_multi(
+        self, node_name: str, description: str, layer: int, graph: ChainGraph,
+    ) -> BottleneckReport | None:
+        """多模型交叉评分: 每个模型独立评分同一节点，取加权中位数合成。"""
+        tasks = []
+        for llm, provider, model in self.llms:
+            tasks.append(self._analyze_node(node_name, description, layer, graph, llm=llm))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        valid: list[tuple[BottleneckReport, float]] = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception) or r is None:
+                continue
+            _, provider, model = self.llms[i]
+            cal_key = f"{provider}/{model}"
+            weight = self.calibration_weights.get(cal_key, 1.0)
+            valid.append((r, weight))
+
+        if not valid:
+            return None
+        if len(valid) == 1:
+            return valid[0][0]
+
+        return self._merge_cross_scores(valid, node_name, description, layer)
+
+    def _merge_cross_scores(
+        self,
+        results: list[tuple[BottleneckReport, float]],
+        node_name: str,
+        description: str,
+        layer: int,
+    ) -> BottleneckReport:
+        """合成多模型评分: 加权中位数 + 分歧度信号。"""
+        merged_scores = []
+
+        for dim in BottleneckDimension:
+            dim_data: list[tuple[float, float, str]] = []
+            for report, weight in results:
+                for s in report.scores:
+                    if s.dimension == dim.value:
+                        dim_data.append((s.score, weight, s.reasoning))
+                        break
+
+            if not dim_data:
+                continue
+
+            score = self._weighted_median([(d[0], d[1]) for d in dim_data])
+            divergence = self._weighted_std([(d[0], d[1]) for d in dim_data])
+
+            closest_idx = min(range(len(dim_data)), key=lambda i: abs(dim_data[i][0] - score))
+            reasoning = dim_data[closest_idx][2]
+
+            if divergence >= 2.0:
+                score_strs = [f"{d[0]:.0f}" for d in dim_data]
+                reasoning = f"[多模型分歧: 各模型={'/'.join(score_strs)}, σ={divergence:.1f}] " + reasoning
+
+            merged_scores.append(BottleneckScore(
+                dimension=dim.value,
+                score=round(score, 1),
+                reasoning=reasoning,
+            ))
+
+        all_insights: list[str] = []
+        all_risks: list[str] = []
+        for report, _ in results:
+            all_insights.extend(report.key_insights)
+            all_risks.extend(report.risks)
+        unique_insights = list(dict.fromkeys(all_insights))[:5]
+        unique_risks = list(dict.fromkeys(all_risks))[:3]
+
+        cr3_data = [(r.cr3_estimate, w) for r, w in results if r.cr3_estimate is not None]
+        hhi_data = [(r.hhi_estimate, w) for r, w in results if r.hhi_estimate is not None]
+        merged_cr3 = round(self._weighted_median(cr3_data)) if cr3_data else None
+        merged_hhi = round(self._weighted_median(hhi_data)) if hhi_data else None
+
+        adjustments = self._check_hhi_consistency(merged_scores, merged_cr3, merged_hhi, node_name)
+
+        overall = self._weighted_score(merged_scores)
+
+        return BottleneckReport(
+            node_name=node_name,
+            node_description=description,
+            layer=layer,
+            scores=merged_scores,
+            overall_score=overall,
+            key_insights=unique_insights,
+            risks=unique_risks,
+            cr3_estimate=merged_cr3,
+            hhi_estimate=merged_hhi,
+            hhi_adjustments=adjustments,
+        )
+
+    @staticmethod
+    def _weighted_median(data: list[tuple[float, float]]) -> float:
+        sorted_data = sorted(data, key=lambda x: x[0])
+        total_weight = sum(w for _, w in sorted_data)
+        if total_weight <= 0:
+            return sorted_data[len(sorted_data) // 2][0]
+        cumulative = 0.0
+        for value, weight in sorted_data:
+            cumulative += weight
+            if cumulative >= total_weight / 2:
+                return value
+        return sorted_data[-1][0]
+
+    @staticmethod
+    def _weighted_std(data: list[tuple[float, float]]) -> float:
+        total_w = sum(w for _, w in data)
+        if total_w <= 0:
+            return 0.0
+        w_mean = sum(v * w for v, w in data) / total_w
+        variance = sum(w * (v - w_mean) ** 2 for v, w in data) / total_w
+        return variance ** 0.5
+
     async def _analyze_node(
-        self, node_name: str, description: str, layer: int, graph: ChainGraph
+        self, node_name: str, description: str, layer: int, graph: ChainGraph,
+        *, llm: BaseChatModel | None = None,
     ) -> BottleneckReport | None:
         """Score a single node across all bottleneck dimensions."""
         lang_note = "请用中文回答" if self.language == "zh" else "Answer in English"
@@ -320,24 +481,33 @@ class BottleneckAnalyzer:
 请对该环节进行瓶颈分析，对以下5个维度各打0-10分，并给出理由:
 {chr(10).join(f"- {d.value}: {desc}" for d, desc in DIMENSION_DESC.items())}
 
+⚠ 重要评分原则:
+- 每个环节必须根据其在产业链中的实际瓶颈特征独立打分
+- 不同环节的分数必须有显著差异（真正的瓶颈环节如光刻机可能 scarcity=9，而通用材料可能只有 3）
+- 严禁照搬示例中的数值，你必须根据该环节的实际情况给出不同的分数
+- 上游原材料和通用设备通常得分较低（3-5分），核心技术环节得分较高（7-9分）
+
 同时列出:
 - key_insights: 关键洞察（2-3条）
 - risks: 主要风险（1-2条）
 
-返回严格 JSON:
+返回严格 JSON（注意：下面的数值仅为格式参考，你必须根据实际情况给出完全不同的分数）:
 {{
+  "cr3_estimate": 65,
+  "hhi_estimate": 2100,
   "scores": [
-    {{"dimension": "scarcity", "score": 8, "reasoning": "..."}},
-    {{"dimension": "irreplaceability", "score": 9, "reasoning": "..."}},
-    {{"dimension": "supply_demand_gap", "score": 7, "reasoning": "..."}},
-    {{"dimension": "pricing_power", "score": 6, "reasoning": "..."}},
-    {{"dimension": "tech_barrier", "score": 8, "reasoning": "..."}}
+    {{"dimension": "scarcity", "score": 5, "reasoning": "根据实际情况填写"}},
+    {{"dimension": "irreplaceability", "score": 3, "reasoning": "根据实际情况填写"}},
+    {{"dimension": "supply_demand_gap", "score": 6, "reasoning": "根据实际情况填写"}},
+    {{"dimension": "pricing_power", "score": 4, "reasoning": "根据实际情况填写"}},
+    {{"dimension": "tech_barrier", "score": 7, "reasoning": "根据实际情况填写"}}
   ],
   "key_insights": ["...", "..."],
   "risks": ["...", "..."]
 }}"""
 
         try:
+            active_llm = llm or self.llms[0][0]
             messages = [
                 SystemMessage(content=self._system_prompt),
                 HumanMessage(content=user_prompt),
@@ -346,7 +516,7 @@ class BottleneckAnalyzer:
             for attempt in range(self.MAX_RETRIES + 1):
                 try:
                     response = await asyncio.wait_for(
-                        self.llm.ainvoke(messages), timeout=self.LLM_TIMEOUT,
+                        active_llm.ainvoke(messages), timeout=self.LLM_TIMEOUT,
                     )
                     break
                 except asyncio.TimeoutError:
@@ -395,6 +565,10 @@ class BottleneckAnalyzer:
                 for s in data["scores"]
             ]
 
+            cr3 = data.get("cr3_estimate")
+            hhi = data.get("hhi_estimate")
+            adjustments = self._check_hhi_consistency(scores, cr3, hhi, node_name)
+
             overall = self._weighted_score(scores)
 
             return BottleneckReport(
@@ -405,10 +579,78 @@ class BottleneckAnalyzer:
                 overall_score=overall,
                 key_insights=data.get("key_insights", []),
                 risks=data.get("risks", []),
+                cr3_estimate=cr3,
+                hhi_estimate=hhi,
+                hhi_adjustments=adjustments,
             )
         except Exception:
             logger.exception(f"Failed to analyze node: {node_name}")
             return None
+
+    @staticmethod
+    def _check_hhi_consistency(
+        scores: list[BottleneckScore],
+        cr3: int | None,
+        hhi: int | None,
+        node_name: str,
+    ) -> list[str]:
+        """检查 LLM 的 scarcity/pricing_power 评分是否与其自身估算的 HHI/CR3 一致，不一致则修正。"""
+        if cr3 is None and hhi is None:
+            return []
+
+        score_map = {s.dimension: s for s in scores}
+        adjustments: list[str] = []
+
+        scarcity = score_map.get("scarcity")
+        pricing = score_map.get("pricing_power")
+
+        if hhi is not None:
+            if hhi > 2500:
+                if scarcity and scarcity.score < 6:
+                    old = scarcity.score
+                    scarcity.score = max(6.0, scarcity.score + 2)
+                    scarcity.reasoning = f"[HHI校准: HHI={hhi}>2500, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
+                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (HHI={hhi}高集中度)")
+                if pricing and pricing.score < 5:
+                    old = pricing.score
+                    pricing.score = max(5.0, pricing.score + 2)
+                    pricing.reasoning = f"[HHI校准: HHI={hhi}>2500, {old:.0f}→{pricing.score:.0f}] " + pricing.reasoning
+                    adjustments.append(f"pricing_power {old:.0f}→{pricing.score:.0f} (HHI={hhi}高集中度)")
+
+            elif hhi < 1500:
+                if scarcity and scarcity.score > 6:
+                    old = scarcity.score
+                    scarcity.score = min(6.0, scarcity.score - 2)
+                    scarcity.reasoning = f"[HHI校准: HHI={hhi}<1500, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
+                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (HHI={hhi}低集中度)")
+                if pricing and pricing.score > 6:
+                    old = pricing.score
+                    pricing.score = min(6.0, pricing.score - 2)
+                    pricing.reasoning = f"[HHI校准: HHI={hhi}<1500, {old:.0f}→{pricing.score:.0f}] " + pricing.reasoning
+                    adjustments.append(f"pricing_power {old:.0f}→{pricing.score:.0f} (HHI={hhi}低集中度)")
+
+        if cr3 is not None:
+            if cr3 > 80:
+                if scarcity and scarcity.score < 7:
+                    old = scarcity.score
+                    scarcity.score = max(7.0, scarcity.score + 2)
+                    scarcity.reasoning = f"[CR3校准: CR3={cr3}%>80%, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
+                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (CR3={cr3}%高垄断)")
+
+            elif cr3 < 30:
+                if scarcity and scarcity.score > 4:
+                    old = scarcity.score
+                    scarcity.score = min(4.0, scarcity.score - 2)
+                    scarcity.reasoning = f"[CR3校准: CR3={cr3}%<30%, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
+                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (CR3={cr3}%低集中)")
+
+        for s in scores:
+            s.score = round(max(0.0, min(10.0, s.score)), 1)
+
+        if adjustments:
+            logger.info(f"HHI一致性校准 [{node_name}]: {'; '.join(adjustments)}")
+
+        return adjustments
 
     def _weighted_score(self, scores: list[BottleneckScore]) -> float:
         score_map = {s.dimension: s.score for s in scores}

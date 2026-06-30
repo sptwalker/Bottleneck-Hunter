@@ -380,8 +380,9 @@ class RoundtableMeeting:
         return messages
 
     def compute_borda(self, round2_msgs: list[MeetingMessage]) -> list[MeetingRanking]:
-        """Borda 计分：#1=3分, #2=2分, #3=1分。取第 2 轮修正后排名。"""
+        """Score-Weighted Ranking: 使用 0-100 绝对信心分 + 保留 Borda 作为辅助。"""
         points: dict[str, int] = defaultdict(int)
+        weighted_scores: dict[str, list[float]] = defaultdict(list)
         supporters: dict[str, int] = defaultdict(int)
         supporter_roles: dict[str, list[str]] = defaultdict(list)
         name_map: dict[str, str] = {}
@@ -399,15 +400,28 @@ class RoundtableMeeting:
                 rank = entry.get("rank", 0)
                 ticker = entry.get("ticker", "")
                 name = entry.get("name", ticker)
+                score = entry.get("score", 0)
                 if rank in borda_weights and ticker:
                     points[ticker] += borda_weights[rank]
                     name_map[ticker] = name
+                    if score > 0:
+                        weighted_scores[ticker].append(float(score))
+                    else:
+                        weighted_scores[ticker].append(borda_weights[rank] * 33.0)
                     if rank == 1:
                         supporters[ticker] += 1
                     if msg.role not in supporter_roles[ticker]:
                         supporter_roles[ticker].append(msg.role)
 
-        sorted_tickers = sorted(points.keys(), key=lambda t: points[t], reverse=True)
+        def _avg_score(ticker: str) -> float:
+            scores = weighted_scores.get(ticker, [])
+            return sum(scores) / len(scores) if scores else 0.0
+
+        sorted_tickers = sorted(
+            points.keys(),
+            key=lambda t: (_avg_score(t), points[t]),
+            reverse=True,
+        )
         rankings = []
         for i, ticker in enumerate(sorted_tickers, 1):
             sup = supporter_roles.get(ticker, [])
@@ -417,6 +431,7 @@ class RoundtableMeeting:
                 ticker=ticker,
                 name=name_map.get(ticker, ticker),
                 borda_points=points[ticker],
+                weighted_score=round(_avg_score(ticker), 1),
                 supporter_count=supporters.get(ticker, 0),
                 supporters=sup,
                 opposers=opp,
@@ -438,7 +453,7 @@ class RoundtableMeeting:
             for m in all_msgs if m.role != "host"
         )
         borda_str = "\n".join(
-            f"{r.rank}. {r.name}({r.ticker}) — Borda {r.borda_points}分"
+            f"{r.rank}. {r.name}({r.ticker}) — 加权分 {r.weighted_score} / Borda {r.borda_points}分"
             for r in borda_ranking
         )
 

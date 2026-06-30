@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from bottleneck_hunter.chain.json_utils import extract_json_object
+from bottleneck_hunter.llm_clients.factory import get_llm_for_position
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -19,26 +19,6 @@ PROMPTS_DIR = Path(__file__).resolve().parents[1] / "chain" / "prompts"
 def _sse(event: str, **data) -> dict:
     return {"event": event, "data": {"event": event, **data}}
 
-
-def _get_llm():
-    try:
-        from bottleneck_hunter.llm_clients.factory import create_llm
-        env_val = os.environ.get("DC_MODEL_L4_EXECUTION", "").strip()
-        if env_val and ":" in env_val:
-            p, m = env_val.split(":", 1)
-            return create_llm(p, m, temperature=0.3), p, m
-
-        for provider, model, key_env in [
-            ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-            ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-            ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-            ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-        ]:
-            if os.getenv(key_env):
-                return create_llm(provider, model, temperature=0.3), provider, model
-    except Exception as e:
-        logger.warning("无法创建 LLM: %s", e)
-    return None, "", ""
 
 
 async def generate_tuning_suggestions(
@@ -76,7 +56,7 @@ async def generate_tuning_suggestions(
     for item in review_summary.get("common_lessons", []):
         lessons_text.append(f"- {item['lesson']}（出现 {item['count']} 次）")
 
-    llm, provider, model = _get_llm()
+    llm, provider, model = get_llm_for_position(position="watchlist_tuning")
     if not llm:
         yield _sse("tuning_error", error="无可用 LLM")
         return

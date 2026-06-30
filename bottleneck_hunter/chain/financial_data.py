@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -137,6 +139,53 @@ def _compute_volume_metrics(
 
 
 # ---------------------------------------------------------------------------
+# A 股实时行情：腾讯行情 API（获取 PE / 市值）
+# ---------------------------------------------------------------------------
+
+_TENCENT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+}
+
+
+def _code_to_tencent(code: str) -> str:
+    code = code.strip()
+    if code.startswith("6"):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _fetch_tencent_pe_mcap(code_6: str) -> tuple[float | None, float | None]:
+    """从腾讯行情获取实时 PE 和总市值(亿)。失败返回 (None, None)。"""
+    symbol = _code_to_tencent(code_6)
+    url = f"http://qt.gtimg.cn/q={symbol}"
+    req = urllib.request.Request(url, headers=_TENCENT_HEADERS)
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        text = resp.read().decode("gbk", errors="replace")
+    except Exception:
+        return None, None
+
+    for line in text.strip().split(";"):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'v_(\w+)="(.*)"', line)
+        if not m:
+            continue
+        fields = m.group(2).split("~")
+        if len(fields) < 46 or not fields[1]:
+            continue
+        try:
+            pe = float(fields[39]) if fields[39] else None
+            total_mcap = round(float(fields[45]), 2) if fields[45] else None
+        except (ValueError, IndexError):
+            return None, None
+        return pe, total_mcap
+
+    return None, None
+
+
+# ---------------------------------------------------------------------------
 # A 股：AKShare (同花顺 + 东方财富)
 # ---------------------------------------------------------------------------
 
@@ -262,6 +311,14 @@ def _fetch_astock_financial(code_6: str) -> FinancialSnapshot:
             snap.consecutive_volume_days = consec
     except Exception as e:
         logger.debug(f"AKShare 日线数据获取失败 ({code_6}): {e}")
+
+    # 4) 实时行情 → PE（腾讯行情 API）
+    try:
+        pe, _ = _fetch_tencent_pe_mcap(code_6)
+        if pe is not None and pe > 0:
+            snap.consensus_pe = pe
+    except Exception as e:
+        logger.debug(f"腾讯行情 PE 获取失败 ({code_6}): {e}")
 
     return snap
 
@@ -475,7 +532,28 @@ def _fetch_us_kline(ticker: str, period: str = "1y") -> list[dict]:
 
 
 async def fetch_kline(ticker: str, market: str = "us_stock") -> list[dict]:
-    """获取近一年 K 线 OHLCV 数据。"""
+    """获取近一年 K 线 OHLCV 数据。优先通过 FetcherManager 自动降级。"""
+    # 优先通过 FetcherManager（自动降级）
+    try:
+        from bottleneck_hunter.data_provider import get_fetcher_manager
+        mgr = get_fetcher_manager()
+        df = await mgr.fetch_daily(ticker, market, 365)
+        if df is not None and not df.empty and "close" in df.columns:
+            rows = []
+            for _, r in df.iterrows():
+                rows.append({
+                    "date": str(r.get("date", ""))[:10],
+                    "open": round(float(r.get("open", 0)), 2),
+                    "high": round(float(r.get("high", 0)), 2),
+                    "low": round(float(r.get("low", 0)), 2),
+                    "close": round(float(r.get("close", 0)), 2),
+                    "volume": int(r.get("volume", 0)),
+                })
+            return rows
+    except Exception as e:
+        logger.debug(f"FetcherManager K线获取失败 ({ticker}): {e}")
+
+    # 后备：原有直连逻辑
     try:
         if market == "a_stock":
             code = _extract_astock_code(ticker)

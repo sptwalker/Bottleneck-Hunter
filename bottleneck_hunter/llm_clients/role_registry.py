@@ -1,0 +1,122 @@
+"""AI 角色定义注册表 — 可扩展的角色元数据。
+
+每个角色定义了一个 LLM 使用位置（如 L1 宏观策略、瓶颈交叉评分等），
+包含默认模型配置和能力权重需求。新增角色只需调用 register_role()。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class RoleDefinition:
+    key: str
+    label: str
+    group: str  # decision / committee / pipeline / watchlist / bottleneck
+    multi_model: bool = False
+    max_slots: int = 1
+    default_provider: str = "deepseek"
+    default_model: str = "deepseek-chat"
+    capability_weights: dict[str, float] = field(default_factory=dict)
+
+
+ROLE_REGISTRY: dict[str, RoleDefinition] = {}
+
+
+def register_role(role: RoleDefinition):
+    ROLE_REGISTRY[role.key] = role
+
+
+def get_role(key: str) -> RoleDefinition | None:
+    return ROLE_REGISTRY.get(key)
+
+
+def list_roles(group: str | None = None) -> list[RoleDefinition]:
+    roles = list(ROLE_REGISTRY.values())
+    if group:
+        roles = [r for r in roles if r.group == group]
+    return roles
+
+
+_DECISION_WEIGHTS = {
+    "connectivity": 0.05, "json_output": 0.15,
+    "chinese_analysis": 0.30, "speed": 0.10,
+    "scoring_variance": 0.15, "instruction_follow": 0.25,
+}
+_COMMITTEE_WEIGHTS = {
+    "connectivity": 0.05, "json_output": 0.20,
+    "chinese_analysis": 0.30, "speed": 0.10,
+    "scoring_variance": 0.15, "instruction_follow": 0.20,
+}
+_PIPELINE_WEIGHTS = {
+    "connectivity": 0.05, "json_output": 0.25,
+    "chinese_analysis": 0.20, "speed": 0.20,
+    "scoring_variance": 0.10, "instruction_follow": 0.20,
+}
+_WATCHLIST_WEIGHTS = {
+    "connectivity": 0.05, "json_output": 0.20,
+    "chinese_analysis": 0.25, "speed": 0.20,
+    "scoring_variance": 0.10, "instruction_follow": 0.20,
+}
+_BOTTLENECK_WEIGHTS = {
+    "connectivity": 0.05, "json_output": 0.25,
+    "chinese_analysis": 0.20, "speed": 0.10,
+    "scoring_variance": 0.25, "instruction_follow": 0.15,
+}
+
+_INIT_ROLES = [
+    # 决策层级
+    RoleDefinition("L1_macro", "L1 宏观策略", "decision",
+                   capability_weights=_DECISION_WEIGHTS),
+    RoleDefinition("L2_strategic", "L2 组合策略", "decision",
+                   capability_weights=_DECISION_WEIGHTS),
+    RoleDefinition("L3_tactical", "L3 战术计划", "decision",
+                   capability_weights=_DECISION_WEIGHTS),
+    RoleDefinition("L4_execution", "L4 执行方案", "decision",
+                   capability_weights=_DECISION_WEIGHTS),
+    # 投委会
+    RoleDefinition("committee_risk", "风险控制官", "committee",
+                   default_provider="deepseek",
+                   capability_weights=_COMMITTEE_WEIGHTS),
+    RoleDefinition("committee_growth", "成长投资人", "committee",
+                   default_provider="qwen", default_model="qwen-plus",
+                   capability_weights=_COMMITTEE_WEIGHTS),
+    RoleDefinition("committee_value", "价值投资人", "committee",
+                   default_provider="kimi", default_model="moonshot-v1-8k",
+                   capability_weights=_COMMITTEE_WEIGHTS),
+    RoleDefinition("committee_contrarian", "逆向投资人", "committee",
+                   default_provider="glm", default_model="glm-4-flash",
+                   capability_weights=_COMMITTEE_WEIGHTS),
+    RoleDefinition("committee_consensus", "圆桌讨论/共识", "committee",
+                   capability_weights=_COMMITTEE_WEIGHTS),
+    # 产业链管线
+    RoleDefinition("pipeline_decompose", "产业链拆解", "pipeline",
+                   capability_weights=_PIPELINE_WEIGHTS),
+    RoleDefinition("pipeline_eval", "供应商评估", "pipeline",
+                   capability_weights=_PIPELINE_WEIGHTS),
+    RoleDefinition("pipeline_cross_val", "交叉验证", "pipeline",
+                   capability_weights=_PIPELINE_WEIGHTS),
+    RoleDefinition("pipeline_roundtable", "圆桌讨论", "pipeline",
+                   capability_weights=_PIPELINE_WEIGHTS),
+    # 看板模块
+    RoleDefinition("watchlist_catalyst", "催化剂监控", "watchlist",
+                   capability_weights=_WATCHLIST_WEIGHTS),
+    RoleDefinition("watchlist_strategy", "策略引擎", "watchlist",
+                   capability_weights=_WATCHLIST_WEIGHTS),
+    RoleDefinition("watchlist_thesis", "论点追踪", "watchlist",
+                   capability_weights=_WATCHLIST_WEIGHTS),
+    RoleDefinition("watchlist_trade_review", "交易复盘", "watchlist",
+                   capability_weights=_WATCHLIST_WEIGHTS),
+    RoleDefinition("watchlist_tuning", "参数调优", "watchlist",
+                   capability_weights=_WATCHLIST_WEIGHTS),
+    RoleDefinition("watchlist_uzi", "深度分析(UZI)", "watchlist",
+                   capability_weights=_WATCHLIST_WEIGHTS),
+    # 瓶颈交叉评分
+    RoleDefinition("bottleneck", "瓶颈分析", "bottleneck",
+                   multi_model=True, max_slots=3,
+                   capability_weights=_BOTTLENECK_WEIGHTS),
+]
+
+for _r in _INIT_ROLES:
+    register_role(_r)

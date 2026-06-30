@@ -268,7 +268,7 @@ function renderMeetingBubble(msg) {
     <div class="meeting-avatar ${avatarClass}" style="background:${color}">${avatarLetter}</div>
     <div class="meeting-bubble-body">
       <div class="meeting-name">${msg.participant_name}${msg.model_name ? ` <span class="meeting-model">${msg.model_name}</span>` : ''}</div>
-      <div class="meeting-msg">${msg.content.replace(/\n/g, '<br>')}</div>
+      <div class="meeting-msg md-body">${formatMarkdown(msg.content)}</div>
     </div>
   `;
   container.appendChild(bubble);
@@ -305,7 +305,7 @@ function renderMeetingResult(result) {
   html += '</tbody></table>';
 
   if (result.investment_thesis) {
-    html += `<div class="meeting-thesis"><strong>投资主线:</strong> ${result.investment_thesis}</div>`;
+    html += `<div class="meeting-thesis md-body"><strong>投资主线:</strong> ${formatMarkdown(result.investment_thesis)}</div>`;
   }
 
   if (result.key_agreements?.length) {
@@ -409,13 +409,13 @@ export function toggleAiInterp(chartType) {
 
   if (cached?.text) {
     if (_aiConfigMatch(cached)) {
-      body.innerHTML = formatMarkdown(cached.text);
+      body.innerHTML = '<div class="md-body">' + formatMarkdown(cached.text) + '</div>';
       _updateExpandMeta(panel, cached);
       return;
     }
     body.innerHTML = `<div class="ai-stale-notice">
       <p>⚠ 权重已调整，以下为旧评点，可能与当前图表不一致</p>
-    </div>` + formatMarkdown(cached.text);
+    </div><div class="md-body">` + formatMarkdown(cached.text) + '</div>';
     _updateExpandMeta(panel, cached);
     const regenBtn = panel.querySelector('.ai-regen-btn');
     if (regenBtn) regenBtn.style.display = '';
@@ -456,6 +456,7 @@ async function _fetchAiInterp(chartType, force) {
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
+    let accumulated = '';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -466,9 +467,12 @@ async function _fetchAiInterp(chartType, force) {
         if (!line.startsWith('data:')) continue;
         try {
           const d = JSON.parse(line.slice(5).trim());
-          if (d.text) body.innerHTML += d.text.replace(/\n/g, '<br>');
+          if (d.text) {
+            accumulated += d.text;
+            body.innerHTML = '<div class="md-body">' + formatMarkdown(accumulated) + '</div>';
+          }
           if (d.full_text) {
-            body.innerHTML = formatMarkdown(d.full_text);
+            body.innerHTML = '<div class="md-body">' + formatMarkdown(d.full_text) + '</div>';
             const reportData = {
               text: d.full_text,
               scoring_config: _aiScoringConfig(),
@@ -503,7 +507,7 @@ export async function generateAiReport() {
   const isFresh = cached?.text && _aiConfigMatch(cached);
 
   if (isFresh && btn?.textContent !== '重新生成') {
-    body.innerHTML = formatMarkdown(cached.text);
+    body.innerHTML = '<div class="md-body">' + formatMarkdown(cached.text) + '</div>';
     if (btn) btn.textContent = '重新生成';
     return;
   }
@@ -511,7 +515,7 @@ export async function generateAiReport() {
   if (isStale && btn?.textContent !== '重新生成') {
     body.innerHTML = `<div class="ai-stale-notice"><p>⚠ 权重已调整，以下为旧报告</p>
       <button class="btn btn-sm ai-regen-btn" id="ai-regen-comparison">重新生成</button>
-    </div>` + formatMarkdown(cached.text);
+    </div><div class="md-body">` + formatMarkdown(cached.text) + '</div>';
     document.getElementById('ai-regen-comparison')?.addEventListener('click', () => {
       _fetchAiReport(body, btn, true);
     });
@@ -546,6 +550,7 @@ async function _fetchAiReport(bodyEl, btn, force) {
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
+    let accumulated = '';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -556,9 +561,12 @@ async function _fetchAiReport(bodyEl, btn, force) {
         if (!line.startsWith('data:')) continue;
         try {
           const d = JSON.parse(line.slice(5).trim());
-          if (d.text) bodyEl.innerHTML += d.text.replace(/\n/g, '<br>');
+          if (d.text) {
+            accumulated += d.text;
+            bodyEl.innerHTML = '<div class="md-body">' + formatMarkdown(accumulated) + '</div>';
+          }
           if (d.full_text) {
-            bodyEl.innerHTML = formatMarkdown(d.full_text);
+            bodyEl.innerHTML = '<div class="md-body">' + formatMarkdown(d.full_text) + '</div>';
             state.aiReports['comparison'] = {
               text: d.full_text,
               scoring_config: _aiScoringConfig(),

@@ -14,19 +14,19 @@ from pydantic import BaseModel, Field
 
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=2, max_length=32)
-    password: str = Field(..., min_length=4, max_length=128)
+    password: str = Field(..., min_length=6, max_length=128)
 
 
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_一-鿿]+$")
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=8, max_length=128)
     display_name: str = Field(default="", max_length=64)
     invite_code: str = Field(default="", max_length=32)
 
 
 class ChangePasswordRequest(BaseModel):
-    old_password: str = Field(..., min_length=4, max_length=128)
-    new_password: str = Field(..., min_length=6, max_length=128)
+    old_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
 
 
 # ---------------------------------------------------------------------------

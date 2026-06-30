@@ -110,3 +110,29 @@
 #btn-logout:hover {
   color: var(--danger);
 }
+
+/* ── 流程式导航 ── */
+.nav-flow {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: 0;
+}
+
+.nav-flow-arrow {
+  font-size: 11px;
+  color: oklch(0.7 0.02 250);
+  padding: 0 2px;
+  user-select: none;
+  line-height: 1;
+}
+
+.nav-flow-sep {
+  font-size: 10px;
+  color: oklch(0.55 0.08 250);
+  padding: 0 4px;
+  font-weight: 600;
+  user-select: none;
+  letter-spacing: 1px;
+  line-height: 1;
+}

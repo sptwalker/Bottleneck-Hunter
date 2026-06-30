@@ -137,7 +137,7 @@ class TestRunTacticalPlans:
         s, entry_id, macro_id, strat_id = store
         llm = _mock_llm_response(TACTICAL_RESPONSE)
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             from bottleneck_hunter.watchlist.decision_engine import run_tactical_plans
             events = []
@@ -201,7 +201,7 @@ class TestRunExecutionPlans:
         })
 
         llm = _mock_llm_response(EXECUTION_RESPONSE)
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             from bottleneck_hunter.watchlist.decision_engine import run_execution_plans
             events = []
@@ -267,13 +267,13 @@ class TestCommittee:
         consensus_llm = _mock_llm_response(CONSENSUS_RESPONSE)
 
         call_count = {"n": 0}
-        def mock_get_llm(hint=None, position=None):
+        def mock_get_llm(provider_hint=None, position=None):
             call_count["n"] += 1
             if call_count["n"] <= 4:
-                return review_llm, hint or "deepseek", "mock-model"
+                return review_llm, provider_hint or "deepseek", "mock-model"
             return consensus_llm, "deepseek", "mock-model"
 
-        with patch("bottleneck_hunter.watchlist.committee._get_llm", side_effect=mock_get_llm):
+        with patch("bottleneck_hunter.watchlist.committee.get_llm_for_position", side_effect=mock_get_llm):
             from bottleneck_hunter.watchlist.committee import run_committee_review
             events = []
             async for evt in run_committee_review(s, pending):

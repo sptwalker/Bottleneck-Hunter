@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>登录 — BottleneckHunter</title>
+  <link rel="stylesheet" href="/static/css/base/tokens.css">
   <link rel="stylesheet" href="/static/css/auth.css">
 </head>
 <body>
@@ -51,7 +52,7 @@
       </div>
       <div class="auth-field">
         <label for="reg-password">密码</label>
-        <input type="password" id="reg-password" name="password" required autocomplete="new-password" placeholder="至少6位">
+        <input type="password" id="reg-password" name="password" required autocomplete="new-password" placeholder="至少8位">
       </div>
       <div class="auth-field">
         <label for="reg-invite-code">邀请码</label>
@@ -61,7 +62,7 @@
       <button type="submit" class="auth-btn" id="btn-register">注 册</button>
     </form>
 
-    <div class="auth-footer">BottleneckHunter &copy; 2024</div>
+    <div class="auth-footer">BottleneckHunter &copy; <script>document.currentScript.parentElement.appendChild(document.createTextNode(new Date().getFullYear()))</script></div>
   </div>
 </div>
 <script src="/static/js/auth.js"></script>

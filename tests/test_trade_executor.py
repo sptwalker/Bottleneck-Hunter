@@ -21,10 +21,14 @@ def _mock_store(*, account=None, position=None, plan=None):
         "total_equity": 100000, "total_return_pct": 0.0,
     }
     store.get_sim_position.return_value = position
+    store.get_sim_position_any.return_value = position
     store.get_sim_positions.return_value = []
     store.get_execution_plan.return_value = plan
     store.create_sim_trade.return_value = "trade_123"
     store.get_sim_trades.return_value = []
+    store.get_snapshots.return_value = []
+    # execute_trade 内部会调用 store.for_market(market)，需返回自身
+    store.for_market.return_value = store
     return store
 
 

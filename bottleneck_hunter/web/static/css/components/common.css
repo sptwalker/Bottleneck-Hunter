@@ -687,14 +687,66 @@
   left: 0;
   right: 0;
   z-index: 100;
-  height: 32px;
+  height: 28px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: var(--fs-xs);
+  font-size: 11px;
   color: var(--muted);
   background: var(--surface);
   border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+.syslog-bar {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 10px;
+  gap: 8px;
+}
+.syslog-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: all 0.3s;
+}
+.syslog-dot.connected {
+  background: oklch(0.72 0.19 145);
+  opacity: 1;
+  box-shadow: 0 0 4px oklch(0.72 0.19 145 / 0.5);
+}
+.syslog-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  mask-image: linear-gradient(to right, transparent 0%, black 3%, black 92%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, black 3%, black 92%, transparent 100%);
+}
+.syslog-entry {
+  flex-shrink: 0;
+  animation: syslog-slide-in 0.35s ease-out;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.syslog-entry .syslog-ts {
+  color: var(--muted);
+  opacity: 0.6;
+}
+.syslog-entry.level-warning { color: oklch(0.8 0.16 75); }
+.syslog-entry.level-error   { color: oklch(0.7 0.2 25); }
+.syslog-entry.level-info    { color: var(--muted); }
+@keyframes syslog-slide-in {
+  from { opacity: 0; transform: translateX(30px); }
+  to   { opacity: 1; transform: translateX(0); }
 }
 .app-version {
   position: absolute;

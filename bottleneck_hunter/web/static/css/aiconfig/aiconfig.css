@@ -1,0 +1,884 @@
+/* ============================================================
+   AI Config — unified AI configuration page styles
+   Prefix: .aic-*
+   ============================================================ */
+
+/* ── Layout ──────────────────────────────────────────────── */
+
+.aic-container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px 20px;
+}
+
+.aic-page-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0 0 20px;
+  color: var(--fg);
+}
+
+.aic-layout {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .aic-layout {
+    grid-template-columns: 1fr;
+  }
+  .aic-sidebar {
+    order: -1;
+  }
+}
+
+.aic-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.aic-card {
+  background: var(--card-bg, oklch(0.98 0 0));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.aic-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.aic-card-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--fg);
+}
+
+.aic-card-header .aic-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ── Section 1: Provider Management ──────────────────────── */
+
+.aic-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.aic-provider-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  transition: border-color 0.15s;
+}
+
+.aic-provider-item:hover {
+  border-color: var(--accent);
+}
+
+.aic-provider-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aic-provider-row-bottom {
+  display: flex;
+  gap: 8px;
+}
+
+.aic-provider-row-bottom .aic-provider-input {
+  width: 100%;
+}
+
+.aic-provider-name {
+  font-weight: 600;
+  font-size: 13px;
+  min-width: 80px;
+  flex-shrink: 0;
+}
+
+.aic-provider-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 80px;
+  flex-shrink: 0;
+}
+
+.aic-provider-actions-inline {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.aic-provider-model {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ── Sidebar: Configured Models ──────────────────────────── */
+
+.aic-sidebar {
+  position: sticky;
+  top: 80px;
+  background: var(--card-bg, oklch(0.98 0 0));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.aic-sidebar-header {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.aic-sidebar-header h3 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--fg);
+}
+
+.aic-sidebar-count {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.aic-sidebar-body {
+  padding: 8px 0;
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+}
+
+.aic-sidebar-empty {
+  text-align: center;
+  padding: 20px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.aic-sb-provider {
+  padding: 8px 16px;
+  border-bottom: 1px solid oklch(0.92 0 0 / 0.5);
+}
+
+.aic-sb-provider:last-of-type {
+  border-bottom: none;
+}
+
+.aic-sb-provider-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.aic-sb-provider-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.aic-sb-provider-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.aic-sb-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: oklch(0.75 0.15 250 / 0.12);
+  color: oklch(0.50 0.15 250);
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.aic-sb-model {
+  padding: 3px 0 3px 13px;
+}
+
+.aic-sb-model-name {
+  font-size: 11px;
+  color: var(--fg);
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-weight: 500;
+  display: block;
+  margin-bottom: 2px;
+}
+
+.aic-sb-model-idle .aic-sb-model-name {
+  color: var(--muted);
+}
+
+.aic-sb-idle-label {
+  font-size: 10px;
+  color: oklch(0.65 0.1 85);
+}
+
+.aic-sb-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.aic-sb-role-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: oklch(0.93 0.03 250);
+  color: oklch(0.40 0.10 250);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.aic-sb-stats {
+  display: flex;
+  gap: 0;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.aic-sb-stat {
+  flex: 1;
+  text-align: center;
+}
+
+.aic-sb-stat-num {
+  display: block;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.2;
+}
+
+.aic-sb-stat-label {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.aic-provider-input {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+}
+
+.aic-provider-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.aic-provider-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.aic-status-ok { background: oklch(0.72 0.19 142); }
+.aic-status-fail { background: oklch(0.63 0.24 25); }
+.aic-status-unknown { background: oklch(0.75 0 0); }
+
+.aic-provider-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  align-items: center;
+}
+
+.aic-provider-actions .aic-save-status {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+/* ── Section 2: Comprehensive Testing ──────────────────── */
+
+.aic-test-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.aic-test-progress {
+  margin-bottom: 14px;
+  display: none;
+}
+
+.aic-test-progress.active {
+  display: block;
+}
+
+.aic-progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.aic-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.aic-progress-text {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.aic-test-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.aic-test-table th {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 2px solid var(--border);
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.aic-test-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.aic-test-table tr:hover {
+  background: oklch(0.97 0 0 / 0.5);
+}
+
+.aic-score-cell {
+  font-weight: 600;
+  text-align: center;
+  min-width: 48px;
+}
+
+.aic-score-high { color: oklch(0.72 0.19 142); }
+.aic-score-mid { color: oklch(0.75 0.15 85); }
+.aic-score-low { color: oklch(0.63 0.24 25); }
+
+.aic-score-bar {
+  display: inline-block;
+  height: 4px;
+  border-radius: 2px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.aic-composite-cell {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.aic-test-empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ── Section 3: Model Assignment Matrix ──────────────────── */
+
+.aic-group-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 14px;
+  border-bottom: 2px solid var(--border);
+}
+
+.aic-group-tab {
+  padding: 8px 16px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.aic-group-tab:hover {
+  color: var(--fg);
+}
+
+.aic-group-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.aic-role-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aic-role-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  flex-wrap: wrap;
+}
+
+.aic-role-item:has(.aic-slot-label) {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.aic-role-item:has(.aic-slot-label) .aic-role-slots {
+  flex-direction: column;
+  gap: 6px;
+}
+
+.aic-role-label {
+  font-weight: 600;
+  font-size: 13px;
+  min-width: 120px;
+  flex-shrink: 0;
+}
+
+.aic-role-multi-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: oklch(0.75 0.15 250 / 0.15);
+  color: oklch(0.55 0.15 250);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.aic-role-slots {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.aic-slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 200px;
+}
+
+.aic-slot-label {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.aic-slot select {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  min-width: 160px;
+}
+
+.aic-slot select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.aic-matrix-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  align-items: center;
+}
+
+.aic-matrix-actions .aic-save-status {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+/* ── Section 4: Auto-recommendation ──────────────────────── */
+
+.aic-recommend-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.aic-recommend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.aic-rec-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--bg);
+}
+
+.aic-rec-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.aic-rec-role {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.aic-rec-score {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.aic-rec-model {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.aic-rec-vs {
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aic-rec-vs .aic-vs-arrow {
+  color: oklch(0.72 0.19 142);
+}
+
+.aic-rec-empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ── Migration notice ────────────────────────────────────── */
+
+.aic-migration-notice {
+  padding: 12px 16px;
+  border: 1px solid oklch(0.75 0.15 85 / 0.4);
+  background: oklch(0.95 0.05 85 / 0.3);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.aic-migration-notice span {
+  font-size: 13px;
+  color: oklch(0.45 0.12 85);
+}
+
+.aic-migration-notice a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.aic-migration-notice a:hover {
+  text-decoration: underline;
+}
+
+/* ── Custom Endpoint Section ────────────────────────────── */
+
+.aic-custom-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.aic-custom-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.aic-custom-header h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--fg);
+}
+
+.aic-custom-header .aic-hint {
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+}
+
+.aic-custom-form {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 14px;
+  background: oklch(0.97 0.01 250 / 0.3);
+}
+
+.aic-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.aic-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.aic-form-field:nth-child(3) {
+  grid-column: 1 / -1;
+}
+
+.aic-form-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.aic-form-field input {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+}
+
+.aic-form-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.aic-form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.aic-custom-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  margin-bottom: 8px;
+  transition: border-color 0.15s;
+}
+
+.aic-custom-item:hover {
+  border-color: var(--accent);
+}
+
+.aic-custom-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.aic-custom-item-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.aic-custom-item-detail {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aic-custom-item-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.aic-custom-empty {
+  text-align: center;
+  padding: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.btn-xs {
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-xs:hover {
+  background: var(--border);
+}
+
+.btn-danger {
+  color: oklch(0.63 0.24 25);
+  border-color: oklch(0.63 0.24 25 / 0.3);
+}
+
+.btn-danger:hover {
+  background: oklch(0.63 0.24 25 / 0.1);
+}
+
+/* ── Recommend Modal ───────────────────────────────────── */
+
+.aic-rm-summary {
+  margin-bottom: 16px;
+}
+
+.aic-rm-summary p {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.aic-rm-group {
+  margin-bottom: 14px;
+}
+
+.aic-rm-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.aic-rm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.aic-rm-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid oklch(0.92 0 0 / 0.6);
+  vertical-align: middle;
+}
+
+.aic-rm-table tr:last-child td {
+  border-bottom: none;
+}
+
+.aic-rm-role {
+  font-weight: 600;
+  white-space: nowrap;
+  min-width: 100px;
+}
+
+.aic-rm-model {
+  min-width: 160px;
+}
+
+.aic-rm-model-name {
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.aic-rm-old {
+  font-size: 11px;
+  color: var(--muted);
+  display: block;
+  margin-top: 1px;
+}
+
+.aic-rm-score {
+  font-weight: 700;
+  text-align: center;
+  min-width: 40px;
+}
+
+.aic-rm-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.aic-rm-new {
+  background: oklch(0.72 0.19 142 / 0.15);
+  color: oklch(0.50 0.19 142);
+}
+
+.aic-rm-changed {
+  background: oklch(0.75 0.15 250 / 0.15);
+  color: oklch(0.50 0.15 250);
+}
+
+.aic-rm-same {
+  background: oklch(0.90 0 0);
+  color: var(--muted);
+}

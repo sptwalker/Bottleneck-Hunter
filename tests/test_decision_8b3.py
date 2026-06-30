@@ -93,7 +93,8 @@ class TestTradeExecutor:
         assert "error" not in result
         assert result["side"] == "buy"
         assert result["shares"] == 50
-        assert result["price"] == 188.0
+        # 成交价含滑点，允许小幅偏移（买入略高于目标价）
+        assert 188.0 <= result["price"] <= 188.0 * 1.01
 
         account = s.get_sim_account()
         assert account["cash_balance"] < 100000
@@ -187,7 +188,8 @@ class TestTradeExecutor:
         assert "error" not in result
         pos = s.get_sim_position(account["id"], "AAPL")
         assert pos["shares"] == 100
-        assert pos["avg_cost"] == 185.0
+        # 加仓均价含滑点：(50*180 + 50*~190.x)/100，约 185，允许滑点偏移
+        assert 185.0 <= pos["avg_cost"] <= 185.0 * 1.01
 
     def test_account_recalculated(self, store):
         s, entry_id, *_ = store

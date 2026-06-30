@@ -1135,7 +1135,8 @@
   justify-content: center;
 }
 .sector-btn {
-  padding: 10px 20px;
+  position: relative;
+  padding: 10px 32px 10px 20px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
@@ -1145,6 +1146,31 @@
   transition: all .2s;
   min-width: 100px;
   text-align: center;
+}
+.sector-menu-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity var(--transition), background var(--transition);
+}
+.sector-btn:hover .sector-menu-btn {
+  opacity: 1;
+}
+.sector-menu-btn:hover {
+  background: oklch(0 0 0 / 0.08);
+  color: var(--ink);
 }
 .sector-btn:hover {
   border-color: var(--accent);

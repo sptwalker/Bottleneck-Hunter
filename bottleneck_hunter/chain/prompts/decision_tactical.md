@@ -16,11 +16,29 @@
 
 ## 个股最新数据
 
+每只股票附带以下 L2 层信息：
+- `l2_role`: core（核心持仓）/ tactical（战术持仓）/ watch（观察仓）— 来自 L2 组合策略
+- `l2_target_weight`: L2 建议的目标权重百分比
+
+**规则**：
+- 优先为 core 角色生成行动计划（buy/add/sell/reduce）
+- tactical 角色根据催化剂和时机生成操作建议
+- watch 角色仅生成观察建议（hold 或 wait_for_pullback），除非有紧急催化剂
+
 {stock_data}
 
 ## 催化剂时间表
 
 {catalyst_timeline}
+
+## 已兑现/落空的催化剂（重要信号）
+
+以下是近期已判定结果的催化剂。这是强信号，请据此调整战术：
+- **落空(failed)**：原买入逻辑受损，倾向 reduce/sell 或收紧止损
+- **兑现(realized)**：逻辑验证成立，若仍有上行空间可考虑 add
+- **部分兑现(partial)**：谨慎评估，维持或小幅调整
+
+{catalyst_outcomes}
 
 ## 分析维度
 
@@ -31,6 +49,13 @@
 3. **催化剂**：即将到来的事件及预期影响
 4. **资金面**：期权异动、机构持仓变化、内部交易
 5. **情绪面**：市场共识、分析师预期、新闻情绪
+
+### 止损止盈锚点（重要）
+
+上方"组合策略"中每只股票含 L2 情景估值 `scenario_valuation`（bear/base/bull 价格+概率）。请据此设定 exit_plan：
+- **止损位 stop_loss**：优先采用该股的 `bear_price` 作为硬止损锚点（若技术支撑位更高可取两者较高者）
+- **止盈位 target_prices**：第一目标参考 `base_price`，第二目标参考 `bull_price`，概率沿用情景概率
+- 若该股无 scenario_valuation，再回退到纯技术位
 
 ## 输出格式
 
@@ -87,3 +112,4 @@
 - **持有不动**：已持仓且无变化信号，不产生无意义操作
 - 止损设置要具体，不能用"适时退出"等模糊表述
 - 分批策略要给出具体比例和条件
+- **价格目标与 L2 对齐**：如果 L2 组合策略中该股有 scenario_valuation（Bear/Base/Bull 三场景估值），exit_plan 的 target_prices 应参考 Base/Bull 价格目标，stop_loss 应参考 Bear 场景价格

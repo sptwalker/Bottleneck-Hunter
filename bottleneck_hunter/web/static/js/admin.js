@@ -1,6 +1,7 @@
 /**
  * admin.js — 管理后台面板（用户管理、邀请码、系统配置）
  */
+import { showConfirm } from './utils/confirm.js';
 
 let _currentTab = 'users';
 
@@ -134,7 +135,7 @@ function renderUsers(users) {
 
 // 全局回调
 window._adminFreeze = async (userId) => {
-  if (!confirm('确定冻结该用户？冻结后用户将无法登录。')) return;
+  if (!await showConfirm('确定冻结该用户？冻结后用户将无法登录。', { danger: true })) return;
   try {
     const res = await fetch(`/api/admin/users/${userId}/freeze`, { method: 'POST' });
     if (!res.ok) { const d = await res.json(); throw new Error(d.detail || res.status); }
@@ -151,7 +152,7 @@ window._adminUnfreeze = async (userId) => {
 };
 
 window._adminDelete = async (userId, username) => {
-  if (!confirm(`确定删除用户 "${username}"？\n\n此操作将删除该用户的全部数据（观察池、分析记录、API KEY），且不可恢复！`)) return;
+  if (!await showConfirm(`确定删除用户 "${username}"？\n\n此操作将删除该用户的全部数据（观察池、分析记录、API KEY），且不可恢复！`, { danger: true })) return;
   try {
     const res = await fetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
     if (!res.ok) { const d = await res.json(); throw new Error(d.detail || res.status); }
@@ -251,7 +252,7 @@ function renderInviteCodes(codes) {
 }
 
 window._adminRevokeCode = async (code) => {
-  if (!confirm(`确定作废邀请码 ${code}？`)) return;
+  if (!await showConfirm(`确定作废邀请码 ${code}？`)) return;
   try {
     const res = await fetch(`/api/admin/invite-codes/${code}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

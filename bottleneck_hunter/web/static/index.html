@@ -4,10 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BottleneckHunter — AI 产业链瓶颈选股</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=47">
+  <link rel="stylesheet" href="/static/css/style.css?v=58">
   <link rel="stylesheet" href="/static/css/admin.css?v=1">
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 </head>
 <body class="wizard-active">
 
@@ -20,9 +21,17 @@
     <span class="header-subtitle">瓶颈猎手</span>
   </div>
   <nav class="header-nav">
-    <button class="nav-btn active" data-view="screen">产业链分析</button>
-    <button class="nav-btn" data-view="watchlist">观察池</button>
-    <button class="nav-btn" data-view="trading">决策中心</button>
+    <div class="nav-flow" role="tablist">
+      <button class="nav-btn active" data-view="screen" role="tab" aria-selected="true">产业链分析</button>
+      <span class="nav-flow-arrow">&raquo;</span>
+      <button class="nav-btn" data-view="watchlist" role="tab" aria-selected="false">观察池</button>
+      <span class="nav-flow-arrow">&raquo;</span>
+      <button class="nav-btn" data-view="trading" role="tab" aria-selected="false">决策中心</button>
+      <span class="nav-flow-sep">&laquo;&raquo;</span>
+      <button class="nav-btn" data-view="simtrading" role="tab" aria-selected="false">模拟交易</button>
+      <span class="nav-flow-sep">|</span>
+      <button class="nav-btn" data-view="aiconfig" role="tab" aria-selected="false">AI 配置</button>
+    </div>
     <button class="nav-btn nav-btn-icon nav-btn-admin" id="btn-admin" title="管理后台" style="display:none">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 4.354a4 4 0 1 1 0 5.292M15 21H3v-1a6 6 0 0 1 12 0v1zm0 0h6v-1a6 6 0 0 0-9-5.197"/>
@@ -116,7 +125,7 @@
               <button class="sector-btn" data-sector="新能源车" data-product="电动汽车" data-market="us_stock">新能源车</button>
               <button class="sector-btn sector-add" id="wiz-add-sector">+ 添加赛道</button>
             </div>
-            <div class="sector-hint">右键点击赛道按钮可配置参数（市场/产业方向/终端产品） · 最多 8 个自定义赛道</div>
+            <div class="sector-hint">点击 ⋯ 按钮可配置赛道参数（市场/产业方向/终端产品） · 最多 8 个自定义赛道</div>
           </div>
 
           <!-- 自定义分析 -->
@@ -196,7 +205,7 @@
               </label>
               <span class="p1-timer" id="p1-timer" style="display:none">已用时：<b id="p1-timer-val">00分00秒</b></span>
               <div class="p1-progress-bar p1-progress-inline" id="p1-progress-bar" style="display:none">
-                <div class="p2-progress-track"><div class="p2-progress-fill" id="p1-progress-fill"></div></div>
+                <div class="p2-progress-track"><div class="p2-progress-fill" id="p1-progress-fill" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div></div>
                 <span class="p2-progress-text" id="p1-progress-text"></span>
               </div>
               <button class="btn btn-sm btn-tristate state-start" id="p1-tristate" style="margin-left:auto">开始分析</button>
@@ -279,7 +288,7 @@
           <!-- 进度条 + 计时器 -->
           <div class="p2-progress-bar" id="p2-progress-bar" style="display:none">
             <div class="p2-progress-track">
-              <div class="p2-progress-fill" id="p2-progress-fill"></div>
+              <div class="p2-progress-fill" id="p2-progress-fill" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
             </div>
             <span class="p2-progress-text" id="p2-progress-text"></span>
             <span class="p2-timer" id="p2-timer" style="display:none">已用时：<b id="p2-timer-val">00分00秒</b></span>
@@ -546,7 +555,6 @@
               <input type="text" class="form-input wl-search-input" id="wl-search" placeholder="搜索 Ticker / 名称...">
             </div>
             <select class="form-input wl-filter-select" id="wl-filter-market">
-              <option value="all">全部市场</option>
               <option value="us_stock">美股</option>
               <option value="a_stock">A股</option>
             </select>
@@ -568,31 +576,22 @@
               <button class="wl-view-btn active" data-mode="table" title="表格视图">☰</button>
               <button class="wl-view-btn" data-mode="card" title="卡片视图">▦</button>
             </div>
-            <button class="btn btn-sm" id="wl-btn-refresh-intel" title="聚合所有数据源生成情报摘要">刷新信息</button>
-            <button class="btn btn-sm" id="wl-btn-refresh-strategy" title="基于最新情报生成操作策略">刷新策略</button>
-            <button class="btn btn-sm" id="wl-btn-refresh">刷新数据</button>
-            <button class="btn btn-sm btn-primary" id="wl-btn-add">+ 添加</button>
+            <button class="btn btn-sm btn-primary" id="wl-btn-auto-refresh">⟳ 一键自动刷新</button>
+            <button class="wl-text-btn" id="wl-btn-refresh" title="刷新市场数据">刷新数据</button>
+            <button class="wl-text-btn" id="wl-btn-refresh-intel" title="聚合情报信息">刷新信息</button>
+            <button class="wl-text-btn" id="wl-btn-refresh-strategy" title="生成操作策略">刷新策略</button>
           </div>
         </div>
 
-        <!-- 添加面板（隐藏） -->
-        <div class="wl-add-panel" id="wl-add-panel" style="display:none">
-          <div class="wl-add-form">
-            <input type="text" class="form-input" id="wl-add-ticker" placeholder="股票代码 (如 NVDA)">
-            <input type="text" class="form-input" id="wl-add-name" placeholder="公司名称">
-            <select class="form-input" id="wl-add-tier">
-              <option value="focus">重点关注 (max 6)</option>
-              <option value="normal">一般关注 (max 6)</option>
-              <option value="track" selected>潜力跟踪 (max 12)</option>
-            </select>
-            <button class="btn btn-sm btn-primary" id="wl-add-submit">确认添加</button>
-            <button class="btn btn-sm btn-secondary" id="wl-add-cancel">取消</button>
-          </div>
-        </div>
-
-        <!-- 刷新进度提示 -->
+        <!-- 刷新进度条 -->
         <div class="wl-refresh-bar" id="wl-refresh-bar" style="display:none">
-          <span class="wl-refresh-msg" id="wl-pipeline-status"></span>
+          <div class="wl-refresh-header">
+            <span class="wl-refresh-msg" id="wl-pipeline-status"></span>
+            <span class="wl-refresh-timer" id="wl-refresh-timer">00:00</span>
+          </div>
+          <div class="wl-refresh-track">
+            <div class="wl-refresh-fill" id="wl-refresh-fill"></div>
+          </div>
         </div>
 
         <!-- 批量操作栏 -->
@@ -684,12 +683,14 @@
         <div class="dc-toolbar">
           <h2 class="wl-page-title">决策中心</h2>
           <div class="dc-toolbar-actions">
+            <select id="dc-market-select" class="wl-filter-select" style="min-width:80px;">
+              <option value="us_stock">美股</option>
+              <option value="a_stock">A股</option>
+            </select>
             <button class="btn btn-sm" id="dc-btn-daily" title="L1 检查 → L3 战术 → L4 执行 → 投委会评审">一键日常决策</button>
             <button class="btn btn-sm" id="dc-btn-refresh" title="全量刷新 L1+L2+L3+L4+投委会">全量刷新</button>
             <button class="btn btn-sm" id="dc-btn-catalysts" title="扫描催化剂事件">催化剂扫描</button>
             <button class="btn btn-sm" id="dc-btn-ai-config" title="配置各层级 AI 模型">⚙ AI 配置</button>
-            <button class="btn btn-sm" id="dc-btn-review" title="查看交易复盘和经验卡片">复盘</button>
-            <button class="btn btn-sm" id="dc-btn-performance" title="绩效报告与调优">📊 绩效</button>
             <button class="btn btn-sm" id="dc-btn-compare" title="参数快照对比">A/B 对比</button>
           </div>
         </div>
@@ -700,9 +701,15 @@
         <!-- SSE 进度条 -->
         <div class="dc-progress" id="dc-progress" style="display:none">
           <div class="dc-progress-bar">
-            <div class="dc-progress-fill" id="dc-progress-fill"></div>
+            <div class="dc-progress-fill" id="dc-progress-fill" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
           </div>
-          <span class="dc-progress-text" id="dc-progress-text">准备中...</span>
+          <div class="dc-progress-info">
+            <span class="dc-progress-text" id="dc-progress-text">准备中...</span>
+            <span class="dc-progress-meta">
+              <span id="dc-progress-pct">0%</span>
+              <span id="dc-progress-timer">00:00</span>
+            </span>
+          </div>
         </div>
 
         <!-- 两列布局 -->
@@ -712,7 +719,7 @@
             <!-- L1 宏观环境 -->
             <div class="dc-card" id="dc-macro">
               <div class="dc-card-header">
-                <h3>L1 宏观环境</h3>
+                <h3>L1 宏观环境 <span class="dc-card-toggle">▼</span></h3>
                 <span class="dc-badge dc-badge-info" id="dc-macro-risk">--</span>
               </div>
               <div class="dc-card-body" id="dc-macro-body">
@@ -723,7 +730,7 @@
             <!-- L3 战术计划 -->
             <div class="dc-card" id="dc-tactical">
               <div class="dc-card-header">
-                <h3>L3 战术计划</h3>
+                <h3>L3 战术计划 <span class="dc-card-toggle">▼</span></h3>
                 <span class="dc-badge" id="dc-tactical-count">0</span>
               </div>
               <div class="dc-card-body">
@@ -747,7 +754,7 @@
             <!-- L4 待确认执行 -->
             <div class="dc-card" id="dc-pending">
               <div class="dc-card-header">
-                <h3>L4 待确认执行</h3>
+                <h3>L4 待确认执行 <span class="dc-card-toggle">▼</span></h3>
                 <span class="dc-badge dc-badge-warn" id="dc-pending-count">0</span>
               </div>
               <div class="dc-card-body" id="dc-pending-list">
@@ -755,13 +762,33 @@
               </div>
             </div>
 
+            <!-- 已拦截操作（系统/投委会拦截，动态渲染） -->
+            <div class="dc-card" id="dc-blocked-section" style="display:none"></div>
+
             <!-- 投委会评审 -->
             <div class="dc-card" id="dc-committee">
               <div class="dc-card-header">
-                <h3>投委会评审</h3>
+                <h3>投委会评审 <span class="dc-card-toggle">▼</span></h3>
               </div>
               <div class="dc-card-body" id="dc-committee-body">
                 <p class="dc-empty-hint">暂无评审记录</p>
+              </div>
+            </div>
+
+            <!-- 会议历史 -->
+            <div class="dc-card" id="dc-meetings">
+              <div class="dc-card-header">
+                <h3>会议历史 <span class="dc-card-toggle">▼</span></h3>
+                <div class="dc-meeting-filters">
+                  <select class="dc-meeting-type-select" id="dc-meeting-type">
+                    <option value="">全部</option>
+                    <option value="roundtable">圆桌会议</option>
+                    <option value="committee">投委会</option>
+                  </select>
+                </div>
+              </div>
+              <div class="dc-card-body" id="dc-meetings-body">
+                <p class="dc-empty-hint">暂无会议记录</p>
               </div>
             </div>
           </div>
@@ -776,50 +803,6 @@
               <div class="dc-card-body">
                 <div id="dc-alloc-chart" style="height:200px"></div>
                 <p class="dc-empty-hint" id="dc-strategic-empty">暂无组合策略</p>
-              </div>
-            </div>
-
-            <!-- 模拟账户 -->
-            <div class="dc-card" id="dc-account">
-              <div class="dc-card-header">
-                <h3>模拟账户</h3>
-              </div>
-              <div class="dc-card-body">
-                <div class="dc-stat-grid" id="dc-account-stats">
-                  <div class="dc-stat">
-                    <span class="dc-stat-value" id="dc-equity">--</span>
-                    <span class="dc-stat-label">总权益</span>
-                  </div>
-                  <div class="dc-stat">
-                    <span class="dc-stat-value" id="dc-cash">--</span>
-                    <span class="dc-stat-label">可用现金</span>
-                  </div>
-                  <div class="dc-stat">
-                    <span class="dc-stat-value" id="dc-return">--</span>
-                    <span class="dc-stat-label">总收益率</span>
-                  </div>
-                  <div class="dc-stat">
-                    <span class="dc-stat-value" id="dc-winrate">--</span>
-                    <span class="dc-stat-label">胜率</span>
-                  </div>
-                </div>
-                <div id="dc-equity-chart" style="height:160px;margin-top:12px"></div>
-              </div>
-            </div>
-
-            <!-- 持仓 -->
-            <div class="dc-card" id="dc-positions">
-              <div class="dc-card-header">
-                <h3>当前持仓</h3>
-              </div>
-              <div class="dc-card-body">
-                <table class="dc-table dc-table-sm" id="dc-positions-table">
-                  <thead>
-                    <tr><th>Ticker</th><th>股数</th><th>成本</th><th>市值</th><th>盈亏</th><th>占比</th></tr>
-                  </thead>
-                  <tbody id="dc-positions-body"></tbody>
-                </table>
-                <p class="dc-empty-hint" id="dc-positions-empty">暂无持仓</p>
               </div>
             </div>
 
@@ -846,14 +829,397 @@
                 <p class="dc-empty-hint">暂无风险数据</p>
               </div>
             </div>
+
+            <!-- 模型评分排行 -->
+            <div class="dc-card" id="dc-model-ratings">
+              <div class="dc-card-header">
+                <h3>模型评分</h3>
+                <button class="btn btn-outline-accent btn-xs" id="dc-btn-calibrate" title="手动触发校准">校准</button>
+              </div>
+              <div class="dc-card-body" id="dc-model-ratings-body">
+                <p class="dc-empty-hint">暂无模型评分数据</p>
+              </div>
+            </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- 模拟交易 View -->
+    <div id="view-simtrading" class="view">
+      <div class="wl-container">
+        <div class="st-header">
+          <h2 class="wl-page-title">模拟交易</h2>
+          <select id="st-market-select" class="wl-filter-select" style="min-width:80px;margin-left:12px;">
+            <option value="us_stock">美股</option>
+            <option value="a_stock">A股</option>
+          </select>
+        </div>
+        <div class="st-tabs" role="tablist">
+          <button class="st-tab active" data-tab="account" role="tab" aria-selected="true">账户盈亏</button>
+          <button class="st-tab" data-tab="positions" role="tab" aria-selected="false">当前持仓</button>
+          <button class="st-tab" data-tab="history" role="tab" aria-selected="false">历史交易</button>
+          <button class="st-tab" data-tab="reviews" role="tab" aria-selected="false">复盘记录</button>
+          <button class="st-tab" data-tab="operations" role="tab" aria-selected="false">账户操作</button>
+        </div>
+
+        <!-- 账户盈亏 -->
+        <div class="st-tab-pane active" id="st-pane-account" role="tabpanel">
+          <div class="st-stat-grid" id="st-account-stats">
+            <div class="st-stat-card">
+              <span class="st-stat-value" id="st-total-equity">--</span>
+              <span class="st-stat-label">总价值</span>
+            </div>
+            <div class="st-stat-card">
+              <span class="st-stat-value" id="st-stock-value">--</span>
+              <span class="st-stat-label">股票价值</span>
+            </div>
+            <div class="st-stat-card">
+              <span class="st-stat-value" id="st-cash-value">--</span>
+              <span class="st-stat-label">现金价值</span>
+            </div>
+            <div class="st-stat-card">
+              <span class="st-stat-value" id="st-total-return">--</span>
+              <span class="st-stat-label">总收益率</span>
+            </div>
+            <div class="st-stat-card">
+              <span class="st-stat-value" id="st-winrate">--</span>
+              <span class="st-stat-label">胜率</span>
+            </div>
+            <div class="st-stat-card">
+              <span class="st-stat-value" id="st-total-trades">--</span>
+              <span class="st-stat-label">总交易</span>
+            </div>
+          </div>
+          <div class="st-card" style="margin-top:16px">
+            <div class="st-card-header">
+              <h3>权益曲线</h3>
+              <div class="st-chart-range">
+                <button class="st-range-btn active" data-days="30">30天</button>
+                <button class="st-range-btn" data-days="90">90天</button>
+                <button class="st-range-btn" data-days="180">半年</button>
+                <button class="st-range-btn" data-days="365">一年</button>
+              </div>
+            </div>
+            <div class="st-card-body">
+              <div id="st-equity-chart" style="height:280px"></div>
+            </div>
+          </div>
+          <!-- 绩效概览 -->
+          <div class="st-perf-grid" style="margin-top:16px">
+            <div class="st-card">
+              <div class="st-card-header"><h3>月度绩效</h3></div>
+              <div class="st-card-body" id="st-perf-monthly"><p class="st-empty-hint">暂无数据</p></div>
+            </div>
+            <div class="st-card">
+              <div class="st-card-header"><h3>标的分布</h3></div>
+              <div class="st-card-body" id="st-perf-tickers"><p class="st-empty-hint">暂无数据</p></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 当前持仓 -->
+        <div class="st-tab-pane" id="st-pane-positions" role="tabpanel">
+          <div class="st-card">
+            <div class="st-card-header">
+              <h3>持仓列表</h3>
+              <label class="st-toggle-label">
+                <input type="checkbox" id="st-show-zero" checked> 显示已清仓
+              </label>
+            </div>
+            <div class="st-card-body">
+              <table class="st-table" id="st-positions-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Ticker</th>
+                    <th>持仓数</th>
+                    <th>成本价</th>
+                    <th>当前价</th>
+                    <th>市值</th>
+                    <th>盈亏</th>
+                    <th>占比</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="st-positions-body"></tbody>
+              </table>
+              <p class="st-empty-hint" id="st-positions-empty">暂无持仓记录</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 历史交易 -->
+        <div class="st-tab-pane" id="st-pane-history" role="tabpanel">
+          <div class="st-card">
+            <div class="st-card-header">
+              <h3>交易记录</h3>
+              <div class="st-history-filters">
+                <input type="text" class="st-input" id="st-history-ticker" placeholder="按 Ticker 筛选">
+                <select class="st-select" id="st-history-side">
+                  <option value="">全部</option>
+                  <option value="buy">买入</option>
+                  <option value="sell">卖出</option>
+                </select>
+                <button class="btn btn-sm" id="st-history-search">搜索</button>
+              </div>
+            </div>
+            <div class="st-card-body">
+              <table class="st-table" id="st-trades-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>Ticker</th>
+                    <th>方向</th>
+                    <th>数量</th>
+                    <th>价格</th>
+                    <th>金额</th>
+                    <th>决策依据</th>
+                  </tr>
+                </thead>
+                <tbody id="st-trades-body"></tbody>
+              </table>
+              <p class="st-empty-hint" id="st-trades-empty">暂无交易记录</p>
+              <div class="st-pagination" id="st-trades-pagination"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 复盘记录 -->
+        <div class="st-tab-pane" id="st-pane-reviews" role="tabpanel">
+          <div class="st-card">
+            <div class="st-card-header">
+              <h3>交易复盘</h3>
+              <div>
+                <button class="btn btn-sm" id="st-btn-batch-review">批量复盘未处理交易</button>
+                <span class="st-review-status" id="st-review-status"></span>
+              </div>
+            </div>
+            <div class="st-card-body" id="st-review-list"><p class="st-empty-hint">暂无复盘记录</p></div>
+          </div>
+          <div class="st-card" style="margin-top:16px">
+            <div class="st-card-header"><h3>经验卡片</h3></div>
+            <div class="st-card-body" id="st-experience-list"><p class="st-empty-hint">暂无经验卡片</p></div>
+          </div>
+          <div class="st-card" style="margin-top:16px">
+            <div class="st-card-header"><h3>交易反馈历史</h3></div>
+            <div class="st-card-body" id="st-feedback-list"><p class="st-empty-hint">暂无反馈记录</p></div>
+          </div>
+        </div>
+
+        <!-- 账户操作 -->
+        <div class="st-tab-pane" id="st-pane-operations" role="tabpanel">
+          <div class="st-ops-grid">
+            <div class="st-card">
+              <div class="st-card-header"><h3>资金管理</h3></div>
+              <div class="st-card-body">
+                <div class="st-op-form">
+                  <div class="st-op-row">
+                    <label>操作类型</label>
+                    <select class="st-select" id="st-fund-type">
+                      <option value="deposit">存入资金</option>
+                      <option value="withdraw">提取资金</option>
+                    </select>
+                  </div>
+                  <div class="st-op-row">
+                    <label>金额</label>
+                    <input type="number" class="st-input" id="st-fund-amount" placeholder="输入金额" min="0" step="100">
+                  </div>
+                  <div class="st-op-row">
+                    <label>备注</label>
+                    <input type="text" class="st-input" id="st-fund-note" placeholder="可选备注">
+                  </div>
+                  <button class="btn btn-sm btn-primary" id="st-btn-adjust-funds">确认操作</button>
+                </div>
+                <div class="st-fund-history" id="st-fund-history"></div>
+              </div>
+            </div>
+            <div class="st-card">
+              <div class="st-card-header"><h3>数据操作</h3></div>
+              <div class="st-card-body">
+                <p class="st-op-desc">手动刷新所有持仓股票的最新市场价格，并重新计算账户盈亏数据。</p>
+                <button class="btn btn-sm" id="st-btn-refresh-prices">刷新市场数据</button>
+                <span class="st-refresh-status" id="st-refresh-status"></span>
+              </div>
+            </div>
+            <div class="st-card">
+              <div class="st-card-header">
+                <h3>调优建议</h3>
+                <button class="btn btn-sm" id="st-btn-gen-tuning">生成调优建议</button>
+              </div>
+              <div class="st-card-body">
+                <span class="st-review-status" id="st-tuning-status"></span>
+                <div id="st-tuning-list"><p class="st-empty-hint">暂无调优建议</p></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- AI 配置 View -->
+    <div id="view-aiconfig" class="view">
+      <div class="aic-container">
+        <h2 class="aic-page-title">AI 配置中心</h2>
+        <div class="aic-layout">
+        <div class="aic-sections">
+
+          <!-- Section 1: Provider 管理 -->
+          <div class="aic-card">
+            <div class="aic-card-header">
+              <h3>Provider 管理</h3>
+              <span class="aic-hint">管理所有 LLM Provider，点击编辑配置 API Key</span>
+            </div>
+            <div class="aic-provider-actions" style="margin-bottom:12px">
+              <button class="btn btn-sm" id="aic-test-conn">测试连通性</button>
+              <span class="aic-save-status" id="aic-provider-status"></span>
+            </div>
+            <div class="aic-provider-grid" id="aic-provider-grid"></div>
+
+            <!-- 自定义端点 -->
+            <div class="aic-custom-section">
+              <div class="aic-custom-header">
+                <h4>自定义 API 端点</h4>
+                <span class="aic-hint">添加 OpenAI 兼容的自定义 API（如 Ollama、代理服务、企业内网 API）</span>
+                <button class="btn btn-sm btn-primary" id="aic-add-custom">+ 添加端点</button>
+              </div>
+
+              <!-- 添加/编辑表单 -->
+              <div class="aic-custom-form" id="aic-custom-form" style="display:none">
+                <input type="hidden" id="aic-custom-edit-id" value="">
+                <div class="aic-form-grid">
+                  <div class="aic-form-field" id="aic-field-name">
+                    <label>显示名称</label>
+                    <input type="text" id="aic-custom-name" placeholder="如：本地 Ollama" maxlength="64">
+                  </div>
+                  <div class="aic-form-field" id="aic-field-id">
+                    <label>标识符 ID</label>
+                    <input type="text" id="aic-custom-id" placeholder="如：ollama_local（小写字母+数字+下划线）" maxlength="32">
+                  </div>
+                  <div class="aic-form-field" id="aic-field-url">
+                    <label>API 地址</label>
+                    <input type="text" id="aic-custom-url" placeholder="如：http://localhost:11434/v1" maxlength="512">
+                  </div>
+                  <div class="aic-form-field">
+                    <label>API Key</label>
+                    <input type="password" id="aic-custom-key" placeholder="可选（如 Ollama 无需填写）" maxlength="512">
+                  </div>
+                  <div class="aic-form-field" id="aic-field-model">
+                    <label>默认模型</label>
+                    <input type="text" id="aic-custom-model" placeholder="如：llama3.1:8b" maxlength="128">
+                  </div>
+                </div>
+                <div class="aic-form-actions">
+                  <button class="btn btn-sm" id="aic-custom-cancel">取消</button>
+                  <button class="btn btn-sm btn-primary" id="aic-custom-save">保存</button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Section 2: 综合测试 -->
+          <div class="aic-card">
+            <div class="aic-card-header">
+              <h3>模型综合能力测试</h3>
+              <span class="aic-hint">6 维度评估: 连通性 / JSON / 中文分析 / 速度 / 评分力 / 指令遵循</span>
+            </div>
+            <div class="aic-test-controls">
+              <button class="btn btn-sm btn-primary" id="aic-start-test">开始综合测试</button>
+            </div>
+            <div class="aic-test-progress">
+              <div class="aic-progress-bar">
+                <div class="aic-progress-fill" id="aic-test-progress-fill"></div>
+              </div>
+              <span class="aic-progress-text" id="aic-test-progress-text"></span>
+            </div>
+            <table class="aic-test-table">
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th>连通性</th>
+                  <th>JSON</th>
+                  <th>中文分析</th>
+                  <th>速度</th>
+                  <th>评分力</th>
+                  <th>指令遵循</th>
+                  <th>综合分</th>
+                </tr>
+              </thead>
+              <tbody id="aic-test-tbody">
+                <tr><td colspan="8" class="aic-test-empty">暂无测试结果，点击"开始综合测试"</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Section 3: 模型分配矩阵 -->
+          <div class="aic-card">
+            <div class="aic-card-header">
+              <h3>模型分配</h3>
+              <span class="aic-hint">为各系统角色配置 AI 模型，未配置的使用默认值</span>
+            </div>
+            <div class="aic-group-tabs">
+              <button class="aic-group-tab active" data-group="decision">决策层级</button>
+              <button class="aic-group-tab" data-group="committee">投资委员会</button>
+              <button class="aic-group-tab" data-group="pipeline">产业链管线</button>
+              <button class="aic-group-tab" data-group="watchlist">看板模块</button>
+              <button class="aic-group-tab" data-group="bottleneck">瓶颈交叉评分</button>
+            </div>
+            <div class="aic-role-list" id="aic-matrix-list"></div>
+            <div class="aic-matrix-actions">
+              <button class="btn btn-sm btn-primary" id="aic-save-matrix">保存配置</button>
+              <span class="aic-save-status" id="aic-matrix-status"></span>
+            </div>
+          </div>
+
+          <!-- Section 4: 自动推荐 -->
+          <div class="aic-card">
+            <div class="aic-card-header">
+              <h3>自动推荐</h3>
+              <span class="aic-hint">基于综合测试结果，为每个角色自动推荐最佳模型</span>
+            </div>
+            <div class="aic-recommend-controls">
+              <button class="btn btn-sm btn-primary" id="aic-gen-recommend">生成推荐</button>
+              <button class="btn btn-sm" id="aic-apply-recommend">一键应用</button>
+              <span class="aic-save-status" id="aic-recommend-status"></span>
+            </div>
+            <div class="aic-recommend-grid" id="aic-recommend-grid">
+              <div class="aic-rec-empty">暂无推荐结果，请先运行综合测试后点击"生成推荐"</div>
+            </div>
+          </div>
+
+        </div><!-- /aic-sections -->
+
+        <!-- 右侧栏：已配置模型总览 -->
+        <aside class="aic-sidebar" id="aic-sidebar">
+          <div class="aic-sidebar-header">
+            <h3>已配置模型</h3>
+            <span class="aic-sidebar-count" id="aic-sidebar-count"></span>
+          </div>
+          <div class="aic-sidebar-body" id="aic-sidebar-body">
+            <div class="aic-sidebar-empty">加载中...</div>
+          </div>
+        </aside>
+
+        </div><!-- /aic-layout -->
       </div>
     </div>
 </main>
 
 
 <!-- 详情抽屉 800px -->
+<!-- 会议详情抽屉 -->
+<div class="drawer-overlay" id="dc-meeting-drawer" style="display:none">
+  <div class="drawer-panel">
+    <div class="drawer-header">
+      <h3 id="dc-meeting-drawer-title">会议详情</h3>
+      <button class="drawer-close" id="dc-meeting-drawer-close">&#10005;</button>
+    </div>
+    <div class="drawer-body" id="dc-meeting-drawer-body"></div>
+  </div>
+</div>
+
 <div class="drawer-overlay" id="wiz-drawer" style="display:none">
   <div class="drawer-panel">
     <div class="drawer-header">
@@ -892,23 +1258,92 @@
 
 
 <footer class="app-footer">
-  <span>AI 生成内容，不构成投资建议。方法论：Serenity「三步法」— 产业链拆解 → 供应商检索 → 多模型交叉验证</span>
+  <div class="syslog-bar" id="syslog-bar">
+    <span class="syslog-dot" id="syslog-dot"></span>
+    <div class="syslog-scroll" id="syslog-scroll"></div>
+  </div>
   <span class="app-version">v0.4.0</span>
 </footer>
 
 <!-- AI Config Modal -->
-<div id="dc-ai-config-modal" class="modal-overlay" style="display:none">
-  <div class="modal" style="max-width:720px">
+<div id="dc-ai-config-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true">
+  <div class="modal" style="max-width:800px">
     <div class="modal-header">
-      <h2 class="modal-title">决策中心 AI 模型配置</h2>
-      <button class="modal-close" id="dc-ai-config-close">&times;</button>
+      <h2 class="modal-title">AI 模型统一配置</h2>
+      <button class="modal-close" id="dc-ai-config-close" aria-label="关闭">&times;</button>
     </div>
     <div class="modal-body">
-      <p class="settings-hint">为每个决策层级和投委会成员配置 AI 模型。未配置的位置使用默认模型。</p>
-      <h3 class="dc-ai-group-title">决策层级</h3>
-      <div id="dc-ai-decision-list"></div>
-      <h3 class="dc-ai-group-title">投资委员会</h3>
-      <div id="dc-ai-committee-list"></div>
+      <!-- Tab 导航 -->
+      <div class="dc-ai-tabs">
+        <button class="dc-ai-tab active" data-tab="model-assign">模型分配</button>
+        <button class="dc-ai-tab" data-tab="custom-endpoints">自定义端点</button>
+      </div>
+
+      <!-- Tab 1: 模型分配 -->
+      <div id="dc-ai-tab-model-assign" class="dc-ai-tab-content active">
+        <div class="aic-migration-notice">
+          <span>模型分配和综合测试功能已整合到顶部导航的「AI 配置」页面。</span>
+        </div>
+        <p class="settings-hint">为各系统模块配置 AI 模型。未配置的位置使用默认模型。</p>
+        <div class="dc-ai-group" data-group="decision">
+          <h3 class="dc-ai-group-title dc-ai-collapsible" data-collapsed="false">
+            <span class="dc-ai-chevron">▾</span> 决策层级
+          </h3>
+          <div id="dc-ai-decision-list" class="dc-ai-group-body"></div>
+        </div>
+        <div class="dc-ai-group" data-group="committee">
+          <h3 class="dc-ai-group-title dc-ai-collapsible" data-collapsed="false">
+            <span class="dc-ai-chevron">▾</span> 投资委员会
+          </h3>
+          <div id="dc-ai-committee-list" class="dc-ai-group-body"></div>
+        </div>
+        <div class="dc-ai-group" data-group="pipeline">
+          <h3 class="dc-ai-group-title dc-ai-collapsible" data-collapsed="true">
+            <span class="dc-ai-chevron">▸</span> 产业链管线
+          </h3>
+          <div id="dc-ai-pipeline-list" class="dc-ai-group-body" style="display:none"></div>
+        </div>
+        <div class="dc-ai-group" data-group="watchlist">
+          <h3 class="dc-ai-group-title dc-ai-collapsible" data-collapsed="true">
+            <span class="dc-ai-chevron">▸</span> 看板模块
+          </h3>
+          <div id="dc-ai-watchlist-list" class="dc-ai-group-body" style="display:none"></div>
+        </div>
+      </div>
+
+      <!-- Tab 2: 自定义端点 -->
+      <div id="dc-ai-tab-custom-endpoints" class="dc-ai-tab-content" style="display:none">
+        <p class="settings-hint">添加 OpenAI 兼容的自定义 API 端点（如 Ollama、代理服务、企业内网 API）。</p>
+        <button class="btn btn-primary btn-sm" id="dc-ai-add-custom-btn">+ 添加端点</button>
+        <div id="dc-ai-custom-form" style="display:none" class="dc-ai-custom-form">
+          <input type="hidden" id="dc-ai-custom-edit-id" value="">
+          <div class="dc-ai-form-row">
+            <label>显示名称</label>
+            <input type="text" id="dc-ai-custom-name" placeholder="如：本地 Ollama" maxlength="64">
+          </div>
+          <div class="dc-ai-form-row">
+            <label>标识符 ID</label>
+            <input type="text" id="dc-ai-custom-id" placeholder="如：ollama_local（小写字母+数字+下划线）" maxlength="32">
+          </div>
+          <div class="dc-ai-form-row">
+            <label>API 地址</label>
+            <input type="text" id="dc-ai-custom-url" placeholder="如：http://localhost:11434/v1" maxlength="512">
+          </div>
+          <div class="dc-ai-form-row">
+            <label>API Key</label>
+            <input type="password" id="dc-ai-custom-key" placeholder="可选（如 Ollama 无需填写）" maxlength="512">
+          </div>
+          <div class="dc-ai-form-row">
+            <label>默认模型</label>
+            <input type="text" id="dc-ai-custom-model" placeholder="如：llama3.1:8b" maxlength="128">
+          </div>
+          <div class="dc-ai-form-actions">
+            <button class="btn btn-secondary btn-sm" id="dc-ai-custom-cancel">取消</button>
+            <button class="btn btn-primary btn-sm" id="dc-ai-custom-save">保存</button>
+          </div>
+        </div>
+        <div id="dc-ai-custom-list"></div>
+      </div>
     </div>
     <div class="modal-footer">
       <span class="dc-ai-status" id="dc-ai-status"></span>
@@ -918,113 +1353,16 @@
   </div>
 </div>
 
-<!-- Review Panel Modal -->
-<div id="dc-review-modal" class="modal-overlay" style="display:none">
-  <div class="modal" style="max-width:900px">
-    <div class="modal-header">
-      <h2 class="modal-title">交易复盘 & 经验卡片</h2>
-      <button class="modal-close" id="dc-review-close">&times;</button>
-    </div>
-    <div class="modal-body" style="max-height:70vh;overflow-y:auto">
-      <!-- 操作栏 -->
-      <div class="dc-review-actions">
-        <button class="btn btn-sm" id="dc-btn-batch-review">批量复盘未处理交易</button>
-        <span class="dc-review-status" id="dc-review-status"></span>
-      </div>
-
-      <!-- 交易复盘列表 -->
-      <h3 class="dc-ai-group-title">交易复盘</h3>
-      <div id="dc-review-list">
-        <p class="text-muted">加载中...</p>
-      </div>
-
-      <!-- 经验卡片 -->
-      <h3 class="dc-ai-group-title">经验卡片</h3>
-      <div id="dc-experience-list">
-        <p class="text-muted">加载中...</p>
-      </div>
-
-      <!-- 交易反馈历史 -->
-      <h3 class="dc-ai-group-title">交易反馈历史</h3>
-      <div id="dc-feedback-list">
-        <p class="text-muted">加载中...</p>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" id="dc-review-modal-close">关闭</button>
-    </div>
-  </div>
-</div>
-
-<!-- 绩效报告 Modal -->
-<div id="dc-perf-modal" class="modal-overlay" style="display:none">
-  <div class="modal" style="max-width:960px">
-    <div class="modal-header">
-      <h2 class="modal-title">绩效报告 & 调优</h2>
-      <button class="modal-close" id="dc-perf-close">&times;</button>
-    </div>
-    <div class="modal-body" style="max-height:75vh;overflow-y:auto">
-      <!-- 指标卡片 -->
-      <div class="dc-perf-cards" id="dc-perf-cards">
-        <div class="dc-perf-card">
-          <span class="dc-perf-value" id="dc-perf-return">--</span>
-          <span class="dc-perf-label">总收益率</span>
-        </div>
-        <div class="dc-perf-card">
-          <span class="dc-perf-value" id="dc-perf-winrate">--</span>
-          <span class="dc-perf-label">胜率</span>
-        </div>
-        <div class="dc-perf-card">
-          <span class="dc-perf-value" id="dc-perf-drawdown">--</span>
-          <span class="dc-perf-label">最大回撤</span>
-        </div>
-        <div class="dc-perf-card">
-          <span class="dc-perf-value" id="dc-perf-cost">--</span>
-          <span class="dc-perf-label">本月LLM成本</span>
-        </div>
-      </div>
-
-      <!-- 权益曲线 -->
-      <div class="dc-perf-section">
-        <h3 class="dc-ai-group-title">权益曲线</h3>
-        <div id="dc-perf-equity-chart" style="height:220px"></div>
-      </div>
-
-      <!-- 月度绩效 -->
-      <h3 class="dc-ai-group-title">月度绩效</h3>
-      <div id="dc-perf-monthly">
-        <p class="text-muted">加载中...</p>
-      </div>
-
-      <!-- 标的分布 -->
-      <h3 class="dc-ai-group-title">标的分布</h3>
-      <div id="dc-perf-tickers">
-        <p class="text-muted">加载中...</p>
-      </div>
-
-      <!-- 调优建议 -->
-      <h3 class="dc-ai-group-title">调优建议</h3>
-      <div class="dc-review-actions">
-        <button class="btn btn-sm" id="dc-btn-gen-tuning">生成调优建议</button>
-        <span class="dc-review-status" id="dc-tuning-status"></span>
-      </div>
-      <div id="dc-tuning-list">
-        <p class="text-muted">暂无调优建议</p>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" id="dc-perf-modal-close">关闭</button>
-    </div>
-  </div>
-</div>
-
-<div id="settings-modal" class="modal-overlay" style="display:none">
+<div id="settings-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true">
   <div class="modal">
     <div class="modal-header">
       <h2 class="modal-title">LLM API 配置</h2>
-      <button class="modal-close" id="btn-close-settings">&times;</button>
+      <button class="modal-close" id="btn-close-settings" aria-label="关闭">&times;</button>
     </div>
     <div class="modal-body" id="settings-body">
+      <div class="aic-migration-notice">
+        <span>此功能已整合到顶部导航的「AI 配置」页面，支持更完整的模型管理和测试功能。</span>
+      </div>
       <p class="settings-hint">配置各 LLM Provider 的 API Key，保存后即时生效，无需重启。</p>
       <div id="provider-list"></div>
     </div>
@@ -1038,21 +1376,21 @@
 </div>
 
 <!-- Admin Modal -->
-<div id="admin-modal" class="modal-overlay" style="display:none">
+<div id="admin-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true">
   <div class="modal">
     <div class="modal-header">
       <h2 class="modal-title">管理后台</h2>
-      <button class="modal-close" id="admin-close">&times;</button>
+      <button class="modal-close" id="admin-close" aria-label="关闭">&times;</button>
     </div>
     <div class="modal-body">
-      <div class="admin-tabs">
-        <button class="admin-tab active" data-tab="users">用户管理</button>
-        <button class="admin-tab" data-tab="invites">邀请码</button>
-        <button class="admin-tab" data-tab="config">系统配置</button>
+      <div class="admin-tabs" role="tablist">
+        <button class="admin-tab active" data-tab="users" role="tab" aria-selected="true">用户管理</button>
+        <button class="admin-tab" data-tab="invites" role="tab" aria-selected="false">邀请码</button>
+        <button class="admin-tab" data-tab="config" role="tab" aria-selected="false">系统配置</button>
       </div>
 
       <!-- 用户管理 -->
-      <div class="admin-tab-pane active" id="admin-tab-users">
+      <div class="admin-tab-pane active" id="admin-tab-users" role="tabpanel">
         <div class="admin-invite-toolbar">
           <span style="font-weight:600;font-size:14px">用户列表</span>
           <span class="admin-section-stats" id="admin-user-stats"></span>
@@ -1074,7 +1412,7 @@
       </div>
 
       <!-- 邀请码 -->
-      <div class="admin-tab-pane" id="admin-tab-invites">
+      <div class="admin-tab-pane" id="admin-tab-invites" role="tabpanel">
         <div class="admin-invite-toolbar">
           <span style="font-weight:600;font-size:14px">邀请码管理</span>
           <label style="font-size:13px">数量 <input type="number" id="admin-invite-count" value="5" min="1" max="50"></label>
@@ -1096,7 +1434,7 @@
       </div>
 
       <!-- 系统配置 -->
-      <div class="admin-tab-pane" id="admin-tab-config">
+      <div class="admin-tab-pane" id="admin-tab-config" role="tabpanel">
         <div class="admin-stats-grid" id="admin-stats-grid"></div>
 
         <div class="admin-config-group">
@@ -1198,11 +1536,11 @@
 </div>
 
 <!-- 重新分析确认弹窗 -->
-<div class="modal-overlay" id="reanalyze-overlay" style="display:none">
+<div class="modal-overlay" id="reanalyze-overlay" style="display:none" role="dialog" aria-modal="true">
   <div class="modal-dialog reanalyze-modal">
     <div class="modal-header">
       <h3>确认重新分析</h3>
-      <button class="modal-close" id="reanalyze-close">&times;</button>
+      <button class="modal-close" id="reanalyze-close" aria-label="关闭">&times;</button>
     </div>
     <div class="modal-body" id="reanalyze-body">
       <p class="reanalyze-hint">以下为本次分析将使用的模型和接口：</p>
@@ -1217,7 +1555,40 @@
   </div>
 </div>
 
-<script type="module" src="/static/js/app.js?v=52"></script>
+<!-- 统一确认对话框 -->
+<div class="modal-overlay" id="confirm-modal" role="dialog" aria-modal="true" style="display:none">
+  <div class="modal" style="max-width:420px;">
+    <div class="modal-header">
+      <h3 id="confirm-title">确认操作</h3>
+    </div>
+    <div class="modal-body">
+      <p id="confirm-message" style="white-space:pre-line;"></p>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn btn-sm" id="confirm-cancel">取消</button>
+      <button class="btn btn-sm btn-primary" id="confirm-ok">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 推荐配置弹窗 -->
+<div class="modal-overlay" id="aic-recommend-modal" style="display:none" role="dialog" aria-modal="true">
+  <div class="modal" style="max-width:720px;">
+    <div class="modal-header">
+      <h3>AI 模型推荐配置</h3>
+      <button class="modal-close" id="aic-recommend-modal-close" aria-label="关闭">&times;</button>
+    </div>
+    <div class="modal-body" id="aic-recommend-modal-body">
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" id="aic-recommend-modal-cancel">关闭</button>
+      <button class="btn btn-sm btn-primary" id="aic-recommend-modal-apply">一键应用全部推荐</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/static/js/app.js?v=70"></script>
+<script src="/static/js/syslog.js"></script>
 <script>
   window.addEventListener('error', e => {
     console.error('Global error:', e.message, e.filename, e.lineno);

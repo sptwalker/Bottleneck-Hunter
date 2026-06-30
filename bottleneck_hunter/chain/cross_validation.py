@@ -2,6 +2,12 @@
 
 Uses multiple LLMs to independently challenge the investment thesis
 for each candidate supplier from adversarial angles.
+
+Upgraded with:
+- Differentiated perspective input (4 viewpoints)
+- Weighted consensus with trimmed mean
+- Outlier challenge round
+- Fatal risk kill-zone veto
 """
 
 from __future__ import annotations
@@ -9,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import statistics
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
@@ -26,13 +33,14 @@ logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-EVALUATION_QUESTIONS = [
-    "核心竞争优势（技术壁垒、客户粘性、稀缺资源）是否真实且可持续？",
-    "行业供需格局和成长空间的判断是否合理？有无被忽视的替代方案？",
-    "公司的市场地位和客户关系是否稳固？是否存在大客户自研替代风险？",
-    "当前估值相对于成长性和行业地位是否合理？",
-    "主要风险（技术路线变化、政策变动、周期性）是否可控？",
-]
+PERSPECTIVES = ["financial", "chain", "sentiment", "blind"]
+
+PERSPECTIVE_PROMPTS = {
+    "financial": "cv_financial_auditor",
+    "chain": "cv_chain_analyst",
+    "sentiment": "cv_sentiment_observer",
+    "blind": "cv_blind_test",
+}
 
 
 def _load_prompt(name: str) -> str:
@@ -40,6 +48,85 @@ def _load_prompt(name: str) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     raise FileNotFoundError(f"Prompt file not found: {path}")
+
+
+def _build_financial_prompt(sc: SupplierScorecard, lang_note: str) -> str:
+    s = sc.supplier
+    return f"""{lang_note}
+
+## 候选标的
+- 公司名称: {s.name}
+- 代码: {s.ticker}
+- 市场: {s.market}
+- 市值: {s.market_cap}
+- 行业: {s.sector}
+
+## 财务数据
+- 财务健康评分: {sc.financial_health}/10
+- 估值评分: {sc.valuation}/10
+- 综合评分: {sc.overall_score}/10
+
+请基于上述财务信息独立评估。"""
+
+
+def _build_chain_prompt(sc: SupplierScorecard, lang_note: str) -> str:
+    s = sc.supplier
+    return f"""{lang_note}
+
+## 候选标的
+- 公司名称: {s.name}
+- 代码: {s.ticker}
+- 市场: {s.market}
+- 行业: {s.sector}
+
+## 产业链数据
+- 瓶颈环节: {sc.bottleneck_node}
+- 市场地位评分: {sc.market_position}/10
+- 客户验证评分: {sc.customer_validation}/10
+- 产能状况评分: {sc.capacity_status}/10
+- 优势: {', '.join(sc.strengths)}
+- 风险: {', '.join(sc.weaknesses)}
+
+请基于上述产业链信息独立评估。"""
+
+
+def _build_sentiment_prompt(sc: SupplierScorecard, lang_note: str) -> str:
+    s = sc.supplier
+    return f"""{lang_note}
+
+## 候选标的
+- 公司名称: {s.name}
+- 代码: {s.ticker}
+- 市场: {s.market}
+- 行业: {s.sector}
+- 市值: {s.market_cap}
+
+## 市场信号
+- 综合评分: {sc.overall_score}/10
+- 优势: {', '.join(sc.strengths)}
+- 风险: {', '.join(sc.weaknesses)}
+
+请基于上述市场信号和你对该公司的了解独立评估。"""
+
+
+def _build_blind_prompt(sc: SupplierScorecard, lang_note: str) -> str:
+    s = sc.supplier
+    return f"""{lang_note}
+
+## 候选标的（盲测）
+- 公司名称: {s.name}
+- 行业: {s.sector}
+- 市场: {s.market}
+
+请仅基于你对该公司和行业的已有知识独立评估其投资价值。"""
+
+
+PERSPECTIVE_BUILDERS = {
+    "financial": _build_financial_prompt,
+    "chain": _build_chain_prompt,
+    "sentiment": _build_sentiment_prompt,
+    "blind": _build_blind_prompt,
+}
 
 
 class CrossValidator:
@@ -51,18 +138,17 @@ class CrossValidator:
         language: str = "zh",
         pass_threshold: float = 0.5,
     ):
-        """Args:
-            validation_models: List of {"provider": "...", "model": "..."} configs.
-            language: Output language.
-            pass_threshold: Fraction of models that must pass for consensus "pass".
-        """
         self.validation_models = validation_models
         self.language = language
         self.pass_threshold = pass_threshold
-        self._system_prompt = _load_prompt("cross_validate")
+        self._perspective_prompts: dict[str, str] = {}
+        for pkey, pname in PERSPECTIVE_PROMPTS.items():
+            try:
+                self._perspective_prompts[pkey] = _load_prompt(pname)
+            except FileNotFoundError:
+                self._perspective_prompts[pkey] = _load_prompt("cross_validate")
 
     def _create_llms(self) -> list[tuple[str, BaseChatModel]]:
-        """Instantiate LLM clients for each configured model."""
         llms = []
         for config in self.validation_models:
             provider = config["provider"]
@@ -75,64 +161,35 @@ class CrossValidator:
                 logger.warning(f"Failed to create LLM for {name}: {e}")
         return llms
 
+    def _assign_perspectives(self, llm_count: int) -> list[str]:
+        assigned = []
+        for i in range(llm_count):
+            assigned.append(PERSPECTIVES[i % len(PERSPECTIVES)])
+        return assigned
+
     async def validate_supplier(
         self,
         scorecard: SupplierScorecard,
         llms: list[tuple[str, BaseChatModel]],
     ) -> CrossValidationReport:
-        """Run cross-validation for a single supplier across all models."""
-        supplier = scorecard.supplier
-        bn_node = scorecard.bottleneck_node
-
         lang_note = "请用中文回答" if self.language == "zh" else "Answer in English"
+        perspectives = self._assign_perspectives(len(llms))
 
-        user_prompt = f"""{lang_note}
+        async def _validate_one(
+            name: str, llm: BaseChatModel, perspective: str
+        ) -> ModelValidation:
+            sys_prompt = self._perspective_prompts.get(
+                perspective, self._perspective_prompts.get("financial", "")
+            )
+            builder = PERSPECTIVE_BUILDERS.get(perspective, _build_financial_prompt)
+            user_prompt = builder(scorecard, lang_note)
 
-## 候选标的
-- 公司名称: {supplier.name}
-- 代码: {supplier.ticker}
-- 市场: {supplier.market}
-- 市值: {supplier.market_cap}
-- 行业: {supplier.sector}
-
-## 对应瓶颈环节
-- 环节: {bn_node}
-- 供应商评分: {scorecard.overall_score}/10
-  - 市场地位: {scorecard.market_position}/10
-  - 客户验证: {scorecard.customer_validation}/10
-  - 产能状况: {scorecard.capacity_status}/10
-  - 财务健康: {scorecard.financial_health}/10
-  - 估值水平: {scorecard.valuation}/10
-- 优势: {', '.join(scorecard.strengths)}
-- 风险: {', '.join(scorecard.weaknesses)}
-
-## 请从以下维度独立评估
-{chr(10).join(f'{i+1}. {q}' for i, q in enumerate(EVALUATION_QUESTIONS))}
-
-## 输出要求
-综合评估后给出 1-10 分的推荐评分。返回严格 JSON（不要包含其他文字）:
-{{
-  "score": <1-10 整数>,
-  "reasoning": "评分理由（2-3句话）",
-  "concerns": ["具体顾虑1", "具体顾虑2"]
-}}
-
-评分标准:
-- 8-10: 投资逻辑成立，核心优势明确，风险可控
-- 5-7: 存在值得关注的顾虑，但非致命，需进一步研究
-- 1-4: 发现重大逻辑缺陷或致命风险，不推荐
-
-注意：请基于事实做出独立判断。如果公司确实具备明确的竞争优势和合理的估值，应该给出高分。"""
-
-        async def _validate_one(name: str, llm: BaseChatModel) -> ModelValidation:
             try:
                 response = await asyncio.wait_for(
-                    llm.ainvoke(
-                        [
-                            SystemMessage(content=self._system_prompt),
-                            HumanMessage(content=user_prompt),
-                        ]
-                    ),
+                    llm.ainvoke([
+                        SystemMessage(content=sys_prompt),
+                        HumanMessage(content=user_prompt),
+                    ]),
                     timeout=120,
                 )
                 text = response.content.strip()
@@ -146,6 +203,9 @@ class CrossValidator:
                     score=score,
                     reasoning=data.get("reasoning", ""),
                     concerns=data.get("concerns", []),
+                    perspective=perspective,
+                    fatal_risk=bool(data.get("fatal_risk", False)),
+                    fatal_reason=data.get("fatal_reason", ""),
                 )
             except Exception:
                 logger.exception(f"Validation failed for model {name}")
@@ -154,49 +214,109 @@ class CrossValidator:
                     score=5.0,
                     reasoning=f"模型 {name} 调用或解析失败，按中性处理",
                     concerns=["模型未能完成验证"],
+                    perspective=perspective,
                 )
 
-        # Run all models in parallel
-        tasks = [_validate_one(name, llm) for name, llm in llms]
-        validations = await asyncio.gather(*tasks)
+        tasks = [
+            _validate_one(name, llm, persp)
+            for (name, llm), persp in zip(llms, perspectives)
+        ]
+        validations = list(await asyncio.gather(*tasks))
 
-        # Compute consensus: average score
         scores = [v.score for v in validations]
-        avg_score = sum(scores) / len(scores) if scores else 5.0
-        consensus_score = round(avg_score, 1)
+        raw_avg = sum(scores) / len(scores) if scores else 5.0
 
-        # Build consensus reasoning
+        if len(scores) >= 4:
+            sorted_scores = sorted(scores)
+            trimmed = sorted_scores[1:-1]
+            trimmed_avg = sum(trimmed) / len(trimmed)
+        else:
+            trimmed_avg = statistics.median(scores) if scores else 5.0
+
+        consensus_score = round(trimmed_avg, 1)
+
+        fatal_risks = []
+        for v in validations:
+            if v.fatal_risk and v.fatal_reason:
+                fatal_risks.append(f"{v.model_name}({v.perspective}): {v.fatal_reason}")
+        has_fatal_risk = len(fatal_risks) > 0
+
+        outlier_challenges: list[dict] = []
+        if len(scores) >= 3:
+            median_score = statistics.median(scores)
+            outliers = [
+                v for v in validations if abs(v.score - median_score) >= 3.0
+            ]
+            for ov in outliers:
+                outlier_challenges.append({
+                    "model": ov.model_name,
+                    "perspective": ov.perspective,
+                    "score": ov.score,
+                    "median": median_score,
+                    "deviation": round(ov.score - median_score, 1),
+                    "reasoning": ov.reasoning,
+                    "concerns": ov.concerns,
+                    "status": "flagged",
+                })
+
+        if has_fatal_risk:
+            consensus_score = min(consensus_score, 3.0)
+
         all_concerns = []
         for v in validations:
             if v.score < 7:
                 all_concerns.extend(v.concerns)
 
-        score_strs = [f"{v.model_name.split('/')[-1]}={v.score:.0f}" for v in validations]
+        score_strs = [
+            f"{v.model_name.split('/')[-1]}[{v.perspective}]={v.score:.0f}"
+            for v in validations
+        ]
         score_summary = "、".join(score_strs)
 
-        if consensus_score >= 7.5:
+        if has_fatal_risk:
             consensus_reasoning = (
-                f"多数模型看好（{score_summary}，均分 {consensus_score}）。"
-                f"投资逻辑整体成立，核心论点经得起质疑。"
+                f"⚠️ 触发致命风险一票否决（{score_summary}）。"
+                f"致命风险：{'；'.join(fatal_risks)}。"
+                f"共识分被限制为 {consensus_score}，需人工复核。"
+            )
+        elif outlier_challenges:
+            outlier_info = "、".join(
+                f"{o['model'].split('/')[-1]}={o['score']:.0f}(偏离{o['deviation']:+.1f})"
+                for o in outlier_challenges
+            )
+            consensus_reasoning = (
+                f"存在离群评分（{outlier_info}），去极值均分 {consensus_score}。"
+                f"各视角评分：{score_summary}。"
+                f"{'主要关注点：' + '；'.join(all_concerns[:3]) if all_concerns else '无重大顾虑'}。"
+            )
+        elif consensus_score >= 7.5:
+            consensus_reasoning = (
+                f"多视角验证通过（{score_summary}，加权分 {consensus_score}）。"
+                f"投资逻辑整体成立，核心论点经得起多角度质疑。"
             )
         elif consensus_score >= 5:
             consensus_reasoning = (
-                f"模型观点分化（{score_summary}，均分 {consensus_score}）。"
+                f"多视角观点分化（{score_summary}，加权分 {consensus_score}）。"
                 f"主要关注点：{'；'.join(all_concerns[:3]) or '无重大顾虑'}。建议进一步研究。"
             )
         else:
             consensus_reasoning = (
-                f"多数模型不看好（{score_summary}，均分 {consensus_score}）。"
+                f"多视角不看好（{score_summary}，加权分 {consensus_score}）。"
                 f"主要问题：{'；'.join(all_concerns[:3]) or '整体逻辑存疑'}。不建议纳入。"
             )
 
         return CrossValidationReport(
-            supplier_name=supplier.name,
-            ticker=supplier.ticker,
-            validations=list(validations),
+            supplier_name=scorecard.supplier.name,
+            ticker=scorecard.supplier.ticker,
+            validations=validations,
             consensus_score=consensus_score,
             consensus_reasoning=consensus_reasoning,
-            avg_score=consensus_score,
+            avg_score=round(raw_avg, 1),
+            raw_avg=round(raw_avg, 1),
+            trimmed_avg=round(trimmed_avg, 1),
+            has_fatal_risk=has_fatal_risk,
+            fatal_risks=fatal_risks,
+            outlier_challenges=outlier_challenges,
         )
 
     async def validate_all(
@@ -212,9 +332,9 @@ class CrossValidator:
             logger.warning("No validation models available, skipping cross-validation")
             return []
 
-        # Only validate top suppliers (by overall score)
-        # Take top 10 max to control cost
-        top_scorecards = sorted(scorecards, key=lambda sc: sc.overall_score, reverse=True)[:10]
+        top_scorecards = sorted(
+            scorecards, key=lambda sc: sc.overall_score, reverse=True
+        )[:10]
 
         reports = []
         for sc in top_scorecards:
@@ -222,7 +342,8 @@ class CrossValidator:
             reports.append(report)
             logger.info(
                 f"Cross-validated {sc.supplier.name}: "
-                f"avg_score={report.avg_score:.1f}"
+                f"consensus={report.consensus_score:.1f} "
+                f"fatal={report.has_fatal_risk}"
             )
 
         return reports

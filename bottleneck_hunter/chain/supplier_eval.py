@@ -153,6 +153,59 @@ def _data_valuation(
         return 2.0
 
 
+def _data_market_position(
+    snap: FinancialSnapshot | None,
+    supplier: SupplierInfo,
+) -> float | None:
+    """从市值规模和毛利率推算 market_position 数据锚点 (0-10)。
+
+    大市值 → 行业龙头地位；高毛利率 → 定价权强。
+    """
+    cap = supplier.market_cap
+    is_astock = getattr(supplier, "market", "") == "a_stock"
+
+    components: list[tuple[float, float]] = []
+
+    if cap is not None:
+        if is_astock:
+            if cap > 1000:    s = 9.0
+            elif cap > 500:   s = 8.0
+            elif cap > 200:   s = 7.0
+            elif cap > 100:   s = 6.0
+            elif cap > 50:    s = 5.0
+            elif cap > 20:    s = 4.0
+            else:             s = 3.0
+        else:
+            if cap > 200:     s = 9.0
+            elif cap > 50:    s = 8.0
+            elif cap > 10:    s = 7.0
+            elif cap > 2:     s = 5.5
+            elif cap > 0.5:   s = 4.0
+            else:             s = 3.0
+        components.append((s, 0.60))
+
+    gm = None
+    if snap and snap.gross_margin_pct is not None:
+        gm = snap.gross_margin_pct
+    elif supplier.gross_margin is not None:
+        gm = supplier.gross_margin
+
+    if gm is not None:
+        if gm > 60:       s = 9.0
+        elif gm > 45:     s = 8.0
+        elif gm > 30:     s = 6.5
+        elif gm > 20:     s = 5.0
+        elif gm > 10:     s = 3.5
+        else:             s = 2.5
+        components.append((s, 0.40))
+
+    if not components:
+        return None
+
+    total_w = sum(w for _, w in components)
+    return round(sum(s * w for s, w in components) / total_w, 1)
+
+
 def _blend(llm: float, data: float | None, data_weight: float = 0.7) -> float:
     """LLM 分与数据驱动分混合。有数据时以数据为主。"""
     if data is None:
@@ -230,6 +283,7 @@ class SupplierEvaluator:
         supplier: SupplierInfo,
         bottleneck: BottleneckReport,
         financial_snapshot: FinancialSnapshot | None = None,
+        batch_context: dict | None = None,
     ) -> SupplierScorecard:
         """Evaluate a single supplier against a bottleneck node."""
         lang_note = "请用中文回答" if self.language == "zh" else "Answer in English"
@@ -271,6 +325,23 @@ class SupplierEvaluator:
         if financial_snapshot:
             financial_block = "\n\n" + _format_financial_block(financial_snapshot)
 
+        batch_block = ""
+        if batch_context and len(batch_context) > 1:
+            blines = ["\n## 同批次候选概况（供参考，用于拉开差异）"]
+            if batch_context.get("count"):
+                blines.append(f"- 本批次共 {batch_context['count']} 家公司")
+            if batch_context.get("mcap_range"):
+                lo, hi = batch_context["mcap_range"]
+                blines.append(f"- 市值范围: {lo:.0f}亿 ~ {hi:.0f}亿")
+            if batch_context.get("pe_range"):
+                lo, hi = batch_context["pe_range"]
+                blines.append(f"- PE 范围: {lo:.0f} ~ {hi:.0f}")
+            if batch_context.get("gm_range"):
+                lo, hi = batch_context["gm_range"]
+                blines.append(f"- 毛利率范围: {lo:.1f}% ~ {hi:.1f}%")
+            blines.append("- 请根据该公司在同批次中的相对位置拉开评分差异")
+            batch_block = "\n".join(blines)
+
         user_prompt = f"""{lang_note}
 
 ## 瓶颈环节
@@ -282,6 +353,7 @@ class SupplierEvaluator:
 ## 候选供应商
 {basic_block}
 {financial_block}
+{batch_block}
 
 请对该供应商进行评估，对以下5个维度各打0-10分（务必根据实际数据差异化打分，不同公司的评分应有显著区别）:
 1. market_position: 市场地位（市占率、垄断/寡头地位）— 行业龙头8-10分，中等5-7分，小企业2-4分
@@ -342,18 +414,18 @@ class SupplierEvaluator:
 
             data_fh = _data_financial_health(financial_snapshot, supplier)
             data_val = _data_valuation(financial_snapshot, supplier)
+            data_mp = _data_market_position(financial_snapshot, supplier)
             fh = _blend(llm_fh, data_fh)
             val = _blend(llm_val, data_val)
+            mp = _blend(data.get("market_position", 0), data_mp, 0.5)
 
-            # 加权平均：数据驱动维度（财务/估值）给更高权重以拉开区分度
-            # LLM 维度权重 1.0，数据维度权重 1.5（有数据时）
-            mp = data.get("market_position", 0)
             cv = data.get("customer_validation", 0)
             cs = data.get("capacity_status", 0)
-            fh_w = 1.5 if data_fh is not None else 1.0
-            val_w = 1.5 if data_val is not None else 1.0
-            weighted_sum = mp * 1.0 + cv * 1.0 + cs * 1.0 + fh * fh_w + val * val_w
-            total_weight = 3.0 + fh_w + val_w
+            mp_w = 1.5 if data_mp is not None else 1.0
+            fh_w = 2.0 if data_fh is not None else 1.0
+            val_w = 2.0 if data_val is not None else 1.0
+            weighted_sum = mp * mp_w + cv * 1.0 + cs * 1.0 + fh * fh_w + val * val_w
+            total_weight = mp_w + 2.0 + fh_w + val_w
             base_overall = weighted_sum / total_weight
 
             moat_fields = ["patent_moat", "switching_cost", "capacity_lead_time", "cost_advantage"]
@@ -368,13 +440,13 @@ class SupplierEvaluator:
                 moat_reasoning=data.get("moat_reasoning", ""),
             )
 
-            overall = round(base_overall * 0.7 + moat_overall * 0.3, 1) if moat_overall > 0 else round(base_overall, 1)
+            overall = round(base_overall * 0.8 + moat_overall * 0.2, 1) if moat_overall > 0 else round(base_overall, 1)
 
             return SupplierScorecard(
                 supplier=supplier,
                 bottleneck_node=bottleneck.node_name,
                 layer=bottleneck.layer,
-                market_position=data.get("market_position", 0),
+                market_position=mp,
                 customer_validation=data.get("customer_validation", 0),
                 capacity_status=data.get("capacity_status", 0),
                 financial_health=fh,
@@ -402,6 +474,37 @@ class SupplierEvaluator:
                 financial_snapshot=financial_snapshot,
             )
 
+    @staticmethod
+    def _compute_batch_context(
+        suppliers: list[SupplierInfo],
+        financial_map: dict[str, FinancialSnapshot],
+    ) -> dict | None:
+        if len(suppliers) < 2:
+            return None
+
+        mcaps = [s.market_cap for s in suppliers if s.market_cap is not None]
+
+        pes: list[float] = []
+        gms: list[float] = []
+        for s in suppliers:
+            snap = financial_map.get(s.ticker)
+            pe = (snap.consensus_pe if snap and snap.consensus_pe else None) or s.pe_ratio
+            gm = (snap.gross_margin_pct if snap and snap.gross_margin_pct else None) or s.gross_margin
+            if pe is not None and pe > 0:
+                pes.append(pe)
+            if gm is not None:
+                gms.append(gm)
+
+        ctx: dict = {"count": len(suppliers)}
+        if mcaps:
+            ctx["mcap_range"] = (min(mcaps), max(mcaps))
+        if pes:
+            ctx["pe_range"] = (min(pes), max(pes))
+        if gms:
+            ctx["gm_range"] = (min(gms), max(gms))
+
+        return ctx if len(ctx) > 1 else None
+
     async def evaluate_batch(
         self,
         suppliers: list[SupplierInfo],
@@ -410,8 +513,9 @@ class SupplierEvaluator:
     ) -> list[SupplierScorecard]:
         """Evaluate a batch of suppliers for one bottleneck node."""
         financial_map = financial_map or {}
+        batch_context = self._compute_batch_context(suppliers, financial_map)
         tasks = [
-            self.evaluate(s, bottleneck, financial_map.get(s.ticker))
+            self.evaluate(s, bottleneck, financial_map.get(s.ticker), batch_context)
             for s in suppliers
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -765,7 +869,7 @@ class FinalScorer:
     """
 
     @classmethod
-    def compute(cls, scorecard: SupplierScorecard, w_q: float = 0.4, w_a: float = 0.6) -> FinalScore:
+    def compute(cls, scorecard: SupplierScorecard, w_q: float = 0.55, w_a: float = 0.45) -> FinalScore:
         quality = max(0.1, min(10.0, scorecard.overall_score))
         alpha = max(0.1, scorecard.alpha.alpha_score if scorecard.alpha else 0.1)
         raw = (quality ** w_q) * (alpha ** w_a)
@@ -782,8 +886,8 @@ class FinalScorer:
     def score_all(
         cls,
         scorecards: list[SupplierScorecard],
-        w_q: float = 0.4,
-        w_a: float = 0.6,
+        w_q: float = 0.55,
+        w_a: float = 0.45,
     ) -> list[SupplierScorecard]:
         """为所有评分卡计算最终评分并按 final_score 排序。"""
         for sc in scorecards:

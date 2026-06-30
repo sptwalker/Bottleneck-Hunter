@@ -70,21 +70,21 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
         job_price_update, CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
         id="us_price_premarket", name="US pre-market price update",
         kwargs={"market": "us_stock"},
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 盘后数据更新：美东 16:30（收盘后 30 分钟）
     _scheduler.add_job(
         job_price_update, CronTrigger(hour=16, minute=30, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
         id="us_price_postmarket", name="US post-market price update",
         kwargs={"market": "us_stock"},
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 日报扫描：美东 18:00
     _scheduler.add_job(
         job_daily_scan, CronTrigger(hour=18, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
         id="us_daily_scan", name="US daily news/SEC/options scan",
         kwargs={"market": "us_stock"},
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
 
     # === A股定时任务 (Asia/Shanghai, UTC+8) ===
@@ -93,21 +93,21 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
         job_price_update, CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=_TZ_CN),
         id="cn_price_premarket", name="A-stock pre-market price update",
         kwargs={"market": "a_stock"},
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 盘后数据更新：北京时间 16:00
     _scheduler.add_job(
         job_price_update, CronTrigger(hour=16, minute=0, day_of_week="mon-fri", timezone=_TZ_CN),
         id="cn_price_postmarket", name="A-stock post-market price update",
         kwargs={"market": "a_stock"},
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 日报扫描：北京时间 18:00
     _scheduler.add_job(
         job_daily_scan, CronTrigger(hour=18, minute=0, day_of_week="mon-fri", timezone=_TZ_CN),
         id="cn_daily_scan", name="A-stock daily news scan",
         kwargs={"market": "a_stock"},
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
 
     # === 美股决策自动化任务 (America/New_York) ===
@@ -115,32 +115,32 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
     _scheduler.add_job(
         job_macro_update, CronTrigger(hour=18, minute=30, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
         id="macro_update", name="Macro data update (VIX/Treasury/DXY)",
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 每日决策：美东 19:00（L1→L3→L4→投委会）
     _scheduler.add_job(
         job_daily_decision, CronTrigger(hour=19, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
         id="us_daily_decision", name="Daily decision (L1→L4+committee)",
         kwargs={"market": "us_stock"},
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 催化剂扫描：美东 8:00
     _scheduler.add_job(
         job_catalyst_scan, CronTrigger(hour=8, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
         id="us_catalyst_scan", name="Catalyst scan & expiry check",
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 每周策略刷新：美东周六 10:00（L1 全面生成 + L2 组合策略）
     _scheduler.add_job(
         job_weekly_strategy, CronTrigger(hour=10, minute=0, day_of_week="sat", timezone=_TZ_US_EASTERN),
         id="us_weekly_strategy", name="Weekly macro strategy (L1+L2)",
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 自动复盘：美东 20:00（批量复盘未复盘的卖出交易）
     _scheduler.add_job(
         job_auto_review, CronTrigger(hour=20, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
         id="us_auto_review", name="Auto review unreviewed sells",
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
 
     # === A股决策自动化任务 (Asia/Shanghai) ===
@@ -149,35 +149,43 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
         job_daily_decision, CronTrigger(hour=18, minute=30, day_of_week="mon-fri", timezone=_TZ_CN),
         id="cn_daily_decision", name="A-stock daily decision (L1→L4+committee)",
         kwargs={"market": "a_stock"},
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 催化剂扫描：北京时间 8:00
     _scheduler.add_job(
         job_catalyst_scan, CronTrigger(hour=8, minute=0, day_of_week="mon-fri", timezone=_TZ_CN),
         id="cn_catalyst_scan", name="A-stock catalyst scan & expiry",
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 每周策略刷新：北京时间周六 10:00
     _scheduler.add_job(
         job_weekly_strategy, CronTrigger(hour=10, minute=0, day_of_week="sat", timezone=_TZ_CN),
         id="cn_weekly_strategy", name="A-stock weekly macro strategy (L1+L2)",
-        replace_existing=True,
+        kwargs={"market": "a_stock"},
+        replace_existing=True, max_instances=1, coalesce=True,
     )
     # 自动复盘：北京时间 20:15
     _scheduler.add_job(
         job_auto_review, CronTrigger(hour=20, minute=15, day_of_week="mon-fri", timezone=_TZ_CN),
         id="cn_auto_review", name="A-stock auto review unreviewed sells",
-        replace_existing=True,
+        kwargs={"market": "a_stock"},
+        replace_existing=True, max_instances=1, coalesce=True,
     )
 
     # === 机构持仓 & 分析师评级（每周六美东 11:00，仅美股） ===
     _scheduler.add_job(
         job_institutional_update, CronTrigger(hour=11, minute=0, day_of_week="sat", timezone=_TZ_US_EASTERN),
         id="us_institutional_update", name="Weekly institutional holders & analyst ratings",
-        replace_existing=True,
+        replace_existing=True, max_instances=1, coalesce=True,
     )
 
-    logger.info("Watchlist scheduler configured with 16 jobs (6 data + 1 institutional + 1 macro + 8 decision)")
+    _scheduler.add_job(
+        job_model_calibration, CronTrigger(hour=12, minute=0, day_of_week="sun", timezone=_TZ_US_EASTERN),
+        id="model_calibration", name="Weekly AI model accuracy calibration",
+        replace_existing=True, max_instances=1, coalesce=True,
+    )
+
+    logger.info("Watchlist scheduler configured with 17 jobs (6 data + 1 institutional + 1 macro + 8 decision + 1 calibration)")
     return _scheduler
 
 
@@ -503,7 +511,9 @@ async def job_macro_update() -> None:
     """定时采集宏观数据（VIX/美债/DXY/北向资金等），存入 macro_snapshots 表。"""
     try:
         from bottleneck_hunter.watchlist.macro_data import fetch_macro_data
-        store = _get_store()
+        if not _wl_store:
+            return
+        store = _wl_store
         by_market = store.get_tickers_by_market()
         markets = list(by_market.keys()) or ["us_stock"]
         result = await fetch_macro_data(store, markets)
@@ -524,7 +534,7 @@ async def job_daily_decision(market: str = "us_stock") -> None:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Daily decision (%s/%s) starting for %d tickers", market, label, len(tickers))
             from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
-            await _drain_sse(run_daily_decision(store, budget, scope="full"))
+            await _drain_sse(run_daily_decision(store, budget, scope="full", market=market))
             logger.info("Daily decision (%s/%s) completed", market, label)
         except Exception as e:
             logger.error("Daily decision (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
@@ -545,26 +555,27 @@ async def job_catalyst_scan() -> None:
             logger.error("Catalyst scan (user=%s) failed: %s", uid[:8] if uid else "global", e)
 
 
-async def job_weekly_strategy() -> None:
+async def job_weekly_strategy(market: str = "us_stock") -> None:
     """每周策略刷新：L1 宏观策略 + L2 组合策略（多用户）。"""
     for uid, store, budget in _get_active_user_stores():
         try:
             label = f"user={uid[:8]}" if uid else "global"
-            logger.info("Weekly strategy refresh (%s) starting", label)
+            logger.info("Weekly strategy refresh (%s/%s) starting", market, label)
             from bottleneck_hunter.watchlist.decision_engine import run_macro_strategy, run_strategic_plan
-            await _drain_sse(run_macro_strategy(store, budget))
-            await _drain_sse(run_strategic_plan(store, budget))
-            logger.info("Weekly strategy refresh (%s) completed", label)
+            await _drain_sse(run_macro_strategy(store, budget, market=market))
+            await _drain_sse(run_strategic_plan(store, budget, market=market))
+            logger.info("Weekly strategy refresh (%s/%s) completed", market, label)
         except Exception as e:
-            logger.error("Weekly strategy refresh (user=%s) failed: %s", uid[:8] if uid else "global", e)
+            logger.error("Weekly strategy refresh (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
 
 
-async def job_auto_review() -> None:
+async def job_auto_review(market: str = "us_stock") -> None:
     """自动复盘：批量复盘未复盘的卖出交易（多用户）。"""
     for uid, store, budget in _get_active_user_stores():
         try:
             label = f"user={uid[:8]}" if uid else "global"
-            unreviewed = store.get_trades_without_review()
+            market_store = store.for_market(market)
+            unreviewed = market_store.get_trades_without_review()
             if not unreviewed:
                 logger.debug("Auto review (%s) skipped — no unreviewed trades", label)
                 continue
@@ -587,6 +598,18 @@ async def job_auto_review() -> None:
                         label, reviewed_count, error_count, len(unreviewed))
         except Exception as e:
             logger.error("Auto review (user=%s) failed: %s", uid[:8] if uid else "global", e)
+
+    # P3.1 机会成本扫描（踏空/错误持有），与复盘同周期运行
+    for uid, store, budget in _get_active_user_stores():
+        try:
+            from bottleneck_hunter.watchlist.trade_reviewer import scan_missed_opportunities
+            async for evt in scan_missed_opportunities(store, market=market):
+                data = evt.get("data", {})
+                if data.get("event") == "missed_scan_done":
+                    logger.info("机会成本扫描 (user=%s) — 发现 %d 条",
+                                uid[:8] if uid else "global", data.get("found", 0))
+        except Exception as e:
+            logger.debug("机会成本扫描 (user=%s) 失败: %s", uid[:8] if uid else "global", e)
 
 
 async def job_institutional_update() -> None:
@@ -632,3 +655,22 @@ async def job_institutional_update() -> None:
             )
         except Exception as e:
             logger.error("Institutional update (user=%s) failed: %s", uid[:8] if uid else "global", e)
+
+
+async def job_model_calibration() -> None:
+    """周度 AI 模型准确率校准。"""
+    if not _wl_store:
+        return
+    from bottleneck_hunter.watchlist.model_calibrator import ModelCalibrator
+
+    user_ids = [(uid, f"user={uid[:8]}" if uid else "global")
+                for uid, _store, _budget in _get_active_user_stores()]
+    for uid, label in user_ids:
+        try:
+            store = _wl_store.for_user(uid) if uid else _wl_store
+            calibrator = ModelCalibrator(store)
+            for mkt in ("us_stock", "a_stock"):
+                count = calibrator.recalibrate(market=mkt)
+                logger.info("Model calibration (%s/%s): %d recalibrated", mkt, label, count)
+        except Exception as e:
+            logger.error("Model calibration (user=%s) failed: %s", uid[:8] if uid else "global", e)

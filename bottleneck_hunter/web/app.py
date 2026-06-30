@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,7 +15,12 @@ from fastapi.responses import FileResponse
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s | %(message)s")
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s %(levelname)s %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 from bottleneck_hunter.auth.jwt_utils import get_cookie_name, verify_token
 from bottleneck_hunter.auth.migration import run_migration
@@ -23,8 +29,18 @@ from bottleneck_hunter.web.api import router
 from bottleneck_hunter.web.auth_api import router as auth_router, set_auth_store
 from bottleneck_hunter.web.watchlist_api import router as watchlist_router, set_store as wl_set_store
 from bottleneck_hunter.web.decision_api import router as decision_router, set_store as dc_set_store
+from bottleneck_hunter.web.trading_api import router as trading_router, set_store as st_set_store
 from bottleneck_hunter.web.user_api import router as user_router, set_auth_store as user_set_auth_store
 from bottleneck_hunter.web.admin_api import router as admin_router, set_stores as admin_set_stores
+from bottleneck_hunter.web.syslog_api import router as syslog_router, init_broadcaster, shutdown_broadcaster
+from bottleneck_hunter.web.custom_provider_api import (
+    router as custom_provider_router,
+    set_auth_store as cp_set_auth_store,
+)
+from bottleneck_hunter.web.ai_config_api import (
+    router as ai_config_router,
+    set_store as aic_set_store,
+)
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.scheduler import init_scheduler, shutdown_scheduler
 from bottleneck_hunter.watchlist.retry import close_http_client
@@ -42,6 +58,23 @@ async def lifespan(app: FastAPI):
     set_auth_store(_auth_store)
     user_set_auth_store(_auth_store)
     admin_set_stores(_auth_store, _wl_store)
+    cp_set_auth_store(_auth_store)
+
+    # 加载自定义 provider 到 factory 运行时缓存
+    from bottleneck_hunter.llm_clients.factory import register_custom_provider
+    for cp in _auth_store.list_custom_providers():
+        detail = _auth_store.get_custom_provider(cp["provider_id"])
+        if detail and detail.get("is_active"):
+            api_key = ""
+            if detail.get("api_key_encrypted"):
+                try:
+                    from bottleneck_hunter.auth.crypto import decrypt
+                    api_key = decrypt(detail["api_key_encrypted"])
+                except Exception:
+                    pass
+            register_custom_provider(
+                cp["provider_id"], cp["base_url"], api_key, cp["default_model"],
+            )
 
     # 数据迁移：将现有数据绑定到 admin 用户
     admin_user = admin or _auth_store.get_user_by_username("admin")
@@ -50,12 +83,16 @@ async def lifespan(app: FastAPI):
 
     wl_set_store(_wl_store)
     dc_set_store(_wl_store)
+    st_set_store(_wl_store)
+    aic_set_store(_wl_store)
+    init_broadcaster()
     scheduler = init_scheduler(_wl_store, auth_store=_auth_store)
     if scheduler:
         scheduler.start()
         logging.getLogger(__name__).info("Watchlist scheduler started")
     yield
     shutdown_scheduler()
+    shutdown_broadcaster()
     await close_http_client()
 
 
@@ -170,8 +207,12 @@ def create_app() -> FastAPI:
     app.include_router(router, prefix="/api")
     app.include_router(watchlist_router, prefix="/api/watchlist")
     app.include_router(decision_router, prefix="/api/decision")
+    app.include_router(trading_router, prefix="/api/trading")
     app.include_router(user_router, prefix="/api/user")
     app.include_router(admin_router, prefix="/api/admin")
+    app.include_router(syslog_router, prefix="/api/system")
+    app.include_router(custom_provider_router, prefix="/api/custom-providers")
+    app.include_router(ai_config_router, prefix="/api/ai-config")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

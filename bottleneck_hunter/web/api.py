@@ -315,6 +315,7 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
                 req.analysis_id, [sc.model_dump() for sc in scorecards],
                 scoring_config=scoring_cfg,
             )
+            store.set_completed_phases(req.analysis_id, 3)
         except Exception:
             logger.exception("Phase3 保存失败")
 

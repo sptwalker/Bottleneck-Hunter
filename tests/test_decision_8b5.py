@@ -97,7 +97,7 @@ class TestL1MacroStrategy:
         llm = _mock_llm_response(MACRO_RESPONSE)
         from bottleneck_hunter.watchlist.decision_engine import run_macro_strategy
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             events = await _collect_events(run_macro_strategy(s))
 
@@ -115,7 +115,7 @@ class TestL1MacroStrategy:
         s, _ = store
         from bottleneck_hunter.watchlist.decision_engine import run_macro_strategy
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(None, "", "")):
             events = await _collect_events(run_macro_strategy(s))
 
@@ -131,7 +131,7 @@ class TestL1MacroStrategy:
         budget.can_spend = MagicMock(return_value=False)
 
         llm = _mock_llm_response(MACRO_RESPONSE)
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             events = await _collect_events(run_macro_strategy(s, budget))
 
@@ -148,7 +148,7 @@ class TestL1MacroStrategy:
             "daily_commentary": "宏观环境无重大变化",
         }
         llm = _mock_llm_response(check_response)
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             events = await _collect_events(run_macro_check(s))
 
@@ -173,7 +173,7 @@ class TestL1MacroStrategy:
                 return _mock_llm_response(check_response), "deepseek", "deepseek-chat"
             return _mock_llm_response(MACRO_RESPONSE), "deepseek", "deepseek-chat"
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    side_effect=mock_get_llm):
             events = await _collect_events(run_macro_check(s))
 
@@ -189,7 +189,7 @@ class TestL1MacroStrategy:
         from bottleneck_hunter.watchlist.decision_engine import run_macro_check
 
         llm = _mock_llm_response(MACRO_RESPONSE)
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             events = await _collect_events(run_macro_check(s))
 
@@ -218,7 +218,7 @@ class TestL2StrategicPlan:
         from bottleneck_hunter.watchlist.decision_engine import run_strategic_plan
 
         llm = _mock_llm_response(STRATEGIC_RESPONSE)
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             events = await _collect_events(run_strategic_plan(s))
 
@@ -242,7 +242,7 @@ class TestL2StrategicPlan:
                 return _mock_llm_response(MACRO_RESPONSE), "deepseek", "deepseek-chat"
             return _mock_llm_response(STRATEGIC_RESPONSE), "deepseek", "deepseek-chat"
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    side_effect=mock_get_llm):
             events = await _collect_events(run_strategic_plan(s))
 
@@ -256,7 +256,7 @@ class TestL2StrategicPlan:
         s, *_ = store_with_macro
         from bottleneck_hunter.watchlist.decision_engine import run_strategic_plan
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(None, "", "")):
             events = await _collect_events(run_strategic_plan(s))
 
@@ -273,7 +273,7 @@ class TestL2StrategicPlan:
             "commentary": "偏离度在可接受范围内",
         }
         llm = _mock_llm_response(deviation_response)
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             events = await _collect_events(run_deviation_check(s))
 
@@ -293,7 +293,7 @@ class TestL2StrategicPlan:
             "suggested_trades": [{"ticker": "AAPL", "action": "buy", "weight_change": 5}],
         }
         llm = _mock_llm_response(deviation_response)
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             events = await _collect_events(run_deviation_check(s))
 
@@ -389,9 +389,9 @@ class TestE2EDecisionFlow:
             CONSENSUS_RESPONSE,       # consensus
         ]
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    side_effect=self._get_llm_sequence(responses)):
-            with patch("bottleneck_hunter.watchlist.committee._get_llm",
+            with patch("bottleneck_hunter.watchlist.committee.get_llm_for_position",
                        side_effect=self._get_llm_sequence(
                            [REVIEW_RESPONSE] * 4 + [CONSENSUS_RESPONSE])):
                 events = await _collect_events(run_daily_decision(s))
@@ -409,7 +409,7 @@ class TestE2EDecisionFlow:
         from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
 
         llm = _mock_llm_response(MACRO_CHECK_VALID)
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    return_value=(llm, "deepseek", "deepseek-chat")):
             events = await _collect_events(run_daily_decision(s, scope="l1"))
 
@@ -426,7 +426,7 @@ class TestE2EDecisionFlow:
 
         responses = [TACTICAL_RESPONSE, EXECUTION_RESPONSE]
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    side_effect=self._get_llm_sequence(responses)):
             events = await _collect_events(run_daily_decision(s, scope="l3l4"))
 
@@ -447,7 +447,7 @@ class TestE2EDecisionFlow:
         responses = [MACRO_CHECK_VALID, DEVIATION_CHECK_OK,
                      TACTICAL_RESPONSE, EXECUTION_RESPONSE]
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    side_effect=self._get_llm_sequence(responses)):
             events = await _collect_events(run_daily_decision(s))
 
@@ -470,9 +470,9 @@ class TestE2EDecisionFlow:
             CONSENSUS_RESPONSE,   # consensus
         ]
 
-        with patch("bottleneck_hunter.watchlist.decision_engine._get_llm",
+        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
                    side_effect=self._get_llm_sequence(responses)):
-            with patch("bottleneck_hunter.watchlist.committee._get_llm",
+            with patch("bottleneck_hunter.watchlist.committee.get_llm_for_position",
                        side_effect=self._get_llm_sequence(
                            [REVIEW_RESPONSE] * 4 + [CONSENSUS_RESPONSE])):
                 events = await _collect_events(run_full_refresh(s))

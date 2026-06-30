@@ -9,6 +9,7 @@ import {
 } from './dashboard.js';
 import { restorePanelFromHistory } from './panel.js';
 import { buildAnalysisTag } from './analysis-tag.js';
+import { showConfirm } from './utils/confirm.js';
 
 const MARKET_LABELS = {
   a_stock: 'A 股',
@@ -164,7 +165,7 @@ async function loadAnalysis(id) {
 
 /* ── Delete analysis ────────────────────────────────── */
 async function deleteAnalysis(id) {
-  if (!confirm('确认删除该分析记录？此操作不可撤销。')) return;
+  if (!await showConfirm('确认删除该分析记录？此操作不可撤销。', { danger: true })) return;
 
   try {
     const resp = await fetch(`/api/history/${id}`, { method: 'DELETE' });
@@ -178,7 +179,7 @@ async function deleteAnalysis(id) {
 /* ── Helpers ─────────────────────────────────────────── */
 function esc(str) {
   if (!str) return '';
-  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function formatDate(isoStr) {

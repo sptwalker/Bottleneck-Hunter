@@ -1,6 +1,7 @@
 """决策中心 API — 挂载于 /api/decision
 
-提供 L1-L2 决策引擎、催化剂管理、模拟账户等端点。
+提供 L1-L4 决策引擎、催化剂管理、风险仪表盘等端点。
+模拟交易相关端点已迁移至 trading_api.py (/api/trading)。
 """
 
 from __future__ import annotations
@@ -69,25 +70,25 @@ def _sse_response(request: Request, gen_coro):
 # ─────────────────────────────────────────────────────────
 
 @router.post("/macro/generate")
-async def generate_macro_strategy(request: Request, user: dict = Depends(get_current_user)):
+async def generate_macro_strategy(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """全面生成 L1 宏观策略（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_macro_strategy
-    store = _user_store(user)
-    return _sse_response(request, run_macro_strategy(store, _user_budget(user)))
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_macro_strategy(store, _user_budget(user), market=market))
 
 
 @router.post("/macro/check")
-async def check_macro_strategy(request: Request, user: dict = Depends(get_current_user)):
+async def check_macro_strategy(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """L1 日常检查（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_macro_check
-    store = _user_store(user)
-    return _sse_response(request, run_macro_check(store, _user_budget(user)))
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_macro_check(store, _user_budget(user), market=market))
 
 
 @router.get("/macro/latest")
-async def get_latest_macro(user: dict = Depends(get_current_user)):
+async def get_latest_macro(market: str = "us_stock", user: dict = Depends(get_current_user)):
     """获取最新 L1 宏观策略"""
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
     strategy = store.get_latest_macro_strategy()
     if not strategy:
         return {"strategy": None, "message": "尚未生成宏观策略"}
@@ -95,8 +96,8 @@ async def get_latest_macro(user: dict = Depends(get_current_user)):
 
 
 @router.get("/macro/history")
-async def get_macro_history(limit: int = 10, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_macro_history(limit: int = 10, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     return {"history": store.get_macro_history(limit=limit)}
 
 
@@ -105,24 +106,24 @@ async def get_macro_history(limit: int = 10, user: dict = Depends(get_current_us
 # ─────────────────────────────────────────────────────────
 
 @router.post("/strategic/generate")
-async def generate_strategic_plan(request: Request, user: dict = Depends(get_current_user)):
+async def generate_strategic_plan(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """全面生成 L2 组合策略（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_strategic_plan
-    store = _user_store(user)
-    return _sse_response(request, run_strategic_plan(store, _user_budget(user)))
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_strategic_plan(store, _user_budget(user), market=market))
 
 
 @router.post("/strategic/deviation-check")
-async def deviation_check(request: Request, user: dict = Depends(get_current_user)):
+async def deviation_check(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """L2 偏离检查（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_deviation_check
-    store = _user_store(user)
-    return _sse_response(request, run_deviation_check(store, _user_budget(user)))
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_deviation_check(store, _user_budget(user), market=market))
 
 
 @router.get("/strategic/latest")
-async def get_latest_strategic(user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_latest_strategic(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     plan = store.get_latest_strategic_plan()
     if not plan:
         return {"plan": None, "message": "尚未生成组合策略"}
@@ -130,8 +131,8 @@ async def get_latest_strategic(user: dict = Depends(get_current_user)):
 
 
 @router.get("/strategic/history")
-async def get_strategic_history(limit: int = 10, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_strategic_history(limit: int = 10, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     return {"history": store.get_strategic_history(limit=limit)}
 
 
@@ -141,6 +142,7 @@ async def get_strategic_history(limit: int = 10, user: dict = Depends(get_curren
 
 class DailyRequest(BaseModel):
     scope: str = "full"
+    market: str = "us_stock"
 
 
 @router.post("/daily")
@@ -150,17 +152,18 @@ async def run_daily(request: Request, body: DailyRequest | None = None, user: di
     scope: "full" | "l1" | "l3l4"
     """
     from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
-    store = _user_store(user)
+    market = body.market if body else "us_stock"
     scope = body.scope if body else "full"
-    return _sse_response(request, run_daily_decision(store, _user_budget(user), scope=scope))
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_daily_decision(store, _user_budget(user), scope=scope, market=market))
 
 
 @router.post("/full-refresh")
-async def full_refresh(request: Request, user: dict = Depends(get_current_user)):
+async def full_refresh(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """全量刷新 L1+L2+L3+L4+投委会（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_full_refresh
-    store = _user_store(user)
-    return _sse_response(request, run_full_refresh(store, _user_budget(user)))
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_full_refresh(store, _user_budget(user), market=market))
 
 
 # ─────────────────────────────────────────────────────────
@@ -168,16 +171,16 @@ async def full_refresh(request: Request, user: dict = Depends(get_current_user))
 # ─────────────────────────────────────────────────────────
 
 @router.post("/tactical/generate")
-async def generate_tactical(request: Request, user: dict = Depends(get_current_user)):
+async def generate_tactical(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """生成 L3 战术计划（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_tactical_plans
-    store = _user_store(user)
-    return _sse_response(request, run_tactical_plans(store, _user_budget(user)))
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_tactical_plans(store, _user_budget(user), market=market))
 
 
 @router.get("/tactical/latest")
-async def get_latest_tactical(user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_latest_tactical(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     plans = store.get_tactical_plans_by_date(today)
@@ -187,8 +190,8 @@ async def get_latest_tactical(user: dict = Depends(get_current_user)):
 
 
 @router.get("/tactical/{ticker}")
-async def get_tactical_for_ticker(ticker: str, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_tactical_for_ticker(ticker: str, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     plan = store.get_tactical_plan_for_ticker(ticker)
     if not plan:
         return {"plan": None, "message": f"{ticker} 无战术计划"}
@@ -200,11 +203,11 @@ async def get_tactical_for_ticker(ticker: str, user: dict = Depends(get_current_
 # ─────────────────────────────────────────────────────────
 
 @router.post("/execution/generate")
-async def generate_execution(request: Request, user: dict = Depends(get_current_user)):
+async def generate_execution(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """生成 L4 执行方案（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_execution_plans
-    store = _user_store(user)
-    return _sse_response(request, run_execution_plans(store, _user_budget(user)))
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_execution_plans(store, _user_budget(user), market=market))
 
 
 @router.get("/execution/{plan_id}")
@@ -222,14 +225,14 @@ async def get_execution_detail(plan_id: str, user: dict = Depends(get_current_us
 # ─────────────────────────────────────────────────────────
 
 @router.post("/committee/review")
-async def trigger_committee_review(request: Request, user: dict = Depends(get_current_user)):
+async def trigger_committee_review(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """对所有待审执行计划启动投委会评审（SSE 流）"""
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
     pending = store.get_pending_executions()
     if not pending:
         return {"message": "无待审执行计划"}
     from bottleneck_hunter.watchlist.committee import run_committee_review
-    return _sse_response(request, run_committee_review(store, pending, _user_budget(user)))
+    return _sse_response(request, run_committee_review(store, pending, _user_budget(user), market=market))
 
 
 @router.get("/committee/reviews/{plan_id}")
@@ -244,10 +247,10 @@ async def get_committee_consensus(plan_id: str, user: dict = Depends(get_current
     store = _user_store(user)
     conn = store._connect()
     try:
-        row = conn.execute(
-            "SELECT * FROM committee_consensus WHERE execution_plan_id = ? ORDER BY created_at DESC LIMIT 1",
-            (plan_id,),
-        ).fetchone()
+        q = "SELECT * FROM committee_consensus WHERE execution_plan_id = ? ORDER BY created_at DESC LIMIT 1"
+        p = (plan_id,)
+        q, p = store._user_filter(q, p)
+        row = conn.execute(q, p).fetchone()
         if not row:
             return {"consensus": None, "message": "暂无共识结果"}
         d = dict(row)
@@ -268,17 +271,95 @@ async def get_committee_consensus(plan_id: str, user: dict = Depends(get_current
 # ─────────────────────────────────────────────────────────
 
 @router.post("/catalysts/scan")
-async def scan_catalysts(request: Request, user: dict = Depends(get_current_user)):
+async def scan_catalysts(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """扫描观察池提取催化剂（SSE 流）"""
     from bottleneck_hunter.watchlist.catalyst_monitor import detect_catalysts
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
     return _sse_response(request, detect_catalysts(store, _user_budget(user)))
 
 
 @router.get("/catalysts/upcoming")
-async def get_upcoming_catalysts(days: int = 14, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_upcoming_catalysts(days: int = 14, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     return {"catalysts": store.get_upcoming_catalysts(days=days)}
+
+
+@router.get("/catalysts/weekly-preview")
+async def get_weekly_preview(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """周度催化剂前瞻 — 按来源分组、按影响度排序"""
+    from bottleneck_hunter.watchlist.catalyst_monitor import generate_weekly_preview
+    store = _user_store(user).for_market(market)
+    return generate_weekly_preview(store)
+
+
+@router.get("/catalysts/enhanced-calendar")
+async def get_enhanced_calendar(days: int = 30, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """增强版催化剂日历 — 含四维分类"""
+    from bottleneck_hunter.watchlist.catalyst_monitor import get_catalyst_calendar
+    store = _user_store(user).for_market(market)
+    return get_catalyst_calendar(store, days=days)
+
+
+@router.get("/catalysts/calendar")
+async def get_catalysts_calendar(month: str | None = None, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """按日期分组返回催化剂事件，格式：{"2026-06-24": [...], ...}"""
+    store = _user_store(user).for_market(market)
+    from datetime import datetime as _dt, timezone as _tz
+    import calendar
+
+    if month:
+        try:
+            year, mon = int(month[:4]), int(month[5:7])
+        except (ValueError, IndexError):
+            year = _dt.now(_tz.utc).year
+            mon = _dt.now(_tz.utc).month
+    else:
+        now = _dt.now(_tz.utc)
+        year, mon = now.year, now.month
+
+    _, last_day = calendar.monthrange(year, mon)
+    start_date = f"{year}-{mon:02d}-01"
+    end_date = f"{year}-{mon:02d}-{last_day:02d}"
+
+    conn = store._connect()
+    try:
+        q, p = store._filtered(
+            """SELECT ct.*, w.company_name FROM catalyst_tracking ct
+               LEFT JOIN watchlist w ON ct.entry_id = w.id
+               WHERE ct.expected_date IS NOT NULL
+               AND ct.expected_date >= ? AND ct.expected_date <= ?
+               ORDER BY ct.expected_date ASC""",
+            (start_date, end_date),
+            table="ct",
+        )
+        rows = conn.execute(q, p).fetchall()
+    finally:
+        conn.close()
+
+    calendar_data: dict[str, list] = {}
+    for r in rows:
+        d = dict(r)
+        date_key = (d.get("expected_date") or "")[:10]
+        if date_key:
+            if date_key not in calendar_data:
+                calendar_data[date_key] = []
+            calendar_data[date_key].append({
+                "id": d.get("id"),
+                "ticker": d.get("ticker"),
+                "company_name": d.get("company_name", ""),
+                "title": d.get("title"),
+                "catalyst_type": d.get("catalyst_type"),
+                "impact_level": d.get("impact_level"),
+                "status": d.get("status"),
+            })
+
+    return {
+        "year": year,
+        "month": mon,
+        "start_date": start_date,
+        "end_date": end_date,
+        "events": calendar_data,
+    }
 
 
 @router.get("/catalysts/{entry_id}")
@@ -307,9 +388,26 @@ async def update_catalyst(catalyst_id: str, req: UpdateCatalystRequest, user: di
 # ─────────────────────────────────────────────────────────
 
 @router.get("/executions/pending")
-async def get_pending_executions(user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_pending_executions(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     return {"executions": store.get_pending_executions()}
+
+
+@router.get("/executions/blocked")
+async def get_blocked_executions(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """被系统/投委会拦截的执行计划（已拦截区）。"""
+    store = _user_store(user).for_market(market)
+    return {"executions": store.get_blocked_executions()}
+
+
+@router.post("/executions/{plan_id}/restore")
+async def restore_execution(plan_id: str, user: dict = Depends(get_current_user)):
+    """用户手动恢复被拦截的计划到待确认队列（override）。"""
+    store = _user_store(user)
+    ok = store.restore_execution(plan_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="计划不存在或非拦截状态")
+    return {"status": "restored"}
 
 
 @router.post("/executions/{plan_id}/confirm")
@@ -323,7 +421,12 @@ async def confirm_execution(plan_id: str, user: dict = Depends(get_current_user)
         trade_result = execute_trade(store, plan_id)
     except Exception as e:
         logger.exception("交易执行异常 plan_id=%s", plan_id)
-        raise HTTPException(status_code=500, detail=f"交易执行异常: {e}")
+        # P2.2 执行失败回滚到 pending，避免卡在 confirmed
+        try:
+            store.revert_to_pending(plan_id)
+        except Exception:
+            logger.warning("回滚 plan_id=%s 到 pending 失败", plan_id)
+        raise HTTPException(status_code=500, detail=f"交易执行异常: {e}") from e
     # execute_trade 返回 error 字段表示业务错误（约束不通过、现金不足等）
     if "error" in trade_result:
         return {"status": "error", "trade": trade_result, "message": trade_result["error"]}
@@ -343,55 +446,11 @@ async def reject_execution(plan_id: str, req: RejectRequest, user: dict = Depend
     return {"status": "rejected"}
 
 
-# ─────────────────────────────────────────────────────────
-# 模拟账户
-# ─────────────────────────────────────────────────────────
-
-@router.get("/account")
-async def get_account(user: dict = Depends(get_current_user)):
+@router.post("/executions/clear-all")
+async def clear_all_pending(user: dict = Depends(get_current_user)):
     store = _user_store(user)
-    account = store.get_sim_account()
-    positions = store.get_sim_positions(account.get("id"))
-    return {"account": account, "positions": positions}
-
-
-@router.get("/account/equity-history")
-async def get_equity_history(days: int = 30, user: dict = Depends(get_current_user)):
-    """按日聚合交易记录，计算每日权益值"""
-    store = _user_store(user)
-    account = store.get_sim_account()
-    initial = account.get("initial_capital", 100000)
-    trades = store.get_sim_trades(limit=10000)
-
-    from collections import defaultdict
-    daily_cash_flow = defaultdict(float)
-    for t in trades:
-        date = (t.get("created_at") or "")[:10]
-        if not date:
-            continue
-        if t.get("side") == "buy":
-            daily_cash_flow[date] -= t.get("amount", 0)
-        else:
-            daily_cash_flow[date] += t.get("amount", 0)
-
-    if not daily_cash_flow:
-        return {"history": [], "initial_capital": initial}
-
-    sorted_dates = sorted(daily_cash_flow.keys())
-    history = []
-    equity = initial
-    for d in sorted_dates:
-        equity += daily_cash_flow[d]
-        history.append({"date": d, "equity": round(equity, 2)})
-
-    history = history[-days:]
-    return {"history": history, "initial_capital": initial}
-
-
-@router.get("/trades")
-async def get_trades(ticker: str | None = None, limit: int = 50, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    return {"trades": store.get_sim_trades(ticker=ticker, limit=limit)}
+    count = store.clear_pending_executions()
+    return {"status": "ok", "cleared": count}
 
 
 # ─────────────────────────────────────────────────────────
@@ -399,9 +458,9 @@ async def get_trades(ticker: str | None = None, limit: int = 50, user: dict = De
 # ─────────────────────────────────────────────────────────
 
 @router.get("/overview")
-async def decision_overview(user: dict = Depends(get_current_user)):
+async def decision_overview(market: str = "us_stock", user: dict = Depends(get_current_user)):
     """策略中心概览 — 一次请求拿到所有关键数据"""
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
 
     macro = store.get_latest_macro_strategy()
     strategic = store.get_latest_strategic_plan()
@@ -437,15 +496,29 @@ async def get_scheduler_status(user: dict = Depends(get_current_user)):
 # ─────────────────────────────────────────────────────────
 
 AI_CONFIG_POSITIONS = [
+    # ── 决策层级 ──
     {"key": "L1_macro", "label": "L1 宏观策略", "group": "decision", "default_provider": "deepseek", "default_model": "deepseek-chat"},
     {"key": "L2_strategic", "label": "L2 组合策略", "group": "decision", "default_provider": "deepseek", "default_model": "deepseek-chat"},
     {"key": "L3_tactical", "label": "L3 战术计划", "group": "decision", "default_provider": "deepseek", "default_model": "deepseek-chat"},
     {"key": "L4_execution", "label": "L4 执行方案", "group": "decision", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    # ── 投资委员会 ──
     {"key": "committee_risk", "label": "风险控制官", "group": "committee", "default_provider": "deepseek", "default_model": "deepseek-chat"},
     {"key": "committee_growth", "label": "成长投资人", "group": "committee", "default_provider": "qwen", "default_model": "qwen-plus"},
     {"key": "committee_value", "label": "价值投资人", "group": "committee", "default_provider": "kimi", "default_model": "moonshot-v1-8k"},
     {"key": "committee_contrarian", "label": "逆向投资人", "group": "committee", "default_provider": "glm", "default_model": "glm-4-flash"},
     {"key": "committee_consensus", "label": "圆桌讨论/共识", "group": "committee", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    # ── 产业链管线 ──
+    {"key": "pipeline_decompose", "label": "产业链拆解", "group": "pipeline", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    {"key": "pipeline_eval", "label": "供应商评估", "group": "pipeline", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    {"key": "pipeline_cross_val", "label": "交叉验证", "group": "pipeline", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    {"key": "pipeline_roundtable", "label": "圆桌讨论", "group": "pipeline", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    # ── 看板模块 ──
+    {"key": "watchlist_catalyst", "label": "催化剂监控", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    {"key": "watchlist_strategy", "label": "策略引擎", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    {"key": "watchlist_thesis", "label": "论点追踪", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    {"key": "watchlist_trade_review", "label": "交易复盘", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    {"key": "watchlist_tuning", "label": "参数调优", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
+    {"key": "watchlist_uzi", "label": "深度分析(UZI)", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
 ]
 
 PROVIDER_MODELS = {
@@ -465,8 +538,9 @@ PROVIDER_MODELS = {
 
 @router.get("/ai-config")
 async def get_ai_config(user: dict = Depends(get_current_user)):
-    """返回 9 个位置的当前 AI 模型配置 + 可用 provider 列表"""
+    """返回所有位置的当前 AI 模型配置 + 可用 provider 列表（含自定义）"""
     from bottleneck_hunter.web.api import PROVIDER_REGISTRY
+    from bottleneck_hunter.llm_clients.factory import list_custom_provider_ids, get_custom_provider
 
     positions = []
     for pos in AI_CONFIG_POSITIONS:
@@ -495,7 +569,19 @@ async def get_ai_config(user: dict = Depends(get_current_user)):
             "name": p["name"],
             "configured": has_key,
             "default_model": PROVIDER_MODELS.get(p["id"], ""),
+            "is_custom": False,
         })
+
+    for cp_id in list_custom_provider_ids():
+        cp = get_custom_provider(cp_id)
+        if cp:
+            available_providers.append({
+                "id": cp_id,
+                "name": cp_id,
+                "configured": True,
+                "default_model": cp["default_model"],
+                "is_custom": True,
+            })
 
     return {"positions": positions, "available_providers": available_providers}
 
@@ -555,207 +641,13 @@ async def test_ai_model(req: AIConfigTestRequest, user: dict = Depends(get_curre
 
 
 # ─────────────────────────────────────────────────────────
-# 交易复盘 & 经验卡片
-# ─────────────────────────────────────────────────────────
-
-@router.get("/reviews")
-async def get_reviews(ticker: str | None = None, limit: int = 20, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    return {"reviews": store.get_auto_reviews(ticker=ticker, limit=limit)}
-
-
-@router.get("/reviews/{review_id}")
-async def get_review_detail(review_id: str, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    review = store.get_auto_review(review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="复盘记录不存在")
-    return {"review": review}
-
-
-@router.post("/reviews/run")
-async def run_batch_review_endpoint(request: Request, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    from bottleneck_hunter.watchlist.budget import BudgetTracker
-    budget = BudgetTracker(store)
-
-    from bottleneck_hunter.watchlist.trade_reviewer import run_batch_review
-
-    async def generate():
-        async for evt in run_batch_review(store, budget):
-            event_name = evt.get("event", "message")
-            data = json.dumps(evt.get("data", evt), ensure_ascii=False)
-            yield {"event": event_name, "data": data}
-
-    return EventSourceResponse(generate())
-
-
-@router.get("/feedback")
-async def get_feedback_history(limit: int = 50, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    return {"feedback": store.get_trade_feedback_history(limit=limit)}
-
-
-@router.get("/experience")
-async def get_experience_cards(scope: str | None = None,
-                               scope_key: str | None = None,
-                               limit: int = 20,
-                               user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    return {"cards": store.get_experience_cards(scope=scope, scope_key=scope_key, limit=limit)}
-
-
-@router.delete("/experience/{card_id}")
-async def delete_experience_card(card_id: str, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    ok = store.delete_experience_card(card_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="经验卡片不存在")
-    return {"status": "deleted"}
-
-
-# ─────────────────────────────────────────────────────────
-# 绩效统计
-# ─────────────────────────────────────────────────────────
-
-@router.get("/performance")
-async def get_performance(user: dict = Depends(get_current_user)):
-    from bottleneck_hunter.watchlist.performance_stats import PerformanceCalculator
-    calc = PerformanceCalculator(_user_store(user))
-    return {
-        "overview": calc.compute_overview(),
-        "drawdown": calc.compute_drawdown(),
-        "cost": calc.compute_cost_summary(),
-        "review_summary": calc.compute_review_summary(),
-    }
-
-
-@router.get("/performance/monthly")
-async def get_performance_monthly(months: int = 6, user: dict = Depends(get_current_user)):
-    from bottleneck_hunter.watchlist.performance_stats import PerformanceCalculator
-    calc = PerformanceCalculator(_user_store(user))
-    return {"monthly": calc.compute_monthly_series(months=months)}
-
-
-@router.get("/performance/tickers")
-async def get_performance_tickers(user: dict = Depends(get_current_user)):
-    from bottleneck_hunter.watchlist.performance_stats import PerformanceCalculator
-    calc = PerformanceCalculator(_user_store(user))
-    return {"tickers": calc.compute_by_ticker()}
-
-
-# ─────────────────────────────────────────────────────────
-# 调优管理
-# ─────────────────────────────────────────────────────────
-
-@router.get("/tuning")
-async def get_tuning(status: str | None = None, limit: int = 20, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    return {"proposals": store.get_tuning_proposals(status=status, limit=limit)}
-
-
-@router.post("/tuning/generate")
-async def generate_tuning(request: Request, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    from bottleneck_hunter.watchlist.budget import BudgetTracker
-    budget = BudgetTracker(store)
-
-    from bottleneck_hunter.watchlist.tuning_engine import generate_tuning_suggestions
-
-    async def generate():
-        async for evt in generate_tuning_suggestions(store, budget):
-            event_name = evt.get("event", "message")
-            data = json.dumps(evt.get("data", evt), ensure_ascii=False)
-            yield {"event": event_name, "data": data}
-
-    return EventSourceResponse(generate())
-
-
-@router.post("/tuning/{tuning_id}/approve")
-async def approve_tuning(tuning_id: str, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    ok = store.approve_tuning(tuning_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="调优建议不存在或已处理")
-    return {"status": "approved"}
-
-
-@router.post("/tuning/{tuning_id}/reject")
-async def reject_tuning(tuning_id: str, reason: str = "", user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    ok = store.reject_tuning(tuning_id, reason)
-    if not ok:
-        raise HTTPException(status_code=404, detail="调优建议不存在或已处理")
-    return {"status": "rejected"}
-
-
-# ------------------------------------------------------------------
-# Backtest
-# ------------------------------------------------------------------
-
-class BacktestRequest(BaseModel):
-    start_date: str | None = None
-    end_date: str | None = None
-    benchmark: str = "SPY"
-
-
-@router.post("/backtest/run")
-async def run_backtest(req: BacktestRequest, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    from bottleneck_hunter.watchlist.backtest import BacktestEngine
-    engine = BacktestEngine(store)
-    result = engine.run(req.start_date, req.end_date, req.benchmark)
-    if result.error:
-        return {"error": result.error}
-    return {
-        "run_id": result.run_id,
-        "start_date": result.start_date,
-        "end_date": result.end_date,
-        "initial_capital": result.initial_capital,
-        "final_equity": result.final_equity,
-        "trade_count": result.trade_count,
-        "metrics": {
-            "total_return_pct": result.metrics.total_return_pct,
-            "annualized_return_pct": result.metrics.annualized_return_pct,
-            "sharpe_ratio": result.metrics.sharpe_ratio,
-            "sortino_ratio": result.metrics.sortino_ratio,
-            "max_drawdown_pct": result.metrics.max_drawdown_pct,
-            "calmar_ratio": result.metrics.calmar_ratio,
-            "win_rate_pct": result.metrics.win_rate_pct,
-            "profit_loss_ratio": result.metrics.profit_loss_ratio,
-            "benchmark_return_pct": result.metrics.benchmark_return_pct,
-            "alpha_pct": result.metrics.alpha_pct,
-        },
-        "equity_curve": result.metrics.equity_curve,
-    }
-
-
-@router.get("/backtest/history")
-async def backtest_history(limit: int = 20, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    runs = store.get_backtest_runs(limit)
-    for r in runs:
-        r.pop("equity_curve", None)
-    return runs
-
-
-@router.get("/backtest/{run_id}")
-async def get_backtest(run_id: str, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
-    run = store.get_backtest_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="回测记录不存在")
-    return run
-
-
-# ─────────────────────────────────────────────────────────
 # 17F.1 决策链路追溯
 # ─────────────────────────────────────────────────────────
 
 @router.get("/trace/{ticker}")
-async def get_decision_trace(ticker: str, user: dict = Depends(get_current_user)):
+async def get_decision_trace(ticker: str, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """聚合一个 ticker 的完整 L1→L2→L3→L4→投委会 决策路径"""
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
 
     layers = []
 
@@ -917,9 +809,9 @@ async def get_decision_trace(ticker: str, user: dict = Depends(get_current_user)
 # ─────────────────────────────────────────────────────────
 
 @router.get("/risk-dashboard")
-async def get_risk_dashboard(user: dict = Depends(get_current_user)):
+async def get_risk_dashboard(market: str = "us_stock", user: dict = Depends(get_current_user)):
     """组合风险仪表盘 — VaR / CVaR / Beta / HHI + 持仓权重 + 预警"""
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
     account = store.get_sim_account()
     positions = store.get_sim_positions(account.get("id"))
     total_equity = account.get("total_equity", 100000.0) or 100000.0
@@ -978,72 +870,6 @@ async def get_risk_dashboard(user: dict = Depends(get_current_user)):
 
 
 # ─────────────────────────────────────────────────────────
-# 17F.3 催化剂日历视图
-# ─────────────────────────────────────────────────────────
-
-@router.get("/catalysts/calendar")
-async def get_catalysts_calendar(month: str | None = None, user: dict = Depends(get_current_user)):
-    """按日期分组返回催化剂事件，格式：{"2026-06-24": [...], ...}"""
-    store = _user_store(user)
-    from datetime import datetime as _dt, timezone as _tz
-    import calendar
-
-    if month:
-        try:
-            year, mon = int(month[:4]), int(month[5:7])
-        except (ValueError, IndexError):
-            year = _dt.now(_tz.utc).year
-            mon = _dt.now(_tz.utc).month
-    else:
-        now = _dt.now(_tz.utc)
-        year, mon = now.year, now.month
-
-    _, last_day = calendar.monthrange(year, mon)
-    start_date = f"{year}-{mon:02d}-01"
-    end_date = f"{year}-{mon:02d}-{last_day:02d}"
-
-    conn = store._connect()
-    try:
-        q, p = store._user_filter(
-            """SELECT ct.*, w.company_name FROM catalyst_tracking ct
-               LEFT JOIN watchlist w ON ct.entry_id = w.id
-               WHERE ct.expected_date IS NOT NULL
-               AND ct.expected_date >= ? AND ct.expected_date <= ?
-               ORDER BY ct.expected_date ASC""",
-            (start_date, end_date),
-            table="ct",
-        )
-        rows = conn.execute(q, p).fetchall()
-    finally:
-        conn.close()
-
-    calendar_data: dict[str, list] = {}
-    for r in rows:
-        d = dict(r)
-        date_key = (d.get("expected_date") or "")[:10]
-        if date_key:
-            if date_key not in calendar_data:
-                calendar_data[date_key] = []
-            calendar_data[date_key].append({
-                "id": d.get("id"),
-                "ticker": d.get("ticker"),
-                "company_name": d.get("company_name", ""),
-                "title": d.get("title"),
-                "catalyst_type": d.get("catalyst_type"),
-                "impact_level": d.get("impact_level"),
-                "status": d.get("status"),
-            })
-
-    return {
-        "year": year,
-        "month": mon,
-        "start_date": start_date,
-        "end_date": end_date,
-        "events": calendar_data,
-    }
-
-
-# ─────────────────────────────────────────────────────────
 # 17F.4 A/B 对比
 # ─────────────────────────────────────────────────────────
 
@@ -1082,3 +908,203 @@ async def compare_snapshots(id_a: str, id_b: str, user: dict = Depends(get_curre
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+
+# ─────────────────────────────────────────────────────────
+# Phase 20A: 投资论点追踪
+# ─────────────────────────────────────────────────────────
+
+@router.post("/thesis/review")
+async def trigger_thesis_review(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """触发全量论点审查（SSE 流）"""
+    from bottleneck_hunter.watchlist.thesis_tracker import run_quarterly_review
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, run_quarterly_review(store, _user_budget(user)))
+
+
+@router.get("/thesis/dashboard")
+async def thesis_dashboard(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """论点健康度总览"""
+    store = _user_store(user).for_market(market)
+    dashboard = store.get_thesis_dashboard()
+    return {"dashboard": dashboard}
+
+
+@router.get("/thesis/{entry_id}")
+async def get_theses(entry_id: str, active_only: bool = True, user: dict = Depends(get_current_user)):
+    """获取某标的所有论点"""
+    store = _user_store(user)
+    theses = store.get_theses_for_entry(entry_id, active_only=active_only)
+    return {"theses": theses}
+
+
+class CreateThesisRequest(BaseModel):
+    title: str
+    summary: str = ""
+    conviction: str = "medium"
+    time_horizon: str = "medium_term"
+    pillars: list[dict] = []
+
+
+@router.post("/thesis/{entry_id}/create")
+async def create_thesis(entry_id: str, req: CreateThesisRequest, user: dict = Depends(get_current_user)):
+    """手动创建投资论点"""
+    store = _user_store(user)
+    entry = store.get(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="标的不存在")
+    thesis_id = store.create_thesis(
+        entry_id=entry_id,
+        ticker=entry["ticker"],
+        title=req.title,
+        summary=req.summary,
+        conviction=req.conviction,
+        time_horizon=req.time_horizon,
+        pillars=req.pillars or [{"text": req.summary[:100], "falsification": "待补充", "weight": 1.0}],
+    )
+    return {"thesis_id": thesis_id}
+
+
+@router.get("/thesis/{thesis_id}/detail")
+async def get_thesis_detail(thesis_id: str, user: dict = Depends(get_current_user)):
+    """论点详情 + 支柱 + 证据日志"""
+    store = _user_store(user)
+    thesis = store.get_thesis(thesis_id)
+    if not thesis:
+        raise HTTPException(status_code=404, detail="论点不存在")
+    pillars = store.get_pillars(thesis_id)
+    evidence = store.get_evidence_log(thesis_id, limit=50)
+    return {"thesis": thesis, "pillars": pillars, "evidence": evidence}
+
+
+class AddEvidenceRequest(BaseModel):
+    pillar_id: str | None = None
+    data_point: str
+    direction: str = "neutral"
+    thesis_impact: str = "no_change"
+    source: str = "manual"
+
+
+@router.post("/thesis/{thesis_id}/evidence")
+async def add_evidence(thesis_id: str, req: AddEvidenceRequest, user: dict = Depends(get_current_user)):
+    """手动添加证据"""
+    store = _user_store(user)
+    thesis = store.get_thesis(thesis_id)
+    if not thesis:
+        raise HTTPException(status_code=404, detail="论点不存在")
+    from datetime import datetime, timezone
+    evidence_id = store.create_evidence(
+        thesis_id=thesis_id,
+        pillar_id=req.pillar_id,
+        date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        data_point=req.data_point,
+        direction=req.direction,
+        thesis_impact=req.thesis_impact,
+        conviction_before=thesis.get("conviction", "medium"),
+        conviction_after=thesis.get("conviction", "medium"),
+        source=req.source,
+    )
+    return {"evidence_id": evidence_id}
+
+
+# ─────────────────────────────────────────────────────────
+# Phase 20D: 三场景估值
+# ─────────────────────────────────────────────────────────
+
+@router.get("/valuation/portfolio/overview")
+async def get_portfolio_valuations(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """组合级场景估值概览"""
+    store = _user_store(user).for_market(market)
+    valuations = store.get_portfolio_valuations()
+    return {"valuations": valuations}
+
+
+@router.get("/valuation/{entry_id}")
+async def get_latest_valuation(entry_id: str, user: dict = Depends(get_current_user)):
+    """最新场景估值"""
+    store = _user_store(user)
+    val = store.get_latest_valuation(entry_id)
+    if not val:
+        return {"valuation": None, "message": "暂无场景估值"}
+    return {"valuation": val}
+
+
+# ─────────────────────────────────────────────────────────
+# Phase 22A: AI 模型评分校准
+# ─────────────────────────────────────────────────────────
+
+@router.get("/model-accuracy")
+async def get_model_accuracy_overview(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """模型预测准确率总览 — 按 provider/model/role 分组统计"""
+    store = _user_store(user)
+    stats = store.get_model_accuracy_stats(market=market)
+    ratings = store.get_model_ratings(market=market)
+    return {"stats": stats, "ratings": ratings}
+
+
+@router.get("/model-accuracy/{provider}/{model}")
+async def get_model_accuracy_detail(provider: str, model: str,
+                                    role_context: str | None = None,
+                                    limit: int = 50,
+                                    user: dict = Depends(get_current_user)):
+    """单个模型的预测记录明细"""
+    store = _user_store(user)
+    records = store.get_model_accuracy(provider, model, role_context=role_context, limit=limit)
+    weight = store.get_calibration_weight(provider, model, role_context=role_context or "")
+    return {"records": records, "calibration_weight": weight}
+
+
+@router.post("/model-accuracy/calibrate")
+async def calibrate_models(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """手动触发模型校准 — 委托 ModelCalibrator 统一计算"""
+    from bottleneck_hunter.watchlist.model_calibrator import ModelCalibrator
+    store = _user_store(user)
+    calibrator = ModelCalibrator(store)
+    calibrated = calibrator.recalibrate(market=market)
+    return {"calibrated": calibrated, "message": f"已校准 {calibrated} 个模型/角色组合"}
+
+
+# ─────────────────────────────────────────────────────────
+# Phase 22A: 会议历史记录
+# ─────────────────────────────────────────────────────────
+
+@router.get("/meetings")
+async def get_meetings(meeting_type: str | None = None, market: str = "us_stock",
+                       limit: int = 20, user: dict = Depends(get_current_user)):
+    """会议历史列表"""
+    store = _user_store(user)
+    records = store.get_meeting_records(meeting_type=meeting_type, market=market, limit=limit)
+    return {"meetings": records}
+
+
+@router.get("/meetings/stats")
+async def get_meetings_stats(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """会议统计概览"""
+    store = _user_store(user)
+    stats = store.get_meeting_stats(market=market)
+    return {"stats": stats}
+
+
+@router.get("/meetings/{record_id}")
+async def get_meeting_detail(record_id: str, user: dict = Depends(get_current_user)):
+    """单条会议详情"""
+    store = _user_store(user)
+    record = store.get_meeting_record(record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="会议记录不存在")
+    return {"meeting": record}
+
+
+class MeetingOutcomeRequest(BaseModel):
+    outcome_summary: str
+
+
+@router.post("/meetings/{record_id}/outcome")
+async def update_meeting_outcome(record_id: str, req: MeetingOutcomeRequest,
+                                 user: dict = Depends(get_current_user)):
+    """更新会议回溯结论"""
+    store = _user_store(user)
+    ok = store.update_meeting_outcome(record_id, req.outcome_summary)
+    if not ok:
+        raise HTTPException(status_code=404, detail="会议记录不存在")
+    return {"status": "updated"}

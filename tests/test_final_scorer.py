@@ -42,13 +42,14 @@ class TestFinalScorer:
     def test_high_quality_low_alpha(self):
         """高质量低alpha应被惩罚（市场已知的好公司）。"""
         sc = _make_scorecard(overall_score=9.0, alpha_score=1.0)
-        result = FinalScorer.compute(sc)
+        # pin 权重以稳定表达语义意图（不依赖默认权重的调整）
+        result = FinalScorer.compute(sc, w_q=0.4, w_a=0.6)
         assert result.final_score < 3.0
 
     def test_low_quality_high_alpha(self):
         """低质量高alpha：隐蔽但有风险。"""
         sc = _make_scorecard(overall_score=3.0, alpha_score=9.0)
-        result = FinalScorer.compute(sc)
+        result = FinalScorer.compute(sc, w_q=0.4, w_a=0.6)
         assert 5.0 < result.final_score < 7.0
 
     def test_strong_all_around(self):

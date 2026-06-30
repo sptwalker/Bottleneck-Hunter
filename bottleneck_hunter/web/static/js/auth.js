@@ -62,7 +62,11 @@
         showSuccess('登录成功，正在跳转…');
         setTimeout(() => { window.location.href = '/'; }, 500);
       } else {
-        showError(data.detail || '登录失败');
+        const detail = data.detail;
+        const msg = Array.isArray(detail)
+          ? detail.map(e => e.msg || JSON.stringify(e)).join('; ')
+          : (typeof detail === 'string' ? detail : '登录失败');
+        showError(msg);
       }
     } catch (err) {
       showError('网络错误：' + err.message);
@@ -96,7 +100,11 @@
         showSuccess('注册成功，正在跳转…');
         setTimeout(() => { window.location.href = '/'; }, 500);
       } else {
-        showError(data.detail || '注册失败');
+        const detail = data.detail;
+        const msg = Array.isArray(detail)
+          ? detail.map(e => e.msg || JSON.stringify(e)).join('; ')
+          : (typeof detail === 'string' ? detail : '注册失败');
+        showError(msg);
       }
     } catch (err) {
       showError('网络错误：' + err.message);

@@ -14,7 +14,6 @@ from bottleneck_hunter.watchlist import uzi_runner
 from bottleneck_hunter.watchlist.uzi_runner import (
     ANALYSIS_TYPES,
     _extract_summary,
-    _get_llm,
     _mock_deep_analysis,
     _mock_investor_panel,
     _mock_trap_result,
@@ -93,30 +92,6 @@ class TestExtractSummary:
         assert _extract_summary("unknown-type", {}) == ""
 
 
-# ---------------------------------------------------------------------------
-# TestGetLlm — _get_llm
-# ---------------------------------------------------------------------------
-
-class TestGetLlm:
-    def test_no_env_returns_none(self):
-        with patch.dict("os.environ", {}, clear=True):
-            assert _get_llm() is None
-
-    def test_with_env_returns_llm(self):
-        mock_llm = MagicMock()
-        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}), \
-             patch("bottleneck_hunter.watchlist.uzi_runner.create_llm",
-                   return_value=mock_llm, create=True) as mock_create:
-            with patch("bottleneck_hunter.llm_clients.factory.create_llm",
-                       return_value=mock_llm):
-                result = _get_llm()
-                assert result is not None
-
-    def test_import_error_returns_none(self):
-        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}), \
-             patch("bottleneck_hunter.llm_clients.factory.create_llm",
-                   side_effect=ImportError("no module")):
-            assert _get_llm() is None
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +207,7 @@ class TestRunUziAnalysis:
 
 class TestDeepAnalysis:
     async def test_no_llm_returns_mock(self):
-        with patch.object(uzi_runner, "_get_llm", return_value=None):
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(None, "", "")):
             result = await uzi_runner._run_deep_analysis("AAPL", [])
         assert result["overall_score"] == 6.5
         assert len(result["dimensions"]) == 8
@@ -246,7 +221,7 @@ class TestDeepAnalysis:
             call_count += 1
             return f"7|维度{call_count}表现良好"
 
-        with patch.object(uzi_runner, "_get_llm", return_value=mock_llm), \
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(mock_llm, "p", "m")), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.to_thread",
                    side_effect=mock_to_thread), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.sleep",
@@ -264,7 +239,7 @@ class TestDeepAnalysis:
         async def mock_to_thread(fn):
             raise RuntimeError("LLM error")
 
-        with patch.object(uzi_runner, "_get_llm", return_value=mock_llm), \
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(mock_llm, "p", "m")), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.to_thread",
                    side_effect=mock_to_thread), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.sleep",
@@ -281,7 +256,7 @@ class TestDeepAnalysis:
 
 class TestInvestorPanel:
     async def test_no_llm_returns_mock(self):
-        with patch.object(uzi_runner, "_get_llm", return_value=None):
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(None, "", "")):
             result = await uzi_runner._run_investor_panel("AAPL", [])
         assert result["panel_consensus"] == 55.0
         assert result["signal_distribution"]["dominant"] == "bullish"
@@ -295,7 +270,7 @@ class TestInvestorPanel:
             call_count += 1
             return "bullish|75|买入|模拟测试理由"
 
-        with patch.object(uzi_runner, "_get_llm", return_value=mock_llm), \
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(mock_llm, "p", "m")), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.to_thread",
                    side_effect=mock_to_thread), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.sleep",
@@ -313,7 +288,7 @@ class TestInvestorPanel:
         async def mock_to_thread(fn):
             raise RuntimeError("boom")
 
-        with patch.object(uzi_runner, "_get_llm", return_value=mock_llm), \
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(mock_llm, "p", "m")), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.to_thread",
                    side_effect=mock_to_thread), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.sleep",
@@ -377,7 +352,7 @@ class TestLhbAnalyzer:
 
 class TestTrapDetector:
     async def test_no_llm_returns_mock(self):
-        with patch.object(uzi_runner, "_get_llm", return_value=None):
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(None, "", "")):
             result = await uzi_runner._run_trap_detector("AAPL", [])
         assert result["trap_level"] == "🟢 安全"
         assert result["trap_score"] == 9
@@ -389,7 +364,7 @@ class TestTrapDetector:
         async def mock_to_thread(fn):
             return "否|未发现相关问题"
 
-        with patch.object(uzi_runner, "_get_llm", return_value=mock_llm), \
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(mock_llm, "p", "m")), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.to_thread",
                    side_effect=mock_to_thread), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.sleep",
@@ -411,7 +386,7 @@ class TestTrapDetector:
                 return "是|发现异常行为"
             return "否|正常"
 
-        with patch.object(uzi_runner, "_get_llm", return_value=mock_llm), \
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(mock_llm, "p", "m")), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.to_thread",
                    side_effect=mock_to_thread), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.sleep",
@@ -428,7 +403,7 @@ class TestTrapDetector:
         async def mock_to_thread(fn):
             return "是|高风险信号"
 
-        with patch.object(uzi_runner, "_get_llm", return_value=mock_llm), \
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(mock_llm, "p", "m")), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.to_thread",
                    side_effect=mock_to_thread), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.sleep",
@@ -450,7 +425,7 @@ class TestTrapDetector:
                 raise RuntimeError("LLM error")
             return "否|正常"
 
-        with patch.object(uzi_runner, "_get_llm", return_value=mock_llm), \
+        with patch.object(uzi_runner, "get_llm_for_position", return_value=(mock_llm, "p", "m")), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.to_thread",
                    side_effect=mock_to_thread), \
              patch("bottleneck_hunter.watchlist.uzi_runner.asyncio.sleep",

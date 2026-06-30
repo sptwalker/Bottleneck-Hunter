@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import jwt
@@ -26,8 +27,14 @@ def _get_secret() -> str:
         return _JWT_SECRET
     _JWT_SECRET = os.getenv("BH_JWT_SECRET")
     if not _JWT_SECRET:
-        _JWT_SECRET = secrets.token_hex(32)
-        logger.warning("⚠️  BH_JWT_SECRET 未设置，已自动生成临时密钥（重启后 token 失效）")
+        secret_file = Path("data/.jwt_secret")
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        if secret_file.exists():
+            _JWT_SECRET = secret_file.read_text(encoding="utf-8").strip()
+        else:
+            _JWT_SECRET = secrets.token_hex(32)
+            secret_file.write_text(_JWT_SECRET, encoding="utf-8")
+            logger.info("已生成 JWT 密钥并保存到 data/.jwt_secret")
     return _JWT_SECRET
 
 

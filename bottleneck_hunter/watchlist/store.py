@@ -442,6 +442,22 @@ CREATE TABLE IF NOT EXISTS analyst_ratings (
     UNIQUE(ticker, firm, date)
 );
 
+CREATE TABLE IF NOT EXISTS company_profiles (
+    ticker        TEXT NOT NULL,
+    raw_json      TEXT DEFAULT '{}',
+    sector        TEXT DEFAULT '',
+    industry      TEXT DEFAULT '',
+    description   TEXT DEFAULT '',
+    website       TEXT DEFAULT '',
+    employees     INTEGER DEFAULT 0,
+    country       TEXT DEFAULT '',
+    exchange      TEXT DEFAULT '',
+    currency      TEXT DEFAULT '',
+    fetched_at    TEXT,
+    user_id       TEXT DEFAULT '',
+    PRIMARY KEY(ticker, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS macro_snapshots (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,
@@ -467,6 +483,19 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     trade_count     INTEGER DEFAULT 0,
     equity_curve    TEXT DEFAULT '[]',
     created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS layer_performance (
+    id              TEXT PRIMARY KEY,
+    trade_id        TEXT,
+    ticker          TEXT NOT NULL,
+    layer           TEXT NOT NULL,           -- L1/L2/L3/L4
+    score           REAL DEFAULT 0,          -- 该层归因评分(1-10 或偏差%)
+    assessment      TEXT DEFAULT '',
+    return_pct      REAL DEFAULT 0,          -- 本次交易最终收益%
+    created_at      TEXT NOT NULL,
+    user_id         TEXT DEFAULT '',
+    market          TEXT DEFAULT 'us_stock'
 );
 """
 
@@ -597,6 +626,251 @@ _MIGRATIONS: list[str] = [
         created_at  TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_ab_snapshots_user ON ab_snapshots(user_id, created_at DESC)",
+    # Phase 18B: 资金操作记录表
+    """CREATE TABLE IF NOT EXISTS sim_fund_ops (
+        id          TEXT PRIMARY KEY,
+        account_id  TEXT NOT NULL,
+        op_type     TEXT NOT NULL CHECK(op_type IN ('deposit','withdraw')),
+        amount      REAL NOT NULL,
+        note        TEXT DEFAULT '',
+        created_at  TEXT NOT NULL,
+        user_id     TEXT DEFAULT ''
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_fund_ops_user ON sim_fund_ops(user_id, created_at DESC)",
+    # Phase 19A: sim_trades 滑点记录
+    "ALTER TABLE sim_trades ADD COLUMN slippage_bps REAL DEFAULT 0",
+    # Phase 19D: experience_cards 置信度动态更新
+    "ALTER TABLE experience_cards ADD COLUMN win_count INTEGER DEFAULT 0",
+    "ALTER TABLE experience_cards ADD COLUMN loss_count INTEGER DEFAULT 0",
+    "ALTER TABLE experience_cards ADD COLUMN last_applied_at TEXT",
+    # Phase 19F: market_snapshots 数据质量标记
+    "ALTER TABLE market_snapshots ADD COLUMN data_quality TEXT DEFAULT 'normal'",
+    "ALTER TABLE market_snapshots ADD COLUMN quality_notes TEXT DEFAULT ''",
+    # Phase 20A: 投资论点追踪系统
+    """CREATE TABLE IF NOT EXISTS investment_theses (
+        id              TEXT PRIMARY KEY,
+        entry_id        TEXT NOT NULL,
+        ticker          TEXT NOT NULL,
+        thesis_title    TEXT NOT NULL,
+        thesis_summary  TEXT DEFAULT '',
+        conviction      TEXT DEFAULT 'medium',
+        status          TEXT DEFAULT 'active',
+        time_horizon    TEXT DEFAULT 'medium_term',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT,
+        invalidated_at  TEXT,
+        user_id         TEXT DEFAULT '',
+        FOREIGN KEY (entry_id) REFERENCES watchlist(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS thesis_pillars (
+        id              TEXT PRIMARY KEY,
+        thesis_id       TEXT NOT NULL,
+        pillar_text     TEXT NOT NULL,
+        falsification   TEXT NOT NULL DEFAULT '',
+        status          TEXT DEFAULT 'intact',
+        weight          REAL DEFAULT 1.0,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT,
+        FOREIGN KEY (thesis_id) REFERENCES investment_theses(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS thesis_evidence_log (
+        id              TEXT PRIMARY KEY,
+        thesis_id       TEXT NOT NULL,
+        pillar_id       TEXT,
+        date            TEXT NOT NULL,
+        data_point      TEXT NOT NULL,
+        direction       TEXT DEFAULT 'neutral',
+        thesis_impact   TEXT DEFAULT 'no_change',
+        recommended_action TEXT DEFAULT 'hold',
+        conviction_before TEXT DEFAULT 'medium',
+        conviction_after TEXT DEFAULT 'medium',
+        source          TEXT DEFAULT '',
+        created_at      TEXT NOT NULL,
+        user_id         TEXT DEFAULT '',
+        FOREIGN KEY (thesis_id) REFERENCES investment_theses(id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_thesis_entry ON investment_theses(entry_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_thesis_ticker ON investment_theses(ticker, status)",
+    "CREATE INDEX IF NOT EXISTS idx_thesis_user ON investment_theses(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_pillar_thesis ON thesis_pillars(thesis_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_evidence_thesis ON thesis_evidence_log(thesis_id, date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_evidence_user ON thesis_evidence_log(user_id, date DESC)",
+    # Phase 20B: 催化剂四维分类升级
+    "ALTER TABLE catalyst_tracking ADD COLUMN source_category TEXT DEFAULT 'other'",
+    "ALTER TABLE catalyst_tracking ADD COLUMN impact_color TEXT DEFAULT 'yellow'",
+    "ALTER TABLE catalyst_tracking ADD COLUMN direction TEXT DEFAULT 'neutral'",
+    "ALTER TABLE catalyst_tracking ADD COLUMN time_window TEXT DEFAULT ''",
+    "ALTER TABLE catalyst_tracking ADD COLUMN position_implication TEXT DEFAULT ''",
+    # Phase 20D: 三场景估值
+    """CREATE TABLE IF NOT EXISTS scenario_valuations (
+        id              TEXT PRIMARY KEY,
+        entry_id        TEXT NOT NULL,
+        ticker          TEXT NOT NULL,
+        strategic_plan_id TEXT,
+        bear_price      REAL,
+        bear_probability REAL DEFAULT 0.2,
+        bear_rationale  TEXT DEFAULT '',
+        base_price      REAL,
+        base_probability REAL DEFAULT 0.6,
+        base_rationale  TEXT DEFAULT '',
+        bull_price      REAL,
+        bull_probability REAL DEFAULT 0.2,
+        bull_rationale  TEXT DEFAULT '',
+        current_price   REAL,
+        expected_return_pct REAL DEFAULT 0,
+        risk_reward_ratio REAL DEFAULT 0,
+        valuation_method TEXT DEFAULT 'relative',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT,
+        user_id         TEXT DEFAULT '',
+        FOREIGN KEY (entry_id) REFERENCES watchlist(id) ON DELETE CASCADE
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_valuation_entry ON scenario_valuations(entry_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_valuation_ticker ON scenario_valuations(ticker, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_valuation_user ON scenario_valuations(user_id)",
+    # ── Phase 21: 美股/A股市场隔离 ──
+    "ALTER TABLE macro_strategies ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE strategic_plans ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE tactical_plans ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE execution_plans ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE committee_reviews ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE committee_consensus ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE sim_account ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE sim_positions ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE sim_trades ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE trade_feedback ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE auto_reviews ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE investment_theses ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE scenario_valuations ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "ALTER TABLE experience_cards ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "CREATE INDEX IF NOT EXISTS idx_macro_market ON macro_strategies(market, status)",
+    "CREATE INDEX IF NOT EXISTS idx_strategic_market ON strategic_plans(market, status)",
+    "CREATE INDEX IF NOT EXISTS idx_tactical_market ON tactical_plans(market, plan_date)",
+    "CREATE INDEX IF NOT EXISTS idx_execution_market ON execution_plans(market, status)",
+    "CREATE INDEX IF NOT EXISTS idx_sim_account_market ON sim_account(market, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sim_positions_market ON sim_positions(market, account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sim_trades_market ON sim_trades(market, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_feedback_market ON trade_feedback(market)",
+    "CREATE INDEX IF NOT EXISTS idx_auto_reviews_market ON auto_reviews(market)",
+    "CREATE INDEX IF NOT EXISTS idx_theses_market ON investment_theses(market, status)",
+    "CREATE INDEX IF NOT EXISTS idx_valuations_market ON scenario_valuations(market, ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_experience_market ON experience_cards(market)",
+    "ALTER TABLE catalyst_tracking ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "CREATE INDEX IF NOT EXISTS idx_catalyst_market ON catalyst_tracking(market, status)",
+    "ALTER TABLE sim_fund_ops ADD COLUMN market TEXT DEFAULT 'us_stock'",
+    "CREATE INDEX IF NOT EXISTS idx_fund_ops_market ON sim_fund_ops(market)",
+    # ── Phase 22A: AI 模型评分校准 + 会议历史记录 ──
+    """CREATE TABLE IF NOT EXISTS model_accuracy (
+        id              TEXT PRIMARY KEY,
+        model_provider  TEXT NOT NULL,
+        model_name      TEXT NOT NULL,
+        role_context     TEXT DEFAULT '',
+        ticker          TEXT NOT NULL,
+        prediction_type TEXT NOT NULL,
+        prediction_value TEXT NOT NULL,
+        prediction_date TEXT NOT NULL,
+        outcome_value   TEXT DEFAULT '',
+        outcome_date    TEXT DEFAULT '',
+        is_correct      INTEGER DEFAULT -1,
+        score_delta     REAL DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT DEFAULT '',
+        user_id         TEXT DEFAULT '',
+        market          TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_model_acc_model ON model_accuracy(model_provider, model_name)",
+    "CREATE INDEX IF NOT EXISTS idx_model_acc_ticker ON model_accuracy(ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_model_acc_role ON model_accuracy(role_context)",
+    "CREATE INDEX IF NOT EXISTS idx_model_acc_date ON model_accuracy(prediction_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_model_acc_user ON model_accuracy(user_id)",
+    """CREATE TABLE IF NOT EXISTS model_ratings (
+        id              TEXT PRIMARY KEY,
+        model_provider  TEXT NOT NULL,
+        model_name      TEXT NOT NULL,
+        role_context     TEXT DEFAULT '',
+        total_predictions INTEGER DEFAULT 0,
+        correct_predictions INTEGER DEFAULT 0,
+        accuracy_rate   REAL DEFAULT 0.5,
+        avg_score_delta REAL DEFAULT 0,
+        calibration_weight REAL DEFAULT 1.0,
+        last_calibrated TEXT DEFAULT '',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT DEFAULT '',
+        user_id         TEXT DEFAULT '',
+        market          TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_model_ratings_unique ON model_ratings(model_provider, model_name, role_context, user_id, market)",
+    """CREATE TABLE IF NOT EXISTS meeting_records (
+        id              TEXT PRIMARY KEY,
+        meeting_type    TEXT NOT NULL,
+        analysis_id     TEXT DEFAULT '',
+        execution_plan_id TEXT DEFAULT '',
+        market          TEXT DEFAULT 'us_stock',
+        title           TEXT NOT NULL,
+        participants    TEXT DEFAULT '[]',
+        tickers_discussed TEXT DEFAULT '[]',
+        final_verdict   TEXT DEFAULT '',
+        final_ranking   TEXT DEFAULT '[]',
+        key_agreements  TEXT DEFAULT '[]',
+        key_disagreements TEXT DEFAULT '[]',
+        risk_warnings   TEXT DEFAULT '[]',
+        investment_thesis TEXT DEFAULT '',
+        transcript_json TEXT DEFAULT '[]',
+        result_json     TEXT DEFAULT '{}',
+        model_predictions TEXT DEFAULT '[]',
+        duration_seconds INTEGER DEFAULT 0,
+        total_tokens     INTEGER DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        user_id         TEXT DEFAULT '',
+        outcome_recorded INTEGER DEFAULT 0,
+        outcome_summary TEXT DEFAULT ''
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_meeting_type ON meeting_records(meeting_type, market)",
+    "CREATE INDEX IF NOT EXISTS idx_meeting_date ON meeting_records(created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_meeting_user ON meeting_records(user_id)",
+    # ── Phase 23: 统一 AI 配置系统 ──
+    """CREATE TABLE IF NOT EXISTS ai_role_config (
+        id              TEXT PRIMARY KEY,
+        role_key        TEXT NOT NULL,
+        role_label      TEXT NOT NULL,
+        role_group      TEXT NOT NULL,
+        slot_index      INTEGER DEFAULT 0,
+        provider        TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        is_active       INTEGER DEFAULT 1,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT DEFAULT '',
+        user_id         TEXT DEFAULT '',
+        UNIQUE(role_key, slot_index, user_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_ai_role_config_role ON ai_role_config(role_key, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_role_config_group ON ai_role_config(role_group)",
+    """CREATE TABLE IF NOT EXISTS model_capability_test (
+        id              TEXT PRIMARY KEY,
+        provider        TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        test_type       TEXT NOT NULL,
+        score           REAL DEFAULT 0,
+        raw_result      TEXT DEFAULT '{}',
+        tested_at       TEXT NOT NULL,
+        user_id         TEXT DEFAULT '',
+        UNIQUE(provider, model, test_type, user_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_model_cap_test ON model_capability_test(provider, model, user_id)",
+    """CREATE TABLE IF NOT EXISTS model_recommendation (
+        id              TEXT PRIMARY KEY,
+        role_key        TEXT NOT NULL,
+        slot_index      INTEGER DEFAULT 0,
+        recommended_provider TEXT NOT NULL,
+        recommended_model TEXT NOT NULL,
+        composite_score  REAL DEFAULT 0,
+        score_breakdown  TEXT DEFAULT '{}',
+        reason          TEXT DEFAULT '',
+        generated_at    TEXT NOT NULL,
+        user_id         TEXT DEFAULT '',
+        UNIQUE(role_key, slot_index, user_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_model_rec_role ON model_recommendation(role_key, user_id)",
 ]
 
 
@@ -627,6 +901,7 @@ class WatchlistStore:
     def __init__(self, db_path: str | Path | None = None, user_id: str = ""):
         self._db_path = str(db_path or _DEFAULT_DB)
         self._user_id = user_id
+        self._market = ""
         self._write_lock = _get_db_lock(self._db_path)
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
@@ -636,6 +911,16 @@ class WatchlistStore:
         clone = object.__new__(WatchlistStore)
         clone._db_path = self._db_path
         clone._user_id = user_id
+        clone._market = self._market
+        clone._write_lock = self._write_lock
+        return clone
+
+    def for_market(self, market: str) -> "WatchlistStore":
+        """返回绑定指定市场的 store 克隆（共享同一 DB 和写锁）。"""
+        clone = object.__new__(WatchlistStore)
+        clone._db_path = self._db_path
+        clone._user_id = self._user_id
+        clone._market = market
         clone._write_lock = self._write_lock
         return clone
 
@@ -662,8 +947,10 @@ class WatchlistStore:
             idx = upper.find(kw, search_start)
             if idx != -1 and idx < insert_pos:
                 insert_pos = idx
+        count_before = query[:insert_pos].count('?')
         query = query[:insert_pos] + clause + query[insert_pos:]
-        return query, params + (self._user_id,)
+        new_params = params[:count_before] + (self._user_id,) + params[count_before:]
+        return query, new_params
 
     def _user_insert_cols(self) -> str:
         """返回 INSERT 语句中的 user_id 列名。"""
@@ -676,6 +963,45 @@ class WatchlistStore:
     def _user_insert_params(self) -> tuple:
         """返回 INSERT 语句中的 user_id 参数。"""
         return (self._user_id,) if self._user_id else ()
+
+    # ── 市场隔离过滤 ──
+
+    def _market_filter(self, query: str, params: tuple = (), *, table: str = "") -> tuple[str, tuple]:
+        """为 SQL 查询自动追加 market 过滤条件（与 _user_filter 平行）。
+
+        对于 JOIN 查询，传入 table="ct" 等主表别名，生成 ct.market = ? 避免歧义。
+        """
+        if not self._market:
+            return query, params
+        col = f"{table}.market" if table else "market"
+        upper = query.upper()
+        has_where = " WHERE " in upper
+        clause = f" AND {col} = ?" if has_where else f" WHERE {col} = ?"
+        search_start = upper.find(" WHERE ") + 7 if has_where else 0
+        insert_pos = len(query)
+        for kw in (" ORDER BY ", " GROUP BY ", " LIMIT "):
+            idx = upper.find(kw, search_start)
+            if idx != -1 and idx < insert_pos:
+                insert_pos = idx
+        count_before = query[:insert_pos].count('?')
+        query = query[:insert_pos] + clause + query[insert_pos:]
+        new_params = params[:count_before] + (self._market,) + params[count_before:]
+        return query, new_params
+
+    def _market_insert_cols(self) -> str:
+        return ", market" if self._market else ""
+
+    def _market_insert_vals(self) -> str:
+        return ", ?" if self._market else ""
+
+    def _market_insert_params(self) -> tuple:
+        return (self._market,) if self._market else ()
+
+    def _filtered(self, query: str, params: tuple = (), *, table: str = "") -> tuple[str, tuple]:
+        """链式 user + market 过滤。"""
+        q, p = self._user_filter(query, params, table=table)
+        q, p = self._market_filter(q, p, table=table)
+        return q, p
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -710,8 +1036,9 @@ class WatchlistStore:
             for sql in _MIGRATIONS:
                 try:
                     conn.execute(sql)
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
+                        logger.warning("迁移语句执行异常: %s — %s", sql[:80], e)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -905,8 +1232,9 @@ class WatchlistStore:
                     f"""INSERT OR REPLACE INTO market_snapshots
                        (ticker, date, open, high, low, close, volume, market_cap,
                         pe_ratio, change_pct, rsi_14, macd, macd_signal, macd_hist,
-                        sma_20, sma_50, fetched_at, market{self._user_insert_cols()})
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                        sma_20, sma_50, fetched_at, market,
+                        data_quality, quality_notes{self._user_insert_cols()})
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
                     (
                         s["ticker"], s["date"], s.get("open"), s.get("high"),
                         s.get("low"), s.get("close"), s.get("volume"),
@@ -915,6 +1243,8 @@ class WatchlistStore:
                         s.get("macd_hist"), s.get("sma_20"), s.get("sma_50"),
                         s.get("fetched_at", _now_iso()),
                         s.get("market", "us_stock"),
+                        s.get("data_quality", "normal"),
+                        s.get("quality_notes", ""),
                     ) + self._user_insert_params(),
                 )
                 count += 1
@@ -941,6 +1271,28 @@ class WatchlistStore:
             )
             row = conn.execute(q, p).fetchone()
             return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_benchmark_return(self, start_date: str, end_date: str,
+                             benchmark: str = "SPY") -> float:
+        """获取基准指数在指定时段的收益率百分比"""
+        conn = self._connect()
+        try:
+            q, p = self._user_filter(
+                """SELECT date, close FROM market_snapshots
+                   WHERE ticker = ? AND date >= ? AND date <= ?
+                   ORDER BY date ASC""",
+                (benchmark, start_date, end_date),
+            )
+            rows = conn.execute(q, p).fetchall()
+            if len(rows) < 2:
+                return 0.0
+            first_close = rows[0]["close"]
+            last_close = rows[-1]["close"]
+            if not first_close:
+                return 0.0
+            return round((last_close / first_close - 1) * 100, 2)
         finally:
             conn.close()
 
@@ -1350,7 +1702,7 @@ class WatchlistStore:
         finally:
             conn.close()
 
-    def get_macro_history(self, indicator: str, days: int = 30) -> list[dict]:
+    def get_macro_snapshot_history(self, indicator: str, days: int = 30) -> list[dict]:
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -1728,11 +2080,11 @@ class WatchlistStore:
         sid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT COALESCE(MAX(version), 0) + 1 FROM macro_strategies"
             )
             version = conn.execute(q, p).fetchone()[0]
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "UPDATE macro_strategies SET status = 'superseded' WHERE status = 'valid'"
             )
             conn.execute(q, p)
@@ -1742,8 +2094,8 @@ class WatchlistStore:
                 f"""INSERT INTO macro_strategies
                    (id, version, regime, risk_appetite, recommended_cash_pct,
                     market_summary, key_signals, sector_rotation, risk_factors,
-                    strategy_text, valid_until_trigger, result_json, status, created_at, updated_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    strategy_text, valid_until_trigger, result_json, status, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     sid, version,
                     rj.get("regime", "sideways"),
@@ -1757,7 +2109,7 @@ class WatchlistStore:
                     rj.get("valid_until_trigger", ""),
                     json.dumps(rj, ensure_ascii=False),
                     "valid", now, now,
-                ) + self._user_insert_params(),
+                ) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return sid
@@ -1767,12 +2119,12 @@ class WatchlistStore:
     def get_latest_macro_strategy(self) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM macro_strategies WHERE status = 'valid' ORDER BY version DESC LIMIT 1"
             )
             row = conn.execute(q, p).fetchone()
             if not row:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM macro_strategies ORDER BY version DESC LIMIT 1"
                 )
                 row = conn.execute(q, p).fetchone()
@@ -1783,7 +2135,7 @@ class WatchlistStore:
     def get_macro_history(self, limit: int = 10) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 """SELECT id, version, regime, risk_appetite, market_summary,
                    status, created_at, updated_at
                    FROM macro_strategies ORDER BY version DESC LIMIT ?""",
@@ -1801,7 +2153,7 @@ class WatchlistStore:
             parts = ["status = ?", "updated_at = ?"]
             vals = [status, _now_iso()]
             if minor_tweaks is not None:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT result_json FROM macro_strategies WHERE id = ?", (strategy_id,)
                 )
                 row = conn.execute(q, p).fetchone()
@@ -1811,7 +2163,7 @@ class WatchlistStore:
                     parts.append("result_json = ?")
                     vals.append(json.dumps(rj, ensure_ascii=False))
             vals.append(strategy_id)
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 f"UPDATE macro_strategies SET {', '.join(parts)} WHERE id = ?", tuple(vals)
             )
             cur = conn.execute(q, p)
@@ -1844,11 +2196,11 @@ class WatchlistStore:
         sid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT COALESCE(MAX(version), 0) + 1 FROM strategic_plans"
             )
             version = conn.execute(q, p).fetchone()[0]
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "UPDATE strategic_plans SET status = 'superseded' WHERE status = 'valid'"
             )
             conn.execute(q, p)
@@ -1858,8 +2210,8 @@ class WatchlistStore:
                 f"""INSERT INTO strategic_plans
                    (id, macro_strategy_id, version, overall_stance, target_allocation,
                     sector_targets, stock_selection, risk_limits, rebalancing_triggers,
-                    strategy_text, result_json, status, created_at, updated_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    strategy_text, result_json, status, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     sid, macro_strategy_id, version,
                     rj.get("overall_stance", "balanced"),
@@ -1871,7 +2223,7 @@ class WatchlistStore:
                     rj.get("strategy_text", ""),
                     json.dumps(rj, ensure_ascii=False),
                     "valid", now, now,
-                ) + self._user_insert_params(),
+                ) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return sid
@@ -1881,12 +2233,12 @@ class WatchlistStore:
     def get_latest_strategic_plan(self) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM strategic_plans WHERE status = 'valid' ORDER BY version DESC LIMIT 1"
             )
             row = conn.execute(q, p).fetchone()
             if not row:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM strategic_plans ORDER BY version DESC LIMIT 1"
                 )
                 row = conn.execute(q, p).fetchone()
@@ -1897,7 +2249,7 @@ class WatchlistStore:
     def get_strategic_history(self, limit: int = 10) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 """SELECT id, macro_strategy_id, version, overall_stance,
                    status, created_at, updated_at
                    FROM strategic_plans ORDER BY version DESC LIMIT ?""",
@@ -1938,8 +2290,8 @@ class WatchlistStore:
                 f"""INSERT INTO tactical_plans
                    (id, strategic_plan_id, entry_id, ticker, plan_date, action,
                     entry_plan, exit_plan, catalyst_watch, confidence,
-                    result_json, status, created_at, updated_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    result_json, status, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     sid, strategic_plan_id, entry_id, ticker, plan_date,
                     rj.get("action", "hold"),
@@ -1949,7 +2301,7 @@ class WatchlistStore:
                     rj.get("confidence", 5),
                     json.dumps(rj, ensure_ascii=False),
                     "active", _now_iso(), _now_iso(),
-                ) + self._user_insert_params(),
+                ) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return sid
@@ -1960,7 +2312,7 @@ class WatchlistStore:
         plan_date = plan_date or _today()
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM tactical_plans WHERE plan_date = ? ORDER BY confidence DESC",
                 (plan_date,),
             )
@@ -1974,7 +2326,7 @@ class WatchlistStore:
         plan_date = plan_date or _today()
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM tactical_plans WHERE ticker = ? AND plan_date = ? AND status = 'active' LIMIT 1",
                 (ticker, plan_date),
             )
@@ -1991,7 +2343,9 @@ class WatchlistStore:
     # ------------------------------------------------------------------
 
     def create_execution_plan(self, tactical_plan_id: str, entry_id: str,
-                              ticker: str, result_json: dict) -> str:
+                              ticker: str, result_json: dict,
+                              status: str = "pending",
+                              rejection_reason: str = "") -> str:
         sid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
@@ -2000,8 +2354,8 @@ class WatchlistStore:
                 f"""INSERT INTO execution_plans
                    (id, tactical_plan_id, entry_id, ticker, action, shares,
                     target_price, amount, method, priority, confidence,
-                    reasoning, result_json, status, created_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    reasoning, result_json, status, rejection_reason, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     sid, tactical_plan_id, entry_id, ticker,
                     rj.get("action", "hold"),
@@ -2013,18 +2367,106 @@ class WatchlistStore:
                     rj.get("confidence", 5),
                     rj.get("reasoning") or rj.get("rationale", ""),
                     json.dumps(rj, ensure_ascii=False),
-                    "pending", _now_iso(),
-                ) + self._user_insert_params(),
+                    status, rejection_reason, _now_iso(),
+                ) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return sid
         finally:
             conn.close()
 
+    # P0.3/P0.5 被拦截计划标记前缀
+    BLOCK_MARKER_SYSTEM = "[系统拦截]"
+    BLOCK_MARKER_COMMITTEE = "[投委会否决]"
+
+    def create_blocked_execution(self, tactical_plan_id: str, entry_id: str,
+                                 ticker: str, result_json: dict,
+                                 reason: str, marker: str = "[系统拦截]") -> str:
+        """创建被拦截的执行计划(status=rejected + 标记)，并写入 trade_feedback 回灌决策。"""
+        full_reason = f"{marker} {reason}"
+        sid = self.create_execution_plan(
+            tactical_plan_id=tactical_plan_id, entry_id=entry_id,
+            ticker=ticker, result_json=result_json,
+            status="rejected", rejection_reason=full_reason,
+        )
+        try:
+            self.create_trade_feedback(
+                execution_plan_id=sid, ticker=ticker,
+                feedback_type="auto_block", reason=full_reason,
+            )
+        except Exception:
+            logger.debug("create_trade_feedback failed for blocked %s", ticker)
+        return sid
+
+    def get_blocked_executions(self, limit: int = 50) -> list[dict]:
+        """获取被系统/投委会拦截的执行计划(供前端'已拦截'区展示)。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM execution_plans WHERE status = 'rejected' "
+                "AND (rejection_reason LIKE ? OR rejection_reason LIKE ?) "
+                "ORDER BY created_at DESC LIMIT ?",
+                (f"{self.BLOCK_MARKER_SYSTEM}%", f"{self.BLOCK_MARKER_COMMITTEE}%", limit),
+            )
+            rows = conn.execute(q, p).fetchall()
+            return [self._parse_json_fields(dict(r), ("result_json",)) for r in rows]
+        finally:
+            conn.close()
+
+    def restore_execution(self, plan_id: str) -> bool:
+        """将被拦截的计划恢复为 pending(用户手动 override)。"""
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET status = 'pending', rejection_reason = '' "
+                "WHERE id = ? AND status = 'rejected'",
+                (plan_id,),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
+
+    def apply_committee_modifications(self, plan_id: str, modifications: dict) -> bool:
+        """P0.5 应用投委会共识修改到执行计划(缩量/调价/改方式)。
+
+        modifications 支持键: shares, target_price, method/execution_method。
+        """
+        plan = self.get_execution_plan(plan_id)
+        if not plan:
+            return False
+        rj = plan.get("result_json", {})
+        if not isinstance(rj, dict):
+            rj = {}
+        new_shares = modifications.get("shares")
+        new_price = modifications.get("target_price") or modifications.get("limit_price")
+        new_method = modifications.get("method") or modifications.get("execution_method")
+
+        if new_shares is not None:
+            rj["shares"] = new_shares
+        if new_price is not None:
+            rj["target_price"] = new_price
+        if new_method is not None:
+            rj["execution_method"] = new_method
+        rj["committee_modified"] = True
+
+        with self._write_conn() as conn:
+            sets = ["result_json = ?"]
+            vals: list = [json.dumps(rj, ensure_ascii=False)]
+            if new_shares is not None:
+                sets.append("shares = ?"); vals.append(new_shares)
+            if new_price is not None:
+                sets.append("target_price = ?"); vals.append(new_price)
+            if new_method is not None:
+                sets.append("method = ?"); vals.append(new_method)
+            q, p = self._filtered(
+                f"UPDATE execution_plans SET {', '.join(sets)} WHERE id = ? AND status = 'pending'",
+                tuple(vals) + (plan_id,),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
+
     def get_pending_executions(self) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM execution_plans WHERE status = 'pending' ORDER BY priority ASC, created_at ASC"
             )
             rows = conn.execute(q, p).fetchall()
@@ -2034,37 +2476,57 @@ class WatchlistStore:
 
     def confirm_execution(self, plan_id: str) -> bool:
         with self._write_conn() as conn:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "UPDATE execution_plans SET status = 'confirmed', confirmed_at = ? WHERE id = ? AND status = 'pending'",
                 (_now_iso(), plan_id),
             )
             cur = conn.execute(q, p)
             return cur.rowcount > 0
 
+    def revert_to_pending(self, plan_id: str) -> bool:
+        """P2.2 执行失败回滚：把 confirmed 退回 pending(状态机加固，避免卡死)。"""
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET status = 'pending', confirmed_at = NULL WHERE id = ? AND status = 'confirmed'",
+                (plan_id,),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
+
     def reject_execution(self, plan_id: str, reason: str = "") -> bool:
         with self._write_conn() as conn:
-            q, p = self._user_filter(
-                "UPDATE execution_plans SET status = 'rejected', rejection_reason = ? WHERE id = ? AND status = 'pending'",
+            q, p = self._filtered(
+                "UPDATE execution_plans SET status = 'rejected', rejection_reason = ? WHERE id = ? AND status IN ('pending', 'confirmed')",
                 (reason, plan_id),
             )
             cur = conn.execute(q, p)
             if cur.rowcount > 0:
-                q2, p2 = self._user_filter("SELECT ticker FROM execution_plans WHERE id = ?", (plan_id,))
+                q2, p2 = self._filtered("SELECT ticker FROM execution_plans WHERE id = ?", (plan_id,))
                 row = conn.execute(q2, p2).fetchone()
                 if row:
                     conn.execute(
                         f"""INSERT INTO trade_feedback
-                           (id, execution_plan_id, ticker, feedback_type, reason, created_at{self._user_insert_cols()})
-                           VALUES (?,?,?,?,?,?{self._user_insert_vals()})""",
+                           (id, execution_plan_id, ticker, feedback_type, reason, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                           VALUES (?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                         (uuid.uuid4().hex[:12], plan_id, row["ticker"], "rejection",
-                         reason, _now_iso()) + self._user_insert_params(),
+                         reason, _now_iso()) + self._user_insert_params() + self._market_insert_params(),
                     )
             return cur.rowcount > 0
+
+    def clear_pending_executions(self) -> int:
+        """清空所有 pending/confirmed(未执行) 的执行计划，标记为 rejected。"""
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET status = 'rejected', rejection_reason = '用户手动清空' "
+                "WHERE status IN ('pending', 'confirmed') AND executed_at IS NULL"
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount
 
     def get_execution_plan(self, plan_id: str) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._user_filter("SELECT * FROM execution_plans WHERE id = ?", (plan_id,))
+            q, p = self._filtered("SELECT * FROM execution_plans WHERE id = ?", (plan_id,))
             row = conn.execute(q, p).fetchone()
             return self._parse_json_fields(dict(row), ("result_json",)) if row else None
         finally:
@@ -2085,8 +2547,8 @@ class WatchlistStore:
                 f"""INSERT INTO committee_reviews
                    (id, execution_plan_id, member_role, model_provider, model_name,
                     vote, confidence, score, key_concerns, suggestions,
-                    result_json, created_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    result_json, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     rid, execution_plan_id, member_role, model_provider, model_name,
                     rj.get("vote", "approve"),
@@ -2097,7 +2559,7 @@ class WatchlistStore:
                     json.dumps(rj.get("suggestions", []), ensure_ascii=False),
                     json.dumps(rj, ensure_ascii=False),
                     _now_iso(),
-                ) + self._user_insert_params(),
+                ) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return rid
@@ -2107,7 +2569,7 @@ class WatchlistStore:
     def get_reviews_for_execution(self, execution_plan_id: str) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM committee_reviews WHERE execution_plan_id = ? ORDER BY created_at",
                 (execution_plan_id,),
             )
@@ -2126,8 +2588,8 @@ class WatchlistStore:
                 f"""INSERT INTO committee_consensus
                    (id, execution_plan_id, final_verdict, approval_rate,
                     vote_detail, consensus_modifications, final_execution_plan,
-                    key_risks_flagged, minority_opinions, summary, result_json, created_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    key_risks_flagged, minority_opinions, summary, result_json, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     cid, execution_plan_id,
                     rj.get("final_verdict", "approved"),
@@ -2140,7 +2602,7 @@ class WatchlistStore:
                     rj.get("summary", ""),
                     json.dumps(rj, ensure_ascii=False),
                     _now_iso(),
-                ) + self._user_insert_params(),
+                ) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return cid
@@ -2154,17 +2616,26 @@ class WatchlistStore:
     def create_catalyst(self, entry_id: str, ticker: str, title: str,
                         catalyst_type: str = "event", description: str = "",
                         expected_date: str | None = None,
-                        impact_level: str = "medium", confidence: int = 5) -> str:
+                        impact_level: str = "medium", confidence: int = 5,
+                        source_category: str = "other",
+                        impact_color: str = "yellow",
+                        direction: str = "neutral",
+                        time_window: str = "",
+                        position_implication: str = "") -> str:
         cid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
             conn.execute(
                 f"""INSERT INTO catalyst_tracking
                    (id, entry_id, ticker, catalyst_type, title, description,
-                    expected_date, impact_level, confidence, status, created_at, updated_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    expected_date, impact_level, confidence, status,
+                    source_category, impact_color, direction, time_window, position_implication,
+                    created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (cid, entry_id, ticker, catalyst_type, title, description,
-                 expected_date, impact_level, confidence, "pending", _now_iso(), _now_iso()) + self._user_insert_params(),
+                 expected_date, impact_level, confidence, "pending",
+                 source_category, impact_color, direction, time_window, position_implication,
+                 _now_iso(), _now_iso()) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return cid
@@ -2175,13 +2646,13 @@ class WatchlistStore:
         conn = self._connect()
         try:
             if active_only:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM catalyst_tracking WHERE entry_id = ? AND status IN ('pending','monitoring') ORDER BY expected_date",
                     (entry_id,),
                 )
                 rows = conn.execute(q, p).fetchall()
             else:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM catalyst_tracking WHERE entry_id = ? ORDER BY created_at DESC",
                     (entry_id,),
                 )
@@ -2203,7 +2674,7 @@ class WatchlistStore:
                 parts.append("actual_date = ?")
                 vals.append(actual_date)
             vals.append(catalyst_id)
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 f"UPDATE catalyst_tracking SET {', '.join(parts)} WHERE id = ?", tuple(vals)
             )
             cur = conn.execute(q, p)
@@ -2215,7 +2686,7 @@ class WatchlistStore:
     def get_catalysts_for_ticker(self, ticker: str) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM catalyst_tracking WHERE ticker = ? ORDER BY created_at DESC",
                 (ticker,),
             )
@@ -2227,7 +2698,7 @@ class WatchlistStore:
     def get_upcoming_catalysts(self, days: int = 14) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 """SELECT ct.*, w.company_name FROM catalyst_tracking ct
                    LEFT JOIN watchlist w ON ct.entry_id = w.id
                    WHERE ct.status IN ('pending','monitoring')
@@ -2244,7 +2715,7 @@ class WatchlistStore:
         conn = self._connect()
         try:
             today = _today()
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 """UPDATE catalyst_tracking SET status = 'expired', updated_at = ?
                    WHERE expected_date < ? AND status IN ('pending', 'monitoring')""",
                 (_now_iso(), today),
@@ -2260,7 +2731,7 @@ class WatchlistStore:
         try:
             today = _today()
             future = (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%d")
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 """SELECT ct.*, w.company_name FROM catalyst_tracking ct
                    LEFT JOIN watchlist w ON ct.entry_id = w.id
                    WHERE ct.status IN ('pending', 'monitoring')
@@ -2279,7 +2750,7 @@ class WatchlistStore:
         """获取已过期但未判定结果的催化剂"""
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 """SELECT ct.*, w.company_name FROM catalyst_tracking ct
                    LEFT JOIN watchlist w ON ct.entry_id = w.id
                    WHERE ct.status = 'expired'
@@ -2294,7 +2765,6 @@ class WatchlistStore:
 
     def judge_catalyst(self, catalyst_id: str, outcome: str, impact: float,
                        actual_date: str | None = None) -> bool:
-        """判定催化剂结果：realized / failed / partial"""
         conn = self._connect()
         try:
             parts = ["outcome = ?", "outcome_impact = ?", "judged_at = ?", "updated_at = ?"]
@@ -2308,12 +2778,31 @@ class WatchlistStore:
                 parts.append("status = ?")
                 vals.append("triggered")
             vals.append(catalyst_id)
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 f"UPDATE catalyst_tracking SET {', '.join(parts)} WHERE id = ?", tuple(vals)
             )
             cur = conn.execute(q, p)
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_recently_judged_catalysts(self, days: int = 7) -> list[dict]:
+        """P1.1 获取最近判定结果的催化剂(realized/failed/partial)，供 L3 生成买卖信号。"""
+        conn = self._connect()
+        try:
+            since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            q, p = self._filtered(
+                """SELECT ct.*, w.company_name FROM catalyst_tracking ct
+                   LEFT JOIN watchlist w ON ct.entry_id = w.id
+                   WHERE ct.outcome IN ('realized','failed','partial')
+                   AND ct.judged_at IS NOT NULL AND ct.judged_at >= ?
+                   ORDER BY ct.judged_at DESC""",
+                (since,),
+                table="ct",
+            )
+            rows = conn.execute(q, p).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()
 
@@ -2329,9 +2818,9 @@ class WatchlistStore:
         try:
             conn.execute(
                 f"""INSERT INTO trade_feedback
-                   (id, execution_plan_id, ticker, feedback_type, reason, user_note, created_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?{self._user_insert_vals()})""",
-                (fid, execution_plan_id, ticker, feedback_type, reason, user_note, _now_iso()) + self._user_insert_params(),
+                   (id, execution_plan_id, ticker, feedback_type, reason, user_note, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (fid, execution_plan_id, ticker, feedback_type, reason, user_note, _now_iso()) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return fid
@@ -2342,13 +2831,13 @@ class WatchlistStore:
         conn = self._connect()
         try:
             if ticker:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM trade_feedback WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
                     (ticker, limit),
                 )
                 rows = conn.execute(q, p).fetchall()
             else:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM trade_feedback ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 )
@@ -2364,24 +2853,29 @@ class WatchlistStore:
     def get_sim_account(self) -> dict:
         conn = self._connect()
         try:
-            q, p = self._user_filter("SELECT * FROM sim_account LIMIT 1")
+            q, p = self._filtered("SELECT * FROM sim_account LIMIT 1")
             row = conn.execute(q, p).fetchone()
             if row:
                 return dict(row)
+            market = self._market or "us_stock"
+            if market == "a_stock":
+                name, capital = "A股模拟账户", 1000000.0
+            else:
+                name, capital = "美股模拟账户", 100000.0
             aid = uuid.uuid4().hex[:12]
             now = _now_iso()
             conn.execute(
                 f"""INSERT INTO sim_account
                    (id, name, initial_capital, current_capital, cash_balance,
-                    total_equity, total_return_pct, total_trades, win_rate, created_at, updated_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
-                (aid, "默认模拟账户", 100000.0, 100000.0, 100000.0,
-                 100000.0, 0.0, 0, 0.0, now, now) + self._user_insert_params(),
+                    total_equity, total_return_pct, total_trades, win_rate, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (aid, name, capital, capital, capital,
+                 capital, 0.0, 0, 0.0, now, now) + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
-            return {"id": aid, "name": "默认模拟账户", "initial_capital": 100000.0,
-                    "current_capital": 100000.0, "cash_balance": 100000.0,
-                    "total_equity": 100000.0, "total_return_pct": 0.0,
+            return {"id": aid, "name": name, "initial_capital": capital,
+                    "current_capital": capital, "cash_balance": capital,
+                    "total_equity": capital, "total_return_pct": 0.0,
                     "total_trades": 0, "win_rate": 0.0, "created_at": now, "updated_at": now}
         finally:
             conn.close()
@@ -2401,7 +2895,7 @@ class WatchlistStore:
         account = self.get_sim_account()
         vals.append(account["id"])
         with self._write_conn() as conn:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 f"UPDATE sim_account SET {', '.join(parts)} WHERE id = ?", tuple(vals)
             )
             cur = conn.execute(q, p)
@@ -2411,16 +2905,17 @@ class WatchlistStore:
     # Sim Positions & Trades
     # ------------------------------------------------------------------
 
-    def get_sim_positions(self, account_id: str | None = None) -> list[dict]:
+    def get_sim_positions(self, account_id: str | None = None, include_zero: bool = False) -> list[dict]:
         conn = self._connect()
         try:
+            share_filter = "" if include_zero else " AND shares > 0"
             if account_id:
-                q, p = self._user_filter(
-                    "SELECT * FROM sim_positions WHERE account_id = ? AND shares > 0", (account_id,)
+                q, p = self._filtered(
+                    f"SELECT * FROM sim_positions WHERE account_id = ?{share_filter}", (account_id,)
                 )
                 rows = conn.execute(q, p).fetchall()
             else:
-                q, p = self._user_filter("SELECT * FROM sim_positions WHERE shares > 0")
+                q, p = self._filtered(f"SELECT * FROM sim_positions WHERE 1=1{share_filter}")
                 rows = conn.execute(q, p).fetchall()
             return [dict(r) for r in rows]
         finally:
@@ -2430,23 +2925,24 @@ class WatchlistStore:
                          shares: int, price: float, amount: float,
                          execution_plan_id: str | None = None,
                          entry_id: str | None = None,
-                         trade_type: str = "entry", reasoning: str = "") -> str:
+                         trade_type: str = "entry", reasoning: str = "",
+                         slippage_bps: float = 0.0) -> str:
         tid = uuid.uuid4().hex[:12]
         with self._write_conn() as conn:
             conn.execute(
                 f"""INSERT INTO sim_trades
                    (id, account_id, execution_plan_id, entry_id, ticker, side,
-                    shares, price, amount, trade_type, reasoning, created_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    shares, price, amount, trade_type, reasoning, slippage_bps, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (tid, account_id, execution_plan_id, entry_id, ticker, side,
-                 shares, price, amount, trade_type, reasoning, _now_iso()) + self._user_insert_params(),
+                 shares, price, amount, trade_type, reasoning, slippage_bps, _now_iso()) + self._user_insert_params() + self._market_insert_params(),
             )
             return tid
 
     def get_sim_position(self, account_id: str, ticker: str) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM sim_positions WHERE account_id = ? AND ticker = ? AND shares > 0",
                 (account_id, ticker),
             )
@@ -2454,6 +2950,28 @@ class WatchlistStore:
             return dict(row) if row else None
         finally:
             conn.close()
+
+    def get_sim_position_any(self, account_id: str, ticker: str) -> dict | None:
+        """查找持仓记录（含 shares=0），用于买回复用已有记录。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM sim_positions WHERE account_id = ? AND ticker = ?",
+                (account_id, ticker),
+            )
+            row = conn.execute(q, p).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def delete_sim_position_if_zero(self, position_id: str) -> bool:
+        """仅允许删除 shares=0 的持仓记录。"""
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "DELETE FROM sim_positions WHERE id = ? AND shares = 0", (position_id,)
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
 
     def create_sim_position(self, account_id: str, ticker: str,
                             shares: int, avg_cost: float,
@@ -2465,10 +2983,10 @@ class WatchlistStore:
                 f"""INSERT INTO sim_positions
                    (id, account_id, entry_id, ticker, shares, avg_cost,
                     current_price, market_value, unrealized_pnl, weight_pct,
-                    opened_at, updated_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    opened_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (pid, account_id, entry_id, ticker, shares, avg_cost,
-                 avg_cost, shares * avg_cost, 0.0, 0.0, now, now) + self._user_insert_params(),
+                 avg_cost, shares * avg_cost, 0.0, 0.0, now, now) + self._user_insert_params() + self._market_insert_params(),
             )
             return pid
 
@@ -2486,7 +3004,7 @@ class WatchlistStore:
         vals.append(_now_iso())
         vals.append(position_id)
         with self._write_conn() as conn:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 f"UPDATE sim_positions SET {', '.join(parts)} WHERE id = ?", tuple(vals)
             )
             cur = conn.execute(q, p)
@@ -2494,7 +3012,7 @@ class WatchlistStore:
 
     def delete_sim_position(self, position_id: str) -> bool:
         with self._write_conn() as conn:
-            q, p = self._user_filter("DELETE FROM sim_positions WHERE id = ?", (position_id,))
+            q, p = self._filtered("DELETE FROM sim_positions WHERE id = ?", (position_id,))
             cur = conn.execute(q, p)
             return cur.rowcount > 0
 
@@ -2502,13 +3020,13 @@ class WatchlistStore:
         conn = self._connect()
         try:
             if ticker:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM sim_trades WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
                     (ticker, limit),
                 )
                 rows = conn.execute(q, p).fetchall()
             else:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM sim_trades ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 )
@@ -2516,6 +3034,47 @@ class WatchlistStore:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------
+    # Sim Fund Operations
+    # ------------------------------------------------------------------
+
+    def create_fund_op(self, account_id: str, op_type: str, amount: float,
+                       note: str = "") -> str:
+        fid = uuid.uuid4().hex[:12]
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO sim_fund_ops
+                   (id, account_id, op_type, amount, note, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (fid, account_id, op_type, amount, note, _now_iso()) + self._user_insert_params() + self._market_insert_params(),
+            )
+            return fid
+
+    def get_fund_ops(self, limit: int = 20) -> list[dict]:
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM sim_fund_ops ORDER BY created_at DESC LIMIT ?", (limit,)
+            )
+            rows = conn.execute(q, p).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def adjust_sim_funds(self, op_type: str, amount: float, note: str = "") -> dict:
+        """增减资金，更新账户余额。"""
+        account = self.get_sim_account()
+        if not account:
+            return {"error": "账户不存在"}
+        if op_type == "withdraw" and account["cash_balance"] < amount:
+            return {"error": "现金不足", "available": account["cash_balance"]}
+        delta = amount if op_type == "deposit" else -amount
+        new_cash = round(account["cash_balance"] + delta, 2)
+        new_initial = round(account.get("initial_capital", 100000) + delta, 2)
+        self.update_sim_account(cash_balance=new_cash, initial_capital=new_initial)
+        self.create_fund_op(account["id"], op_type, amount, note)
+        return {"success": True, "cash_balance": new_cash, "initial_capital": new_initial}
 
     # ------------------------------------------------------------------
     # User Preferences
@@ -2588,28 +3147,78 @@ class WatchlistStore:
             conn.execute(
                 f"""INSERT INTO auto_reviews
                    (id, sim_trade_id, ticker, review_type, entry_price, exit_price,
-                    return_pct, lessons_learned, experience_card, result_json, created_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    return_pct, lessons_learned, experience_card, result_json, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (rid, sim_trade_id, ticker, review_type,
                  entry_price, exit_price, return_pct,
                  lessons_learned,
                  json.dumps(experience_card or {}, ensure_ascii=False),
                  json.dumps(result_json or {}, ensure_ascii=False),
-                 _now_iso()) + self._user_insert_params(),
+                 _now_iso()) + self._user_insert_params() + self._market_insert_params(),
             )
         return rid
+
+    def record_layer_performance(self, trade_id: str, ticker: str,
+                                 attribution: dict, return_pct: float) -> None:
+        """P1.2 从复盘 attribution 拆出四层归因，写入 layer_performance。
+
+        attribution 结构(来自 trade_review.md):
+          stock_selection→L2, market_timing→L3, macro_alignment→L1, plan_deviation→L4
+        """
+        mapping = {
+            "L1": ("macro_alignment", "score"),
+            "L2": ("stock_selection", "score"),
+            "L3": ("market_timing", "score"),
+        }
+        rows = []
+        for layer, (key, score_field) in mapping.items():
+            d = attribution.get(key, {}) or {}
+            rows.append((layer, float(d.get(score_field, 0) or 0), d.get("assessment", "")))
+        # L4 用 plan_deviation 的偏差绝对值反推质量分(偏差越小越好)
+        pd = attribution.get("plan_deviation", {}) or {}
+        dev = abs(float(pd.get("entry_diff_pct", 0) or 0)) + abs(float(pd.get("exit_diff_pct", 0) or 0))
+        l4_score = max(0.0, 10.0 - dev)  # 偏差 0 → 10 分
+        rows.append(("L4", l4_score, pd.get("assessment", "")))
+
+        with self._write_conn() as conn:
+            for layer, score, assessment in rows:
+                conn.execute(
+                    f"""INSERT INTO layer_performance
+                       (id, trade_id, ticker, layer, score, assessment, return_pct, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                       VALUES (?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                    (uuid.uuid4().hex[:12], trade_id, ticker, layer, score,
+                     assessment, return_pct, _now_iso())
+                    + self._user_insert_params() + self._market_insert_params(),
+                )
+
+    def get_layer_performance_summary(self, limit: int = 100) -> dict:
+        """聚合各层近期表现：平均归因分 + 样本数。返回 {L1:{avg,count}, ...}。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT layer, AVG(score) avg_score, COUNT(*) cnt FROM layer_performance "
+                "GROUP BY layer",
+            )
+            rows = conn.execute(q, p).fetchall()
+            out = {}
+            for r in rows:
+                d = dict(r)
+                out[d["layer"]] = {"avg": round(d["avg_score"], 1), "count": d["cnt"]}
+            return out
+        finally:
+            conn.close()
 
     def get_auto_reviews(self, ticker: str | None = None, limit: int = 20) -> list[dict]:
         conn = self._connect()
         try:
             if ticker:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM auto_reviews WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
                     (ticker, limit),
                 )
                 rows = conn.execute(q, p).fetchall()
             else:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM auto_reviews ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 )
@@ -2626,7 +3235,7 @@ class WatchlistStore:
     def get_auto_review(self, review_id: str) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM auto_reviews WHERE id = ?", (review_id,)
             )
             row = conn.execute(q, p).fetchone()
@@ -2641,7 +3250,7 @@ class WatchlistStore:
     def get_trades_without_review(self) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 """SELECT st.* FROM sim_trades st
                    LEFT JOIN auto_reviews ar ON ar.sim_trade_id = st.id
                    WHERE st.side = 'sell' AND ar.id IS NULL
@@ -2668,11 +3277,11 @@ class WatchlistStore:
             conn.execute(
                 f"""INSERT INTO experience_cards
                    (id, scope, scope_key, category, title, content, evidence,
-                    confidence, source_review_id, created_at, updated_at{self._user_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                    confidence, source_review_id, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (cid, scope, scope_key or "", category, title, content,
                  json.dumps(evidence or [], ensure_ascii=False),
-                 confidence, source_review_id, _now_iso(), _now_iso()) + self._user_insert_params(),
+                 confidence, source_review_id, _now_iso(), _now_iso()) + self._user_insert_params() + self._market_insert_params(),
             )
         return cid
 
@@ -2691,7 +3300,7 @@ class WatchlistStore:
                 params.append(scope_key)
             where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
             params.append(limit)
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 f"SELECT * FROM experience_cards{where} ORDER BY confidence DESC, applied_count DESC LIMIT ?",
                 tuple(params),
             )
@@ -2709,7 +3318,7 @@ class WatchlistStore:
                            limit: int = 5) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 """SELECT * FROM experience_cards
                    WHERE (scope = 'global')
                       OR (scope = 'ticker' AND scope_key = ?)
@@ -2729,28 +3338,326 @@ class WatchlistStore:
             conn.close()
 
     def increment_card_applied(self, card_id: str) -> None:
-        """经验卡片被引用时，递增 applied_count"""
+        """经验卡片被引用时，递增 applied_count 并更新 last_applied_at"""
         with self._write_conn() as conn:
-            q, p = self._user_filter(
-                "UPDATE experience_cards SET applied_count = applied_count + 1, updated_at = ? WHERE id = ?",
+            q, p = self._filtered(
+                "UPDATE experience_cards SET applied_count = applied_count + 1, last_applied_at = ?, updated_at = ? WHERE id = ?",
+                (_now_iso(), _now_iso(), card_id),
+            )
+            conn.execute(q, p)
+
+    def update_card_outcome(self, card_id: str, is_win: bool) -> None:
+        """根据交易结果更新经验卡片置信度（贝叶斯后验）"""
+        with self._write_conn() as conn:
+            field = "win_count" if is_win else "loss_count"
+            q, p = self._filtered(
+                f"UPDATE experience_cards SET {field} = {field} + 1, updated_at = ? WHERE id = ?",
                 (_now_iso(), card_id),
             )
             conn.execute(q, p)
 
+            q2, p2 = self._filtered(
+                "SELECT win_count, loss_count FROM experience_cards WHERE id = ?",
+                (card_id,),
+            )
+            row = conn.execute(q2, p2).fetchone()
+            if row:
+                w, l = row["win_count"], row["loss_count"]
+                new_conf = round((w + 1) / (w + l + 2), 4)
+                q3, p3 = self._filtered(
+                    "UPDATE experience_cards SET confidence = ? WHERE id = ?",
+                    (new_conf, card_id),
+                )
+                conn.execute(q3, p3)
+
     def delete_experience_card(self, card_id: str) -> bool:
         conn = self._connect()
         try:
-            q, p = self._user_filter("DELETE FROM experience_cards WHERE id = ?", (card_id,))
+            q, p = self._filtered("DELETE FROM experience_cards WHERE id = ?", (card_id,))
             cur = conn.execute(q, p)
             conn.commit()
             return cur.rowcount > 0
         finally:
             conn.close()
 
+    # ------------------------------------------------------------------
+    # Investment Theses (投资论点追踪)
+    # ------------------------------------------------------------------
+
+    def create_thesis(self, entry_id: str, ticker: str, title: str,
+                      summary: str = "", conviction: str = "medium",
+                      time_horizon: str = "medium_term",
+                      pillars: list[dict] | None = None) -> str:
+        thesis_id = uuid.uuid4().hex[:12]
+        now = _now_iso()
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO investment_theses
+                   (id, entry_id, ticker, thesis_title, thesis_summary,
+                    conviction, status, time_horizon, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (thesis_id, entry_id, ticker, title, summary,
+                 conviction, "active", time_horizon, now, now) + self._user_insert_params() + self._market_insert_params(),
+            )
+            for p in (pillars or []):
+                pid = uuid.uuid4().hex[:12]
+                conn.execute(
+                    """INSERT INTO thesis_pillars
+                       (id, thesis_id, pillar_text, falsification, weight, status, created_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (pid, thesis_id, p.get("text", ""), p.get("falsification", ""),
+                     p.get("weight", 1.0), "intact", now),
+                )
+        return thesis_id
+
+    def get_theses_for_entry(self, entry_id: str, active_only: bool = True) -> list[dict]:
+        conn = self._connect()
+        try:
+            if active_only:
+                q, p = self._filtered(
+                    "SELECT * FROM investment_theses WHERE entry_id = ? AND status = 'active' ORDER BY created_at DESC",
+                    (entry_id,),
+                )
+            else:
+                q, p = self._filtered(
+                    "SELECT * FROM investment_theses WHERE entry_id = ? ORDER BY created_at DESC",
+                    (entry_id,),
+                )
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def get_thesis(self, thesis_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM investment_theses WHERE id = ?", (thesis_id,),
+            )
+            row = conn.execute(q, p).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def update_thesis_status(self, thesis_id: str, status: str,
+                             conviction: str | None = None) -> bool:
+        with self._write_conn() as conn:
+            parts = ["status = ?", "updated_at = ?"]
+            vals: list = [status, _now_iso()]
+            if conviction:
+                parts.append("conviction = ?")
+                vals.append(conviction)
+            if status == "invalidated":
+                parts.append("invalidated_at = ?")
+                vals.append(_now_iso())
+            vals.append(thesis_id)
+            q, p = self._filtered(
+                f"UPDATE investment_theses SET {', '.join(parts)} WHERE id = ?", tuple(vals),
+            )
+            return conn.execute(q, p).rowcount > 0
+
+    def get_pillars(self, thesis_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM thesis_pillars WHERE thesis_id = ? ORDER BY weight DESC",
+                (thesis_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def update_pillar_status(self, pillar_id: str, status: str) -> bool:
+        with self._write_conn() as conn:
+            cur = conn.execute(
+                "UPDATE thesis_pillars SET status = ?, updated_at = ? WHERE id = ?",
+                (status, _now_iso(), pillar_id),
+            )
+            return cur.rowcount > 0
+
+    def create_evidence(self, thesis_id: str, pillar_id: str | None,
+                        date: str, data_point: str,
+                        direction: str = "neutral",
+                        thesis_impact: str = "no_change",
+                        recommended_action: str = "hold",
+                        conviction_before: str = "medium",
+                        conviction_after: str = "medium",
+                        source: str = "") -> str:
+        eid = uuid.uuid4().hex[:12]
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO thesis_evidence_log
+                   (id, thesis_id, pillar_id, date, data_point, direction,
+                    thesis_impact, recommended_action, conviction_before,
+                    conviction_after, source, created_at{self._user_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                (eid, thesis_id, pillar_id, date, data_point, direction,
+                 thesis_impact, recommended_action, conviction_before,
+                 conviction_after, source, _now_iso()) + self._user_insert_params(),
+            )
+        return eid
+
+    def get_evidence_log(self, thesis_id: str, limit: int = 50) -> list[dict]:
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM thesis_evidence_log WHERE thesis_id = ? ORDER BY date DESC LIMIT ?",
+                (thesis_id, limit),
+            )
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def get_stale_theses(self, days: int = 90) -> list[dict]:
+        conn = self._connect()
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+            q, p = self._filtered(
+                """SELECT * FROM investment_theses
+                   WHERE status = 'active' AND updated_at < ?
+                   ORDER BY updated_at ASC""",
+                (cutoff,),
+            )
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def get_thesis_dashboard(self, entry_id: str | None = None) -> dict:
+        conn = self._connect()
+        try:
+            if entry_id:
+                q, p = self._filtered(
+                    "SELECT * FROM investment_theses WHERE entry_id = ? AND status = 'active'",
+                    (entry_id,),
+                )
+            else:
+                q, p = self._filtered(
+                    "SELECT * FROM investment_theses WHERE status = 'active'",
+                )
+            theses = [dict(r) for r in conn.execute(q, p).fetchall()]
+            result = {"theses": [], "total_theses": len(theses),
+                      "high": 0, "medium": 0, "low": 0}
+            for t in theses:
+                tid = t["id"]
+                pillars = conn.execute(
+                    "SELECT * FROM thesis_pillars WHERE thesis_id = ?", (tid,),
+                ).fetchall()
+                evidence = conn.execute(
+                    "SELECT direction, COUNT(*) as cnt FROM thesis_evidence_log WHERE thesis_id = ? GROUP BY direction",
+                    (tid,),
+                ).fetchall()
+                ev_counts = {r["direction"]: r["cnt"] for r in evidence}
+                t["pillars"] = [dict(p) for p in pillars]
+                t["pillar_intact"] = sum(1 for p in pillars if p["status"] == "intact")
+                t["pillar_total"] = len(pillars)
+                t["evidence_supporting"] = ev_counts.get("supporting", 0)
+                t["evidence_contradicting"] = ev_counts.get("contradicting", 0)
+                t["evidence_neutral"] = ev_counts.get("neutral", 0)
+                result["theses"].append(t)
+                conv = t.get("conviction", "medium")
+                if conv in result:
+                    result[conv] += 1
+            return result
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Scenario Valuations (三场景估值)
+    # ------------------------------------------------------------------
+
+    def create_scenario_valuation(self, entry_id: str, ticker: str,
+                                   strategic_plan_id: str = "",
+                                   bear_price: float = 0, bear_probability: float = 0.2,
+                                   bear_rationale: str = "",
+                                   base_price: float = 0, base_probability: float = 0.6,
+                                   base_rationale: str = "",
+                                   bull_price: float = 0, bull_probability: float = 0.2,
+                                   bull_rationale: str = "",
+                                   current_price: float = 0,
+                                   valuation_method: str = "relative") -> str:
+        vid = uuid.uuid4().hex[:12]
+        expected_return = 0.0
+        risk_reward = 0.0
+        # 归一化概率：如果传入百分比值（和>1），自动转为小数
+        prob_sum = bear_probability + base_probability + bull_probability
+        if prob_sum > 1.5:
+            bear_probability /= 100
+            base_probability /= 100
+            bull_probability /= 100
+        if current_price > 0:
+            bear_ret = (bear_price - current_price) / current_price
+            base_ret = (base_price - current_price) / current_price
+            bull_ret = (bull_price - current_price) / current_price
+            expected_return = round(
+                bear_ret * bear_probability + base_ret * base_probability + bull_ret * bull_probability, 4
+            ) * 100
+            downside_ev = abs(bear_ret * bear_probability)
+            upside_ev = base_ret * base_probability + bull_ret * bull_probability
+            risk_reward = round(upside_ev / downside_ev, 2) if downside_ev > 0 else 0.0
+        now = _now_iso()
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO scenario_valuations
+                   (id, entry_id, ticker, strategic_plan_id,
+                    bear_price, bear_probability, bear_rationale,
+                    base_price, base_probability, base_rationale,
+                    bull_price, bull_probability, bull_rationale,
+                    current_price, expected_return_pct, risk_reward_ratio,
+                    valuation_method, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (vid, entry_id, ticker, strategic_plan_id,
+                 bear_price, bear_probability, bear_rationale,
+                 base_price, base_probability, base_rationale,
+                 bull_price, bull_probability, bull_rationale,
+                 current_price, expected_return, risk_reward,
+                 valuation_method, now, now) + self._user_insert_params() + self._market_insert_params(),
+            )
+        return vid
+
+    def get_latest_valuation(self, entry_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM scenario_valuations WHERE entry_id = ? ORDER BY created_at DESC LIMIT 1",
+                (entry_id,),
+            )
+            row = conn.execute(q, p).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_valuation_history(self, entry_id: str, limit: int = 5) -> list[dict]:
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM scenario_valuations WHERE entry_id = ? ORDER BY created_at DESC LIMIT ?",
+                (entry_id, limit),
+            )
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def get_portfolio_valuations(self) -> list[dict]:
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                """SELECT sv.*, w.company_name, w.tier FROM scenario_valuations sv
+                   JOIN watchlist w ON sv.entry_id = w.id
+                   WHERE sv.id IN (
+                       SELECT id FROM scenario_valuations sv2
+                       WHERE sv2.entry_id = sv.entry_id
+                       ORDER BY sv2.created_at DESC LIMIT 1
+                   )
+                   ORDER BY sv.expected_return_pct DESC""",
+                table="sv",
+            )
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
     def get_trade_feedback_history(self, limit: int = 50) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._filtered(
                 "SELECT * FROM trade_feedback ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
@@ -2926,6 +3833,57 @@ class WatchlistStore:
             conn.close()
 
     # ------------------------------------------------------------------
+    # Company Profiles (企业基本面)
+    # ------------------------------------------------------------------
+
+    def save_company_profile(self, ticker: str, info: dict) -> None:
+        """从 yfinance info dict 提取企业基本面并 upsert。"""
+        if not info:
+            return
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT OR REPLACE INTO company_profiles
+                   (ticker, raw_json, sector, industry, description, website,
+                    employees, country, exchange, currency, fetched_at, user_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    ticker,
+                    json.dumps(info, ensure_ascii=False, default=str),
+                    info.get("sector", ""),
+                    info.get("industry", ""),
+                    info.get("longBusinessSummary", ""),
+                    info.get("website", ""),
+                    info.get("fullTimeEmployees") or 0,
+                    info.get("country", ""),
+                    info.get("exchange", ""),
+                    info.get("currency", ""),
+                    _now_iso(),
+                    self._user_id or "",
+                ),
+            )
+
+    def get_company_profile(self, ticker: str) -> dict | None:
+        """获取企业基本面，返回结构化 dict。"""
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM company_profiles WHERE ticker = ?"
+            p: tuple = (ticker,)
+            if self._user_id:
+                q += " AND user_id = ?"
+                p = (ticker, self._user_id)
+            row = conn.execute(q, p).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            try:
+                d["raw"] = json.loads(d.pop("raw_json", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                d["raw"] = {}
+            return d
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
     # Backtest
     # ------------------------------------------------------------------
 
@@ -2984,6 +3942,500 @@ class WatchlistStore:
             except (json.JSONDecodeError, TypeError):
                 d["equity_curve"] = []
             return d
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # AI 模型预测记录 (model_accuracy)
+    # ------------------------------------------------------------------
+
+    def record_prediction(self, *, provider: str, model: str, role_context: str,
+                          ticker: str, prediction_type: str, prediction_value: str,
+                          market: str = "") -> str:
+        rid = str(uuid.uuid4())
+        now = _now_iso()
+        mkt = market or self._market or "us_stock"
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """INSERT INTO model_accuracy
+                       (id, model_provider, model_name, role_context, ticker,
+                        prediction_type, prediction_value, prediction_date,
+                        created_at, user_id, market)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (rid, provider, model, role_context, ticker,
+                     prediction_type, prediction_value, now[:10],
+                     now, self._user_id, mkt),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return rid
+
+    def record_outcome(self, ticker: str, prediction_type: str,
+                       outcome_value: str, outcome_date: str = "",
+                       score_delta: float = 0.0) -> int:
+        now = _now_iso()
+        odate = outcome_date or now[:10]
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                is_correct = 1 if abs(score_delta) < 2.0 else 0
+                q = """UPDATE model_accuracy SET outcome_value = ?, outcome_date = ?,
+                       is_correct = ?, score_delta = ?, updated_at = ?
+                       WHERE ticker = ? AND prediction_type = ? AND is_correct = -1"""
+                params = (outcome_value, odate, is_correct, score_delta, now,
+                          ticker, prediction_type)
+                if self._user_id:
+                    q += " AND user_id = ?"
+                    params = params + (self._user_id,)
+                cur = conn.execute(q, params)
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+
+    def get_model_accuracy(self, provider: str, model: str,
+                           role_context: str | None = None,
+                           limit: int = 100) -> list[dict]:
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM model_accuracy WHERE model_provider = ? AND model_name = ?"
+            p: tuple = (provider, model)
+            if role_context is not None:
+                q += " AND role_context = ?"
+                p = p + (role_context,)
+            q += " ORDER BY prediction_date DESC LIMIT ?"
+            p = p + (limit,)
+            q, p = self._user_filter(q, p)
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def get_model_accuracy_stats(self, market: str = "") -> list[dict]:
+        conn = self._connect()
+        try:
+            q = """SELECT model_provider, model_name, role_context,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct,
+                   SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END) as incorrect,
+                   SUM(CASE WHEN is_correct = -1 THEN 1 ELSE 0 END) as pending,
+                   AVG(CASE WHEN is_correct >= 0 THEN score_delta END) as avg_delta
+                   FROM model_accuracy"""
+            p: tuple = ()
+            if market:
+                q += " WHERE market = ?"
+                p = (market,)
+            q, p = self._user_filter(q, p)
+            q += " GROUP BY model_provider, model_name, role_context ORDER BY total DESC"
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # AI 模型综合评分 (model_ratings)
+    # ------------------------------------------------------------------
+
+    def get_model_ratings(self, role_context: str | None = None,
+                          market: str = "") -> list[dict]:
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM model_ratings"
+            p: tuple = ()
+            conditions = []
+            if role_context is not None:
+                conditions.append("role_context = ?")
+                p = p + (role_context,)
+            if market:
+                conditions.append("market = ?")
+                p = p + (market,)
+            if conditions:
+                q += " WHERE " + " AND ".join(conditions)
+            q, p = self._user_filter(q, p)
+            q += " ORDER BY calibration_weight DESC"
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def upsert_model_rating(self, *, provider: str, model: str,
+                            role_context: str = "", total: int = 0,
+                            correct: int = 0, accuracy: float = 0.5,
+                            avg_delta: float = 0.0, weight: float = 1.0,
+                            market: str = "") -> None:
+        now = _now_iso()
+        mkt = market or self._market or "us_stock"
+        uid = self._user_id or ""
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                existing = conn.execute(
+                    """SELECT id FROM model_ratings
+                       WHERE model_provider = ? AND model_name = ?
+                       AND role_context = ? AND user_id = ? AND market = ?""",
+                    (provider, model, role_context, uid, mkt),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        """UPDATE model_ratings SET total_predictions = ?,
+                           correct_predictions = ?, accuracy_rate = ?,
+                           avg_score_delta = ?, calibration_weight = ?,
+                           last_calibrated = ?, updated_at = ?
+                           WHERE id = ?""",
+                        (total, correct, accuracy, avg_delta, weight, now, now,
+                         existing["id"]),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO model_ratings
+                           (id, model_provider, model_name, role_context,
+                            total_predictions, correct_predictions, accuracy_rate,
+                            avg_score_delta, calibration_weight, last_calibrated,
+                            created_at, updated_at, user_id, market)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (str(uuid.uuid4()), provider, model, role_context,
+                         total, correct, accuracy, avg_delta, weight, now,
+                         now, now, uid, mkt),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_calibration_weight(self, provider: str, model: str,
+                               role_context: str = "", market: str = "") -> float:
+        conn = self._connect()
+        try:
+            mkt = market or self._market or "us_stock"
+            uid = self._user_id or ""
+            row = conn.execute(
+                """SELECT calibration_weight FROM model_ratings
+                   WHERE model_provider = ? AND model_name = ?
+                   AND role_context = ? AND user_id = ? AND market = ?""",
+                (provider, model, role_context, uid, mkt),
+            ).fetchone()
+            return row["calibration_weight"] if row else 1.0
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # 会议历史记录 (meeting_records)
+    # ------------------------------------------------------------------
+
+    def create_meeting_record(self, *, meeting_type: str, title: str,
+                              participants: list | None = None,
+                              tickers_discussed: list | None = None,
+                              final_verdict: str = "",
+                              final_ranking: list | None = None,
+                              key_agreements: list | None = None,
+                              key_disagreements: list | None = None,
+                              risk_warnings: list | None = None,
+                              investment_thesis: str = "",
+                              transcript_json: list | None = None,
+                              result_json: dict | None = None,
+                              model_predictions: list | None = None,
+                              duration_seconds: int = 0,
+                              total_tokens: int = 0,
+                              analysis_id: str = "",
+                              execution_plan_id: str = "",
+                              market: str = "") -> str:
+        rid = str(uuid.uuid4())
+        now = _now_iso()
+        mkt = market or self._market or "us_stock"
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """INSERT INTO meeting_records
+                       (id, meeting_type, analysis_id, execution_plan_id, market,
+                        title, participants, tickers_discussed,
+                        final_verdict, final_ranking, key_agreements,
+                        key_disagreements, risk_warnings, investment_thesis,
+                        transcript_json, result_json, model_predictions,
+                        duration_seconds, total_tokens, created_at, user_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (rid, meeting_type, analysis_id, execution_plan_id, mkt,
+                     title,
+                     json.dumps(participants or [], ensure_ascii=False),
+                     json.dumps(tickers_discussed or [], ensure_ascii=False),
+                     final_verdict,
+                     json.dumps(final_ranking or [], ensure_ascii=False),
+                     json.dumps(key_agreements or [], ensure_ascii=False),
+                     json.dumps(key_disagreements or [], ensure_ascii=False),
+                     json.dumps(risk_warnings or [], ensure_ascii=False),
+                     investment_thesis,
+                     json.dumps(transcript_json or [], ensure_ascii=False),
+                     json.dumps(result_json or {}, ensure_ascii=False),
+                     json.dumps(model_predictions or [], ensure_ascii=False),
+                     duration_seconds, total_tokens, now, self._user_id or ""),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return rid
+
+    def get_meeting_records(self, meeting_type: str | None = None,
+                            market: str = "", limit: int = 20) -> list[dict]:
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM meeting_records"
+            p: tuple = ()
+            conditions = []
+            if meeting_type:
+                conditions.append("meeting_type = ?")
+                p = p + (meeting_type,)
+            if market:
+                conditions.append("market = ?")
+                p = p + (market,)
+            if conditions:
+                q += " WHERE " + " AND ".join(conditions)
+            q, p = self._user_filter(q, p)
+            q += " ORDER BY created_at DESC LIMIT ?"
+            p = p + (limit,)
+            rows = conn.execute(q, p).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                self._parse_json_fields(d,
+                    dict_fields=("result_json",),
+                    list_fields=("participants", "tickers_discussed",
+                                 "final_ranking", "key_agreements",
+                                 "key_disagreements", "risk_warnings",
+                                 "transcript_json", "model_predictions"))
+                result.append(d)
+            return result
+        finally:
+            conn.close()
+
+    def get_meeting_record(self, record_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            q, p = self._user_filter(
+                "SELECT * FROM meeting_records WHERE id = ?", (record_id,)
+            )
+            row = conn.execute(q, p).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            self._parse_json_fields(d,
+                dict_fields=("result_json",),
+                list_fields=("participants", "tickers_discussed",
+                             "final_ranking", "key_agreements",
+                             "key_disagreements", "risk_warnings",
+                             "transcript_json", "model_predictions"))
+            return d
+        finally:
+            conn.close()
+
+    def update_meeting_outcome(self, record_id: str, outcome_summary: str) -> bool:
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                q = """UPDATE meeting_records SET outcome_recorded = 1,
+                       outcome_summary = ? WHERE id = ?"""
+                p = (outcome_summary, record_id)
+                if self._user_id:
+                    q += " AND user_id = ?"
+                    p = p + (self._user_id,)
+                cur = conn.execute(q, p)
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def get_meeting_stats(self, market: str = "") -> dict:
+        conn = self._connect()
+        try:
+            q = "SELECT meeting_type, COUNT(*) as cnt FROM meeting_records"
+            p: tuple = ()
+            if market:
+                q += " WHERE market = ?"
+                p = (market,)
+            q, p = self._user_filter(q, p)
+            q += " GROUP BY meeting_type"
+            rows = conn.execute(q, p).fetchall()
+            by_type = {r["meeting_type"]: r["cnt"] for r in rows}
+
+            q2 = "SELECT COUNT(*) as total, AVG(duration_seconds) as avg_duration FROM meeting_records"
+            p2: tuple = ()
+            if market:
+                q2 += " WHERE market = ?"
+                p2 = (market,)
+            q2, p2 = self._user_filter(q2, p2)
+            summary = dict(conn.execute(q2, p2).fetchone())
+            return {
+                "total": summary.get("total", 0),
+                "avg_duration_seconds": round(summary.get("avg_duration") or 0, 1),
+                "by_type": by_type,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # AI 角色配置 CRUD
+    # ------------------------------------------------------------------
+
+    def upsert_role_config(self, role_key: str, slot_index: int,
+                           provider: str, model: str,
+                           role_label: str = "", role_group: str = "",
+                           user_id: str | None = None) -> str:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        now = _now_iso()
+        with self._write_conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM ai_role_config WHERE role_key = ? AND slot_index = ? AND user_id = ?",
+                (role_key, slot_index, uid),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE ai_role_config SET provider = ?, model = ?, is_active = 1,
+                       updated_at = ?, role_label = COALESCE(NULLIF(?, ''), role_label),
+                       role_group = COALESCE(NULLIF(?, ''), role_group)
+                       WHERE id = ?""",
+                    (provider, model, now, role_label, role_group, existing["id"]),
+                )
+                return existing["id"]
+            rid = uuid.uuid4().hex[:16]
+            conn.execute(
+                """INSERT INTO ai_role_config
+                   (id, role_key, role_label, role_group, slot_index, provider, model,
+                    is_active, created_at, updated_at, user_id)
+                   VALUES (?,?,?,?,?,?,?,1,?,?,?)""",
+                (rid, role_key, role_label, role_group, slot_index,
+                 provider, model, now, now, uid),
+            )
+            return rid
+
+    def get_role_configs(self, role_key: str | None = None,
+                         role_group: str | None = None,
+                         user_id: str | None = None) -> list[dict]:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM ai_role_config WHERE user_id = ? AND is_active = 1"
+            p: tuple = (uid,)
+            if role_key:
+                q += " AND role_key = ?"
+                p += (role_key,)
+            if role_group:
+                q += " AND role_group = ?"
+                p += (role_group,)
+            q += " ORDER BY role_key, slot_index"
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def delete_role_config(self, role_key: str, slot_index: int,
+                           user_id: str | None = None) -> bool:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        with self._write_conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM ai_role_config WHERE role_key = ? AND slot_index = ? AND user_id = ?",
+                (role_key, slot_index, uid),
+            )
+            return cur.rowcount > 0
+
+    def clear_role_configs(self, role_key: str, user_id: str | None = None) -> int:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        with self._write_conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM ai_role_config WHERE role_key = ? AND user_id = ?",
+                (role_key, uid),
+            )
+            return cur.rowcount
+
+    # ------------------------------------------------------------------
+    # 模型能力测试结果 CRUD
+    # ------------------------------------------------------------------
+
+    def save_test_result(self, provider: str, model: str, test_type: str,
+                         score: float, raw_result: str = "{}",
+                         user_id: str | None = None) -> str:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        now = _now_iso()
+        with self._write_conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM model_capability_test WHERE provider = ? AND model = ? AND test_type = ? AND user_id = ?",
+                (provider, model, test_type, uid),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE model_capability_test SET score = ?, raw_result = ?, tested_at = ? WHERE id = ?",
+                    (score, raw_result, now, existing["id"]),
+                )
+                return existing["id"]
+            rid = uuid.uuid4().hex[:16]
+            conn.execute(
+                """INSERT INTO model_capability_test
+                   (id, provider, model, test_type, score, raw_result, tested_at, user_id)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (rid, provider, model, test_type, score, raw_result, now, uid),
+            )
+            return rid
+
+    def get_test_results(self, provider: str | None = None, model: str | None = None,
+                         user_id: str | None = None) -> list[dict]:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM model_capability_test WHERE user_id = ?"
+            p: tuple = (uid,)
+            if provider:
+                q += " AND provider = ?"
+                p += (provider,)
+            if model:
+                q += " AND model = ?"
+                p += (model,)
+            q += " ORDER BY provider, model, test_type"
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # 模型推荐结果 CRUD
+    # ------------------------------------------------------------------
+
+    def save_recommendation(self, role_key: str, slot_index: int,
+                            provider: str, model: str,
+                            composite_score: float = 0, score_breakdown: str = "{}",
+                            reason: str = "", user_id: str | None = None) -> str:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        now = _now_iso()
+        with self._write_conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM model_recommendation WHERE role_key = ? AND slot_index = ? AND user_id = ?",
+                (role_key, slot_index, uid),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE model_recommendation SET recommended_provider = ?, recommended_model = ?,
+                       composite_score = ?, score_breakdown = ?, reason = ?, generated_at = ?
+                       WHERE id = ?""",
+                    (provider, model, composite_score, score_breakdown, reason, now, existing["id"]),
+                )
+                return existing["id"]
+            rid = uuid.uuid4().hex[:16]
+            conn.execute(
+                """INSERT INTO model_recommendation
+                   (id, role_key, slot_index, recommended_provider, recommended_model,
+                    composite_score, score_breakdown, reason, generated_at, user_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (rid, role_key, slot_index, provider, model,
+                 composite_score, score_breakdown, reason, now, uid),
+            )
+            return rid
+
+    def get_recommendations(self, role_key: str | None = None,
+                            user_id: str | None = None) -> list[dict]:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM model_recommendation WHERE user_id = ?"
+            p: tuple = (uid,)
+            if role_key:
+                q += " AND role_key = ?"
+                p += (role_key,)
+            q += " ORDER BY role_key, slot_index"
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
         finally:
             conn.close()
 

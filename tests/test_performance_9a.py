@@ -290,7 +290,7 @@ async def test_generate_tuning_success(perf_store):
 
     from bottleneck_hunter.watchlist.tuning_engine import generate_tuning_suggestions
 
-    with patch("bottleneck_hunter.watchlist.tuning_engine._get_llm", return_value=(mock_llm, "test", "test")):
+    with patch("bottleneck_hunter.watchlist.tuning_engine.get_llm_for_position", return_value=(mock_llm, "test", "test")):
         events = []
         async for evt in generate_tuning_suggestions(perf_store, budget=None):
             events.append(evt)

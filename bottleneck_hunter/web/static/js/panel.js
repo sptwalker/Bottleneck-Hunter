@@ -6,7 +6,7 @@
 import { startScreening } from './pipeline.js';
 import { showView } from './app.js';
 
-const DEFAULT_MODELS = {
+const _BUILTIN_MODELS = {
   openai: 'gpt-4o',
   anthropic: 'claude-sonnet-4-6',
   deepseek: 'deepseek-chat',
@@ -19,6 +19,20 @@ const DEFAULT_MODELS = {
   agnes: 'agnes-2.0-flash',
   kimi: 'moonshot-v1-8k',
 };
+
+let DEFAULT_MODELS = { ..._BUILTIN_MODELS };
+
+async function _mergeCustomProviders() {
+  try {
+    const res = await fetch('/api/custom-providers');
+    if (!res.ok) return;
+    const data = await res.json();
+    DEFAULT_MODELS = { ..._BUILTIN_MODELS };
+    for (const p of (data.providers || [])) {
+      DEFAULT_MODELS[p.provider_id] = p.default_model || '';
+    }
+  } catch { /* silent */ }
+}
 
 const MAX_CV_MODELS = 5;
 
@@ -216,9 +230,12 @@ async function autoSelectProvider() {
 async function ensureProvidersLoaded() {
   if (_configuredProviders.length > 0) return;
   try {
-    const res = await fetch('/api/settings');
-    if (!res.ok) return;
-    const data = await res.json();
+    const [settingsRes] = await Promise.all([
+      fetch('/api/settings'),
+      _mergeCustomProviders(),
+    ]);
+    if (!settingsRes.ok) return;
+    const data = await settingsRes.json();
     const providers = data.providers || [];
     syncProviderFromSettings(providers);
   } catch { /* silent */ }
@@ -257,7 +274,7 @@ export function syncProviderFromSettings(providerList, testedIds) {
 function _escapeHtml(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 /* ── 从历史记录还原侧边栏参数，锁定 market 和 depth ── */

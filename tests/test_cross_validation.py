@@ -50,7 +50,8 @@ class TestValidateSupplier:
         report = await validator.validate_supplier(sc, llms)
         assert report.consensus_score == 8.5
         assert len(report.validations) == 2
-        assert "看好" in report.consensus_reasoning
+        # consensus_reasoning 现为结构化模板（含加权分与各模型评分）
+        assert "8.5" in report.consensus_reasoning
 
     @pytest.mark.asyncio
     async def test_low_score(self):

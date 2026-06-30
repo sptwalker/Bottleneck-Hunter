@@ -8,9 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import AsyncGenerator
 
+from bottleneck_hunter.llm_clients.factory import get_llm_for_position
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ async def _run_deep_analysis(ticker: str, progress: list) -> dict:
         ("events", "催化事件"),
     ]
 
-    llm = _get_llm()
+    llm, _, _ = get_llm_for_position(position="watchlist_uzi")
     if not llm:
         return _mock_deep_analysis(ticker)
 
@@ -171,7 +171,7 @@ async def _analyze_dimension(llm, ticker: str, key: str, label: str) -> tuple[in
 # ---------------------------------------------------------------------------
 
 async def _run_investor_panel(ticker: str, progress: list) -> dict:
-    llm = _get_llm()
+    llm, _, _ = get_llm_for_position(position="watchlist_uzi")
     if not llm:
         return _mock_investor_panel(ticker)
 
@@ -284,7 +284,7 @@ async def _run_lhb_analyzer(ticker: str, progress: list) -> dict:
 # ---------------------------------------------------------------------------
 
 async def _run_trap_detector(ticker: str, progress: list) -> dict:
-    llm = _get_llm()
+    llm, _, _ = get_llm_for_position(position="watchlist_uzi")
     if not llm:
         return _mock_trap_result(ticker)
 
@@ -388,23 +388,3 @@ def _mock_trap_result(ticker: str) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# LLM helper
-# ---------------------------------------------------------------------------
-
-def _get_llm():
-    """Try to create a cheap LLM for analysis. Returns None if unavailable."""
-    try:
-        from bottleneck_hunter.llm_clients.factory import create_llm
-
-        for provider, model, key_env in [
-            ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-            ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-            ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-            ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-        ]:
-            if os.getenv(key_env):
-                return create_llm(provider, model, temperature=0.3)
-    except Exception as e:
-        logger.warning("无法创建 LLM: %s", e)
-    return None

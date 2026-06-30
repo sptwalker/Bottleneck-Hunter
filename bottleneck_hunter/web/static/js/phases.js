@@ -10,6 +10,7 @@ import { readSSEStream } from './sse.js';
 import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, MEETING_ROLES } from './ai-features.js';
 import { openDrawer, closeDrawer } from './drawer.js';
 import { buildAnalysisTag } from './analysis-tag.js';
+import { showConfirm } from './utils/confirm.js';
 
 
 
@@ -219,7 +220,7 @@ function resetForNewAnalysis() {
 }
 
 /* ── 全自动模式: 阶段完成后自动推进 ────────── */
-function _autoChainNext() {
+async function _autoChainNext() {
   if (!state.autoMode) return;
   if (state.phase1 && !state.phase2) {
     logMsg('全自动: 自动启动 Phase 2', 'info');
@@ -232,8 +233,7 @@ function _autoChainNext() {
   } else if (state.phase3 && !state.phase4) {
     logMsg('全自动: 自动启动 Phase 4', 'info');
     goToPhase(4);
-    const provs = getProviders();
-    const configured = provs.filter(p => p.configured && !p.is_url);
+    const configured = await fetchConfiguredProviders();
     loadCvModels(configured.length > 0 ? configured : undefined);
     setTimeout(() => runPhase4(), 300);
   } else if (state.phase4) {
@@ -486,7 +486,7 @@ function _updateAnalysisTags() {
       const sector = data.sector || '';
       const mkt = data.market === 'a_stock' ? 'A股' : '美股';
       const cp = data.completed_phases || 0;
-      const dots = [0,1,2,3].map(i => `<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${i < cp ? 'oklch(0.55 0.12 155)' : '#ccc'};margin:0 1px"></span>`).join('');
+      const dots = [0,1,2,3,4].map(i => `<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${i < cp ? 'oklch(0.55 0.12 155)' : '#ccc'};margin:0 1px"></span>`).join('');
       sidebar.innerHTML =
         `<div style="display:flex;border:1px solid var(--border,#ddd);border-radius:8px;overflow:hidden;width:100%">` +
           `<div style="display:flex;align-items:center;justify-content:center;padding:0 8px;font:800 16px/1 monospace;background:var(--surface,#f8f8f8);border-right:1px solid var(--border,#ddd)">${seq}</div>` +
@@ -677,9 +677,9 @@ function handlePhase1Event(data) {
     if (data.run_count) state.config.run_count = data.run_count;
     if (data.completed_phases) state.config.completed_phases = data.completed_phases;
     state.phase1 = data;
-    state.phase2 = null;
-    state.phase3 = null;
-    state.phase4 = null;
+    if (state.phase2) state.p2NeedsUpdate = true; else state.phase2 = null;
+    if (state.phase3) state.p3NeedsUpdate = true; else state.phase3 = null;
+    if (state.phase4) state.p4NeedsUpdate = true; else state.phase4 = null;
 
     _stopP1Timer();
     _updateP1Progress(100, '分析完成');
@@ -1026,6 +1026,11 @@ function runPhase3(wQ, wA) {
       analysis_id: state.analysisId,
       scoring_config: { quality_weight: wQ, alpha_weight: wA, top_n: topN },
     }),
+  }).then(() => {
+    if ((state.config.completed_phases || 0) < 3) {
+      state.config.completed_phases = 3;
+      _updateAnalysisTags();
+    }
   }).catch(() => {});
 
   _savePhaseStatus();
@@ -1165,12 +1170,13 @@ function renderSectorButtons() {
   if (!grid) return;
   const sectors = loadSectors();
   grid.innerHTML = sectors.map((s, i) =>
-    `<button class="sector-btn" data-idx="${i}" data-sector="${s.sector}" data-product="${s.product}" data-market="${s.market || 'us_stock'}">${s.name}</button>`
+    `<button class="sector-btn" data-idx="${i}" data-sector="${s.sector}" data-product="${s.product}" data-market="${s.market || 'us_stock'}">${s.name}<span class="sector-menu-btn" title="配置赛道">⋯</span></button>`
   ).join('') + (sectors.length < 8 ? '<button class="sector-btn sector-add" id="wiz-add-sector">+ 添加赛道</button>' : '');
 
   grid.querySelectorAll('.sector-btn:not(.sector-add)').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
+      if (e.target.closest('.sector-menu-btn')) { showCtxMenu(e, btn); return; }
       const s = loadSectors()[parseInt(btn.dataset.idx)];
       if (!s?.sector || !s?.product) { showCtxMenu(e, btn); return; }
       resetForNewAnalysis();
@@ -1396,10 +1402,9 @@ export function initWizard() {
   });
 
   // Phase 3 下一步
-  document.getElementById('wiz-p3-next')?.addEventListener('click', () => {
+  document.getElementById('wiz-p3-next')?.addEventListener('click', async () => {
     goToPhase(4);
-    const provs = getProviders();
-    const configured = provs.filter(p => p.configured && !p.is_url);
+    const configured = await fetchConfiguredProviders();
     loadCvModels(configured.length > 0 ? configured : undefined);
   });
   document.getElementById('wiz-p3-back')?.addEventListener('click', () => goToPhase(2));
@@ -1540,7 +1545,7 @@ export function initWizard() {
 /* ── AI 模型设置页面初始化 ──────────────── */
 async function initWizardSettings() {
   const providers = await fetchAndRender('wiz-provider-list');
-  if (providers.length > 0) refreshModelSelectors(providers);
+  await refreshModelSelectors(providers);
 
   onProvidersChange(refreshModelSelectors);
 
@@ -1644,10 +1649,10 @@ async function loadWizardHistory() {
     }).join('');
 
     list.querySelectorAll('tr[data-id]').forEach(row => {
-      row.addEventListener('click', () => {
+      row.addEventListener('click', async () => {
         const id = row.dataset.id;
         const sector = row.querySelector('.at-sector')?.textContent || '';
-        if (confirm(`是否载入该分析数据？\n\n赛道: ${sector}`)) {
+        if (await showConfirm(`是否载入该分析数据？\n\n赛道: ${sector}`)) {
           loadWizardAnalysis(id);
         }
       });
@@ -1868,12 +1873,12 @@ async function loadAllHistory() {
     }).join('');
 
     list.querySelectorAll('.hist-load-btn').forEach(btn => {
-      btn.addEventListener('click', e => {
+      btn.addEventListener('click', async e => {
         e.stopPropagation();
         const id = btn.dataset.id;
         const row = btn.closest('tr');
         const sector = row.querySelector('.at-sector')?.textContent || '';
-        if (confirm(`是否载入该分析数据？\n\n赛道: ${sector}`)) {
+        if (await showConfirm(`是否载入该分析数据？\n\n赛道: ${sector}`)) {
           loadWizardAnalysis(id);
         }
       });
@@ -1882,7 +1887,7 @@ async function loadAllHistory() {
     list.querySelectorAll('.hist-del-btn').forEach(btn => {
       btn.addEventListener('click', async e => {
         e.stopPropagation();
-        if (!confirm('确认删除该分析记录？此操作不可撤销。')) return;
+        if (!await showConfirm('确认删除该分析记录？此操作不可撤销。', { danger: true })) return;
         try {
           const resp = await fetch(`/api/history/${btn.dataset.id}`, { method: 'DELETE' });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -1914,12 +1919,35 @@ const DEFAULT_MODELS = {
   kimi: 'moonshot-v1-8k',
 };
 
-function refreshModelSelectors(providerList) {
-  const configured = (providerList || []).filter(p => p.configured && !p.is_url);
+async function fetchConfiguredProviders() {
+  try {
+    const resp = await fetch('/api/ai-config/providers');
+    if (resp.ok) {
+      const data = await resp.json();
+      return data.providers || [];
+    }
+  } catch (e) { /* fallback */ }
+  const provs = getProviders();
+  return provs.filter(p => p.configured && !p.is_url);
+}
+
+async function refreshModelSelectors(fallbackProviderList) {
+  let configured;
+  try {
+    const resp = await fetch('/api/ai-config/providers');
+    if (resp.ok) {
+      const data = await resp.json();
+      configured = data.providers || [];
+    }
+  } catch (e) { /* fallback below */ }
+
+  if (!configured || configured.length === 0) {
+    configured = (fallbackProviderList || []).filter(p => p.configured && !p.is_url);
+  }
   if (configured.length === 0) return;
 
   const options = configured.map(p => {
-    const model = DEFAULT_MODELS[p.id] || '';
+    const model = p.default_model || DEFAULT_MODELS[p.id] || '';
     const val = `${p.id}::${model}`;
     return `<option value="${val}">${_escapeHtml(p.name)}</option>`;
   }).join('');
@@ -1998,7 +2026,7 @@ function _syncMainModelFromSettings() {
 function _escapeHtml(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function loadCvModels(configuredProviders) {
@@ -2009,7 +2037,7 @@ function loadCvModels(configuredProviders) {
   if (configuredProviders && configuredProviders.length > 0) {
     models = configuredProviders.map(p => ({
       provider: p.id,
-      model: DEFAULT_MODELS[p.id] || '',
+      model: p.default_model || DEFAULT_MODELS[p.id] || '',
       label: p.name,
     }));
   } else {
@@ -2025,7 +2053,7 @@ function loadCvModels(configuredProviders) {
   container.innerHTML = models.map(m => `
     <label class="cv-check">
       <input type="checkbox" value="${m.provider}::${m.model}" checked>
-      <span>${m.label}</span>
+      <span>${m.label}${m.model ? ' (' + _escapeHtml(m.model) + ')' : ''}</span>
     </label>
   `).join('');
 }

@@ -134,6 +134,9 @@ class BottleneckReport(BaseModel):
     rank: Optional[int] = None
     key_insights: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
+    cr3_estimate: Optional[int] = Field(None, ge=0, le=100, description="LLM 估算的 CR3 市场集中度(%)")
+    hhi_estimate: Optional[int] = Field(None, ge=0, le=10000, description="LLM 估算的 HHI 赫芬达尔指数")
+    hhi_adjustments: list[str] = Field(default_factory=list, description="HHI 一致性校验的调整记录")
 
     model_config = {"use_enum_values": True}
 
@@ -281,8 +284,8 @@ class FinalScore(BaseModel):
     quality_score: float = Field(ge=0, le=10, description="质量评分（= overall_score）")
     alpha_score: float = Field(ge=0, le=10, description="预期差评分")
     final_score: float = Field(ge=0, le=10, description="最终综合评分")
-    quality_weight: float = Field(default=0.4, description="质量权重")
-    alpha_weight: float = Field(default=0.6, description="预期差权重")
+    quality_weight: float = Field(default=0.55, description="质量权重")
+    alpha_weight: float = Field(default=0.45, description="预期差权重")
 
 
 class SupplierScorecard(BaseModel):
@@ -341,6 +344,10 @@ class ModelValidation(BaseModel):
     score: float = Field(ge=1, le=10, description="推荐评分 1-10")
     reasoning: str
     concerns: list[str] = Field(default_factory=list)
+    perspective: str = Field(default="", description="验证视角: financial/chain/sentiment/blind")
+    fatal_risk: bool = Field(default=False, description="是否触发致命风险")
+    fatal_reason: str = Field(default="", description="致命风险原因")
+    weight: float = Field(default=1.0, description="校准权重")
 
 
 class CrossValidationReport(BaseModel):
@@ -349,9 +356,14 @@ class CrossValidationReport(BaseModel):
     supplier_name: str
     ticker: str
     validations: list[ModelValidation]
-    consensus_score: float = Field(ge=1, le=10, description="多模型共识评分（平均值）")
+    consensus_score: float = Field(ge=0, le=10, description="多模型共识评分（加权）")
     consensus_reasoning: str
-    avg_score: float = Field(ge=1, le=10, description="平均评分")
+    avg_score: float = Field(ge=0, le=10, description="原始均分")
+    raw_avg: float = Field(default=0.0, description="原始均分（未去极值）")
+    trimmed_avg: float = Field(default=0.0, description="去极值均分")
+    has_fatal_risk: bool = Field(default=False, description="是否触发一票否决")
+    fatal_risks: list[str] = Field(default_factory=list, description="致命风险列表")
+    outlier_challenges: list[dict] = Field(default_factory=list, description="离群值追问记录")
 
 
 class ScreeningResult(BaseModel):
@@ -385,6 +397,7 @@ class MeetingRanking(BaseModel):
     ticker: str
     name: str
     borda_points: int = 0
+    weighted_score: float = Field(default=0.0, description="加权信心分（0-100）")
     supporter_count: int = 0
     supporters: list[str] = Field(default_factory=list, description="投票支持的角色 ID")
     opposers: list[str] = Field(default_factory=list, description="未投票的角色 ID")

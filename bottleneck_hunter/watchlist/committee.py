@@ -14,13 +14,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 from typing import AsyncGenerator
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.chain.json_utils import extract_json_object
+from bottleneck_hunter.llm_clients.factory import get_llm_for_position
 
 logger = logging.getLogger(__name__)
 
@@ -69,40 +69,6 @@ def _load_prompt(name: str) -> str:
     raise FileNotFoundError(f"Prompt 模板不存在: {path}")
 
 
-def _get_llm(provider_hint: str | None = None, position: str | None = None):
-    try:
-        from bottleneck_hunter.llm_clients.factory import create_llm
-
-        if position:
-            env_val = os.environ.get(f"DC_MODEL_{position.upper()}", "").strip()
-            if env_val and ":" in env_val:
-                p, m = env_val.split(":", 1)
-                return create_llm(p, m, temperature=0.3), p, m
-
-        if provider_hint:
-            configs = {
-                "deepseek": ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-                "qwen": ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-                "kimi": ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-                "glm": ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-            }
-            cfg = configs.get(provider_hint)
-            if cfg and os.getenv(cfg[2]):
-                return create_llm(cfg[0], cfg[1], temperature=0.3), cfg[0], cfg[1]
-
-        for provider, model, key_env in [
-            ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-            ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-            ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-            ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-        ]:
-            if os.getenv(key_env):
-                return create_llm(provider, model, temperature=0.3), provider, model
-    except Exception as e:
-        logger.warning("无法创建 LLM: %s", e)
-    return None, "", ""
-
-
 # ─────────────────────────────────────────────────────────
 # 单成员评审
 # ─────────────────────────────────────────────────────────
@@ -113,9 +79,9 @@ async def _review_single(
     context: dict,
 ) -> dict:
     """单个委员独立评审"""
-    llm, provider, model = _get_llm(member["provider_hint"], position=member.get("config_key"))
+    llm, provider, model = get_llm_for_position(position=member.get("config_key"), provider_hint=member["provider_hint"])
     if not llm:
-        llm, provider, model = _get_llm()
+        llm, provider, model = get_llm_for_position()
     if not llm:
         return {"role": member["role"], "error": "无可用 LLM", "vote": "abstain"}
 
@@ -165,9 +131,9 @@ async def _run_discussion(
     execution_plan: dict,
 ) -> dict:
     """当委员分歧过大时，触发圆桌讨论"""
-    llm, provider, model = _get_llm("deepseek", position="committee_consensus")
+    llm, provider, model = get_llm_for_position(position="committee_consensus", provider_hint="deepseek")
     if not llm:
-        llm, provider, model = _get_llm()
+        llm, provider, model = get_llm_for_position()
     if not llm:
         return {"error": "无可用 LLM 进行圆桌讨论"}
 
@@ -194,9 +160,9 @@ async def _build_consensus(
     discussion_results: dict | None = None,
 ) -> dict:
     """汇总评审意见，生成最终共识"""
-    llm, provider, model = _get_llm("deepseek", position="committee_consensus")
+    llm, provider, model = get_llm_for_position(position="committee_consensus", provider_hint="deepseek")
     if not llm:
-        llm, provider, model = _get_llm()
+        llm, provider, model = get_llm_for_position()
     if not llm:
         return _fallback_consensus(reviews)
 
@@ -274,8 +240,10 @@ async def run_committee_review(
     store: WatchlistStore,
     pending_plans: list[dict],
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """对待审执行计划逐一进行投委会评审"""
+    store = store.for_market(market)
     total = len(pending_plans)
     yield _sse("committee_start", total=total,
                message=f"投委会评审启动，共 {total} 条执行计划")
@@ -344,6 +312,18 @@ async def run_committee_review(
                 model_name=r.get("model", ""),
                 result_json=r,
             )
+            try:
+                store.record_prediction(
+                    provider=r.get("provider", ""),
+                    model=r.get("model", ""),
+                    role_context=f"committee_{role}",
+                    ticker=ticker,
+                    prediction_type="vote",
+                    prediction_value=r.get("vote", "abstain"),
+                    market=market,
+                )
+            except Exception:
+                logger.debug("record_prediction failed for committee %s", role)
 
         yield _sse("committee_reviews_done", ticker=ticker,
                    votes={role: r.get("vote", "abstain") for role, r in reviews.items()},
@@ -374,6 +354,55 @@ async def run_committee_review(
             execution_plan_id=plan_id,
             result_json=consensus,
         )
+
+        # ── P0.5 投委会 gating：按共识结论实际动作 ──
+        verdict_raw = consensus.get("final_verdict", "unknown")
+        summary_text = consensus.get("summary", "")
+        if verdict_raw == "rejected":
+            store.reject_execution(
+                plan_id, f"{store.BLOCK_MARKER_COMMITTEE} {summary_text}")
+            yield _sse("committee_gating", ticker=ticker, plan_id=plan_id,
+                       action="blocked",
+                       message=f"{ticker} 被投委会否决，已移出待确认队列")
+        elif verdict_raw == "approved_with_modifications":
+            mods: dict = {}
+            for m in consensus.get("consensus_modifications", []):
+                m_ticker = m.get("ticker")
+                if m_ticker and m_ticker != ticker:
+                    continue
+                field = m.get("field", "")
+                val = m.get("modified")
+                if field in ("shares", "target_price", "limit_price",
+                             "execution_method", "method") and val is not None:
+                    mods[field] = val
+            if mods:
+                ok = store.apply_committee_modifications(plan_id, mods)
+                if ok:
+                    yield _sse("committee_gating", ticker=ticker, plan_id=plan_id,
+                               action="modified", modifications=mods,
+                               message=f"{ticker} 已应用投委会修改: {mods}")
+
+        try:
+            participants = [
+                {"role": r.get("role", ""), "name": r.get("name", ""),
+                 "model": f"{r.get('provider', '')}/{r.get('model', '')}"}
+                for r in reviews.values()
+            ]
+            store.create_meeting_record(
+                meeting_type="committee",
+                title=f"投委会审议: {ticker} {plan.get('action', '')}",
+                participants=participants,
+                tickers_discussed=[ticker],
+                final_verdict=consensus.get("final_verdict", ""),
+                key_agreements=consensus.get("key_agreements", []),
+                key_disagreements=consensus.get("minority_opinions", []),
+                risk_warnings=consensus.get("key_risks_flagged", []),
+                result_json=consensus,
+                execution_plan_id=plan_id,
+                market=market,
+            )
+        except Exception:
+            logger.debug("create_meeting_record failed for committee %s", ticker)
 
         verdict = consensus.get("final_verdict", "unknown")
         yield _sse("committee_plan_done", ticker=ticker, plan_id=plan_id,

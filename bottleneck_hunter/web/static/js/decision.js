@@ -2,12 +2,14 @@
  * decision.js — 决策中心前端模块
  * L1 宏观 / L2 组合 / L3 战术 / L4 执行 / 投委会 / 模拟账户
  */
+import { showConfirm } from './utils/confirm.js';
 
 const DC_API = '/api/decision';
 
 const dcState = {
   overview: null,
   loading: false,
+  market: 'us_stock',
   chartAlloc: null,
   chartEquity: null,
   catalystView: 'list',
@@ -45,6 +47,8 @@ function actionBadge(action) {
     sell: ['卖出', 'dc-badge-sell'],
     reduce: ['减仓', 'dc-badge-sell'],
     hold: ['持有', 'dc-badge-hold'],
+    wait_for_pullback: ['等待回调', 'dc-badge-hold'],
+    wait_for_catalyst: ['等待催化', 'dc-badge-hold'],
   };
   const [label, cls] = map[action] || [action, 'dc-badge'];
   return `<span class="dc-badge ${cls}">${escDC(label)}</span>`;
@@ -107,19 +111,35 @@ async function dcSSE(url, { onEvent, onDone, onError, method = 'POST', body = nu
 function showProgress(text) {
   const el = document.getElementById('dc-progress');
   if (el) el.style.display = '';
+  dcState.progressStart = Date.now();
+  if (dcState.progressTimer) clearInterval(dcState.progressTimer);
+  dcState.progressTimer = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - dcState.progressStart) / 1000);
+    const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const s = String(elapsed % 60).padStart(2, '0');
+    const timerEl = document.getElementById('dc-progress-timer');
+    if (timerEl) timerEl.textContent = `${m}:${s}`;
+  }, 1000);
   setProgress(0, text);
 }
 
 function hideProgress() {
   const el = document.getElementById('dc-progress');
   if (el) el.style.display = 'none';
+  if (dcState.progressTimer) {
+    clearInterval(dcState.progressTimer);
+    dcState.progressTimer = null;
+  }
 }
 
 function setProgress(pct, text) {
+  const val = Math.min(100, Math.round(pct));
   const fill = document.getElementById('dc-progress-fill');
   const txt = document.getElementById('dc-progress-text');
-  if (fill) fill.style.width = `${Math.min(100, pct)}%`;
-  if (txt) txt.textContent = text || '';
+  const pctEl = document.getElementById('dc-progress-pct');
+  if (fill) fill.style.width = `${val}%`;
+  if (txt && text) txt.textContent = text;
+  if (pctEl) pctEl.textContent = `${val}%`;
 }
 
 /* ── 数据加载 ─────────────────────────────────────── */
@@ -128,7 +148,7 @@ async function loadOverview() {
   if (dcState.loading) return;
   dcState.loading = true;
   try {
-    const data = await dcFetch('/overview');
+    const data = await dcFetch(`/overview?market=${encodeURIComponent(dcState.market)}`);
     dcState.overview = data;
     renderAll(data);
   } catch (e) {
@@ -142,9 +162,11 @@ function renderAll(data) {
   renderStrategic(data.strategic_plan);
   renderTactical(data.tactical_plans || []);
   renderPending(data.pending_executions || []);
-  renderAccount(data.account, data.positions || []);
+  loadBlocked();
   renderCatalysts(data.upcoming_catalysts || []);
   loadRiskDashboard();
+  loadMeetings();
+  loadModelRatings();
 }
 
 /* ── L1 宏观 ──────────────────────────────────────── */
@@ -201,9 +223,11 @@ function renderMacro(macro) {
 function renderStrategic(plan) {
   const empty = document.getElementById('dc-strategic-empty');
   const chartEl = document.getElementById('dc-alloc-chart');
+  const parent = chartEl?.parentElement;
   if (!plan) {
     if (empty) empty.style.display = '';
     if (chartEl) chartEl.innerHTML = '';
+    if (parent) { const old = parent.querySelector('.dc-strategic-info'); if (old) old.remove(); }
     return;
   }
   if (empty) empty.style.display = 'none';
@@ -214,16 +238,25 @@ function renderStrategic(plan) {
   }
   rj = rj || {};
 
-  const alloc = rj.target_allocation || [];
-  if (chartEl && typeof echarts !== 'undefined' && alloc.length > 0) {
+  let ss = plan.stock_selection || rj.stock_selection;
+  if (typeof ss === 'string') { try { ss = JSON.parse(ss); } catch { ss = {}; } }
+  ss = ss || {};
+  const core = Array.isArray(ss.core_holdings) ? ss.core_holdings : [];
+  const tactical = Array.isArray(ss.tactical_holdings) ? ss.tactical_holdings : [];
+  const holdings = core.concat(tactical).filter(h => h.ticker && h.target_weight_pct > 0);
+
+  const alloc = rj.target_allocation || {};
+  const stance = rj.overall_stance || rj.stance || '';
+
+  if (chartEl && typeof echarts !== 'undefined' && holdings.length > 0) {
     const chart = dcState.chartAlloc || echarts.init(chartEl);
     dcState.chartAlloc = chart;
-    const pieData = alloc.map(a => ({
-      name: a.ticker || a.name,
-      value: Math.round((a.weight || 0) * 100),
+    const pieData = holdings.map(h => ({
+      name: h.ticker,
+      value: h.target_weight_pct,
     }));
-    const cashWeight = 100 - pieData.reduce((s, d) => s + d.value, 0);
-    if (cashWeight > 0) pieData.push({ name: '现金', value: cashWeight });
+    const usedPct = pieData.reduce((s, d) => s + d.value, 0);
+    if (usedPct < 100) pieData.push({ name: '现金/其他', value: Math.round(100 - usedPct) });
 
     chart.setOption({
       tooltip: { trigger: 'item', formatter: '{b}: {c}%' },
@@ -234,19 +267,52 @@ function renderStrategic(plan) {
         data: pieData,
       }],
     });
+  } else if (chartEl) {
+    chartEl.innerHTML = '';
   }
 
-  const parent = chartEl?.parentElement;
-  if (parent && alloc.length > 0) {
-    let existing = parent.querySelector('.dc-alloc-list');
-    if (!existing) {
-      existing = document.createElement('ul');
-      existing.className = 'dc-alloc-list';
-      parent.appendChild(existing);
+  if (parent) {
+    let infoEl = parent.querySelector('.dc-strategic-info');
+    if (!infoEl) {
+      infoEl = document.createElement('div');
+      infoEl.className = 'dc-strategic-info';
+      parent.appendChild(infoEl);
     }
-    existing.innerHTML = alloc.map(a =>
-      `<li><span>${escDC(a.ticker)} <small>${escDC(a.action || '')}</small></span><span>${Math.round((a.weight || 0) * 100)}%</span></li>`
-    ).join('');
+
+    let html = '';
+    if (stance) {
+      const cls = stance.includes('防御') ? 'dc-badge-sell' : stance.includes('进攻') ? 'dc-badge-buy' : 'dc-badge-info';
+      html += `<div style="margin-bottom:8px"><span class="dc-badge ${cls}">${escDC(stance)}</span></div>`;
+    }
+
+    if (typeof alloc === 'object' && !Array.isArray(alloc) && Object.keys(alloc).length > 0) {
+      const labels = { equity_pct: '权益', cash_pct: '现金', hedge_pct: '对冲', bond_pct: '债券' };
+      html += '<div class="dc-alloc-summary">';
+      for (const [k, v] of Object.entries(alloc)) {
+        if (typeof v === 'number') html += `<span class="dc-alloc-tag">${escDC(labels[k] || k)} ${v}%</span>`;
+      }
+      html += '</div>';
+    }
+
+    if (holdings.length > 0) {
+      html += '<ul class="dc-alloc-list">';
+      for (const h of holdings) {
+        const tag = core.includes(h) ? '核心' : '战术';
+        html += `<li><span>${escDC(h.ticker)} <small class="text-muted">${escDC(tag)}</small></span><span>${h.target_weight_pct}%</span></li>`;
+      }
+      html += '</ul>';
+    }
+
+    if (!holdings.length && !stance) {
+      const text = rj.strategy_text || rj.summary || '';
+      if (text) html += `<p class="dc-strategic-text">${escDC(text)}</p>`;
+      else html += '<p class="dc-empty-hint">组合策略数据格式异常</p>';
+    }
+
+    const ts = plan.created_at || '';
+    if (ts) html += `<div style="font-size:11px;color:var(--muted);margin-top:8px">更新于 ${escDC(ts.replace('T', ' ').slice(0, 16))}</div>`;
+
+    infoEl.innerHTML = html;
   }
 }
 
@@ -322,10 +388,14 @@ function renderPending(executions) {
     const shares = ex.shares || rj.shares || '--';
     const price = ex.target_price || rj.target_price || '--';
     const reasoning = rj.reasoning || '';
+    let flags = '';
+    if (rj.committee_modified) flags += '<span class="dc-pending-flag dc-flag-committee">投委会调整</span>';
+    if (rj.auto_repaired) flags += '<span class="dc-pending-flag dc-flag-repair">自修正</span>';
+    if (rj.auto_adjusted) flags += '<span class="dc-pending-flag dc-flag-adjust">已缩量</span>';
 
     return `<div class="dc-pending-item" data-plan-id="${escDC(ex.id)}">
       <div class="dc-pending-header">
-        <span class="dc-pending-ticker">${escDC(ex.ticker)} ${actionBadge(action)}</span>
+        <span class="dc-pending-ticker">${escDC(ex.ticker)} ${actionBadge(action)} ${flags}</span>
         <span style="font-size:12px;color:var(--muted)">${shares}股 @ ${price !== '--' ? fmtNum(Number(price), 2) : '--'}</span>
       </div>
       ${reasoning ? `<div class="dc-pending-detail">${escDC(reasoning)}</div>` : ''}
@@ -335,11 +405,107 @@ function renderPending(executions) {
       </div>
     </div>`;
   }).join('');
+
+  list.innerHTML += `<div style="text-align:right;padding:8px 4px 0">
+    <button class="dc-btn-reject" id="dc-clear-all-pending" style="font-size:12px">清空所有操作</button>
+  </div>`;
+}
+
+/* ── 已拦截区（被系统/投委会拦截）──────────────────── */
+
+async function loadBlocked() {
+  const container = document.getElementById('dc-blocked-section');
+  if (!container) return;
+  let executions = [];
+  try {
+    const data = await dcFetch(`/executions/blocked?market=${encodeURIComponent(dcState.market)}`);
+    executions = data.executions || [];
+  } catch { executions = []; }
+  renderBlocked(executions);
+}
+
+function renderBlocked(executions) {
+  const container = document.getElementById('dc-blocked-section');
+  if (!container) return;
+
+  if (!executions.length) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+    return;
+  }
+  container.style.display = '';
+
+  const items = executions.map(ex => {
+    let rj = ex.result_json;
+    if (typeof rj === 'string') { try { rj = JSON.parse(rj); } catch { rj = {}; } }
+    rj = rj || {};
+    const action = ex.action || rj.action || '--';
+    const shares = ex.shares || rj.shares || '--';
+    const price = ex.target_price || rj.target_price || '--';
+    const reason = ex.rejection_reason || '';
+    const isCommittee = reason.indexOf('[投委会否决]') === 0;
+    const tag = isCommittee
+      ? '<span class="dc-blocked-tag dc-blocked-tag--committee">投委会否决</span>'
+      : '<span class="dc-blocked-tag dc-blocked-tag--system">不合规拦截</span>';
+    const cleanReason = reason.replace(/^\[(系统拦截|投委会否决)\]\s*/, '');
+    return `<div class="dc-blocked-item" data-plan-id="${escDC(ex.id)}">
+      <div class="dc-pending-header">
+        <span class="dc-pending-ticker">${escDC(ex.ticker)} ${actionBadge(action)} ${tag}</span>
+        <span style="font-size:12px;color:var(--muted)">${shares}股 @ ${price !== '--' ? fmtNum(Number(price), 2) : '--'}</span>
+      </div>
+      <div class="dc-blocked-reason">${escDC(cleanReason)}</div>
+      <div class="dc-pending-actions">
+        <button class="dc-btn-restore" data-action="restore" data-plan-id="${escDC(ex.id)}">恢复到待确认</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="dc-card-header" style="cursor:pointer" id="dc-blocked-toggle">
+      <h3>已拦截操作 <span class="dc-card-toggle">▼</span></h3>
+      <span class="dc-badge dc-badge-danger">${executions.length}</span>
+    </div>
+    <div class="dc-card-body" id="dc-blocked-list">${items}</div>`;
+}
+
+async function handleBlockedAction(e) {
+  const btn = e.target.closest('[data-action="restore"]');
+  if (!btn) return;
+  const planId = btn.dataset.planId;
+  btn.disabled = true;
+  btn.textContent = '恢复中...';
+  try {
+    await dcFetch(`/executions/${encodeURIComponent(planId)}/restore`, { method: 'POST' });
+    await loadOverview();
+    await loadBlocked();
+  } catch (err) {
+    alert('恢复失败: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = '恢复到待确认';
+  }
 }
 
 /* ── 确认 / 拒绝 ──────────────────────────────────── */
 
 async function handlePendingAction(e) {
+  /* 清空所有操作 */
+  const clearBtn = e.target.closest('#dc-clear-all-pending');
+  if (clearBtn) {
+    if (!confirm('确定清空所有待执行操作？此操作不可撤销。')) return;
+    clearBtn.disabled = true;
+    clearBtn.textContent = '清空中...';
+    try {
+      const res = await dcFetch('/executions/clear-all', { method: 'POST' });
+      alert(`已清空 ${res.cleared} 条操作`);
+      await loadOverview();
+    } catch (err) {
+      alert('清空失败: ' + err.message);
+      clearBtn.disabled = false;
+      clearBtn.textContent = '清空所有操作';
+    }
+    return;
+  }
+
   const btn = e.target.closest('[data-action]');
   if (!btn) return;
   const planId = btn.dataset.planId;
@@ -350,7 +516,7 @@ async function handlePendingAction(e) {
 
   try {
     if (action === 'confirm') {
-      const res = await dcFetch(`/executions/${planId}/confirm`, { method: 'POST' });
+      const res = await dcFetch(`/executions/${encodeURIComponent(planId)}/confirm`, { method: 'POST' });
       const trade = res.trade || {};
       const msg = trade.error
         ? `执行失败: ${trade.error}`
@@ -358,107 +524,17 @@ async function handlePendingAction(e) {
       alert(msg);
     } else {
       const reason = prompt('拒绝原因（可选）:') || '';
-      await dcFetch(`/executions/${planId}/reject`, {
+      await dcFetch(`/executions/${encodeURIComponent(planId)}/reject`, {
         method: 'POST',
         body: JSON.stringify({ reason }),
       });
     }
     await loadOverview();
+    if (window.appState) window.appState.tradingDirty = true;
   } catch (e) {
     alert('操作失败: ' + e.message);
     btn.disabled = false;
     btn.textContent = action === 'confirm' ? '确认执行' : '拒绝';
-  }
-}
-
-/* ── 模拟账户 ──────────────────────────────────────── */
-
-function renderAccount(account, positions) {
-  if (!account) return;
-  const el = (id) => document.getElementById(id);
-
-  el('dc-equity') && (el('dc-equity').textContent = fmtNum(account.total_equity, 0));
-  el('dc-cash') && (el('dc-cash').textContent = fmtNum(account.cash_balance, 0));
-  const retEl = el('dc-return');
-  if (retEl) {
-    const ret = account.total_return_pct || 0;
-    retEl.textContent = (ret >= 0 ? '+' : '') + fmtNum(ret, 2) + '%';
-    retEl.className = `dc-stat-value ${pnlClass(ret)}`;
-  }
-  el('dc-winrate') && (el('dc-winrate').textContent = fmtNum(account.win_rate || 0, 1) + '%');
-
-  renderPositions(positions);
-  loadEquityChart();
-}
-
-function renderPositions(positions) {
-  const tbody = document.getElementById('dc-positions-body');
-  const empty = document.getElementById('dc-positions-empty');
-  if (!tbody) return;
-
-  if (!positions || positions.length === 0) {
-    tbody.innerHTML = '';
-    if (empty) empty.style.display = '';
-    return;
-  }
-  if (empty) empty.style.display = 'none';
-
-  tbody.innerHTML = positions.map(p => {
-    const pnl = p.unrealized_pnl || 0;
-    const weight = p.weight_pct || 0;
-    return `<tr>
-      <td><strong>${escDC(p.ticker)}</strong></td>
-      <td>${fmtNum(p.shares, 0)}</td>
-      <td>${fmtNum(p.avg_cost, 2)}</td>
-      <td class="${pnlClass(pnl)}">${pnl >= 0 ? '+' : ''}${fmtNum(pnl, 0)}</td>
-      <td>${fmtNum(weight, 1)}%</td>
-    </tr>`;
-  }).join('');
-}
-
-async function loadEquityChart() {
-  const chartEl = document.getElementById('dc-equity-chart');
-  if (!chartEl || typeof echarts === 'undefined') return;
-
-  try {
-    const data = await dcFetch('/account/equity-history');
-    const history = data.history || [];
-    if (history.length === 0) {
-      chartEl.innerHTML = '<p style="text-align:center;color:var(--muted);font-size:12px;padding-top:40px">暂无交易记录</p>';
-      return;
-    }
-
-    const chart = dcState.chartEquity || echarts.init(chartEl);
-    dcState.chartEquity = chart;
-
-    chart.setOption({
-      grid: { top: 10, right: 10, bottom: 24, left: 50 },
-      xAxis: {
-        type: 'category',
-        data: history.map(h => h.date.slice(5)),
-        axisLabel: { fontSize: 10, color: '#888' },
-        axisLine: { lineStyle: { color: '#333' } },
-      },
-      yAxis: {
-        type: 'value',
-        axisLabel: { fontSize: 10, color: '#888' },
-        splitLine: { lineStyle: { color: '#222' } },
-      },
-      series: [{
-        type: 'line',
-        data: history.map(h => h.equity),
-        smooth: true,
-        symbol: 'none',
-        lineStyle: { width: 2 },
-        areaStyle: { opacity: 0.1 },
-      }],
-      tooltip: {
-        trigger: 'axis',
-        formatter: p => `${p[0].name}<br/>权益: ${fmtNum(p[0].value, 0)}`,
-      },
-    });
-  } catch (e) {
-    console.error('Failed to load equity chart:', e);
   }
 }
 
@@ -525,7 +601,7 @@ async function runDaily() {
   const totalSteps = 5;
 
   await dcSSE('/daily', {
-    body: { scope: 'full' },
+    body: { scope: 'full', market: dcState.market },
     onEvent(data) {
       const evt = data.event || '';
       const msg = data.message || data.error || evt;
@@ -551,11 +627,12 @@ async function runDaily() {
 
 async function runFullRefresh() {
   if (dcState.loading) return;
-  if (!confirm('全量刷新将重新运行 L1→L2→L3→L4→投委会全流程，确认继续？')) return;
+  if (!await showConfirm('全量刷新将重新运行 L1→L2→L3→L4→投委会全流程，确认继续？')) return;
   dcState.loading = true;
   let step = 0;
 
   await dcSSE('/full-refresh', {
+    body: { market: dcState.market },
     onEvent(data) {
       const evt = data.event || '';
       const msg = data.message || data.error || evt;
@@ -584,6 +661,7 @@ async function scanCatalysts() {
   dcState.loading = true;
 
   await dcSSE('/catalysts/scan', {
+    body: { market: dcState.market },
     onEvent(data) {
       const evt = data.event || '';
       const msg = data.message || data.error || '扫描中...';
@@ -613,9 +691,24 @@ export function initDecision() {
   document.getElementById('dc-btn-refresh')?.addEventListener('click', runFullRefresh);
   document.getElementById('dc-btn-catalysts')?.addEventListener('click', scanCatalysts);
   document.getElementById('dc-btn-ai-config')?.addEventListener('click', openAIConfig);
-  document.getElementById('dc-btn-review')?.addEventListener('click', openReviewPanel);
-  document.getElementById('dc-btn-performance')?.addEventListener('click', openPerformance);
   document.getElementById('dc-btn-compare')?.addEventListener('click', openComparePanel);
+
+  // 左列卡片折叠
+  document.querySelectorAll('.dc-col-main .dc-card-header').forEach(header => {
+    header.addEventListener('click', () => {
+      header.closest('.dc-card').classList.toggle('collapsed');
+    });
+  });
+
+  // 市场切换
+  const marketSel = document.getElementById('dc-market-select');
+  if (marketSel) {
+    marketSel.addEventListener('change', (e) => {
+      dcState.market = e.target.value;
+      dcState.overview = null;
+      loadOverview();
+    });
+  }
 
   // 催化剂视图切换
   document.getElementById('dc-catalyst-list-btn')?.addEventListener('click', () => {
@@ -632,21 +725,6 @@ export function initDecision() {
     loadCatalystCalendar();
   });
 
-  document.getElementById('dc-review-close')?.addEventListener('click', closeReviewPanel);
-  document.getElementById('dc-review-modal-close')?.addEventListener('click', closeReviewPanel);
-  document.getElementById('dc-btn-batch-review')?.addEventListener('click', runBatchReview);
-
-  document.getElementById('dc-perf-close')?.addEventListener('click', closePerformance);
-  document.getElementById('dc-perf-modal-close')?.addEventListener('click', closePerformance);
-  document.getElementById('dc-btn-gen-tuning')?.addEventListener('click', generateTuning);
-
-  const reviewModal = document.getElementById('dc-review-modal');
-  if (reviewModal) {
-    reviewModal.addEventListener('click', (e) => {
-      if (e.target.classList.contains('modal-overlay')) closeReviewPanel();
-    });
-  }
-
   document.getElementById('dc-ai-config-close')?.addEventListener('click', closeAIConfig);
   document.getElementById('dc-ai-config-cancel')?.addEventListener('click', closeAIConfig);
   document.getElementById('dc-ai-config-save')?.addEventListener('click', saveAIConfig);
@@ -658,14 +736,21 @@ export function initDecision() {
     });
   }
 
-  const perfModal = document.getElementById('dc-perf-modal');
-  if (perfModal) {
-    perfModal.addEventListener('click', (e) => {
-      if (e.target.classList.contains('modal-overlay')) closePerformance();
-    });
-  }
-
   document.getElementById('dc-pending-list')?.addEventListener('click', handlePendingAction);
+  document.getElementById('dc-blocked-section')?.addEventListener('click', handleBlockedAction);
+
+  // 会议类型筛选
+  document.getElementById('dc-meeting-type')?.addEventListener('change', () => loadMeetings());
+
+  // 模型校准按钮
+  document.getElementById('dc-btn-calibrate')?.addEventListener('click', runCalibration);
+
+  // 会议详情抽屉
+  const meetingDrawer = document.getElementById('dc-meeting-drawer');
+  document.getElementById('dc-meeting-drawer-close')?.addEventListener('click', closeMeetingDrawer);
+  meetingDrawer?.addEventListener('click', (e) => {
+    if (e.target === meetingDrawer) closeMeetingDrawer();
+  });
 
   const navBtn = document.querySelector('.nav-btn[data-view="trading"]');
   if (navBtn) {
@@ -679,7 +764,6 @@ export function initDecision() {
     dcState.chartAlloc?.resize();
     dcState.chartEquity?.resize();
     dcState.riskChart?.resize();
-    perfState.equityChart?.resize();
   });
 }
 
@@ -734,36 +818,76 @@ let aiConfigData = null;
 function openAIConfig() {
   document.getElementById('dc-ai-config-modal').style.display = '';
   document.getElementById('dc-ai-status').textContent = '';
+  _initAIConfigTabs();
   loadAIConfig();
+  loadCustomProviders();
 }
 
 function closeAIConfig() {
   document.getElementById('dc-ai-config-modal').style.display = 'none';
 }
 
-async function loadAIConfig() {
-  const decList = document.getElementById('dc-ai-decision-list');
-  const comList = document.getElementById('dc-ai-committee-list');
-  if (!decList || !comList) return;
+function _initAIConfigTabs() {
+  document.querySelectorAll('.dc-ai-tab').forEach(tab => {
+    tab.onclick = () => {
+      document.querySelectorAll('.dc-ai-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.dc-ai-tab-content').forEach(c => {
+        c.style.display = 'none';
+        c.classList.remove('active');
+      });
+      tab.classList.add('active');
+      const target = document.getElementById(`dc-ai-tab-${tab.dataset.tab}`);
+      if (target) { target.style.display = ''; target.classList.add('active'); }
+    };
+  });
 
-  decList.innerHTML = '<p style="color:var(--muted);font-size:12px">加载中...</p>';
-  comList.innerHTML = '';
+  document.querySelectorAll('.dc-ai-collapsible').forEach(h3 => {
+    h3.onclick = () => {
+      const collapsed = h3.dataset.collapsed === 'true';
+      const body = h3.nextElementSibling;
+      const chevron = h3.querySelector('.dc-ai-chevron');
+      if (collapsed) {
+        body.style.display = '';
+        h3.dataset.collapsed = 'false';
+        if (chevron) chevron.textContent = '▾';
+      } else {
+        body.style.display = 'none';
+        h3.dataset.collapsed = 'true';
+        if (chevron) chevron.textContent = '▸';
+      }
+    };
+  });
+}
+
+const _GROUP_CONTAINERS = {
+  decision: 'dc-ai-decision-list',
+  committee: 'dc-ai-committee-list',
+  pipeline: 'dc-ai-pipeline-list',
+  watchlist: 'dc-ai-watchlist-list',
+};
+
+async function loadAIConfig() {
+  const firstContainer = document.getElementById('dc-ai-decision-list');
+  if (!firstContainer) return;
+  firstContainer.innerHTML = '<p style="color:var(--muted);font-size:12px">加载中...</p>';
 
   try {
     const res = await fetch(`${DC_API}/ai-config`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     aiConfigData = await res.json();
 
-    const decision = aiConfigData.positions.filter(p => p.group === 'decision');
-    const committee = aiConfigData.positions.filter(p => p.group === 'committee');
     const providers = aiConfigData.available_providers || [];
 
-    decList.innerHTML = decision.map(p => renderAIConfigRow(p, providers)).join('');
-    comList.innerHTML = committee.map(p => renderAIConfigRow(p, providers)).join('');
+    for (const [group, containerId] of Object.entries(_GROUP_CONTAINERS)) {
+      const el = document.getElementById(containerId);
+      if (!el) continue;
+      const positions = aiConfigData.positions.filter(p => p.group === group);
+      el.innerHTML = positions.map(p => renderAIConfigRow(p, providers)).join('');
+    }
 
     bindAIConfigEvents();
   } catch (e) {
-    decList.innerHTML = `<p style="color:var(--danger);font-size:12px">加载失败: ${e.message}</p>`;
+    firstContainer.innerHTML = `<p style="color:var(--danger);font-size:12px">加载失败: ${e.message}</p>`;
   }
 }
 
@@ -772,12 +896,26 @@ function renderAIConfigRow(pos, providers) {
   const currentModel = pos.configured_model || '';
   const isCustom = !!currentProvider;
 
-  const providerOptions = providers
-    .filter(p => p.configured)
-    .map(p => {
+  const builtIn = providers.filter(p => !p.is_custom && p.configured);
+  const custom = providers.filter(p => p.is_custom);
+
+  let providerOptions = '';
+  if (builtIn.length) {
+    providerOptions += `<optgroup label="内置 Provider">`;
+    providerOptions += builtIn.map(p => {
       const sel = (currentProvider === p.id) ? 'selected' : '';
       return `<option value="${escDC(p.id)}" ${sel}>${escDC(p.name)}</option>`;
     }).join('');
+    providerOptions += `</optgroup>`;
+  }
+  if (custom.length) {
+    providerOptions += `<optgroup label="自定义端点">`;
+    providerOptions += custom.map(p => {
+      const sel = (currentProvider === p.id) ? 'selected' : '';
+      return `<option value="${escDC(p.id)}" ${sel}>${escDC(p.name)}</option>`;
+    }).join('');
+    providerOptions += `</optgroup>`;
+  }
 
   const displayModel = currentModel || pos.default_model;
   const placeholder = `默认: ${pos.default_provider}/${pos.default_model}`;
@@ -912,386 +1050,150 @@ async function saveAIConfig() {
   }
 }
 
-/* ── 复盘面板 ────────────────────────────────────────── */
+/* ── 自定义端点管理 ──────────────────────────────────── */
 
-function openReviewPanel() {
-  document.getElementById('dc-review-modal').style.display = '';
-  document.getElementById('dc-review-status').textContent = '';
-  loadReviewData();
-}
+async function loadCustomProviders() {
+  const list = document.getElementById('dc-ai-custom-list');
+  if (!list) return;
+  list.innerHTML = '<p style="color:var(--muted);font-size:12px">加载中...</p>';
 
-function closeReviewPanel() {
-  document.getElementById('dc-review-modal').style.display = 'none';
-}
-
-async function loadReviewData() {
-  await Promise.all([loadReviews(), loadExperienceCards(), loadFeedbackHistory()]);
-}
-
-async function loadReviews() {
-  const el = document.getElementById('dc-review-list');
-  if (!el) return;
   try {
-    const data = await dcFetch('/reviews?limit=20');
-    const reviews = data.reviews || [];
-    if (reviews.length === 0) {
-      el.innerHTML = '<p class="text-muted">暂无复盘记录。执行卖出交易后可使用"批量复盘"功能。</p>';
+    const res = await fetch('/api/custom-providers');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const providers = data.providers || [];
+
+    if (!providers.length) {
+      list.innerHTML = '<p class="dc-ai-empty-hint">暂无自定义端点</p>';
       return;
     }
-    el.innerHTML = reviews.map(r => {
-      const rj = r.result_json || {};
-      const right = (rj.what_went_right || []).map(s => `<li>${escDC(s)}</li>`).join('');
-      const wrong = (rj.what_went_wrong || []).map(s => `<li>${escDC(s)}</li>`).join('');
-      const lessons = (rj.key_lessons || []).map(s => `<li>${escDC(s)}</li>`).join('');
-      const score = rj.trade_quality_score || '--';
-      const pnlCls = r.return_pct > 0 ? 'dc-pnl-pos' : r.return_pct < 0 ? 'dc-pnl-neg' : 'dc-pnl-zero';
-      return `
-        <div class="dc-review-item">
-          <div class="dc-review-header">
-            <strong>${escDC(r.ticker)}</strong>
-            <span class="${pnlCls}">${r.return_pct > 0 ? '+' : ''}${(r.return_pct || 0).toFixed(1)}%</span>
-            <span class="dc-review-score">质量 ${score}/10</span>
-            <span class="text-muted">${(r.created_at || '').slice(0, 10)}</span>
-          </div>
-          <div class="dc-review-body">
-            ${right ? `<div class="dc-review-section"><strong>正确判断</strong><ul>${right}</ul></div>` : ''}
-            ${wrong ? `<div class="dc-review-section"><strong>不足之处</strong><ul>${wrong}</ul></div>` : ''}
-            ${lessons ? `<div class="dc-review-section"><strong>经验教训</strong><ul>${lessons}</ul></div>` : ''}
-          </div>
-        </div>`;
-    }).join('');
+
+    list.innerHTML = providers.map(p => `
+      <div class="dc-ai-custom-card" data-pid="${escDC(p.provider_id)}">
+        <div class="dc-ai-custom-info">
+          <strong>${escDC(p.display_name)}</strong>
+          <span class="dc-ai-custom-url">${escDC(p.base_url)}</span>
+          <span class="dc-ai-custom-model">默认模型: ${escDC(p.default_model)}</span>
+          ${p.api_key_hint ? `<span class="dc-ai-custom-key-hint">KEY: ${escDC(p.api_key_hint)}</span>` : ''}
+        </div>
+        <div class="dc-ai-custom-actions">
+          <button class="btn btn-sm btn-secondary dc-ai-custom-test-btn" data-pid="${escDC(p.provider_id)}">测试</button>
+          <button class="btn btn-sm btn-secondary dc-ai-custom-edit-btn" data-pid="${escDC(p.provider_id)}"
+                  data-name="${escDC(p.display_name)}" data-url="${escDC(p.base_url)}"
+                  data-model="${escDC(p.default_model)}">编辑</button>
+          <button class="btn btn-sm btn-danger dc-ai-custom-del-btn" data-pid="${escDC(p.provider_id)}">删除</button>
+        </div>
+      </div>
+    `).join('');
+
+    _bindCustomProviderEvents();
   } catch (e) {
-    el.innerHTML = `<p class="text-muted">加载失败: ${escDC(e.message)}</p>`;
+    list.innerHTML = `<p style="color:var(--danger);font-size:12px">加载失败: ${e.message}</p>`;
   }
 }
 
-async function loadExperienceCards() {
-  const el = document.getElementById('dc-experience-list');
-  if (!el) return;
-  try {
-    const data = await dcFetch('/experience?limit=20');
-    const cards = data.cards || [];
-    if (cards.length === 0) {
-      el.innerHTML = '<p class="text-muted">暂无经验卡片。完成交易复盘后会自动生成。</p>';
-      return;
-    }
-    el.innerHTML = cards.map(c => {
-      const scopeLabel = { global: '全局', sector: '行业', ticker: '个股' }[c.scope] || c.scope;
-      const catLabel = { pattern: '模式', lesson: '教训', rule: '规则' }[c.category] || c.category;
-      return `
-        <div class="dc-exp-card">
-          <div class="dc-exp-header">
-            <span class="dc-exp-badge">${escDC(scopeLabel)}</span>
-            ${c.scope_key ? `<span class="dc-exp-scope-key">${escDC(c.scope_key)}</span>` : ''}
-            <span class="dc-exp-badge dc-exp-cat">${escDC(catLabel)}</span>
-            <span class="dc-exp-confidence">置信度 ${((c.confidence || 0) * 100).toFixed(0)}%</span>
-            <span class="text-muted">应用 ${c.applied_count || 0} 次</span>
-            <button class="dc-exp-delete" data-card-id="${escDC(c.id)}" title="删除">✕</button>
-          </div>
-          <div class="dc-exp-title">${escDC(c.title)}</div>
-          <div class="dc-exp-content">${escDC(c.content)}</div>
-        </div>`;
-    }).join('');
+function _bindCustomProviderEvents() {
+  document.querySelectorAll('.dc-ai-custom-test-btn').forEach(btn => {
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = '...';
+      try {
+        const res = await fetch(`/api/custom-providers/${btn.dataset.pid}/test`, { method: 'POST' });
+        const data = await res.json();
+        btn.textContent = data.ok ? '✓' : '✗';
+        btn.title = data.ok ? '连接成功' : (data.error || '失败');
+      } catch (e) { btn.textContent = '✗'; btn.title = e.message; }
+      setTimeout(() => { btn.disabled = false; btn.textContent = '测试'; }, 2000);
+    };
+  });
 
-    el.querySelectorAll('.dc-exp-delete').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const cardId = btn.dataset.cardId;
-        if (!confirm('确定删除这张经验卡片？')) return;
-        try {
-          await fetch(`${DC_API}/experience/${cardId}`, { method: 'DELETE' });
-          await loadExperienceCards();
-        } catch (e) { /* ignore */ }
-      });
-    });
-  } catch (e) {
-    el.innerHTML = `<p class="text-muted">加载失败: ${escDC(e.message)}</p>`;
-  }
-}
+  document.querySelectorAll('.dc-ai-custom-edit-btn').forEach(btn => {
+    btn.onclick = () => {
+      const form = document.getElementById('dc-ai-custom-form');
+      document.getElementById('dc-ai-custom-edit-id').value = btn.dataset.pid;
+      document.getElementById('dc-ai-custom-id').value = btn.dataset.pid;
+      document.getElementById('dc-ai-custom-id').disabled = true;
+      document.getElementById('dc-ai-custom-name').value = btn.dataset.name;
+      document.getElementById('dc-ai-custom-url').value = btn.dataset.url;
+      document.getElementById('dc-ai-custom-key').value = '';
+      document.getElementById('dc-ai-custom-model').value = btn.dataset.model;
+      form.style.display = '';
+    };
+  });
 
-async function loadFeedbackHistory() {
-  const el = document.getElementById('dc-feedback-list');
-  if (!el) return;
-  try {
-    const data = await dcFetch('/feedback?limit=20');
-    const feedback = data.feedback || [];
-    if (feedback.length === 0) {
-      el.innerHTML = '<p class="text-muted">暂无交易反馈记录。</p>';
-      return;
-    }
-    let html = `<table class="dc-table"><thead><tr>
-      <th>时间</th><th>股票</th><th>类型</th><th>原因</th>
-    </tr></thead><tbody>`;
-    for (const f of feedback) {
-      const typeLabel = f.feedback_type === 'rejection' ? '否决' : f.feedback_type === 'confirmation' ? '确认' : f.feedback_type;
-      html += `<tr>
-        <td>${(f.created_at || '').slice(0, 10)}</td>
-        <td><strong>${escDC(f.ticker)}</strong></td>
-        <td>${escDC(typeLabel)}</td>
-        <td>${escDC(f.reason || f.user_note || '--')}</td>
-      </tr>`;
-    }
-    html += '</tbody></table>';
-    el.innerHTML = html;
-  } catch (e) {
-    el.innerHTML = `<p class="text-muted">加载失败: ${escDC(e.message)}</p>`;
-  }
-}
-
-async function runBatchReview() {
-  const btn = document.getElementById('dc-btn-batch-review');
-  const statusEl = document.getElementById('dc-review-status');
-  if (!btn || !statusEl) return;
-
-  btn.disabled = true;
-  statusEl.textContent = '正在复盘...';
-  statusEl.className = 'dc-review-status';
-
-  try {
-    await dcSSE('/reviews/run', {
-      onEvent(evt) {
-        const d = typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
-        if (d.message) statusEl.textContent = d.message;
-      },
-      onDone() {
-        statusEl.textContent = '复盘完成';
-        statusEl.className = 'dc-review-status success';
-        loadReviewData();
-      },
-      onError(err) {
-        statusEl.textContent = `复盘失败: ${err}`;
-        statusEl.className = 'dc-review-status error';
-      },
-    });
-  } catch (e) {
-    statusEl.textContent = `复盘失败: ${e.message}`;
-    statusEl.className = 'dc-review-status error';
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-/* ── 绩效报告 ────────────────────────────────────── */
-
-let perfState = { equityChart: null };
-
-function openPerformance() {
-  document.getElementById('dc-perf-modal').style.display = '';
-  loadPerformanceData();
-}
-
-function closePerformance() {
-  document.getElementById('dc-perf-modal').style.display = 'none';
-}
-
-async function loadPerformanceData() {
-  try {
-    const [perfResp, monthlyResp, tickersResp] = await Promise.all([
-      dcFetch('/performance'),
-      dcFetch('/performance/monthly?months=6'),
-      dcFetch('/performance/tickers'),
-    ]);
-
-    renderPerfCards(perfResp.overview, perfResp.drawdown, perfResp.cost);
-    renderPerfEquity();
-    renderPerfMonthly(monthlyResp.monthly);
-    renderPerfTickers(tickersResp.tickers);
-    loadTuningProposals();
-  } catch (e) {
-    console.error('加载绩效数据失败:', e);
-  }
-}
-
-function renderPerfCards(overview, drawdown, cost) {
-  document.getElementById('dc-perf-return').textContent =
-    `${overview.total_return_pct >= 0 ? '+' : ''}${overview.total_return_pct}%`;
-  document.getElementById('dc-perf-return').className =
-    `dc-perf-value ${pnlClass(overview.total_return_pct)}`;
-
-  document.getElementById('dc-perf-winrate').textContent = `${overview.win_rate}%`;
-  document.getElementById('dc-perf-drawdown').textContent = `-${drawdown.max_drawdown_pct}%`;
-  document.getElementById('dc-perf-cost').textContent = `$${cost.monthly_cost.toFixed(2)}`;
-}
-
-async function renderPerfEquity() {
-  const resp = await dcFetch('/account/equity-history?days=90');
-  const container = document.getElementById('dc-perf-equity-chart');
-  if (!container || !resp.history || resp.history.length === 0) return;
-
-  if (!perfState.equityChart) {
-    perfState.equityChart = echarts.init(container);
-  }
-
-  perfState.equityChart.setOption({
-    tooltip: { trigger: 'axis' },
-    grid: { left: 48, right: 24, top: 24, bottom: 32 },
-    xAxis: { type: 'category', data: resp.history.map(h => h.date) },
-    yAxis: { type: 'value' },
-    series: [{
-      type: 'line',
-      data: resp.history.map(h => h.equity),
-      smooth: true,
-      lineStyle: { color: '#3b82f6', width: 2 },
-      areaStyle: { color: 'rgba(59, 130, 246, 0.1)' },
-    }],
+  document.querySelectorAll('.dc-ai-custom-del-btn').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm(`确定删除自定义端点 ${btn.dataset.pid}？`)) return;
+      try {
+        const res = await fetch(`/api/custom-providers/${btn.dataset.pid}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        loadCustomProviders();
+        loadAIConfig();
+      } catch (e) { alert(`删除失败: ${e.message}`); }
+    };
   });
 }
 
-function renderPerfMonthly(monthly) {
-  const container = document.getElementById('dc-perf-monthly');
-  if (!monthly || monthly.length === 0) {
-    container.innerHTML = '<p class="text-muted">暂无月度数据</p>';
-    return;
-  }
+function _initCustomProviderForm() {
+  const addBtn = document.getElementById('dc-ai-add-custom-btn');
+  const cancelBtn = document.getElementById('dc-ai-custom-cancel');
+  const saveBtn = document.getElementById('dc-ai-custom-save');
+  const form = document.getElementById('dc-ai-custom-form');
+  if (!addBtn || !form) return;
 
-  const html = `
-    <table class="dc-table dc-table-sm">
-      <thead>
-        <tr><th>月份</th><th>交易数</th><th>胜率</th><th>月收益率</th></tr>
-      </thead>
-      <tbody>
-        ${monthly.map(m => `
-          <tr>
-            <td>${m.month}</td>
-            <td>${m.trades}</td>
-            <td>${m.win_rate}%</td>
-            <td class="${pnlClass(m.total_return_pct)}">${m.total_return_pct >= 0 ? '+' : ''}${m.total_return_pct}%</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  `;
-  container.innerHTML = html;
+  addBtn.onclick = () => {
+    document.getElementById('dc-ai-custom-edit-id').value = '';
+    document.getElementById('dc-ai-custom-id').value = '';
+    document.getElementById('dc-ai-custom-id').disabled = false;
+    document.getElementById('dc-ai-custom-name').value = '';
+    document.getElementById('dc-ai-custom-url').value = '';
+    document.getElementById('dc-ai-custom-key').value = '';
+    document.getElementById('dc-ai-custom-model').value = '';
+    form.style.display = '';
+  };
+
+  cancelBtn.onclick = () => { form.style.display = 'none'; };
+
+  saveBtn.onclick = async () => {
+    const editId = document.getElementById('dc-ai-custom-edit-id').value;
+    const pid = document.getElementById('dc-ai-custom-id').value.trim();
+    const name = document.getElementById('dc-ai-custom-name').value.trim();
+    const url = document.getElementById('dc-ai-custom-url').value.trim();
+    const key = document.getElementById('dc-ai-custom-key').value;
+    const model = document.getElementById('dc-ai-custom-model').value.trim();
+
+    if (!pid || !name || !url || !model) {
+      alert('请填写必填字段（名称、标识符、API 地址、默认模型）');
+      return;
+    }
+
+    saveBtn.disabled = true; saveBtn.textContent = '保存中...';
+    try {
+      const body = { provider_id: pid, display_name: name, base_url: url, api_key: key, default_model: model };
+      const isEdit = !!editId;
+      const endpoint = isEdit ? `/api/custom-providers/${editId}` : '/api/custom-providers';
+      const method = isEdit ? 'PUT' : 'POST';
+
+      const res = await fetch(endpoint, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+
+      form.style.display = 'none';
+      loadCustomProviders();
+      loadAIConfig();
+    } catch (e) {
+      alert(`保存失败: ${e.message}`);
+    }
+    saveBtn.disabled = false; saveBtn.textContent = '保存';
+  };
 }
 
-function renderPerfTickers(tickers) {
-  const container = document.getElementById('dc-perf-tickers');
-  if (!tickers || tickers.length === 0) {
-    container.innerHTML = '<p class="text-muted">暂无标的数据</p>';
-    return;
-  }
-
-  const html = `
-    <table class="dc-table dc-table-sm">
-      <thead>
-        <tr><th>Ticker</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>最佳</th><th>最差</th></tr>
-      </thead>
-      <tbody>
-        ${tickers.map(t => `
-          <tr>
-            <td><strong>${escDC(t.ticker)}</strong></td>
-            <td>${t.trades}</td>
-            <td>${t.win_rate}%</td>
-            <td class="${pnlClass(t.avg_return_pct)}">${t.avg_return_pct >= 0 ? '+' : ''}${t.avg_return_pct}%</td>
-            <td class="${pnlClass(t.best_pct)}">${t.best_pct >= 0 ? '+' : ''}${t.best_pct}%</td>
-            <td class="${pnlClass(t.worst_pct)}">${t.worst_pct >= 0 ? '+' : ''}${t.worst_pct}%</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  `;
-  container.innerHTML = html;
-}
-
-async function loadTuningProposals() {
-  try {
-    const resp = await dcFetch('/tuning?status=proposed&limit=20');
-    renderTuningList(resp.proposals);
-  } catch (e) {
-    console.error('加载调优建议失败:', e);
-  }
-}
-
-function renderTuningList(proposals) {
-  const container = document.getElementById('dc-tuning-list');
-  if (!proposals || proposals.length === 0) {
-    container.innerHTML = '<p class="text-muted">暂无调优建议，点击"生成调优建议"按钮</p>';
-    return;
-  }
-
-  const html = proposals.map(p => `
-    <div class="dc-tuning-item">
-      <div class="dc-tuning-header">
-        <span class="dc-tuning-type">${escDC(p.type)}</span>
-        <strong>${escDC(p.parameter_name)}</strong>
-      </div>
-      <div class="dc-tuning-body">
-        <div class="dc-tuning-change">
-          <span class="text-muted">${escDC(p.old_value)}</span>
-          <span> → </span>
-          <span class="text-primary"><strong>${escDC(p.new_value)}</strong></span>
-        </div>
-        <p class="dc-tuning-reason">${escDC(p.reason)}</p>
-        ${p.evidence && p.evidence.length > 0 ? `
-          <details class="dc-tuning-evidence">
-            <summary>证据 (${p.evidence.length})</summary>
-            <ul>${p.evidence.map(e => `<li>${escDC(e)}</li>`).join('')}</ul>
-          </details>
-        ` : ''}
-      </div>
-      <div class="dc-tuning-actions">
-        <button class="btn btn-sm btn-secondary" onclick="rejectTuning('${p.id}')">拒绝</button>
-        <button class="btn btn-sm btn-primary" onclick="approveTuning('${p.id}')">批准</button>
-      </div>
-    </div>
-  `).join('');
-  container.innerHTML = html;
-}
-
-async function generateTuning() {
-  const btn = document.getElementById('dc-btn-gen-tuning');
-  const statusEl = document.getElementById('dc-tuning-status');
-  if (!btn || !statusEl) return;
-
-  btn.disabled = true;
-  statusEl.textContent = '正在分析...';
-  statusEl.className = 'dc-review-status';
-
-  try {
-    await dcSSE('/tuning/generate', {
-      onEvent(evt) {
-        const d = typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
-        if (d.message) statusEl.textContent = d.message;
-      },
-      onDone() {
-        statusEl.textContent = '调优建议已生成';
-        statusEl.className = 'dc-review-status success';
-        loadTuningProposals();
-      },
-      onError(err) {
-        statusEl.textContent = `生成失败: ${err}`;
-        statusEl.className = 'dc-review-status error';
-      },
-    });
-  } catch (e) {
-    statusEl.textContent = `生成失败: ${e.message}`;
-    statusEl.className = 'dc-review-status error';
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function approveTuning(id) {
-  try {
-    await dcFetch(`/tuning/${id}/approve`, { method: 'POST' });
-    loadTuningProposals();
-  } catch (e) {
-    alert(`批准失败: ${e.message}`);
-  }
-}
-
-async function rejectTuning(id) {
-  const reason = prompt('拒绝理由（可选）:');
-  if (reason === null) return;
-  try {
-    await dcFetch(`/tuning/${id}/reject?reason=${encodeURIComponent(reason)}`, { method: 'POST' });
-    loadTuningProposals();
-  } catch (e) {
-    alert(`拒绝失败: ${e.message}`);
-  }
-}
-
-window.approveTuning = approveTuning;
-window.rejectTuning = rejectTuning;
+_initCustomProviderForm();
 
 /* ── 17F.2 风险仪表盘 ──────────────────────────────────── */
 
@@ -1299,7 +1201,7 @@ async function loadRiskDashboard() {
   const body = document.getElementById('dc-risk-body');
   if (!body) return;
   try {
-    const data = await dcFetch('/risk-dashboard');
+    const data = await dcFetch(`/risk-dashboard?market=${encodeURIComponent(dcState.market)}`);
     renderRisk(data);
   } catch (e) {
     body.innerHTML = `<p class="dc-empty-hint">风险数据加载失败: ${escDC(e.message)}</p>`;
@@ -1383,7 +1285,8 @@ async function loadCatalystCalendar(monthStr) {
   if (!body) return;
   body.innerHTML = '<p class="dc-empty-hint">加载日历...</p>';
   try {
-    const qs = monthStr ? `?month=${monthStr}` : '';
+    let qs = monthStr ? `?month=${monthStr}` : '';
+    qs += (qs ? '&' : '?') + `market=${encodeURIComponent(dcState.market)}`;
     const data = await dcFetch(`/catalysts/calendar${qs}`);
     renderCatalystCalendar(data);
   } catch (e) {
@@ -1619,4 +1522,335 @@ function renderCompareResult(data, container) {
   }
 
   container.innerHTML = html;
+}
+
+/* ── 会议历史 ─────────────────────────────────────── */
+
+async function loadMeetings() {
+  const body = document.getElementById('dc-meetings-body');
+  if (!body) return;
+
+  const typeFilter = document.getElementById('dc-meeting-type')?.value || '';
+  let qs = `?market=${encodeURIComponent(dcState.market)}&limit=10`;
+  if (typeFilter) qs += `&type=${encodeURIComponent(typeFilter)}`;
+
+  try {
+    const data = await dcFetch(`/meetings${qs}`);
+    const meetings = data.meetings || [];
+    renderMeetings(meetings);
+  } catch (e) {
+    body.innerHTML = `<p class="dc-empty-hint">加载失败: ${escDC(e.message)}</p>`;
+  }
+}
+
+function renderMeetings(meetings) {
+  const body = document.getElementById('dc-meetings-body');
+  if (!body) return;
+
+  if (!meetings || meetings.length === 0) {
+    body.innerHTML = '<p class="dc-empty-hint">暂无会议记录</p>';
+    return;
+  }
+
+  body.innerHTML = meetings.map(m => {
+    const typeIcon = m.meeting_type === 'roundtable' ? '\u{1F535}' : '\u{1F7E2}';
+    const typeLabel = m.meeting_type === 'roundtable' ? '圆桌' : '投委会';
+    const date = (m.created_at || '').replace('T', ' ').slice(0, 16);
+    const verdict = m.final_verdict || '';
+
+    let verdictCls = '';
+    if (verdict.includes('approved') || verdict.includes('pass')) verdictCls = 'dc-verdict-pass';
+    else if (verdict.includes('rejected') || verdict.includes('fail')) verdictCls = 'dc-verdict-fail';
+
+    let tickers = [];
+    try {
+      tickers = typeof m.tickers_discussed === 'string' ? JSON.parse(m.tickers_discussed) : (m.tickers_discussed || []);
+    } catch { tickers = []; }
+
+    let participants = [];
+    try {
+      participants = typeof m.participants === 'string' ? JSON.parse(m.participants) : (m.participants || []);
+    } catch { participants = []; }
+
+    return `<div class="dc-meeting-item" data-meeting-id="${escDC(m.id)}">
+      <div class="dc-meeting-row">
+        <span class="dc-meeting-icon">${typeIcon}</span>
+        <div class="dc-meeting-info">
+          <div class="dc-meeting-title">${escDC(m.title || `${typeLabel}会议`)}</div>
+          <div class="dc-meeting-meta">
+            <span class="dc-meeting-date">${escDC(date)}</span>
+            <span class="dc-meeting-participants">${participants.length}位参会</span>
+            ${tickers.length ? `<span class="dc-meeting-tickers">${tickers.map(t => escDC(t)).join(', ')}</span>` : ''}
+          </div>
+        </div>
+        <span class="dc-meeting-verdict ${verdictCls}">${escDC(verdict)}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  body.querySelectorAll('.dc-meeting-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.meetingId;
+      if (id) openMeetingDrawer(id);
+    });
+  });
+}
+
+/* ── 会议详情抽屉 ─────────────────────────────────── */
+
+async function openMeetingDrawer(recordId) {
+  const drawer = document.getElementById('dc-meeting-drawer');
+  const title = document.getElementById('dc-meeting-drawer-title');
+  const body = document.getElementById('dc-meeting-drawer-body');
+  if (!drawer || !body) return;
+
+  drawer.style.display = '';
+  if (title) title.textContent = '加载中...';
+  body.innerHTML = '<p class="dc-empty-hint">加载会议详情...</p>';
+
+  try {
+    const data = await dcFetch(`/meetings/${encodeURIComponent(recordId)}`);
+    if (title) title.textContent = data.title || '会议详情';
+    renderMeetingDetail(data, body);
+  } catch (e) {
+    body.innerHTML = `<p class="dc-empty-hint">加载失败: ${escDC(e.message)}</p>`;
+  }
+}
+
+function closeMeetingDrawer() {
+  const drawer = document.getElementById('dc-meeting-drawer');
+  if (drawer) drawer.style.display = 'none';
+}
+
+function renderMeetingDetail(data, container) {
+  let participants = data.participants || [];
+  if (typeof participants === 'string') {
+    try { participants = JSON.parse(participants); } catch { participants = []; }
+  }
+
+  let tickers = data.tickers_discussed || [];
+  if (typeof tickers === 'string') {
+    try { tickers = JSON.parse(tickers); } catch { tickers = []; }
+  }
+
+  let agreements = data.key_agreements || [];
+  if (typeof agreements === 'string') {
+    try { agreements = JSON.parse(agreements); } catch { agreements = []; }
+  }
+
+  let disagreements = data.key_disagreements || [];
+  if (typeof disagreements === 'string') {
+    try { disagreements = JSON.parse(disagreements); } catch { disagreements = []; }
+  }
+
+  let risks = data.risk_warnings || [];
+  if (typeof risks === 'string') {
+    try { risks = JSON.parse(risks); } catch { risks = []; }
+  }
+
+  let result = data.result_json || {};
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result); } catch { result = {}; }
+  }
+
+  const typeLabel = data.meeting_type === 'roundtable' ? '圆桌会议' : '投委会审议';
+  const date = (data.created_at || '').replace('T', ' ').slice(0, 16);
+
+  let html = '';
+
+  // 概要信息
+  html += `<div class="drawer-section">
+    <h4>概要</h4>
+    <div class="dc-mtg-summary">
+      <div class="dc-mtg-kv"><span>类型</span><span>${escDC(typeLabel)}</span></div>
+      <div class="dc-mtg-kv"><span>时间</span><span>${escDC(date)}</span></div>
+      <div class="dc-mtg-kv"><span>结论</span><span class="dc-mtg-verdict">${escDC(data.final_verdict || '--')}</span></div>
+      ${tickers.length ? `<div class="dc-mtg-kv"><span>讨论标的</span><span>${tickers.map(t => escDC(t)).join(', ')}</span></div>` : ''}
+      ${data.duration_seconds ? `<div class="dc-mtg-kv"><span>耗时</span><span>${Math.round(data.duration_seconds / 60)}分钟</span></div>` : ''}
+    </div>
+  </div>`;
+
+  // 参会者
+  if (participants.length > 0) {
+    html += `<div class="drawer-section">
+      <h4>参会者</h4>
+      <div class="dc-mtg-participants">
+        ${participants.map(p => `<div class="dc-mtg-participant">
+          <span class="dc-mtg-p-role">${escDC(p.role || p.name || '--')}</span>
+          <span class="dc-mtg-p-model">${escDC(p.model || '')}</span>
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  // 共识与分歧
+  if (agreements.length > 0 || disagreements.length > 0) {
+    html += `<div class="drawer-section"><h4>共识与分歧</h4>`;
+    if (agreements.length > 0) {
+      html += `<div class="dc-mtg-list dc-mtg-agree">
+        <div class="dc-mtg-list-title">共识</div>
+        ${agreements.map(a => `<div class="dc-mtg-list-item">${escDC(typeof a === 'string' ? a : JSON.stringify(a))}</div>`).join('')}
+      </div>`;
+    }
+    if (disagreements.length > 0) {
+      html += `<div class="dc-mtg-list dc-mtg-disagree">
+        <div class="dc-mtg-list-title">分歧</div>
+        ${disagreements.map(d => `<div class="dc-mtg-list-item">${escDC(typeof d === 'string' ? d : JSON.stringify(d))}</div>`).join('')}
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // 风险警示
+  if (risks.length > 0) {
+    html += `<div class="drawer-section">
+      <h4>风险警示</h4>
+      <div class="dc-mtg-list dc-mtg-risks">
+        ${risks.map(r => `<div class="dc-mtg-list-item dc-mtg-risk-item">${escDC(typeof r === 'string' ? r : JSON.stringify(r))}</div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  // 排名结果（圆桌）
+  let ranking = data.final_ranking || result.final_ranking || [];
+  if (typeof ranking === 'string') {
+    try { ranking = JSON.parse(ranking); } catch { ranking = []; }
+  }
+  if (Array.isArray(ranking) && ranking.length > 0) {
+    html += `<div class="drawer-section">
+      <h4>最终排名</h4>
+      <table class="dc-table dc-table-sm">
+        <thead><tr><th>#</th><th>Ticker</th><th>加权分</th><th>理由</th></tr></thead>
+        <tbody>${ranking.map((r, i) => `<tr>
+          <td>${r.rank || i + 1}</td>
+          <td><strong>${escDC(r.ticker || '')}</strong></td>
+          <td>${r.weighted_score || r.score || r.borda_points || '--'}</td>
+          <td style="font-size:11px;color:var(--muted)">${escDC((r.reason || r.reasoning || '').slice(0, 80))}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+  }
+
+  // 投票详情（投委会）
+  const voteDetail = result.vote_detail || {};
+  if (Object.keys(voteDetail).length > 0) {
+    html += `<div class="drawer-section">
+      <h4>投票详情</h4>
+      <div class="dc-votes-grid">${Object.entries(voteDetail).map(([role, info]) => {
+        const vote = typeof info === 'object' ? (info.vote || '--') : String(info);
+        const conf = typeof info === 'object' ? (info.confidence || '--') : '--';
+        const vCls = vote.includes('approve') ? 'approve' : vote.includes('reject') ? 'reject' : 'conditional';
+        return `<div class="dc-member-vote">
+          <div class="dc-member-name">${escDC(role)}</div>
+          <div class="dc-member-decision ${vCls}">${escDC(vote)}</div>
+          <div class="dc-member-reasoning">信心: ${conf}/10</div>
+        </div>`;
+      }).join('')}</div>
+    </div>`;
+  }
+
+  // 回溯结果
+  if (data.outcome_recorded && data.outcome_summary) {
+    html += `<div class="drawer-section">
+      <h4>回溯结论</h4>
+      <p style="font-size:13px;line-height:1.6">${escDC(data.outcome_summary)}</p>
+    </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+/* ── 模型评分排行 ─────────────────────────────────── */
+
+async function loadModelRatings() {
+  const body = document.getElementById('dc-model-ratings-body');
+  if (!body) return;
+
+  try {
+    const data = await dcFetch(`/model-accuracy?market=${encodeURIComponent(dcState.market)}`);
+    renderModelRatings(data, body);
+  } catch (e) {
+    body.innerHTML = `<p class="dc-empty-hint">加载失败: ${escDC(e.message)}</p>`;
+  }
+}
+
+function renderModelRatings(data, container) {
+  const ratings = data.ratings || [];
+  const stats = data.stats || [];
+
+  if (ratings.length === 0 && stats.length === 0) {
+    container.innerHTML = '<p class="dc-empty-hint">暂无模型评分数据</p>';
+    return;
+  }
+
+  let html = '';
+
+  if (ratings.length > 0) {
+    html += `<div class="dc-model-list">`;
+    const sorted = [...ratings].sort((a, b) => (b.calibration_weight || 1) - (a.calibration_weight || 1));
+    html += sorted.map((r, i) => {
+      const w = r.calibration_weight || 1.0;
+      const accuracy = r.accuracy_rate != null ? (r.accuracy_rate * 100).toFixed(0) : '--';
+      const barW = Math.min(100, Math.round(w / 3 * 100));
+      const barCls = w >= 1.5 ? 'dc-bar-good' : w >= 0.8 ? 'dc-bar-mid' : 'dc-bar-low';
+
+      return `<div class="dc-model-row">
+        <span class="dc-model-rank">#${i + 1}</span>
+        <div class="dc-model-info">
+          <div class="dc-model-name">${escDC(r.model_provider)}/${escDC(r.model_name)}</div>
+          <div class="dc-model-meta">
+            ${r.role_context ? `<span class="dc-model-role">${escDC(r.role_context)}</span>` : ''}
+            <span>准确率 ${accuracy}%</span>
+            <span>样本 ${r.total_predictions || 0}</span>
+          </div>
+        </div>
+        <div class="dc-model-weight">
+          <div class="dc-model-bar"><div class="dc-model-bar-fill ${barCls}" style="width:${barW}%"></div></div>
+          <span class="dc-model-w-val">${w.toFixed(2)}</span>
+        </div>
+      </div>`;
+    }).join('');
+    html += `</div>`;
+  } else if (stats.length > 0) {
+    html += `<div class="dc-model-list">`;
+    html += stats.map(s => {
+      const total = s.total || 0;
+      const correct = s.correct || 0;
+      const accuracy = total > 0 ? ((correct / total) * 100).toFixed(0) : '--';
+
+      return `<div class="dc-model-row">
+        <div class="dc-model-info">
+          <div class="dc-model-name">${escDC(s.model_provider)}/${escDC(s.model_name)}</div>
+          <div class="dc-model-meta">
+            ${s.role_context ? `<span class="dc-model-role">${escDC(s.role_context)}</span>` : ''}
+            <span>准确率 ${accuracy}%</span>
+            <span>${correct}/${total}</span>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+    html += `</div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+async function runCalibration() {
+  const btn = document.getElementById('dc-btn-calibrate');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '校准中...';
+
+  try {
+    const data = await dcFetch('/model-accuracy/calibrate', { method: 'POST', body: JSON.stringify({ market: dcState.market }) });
+    btn.textContent = `已校准 ${data.calibrated || 0} 个`;
+    await loadModelRatings();
+  } catch (e) {
+    btn.textContent = '失败';
+  }
+
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = '校准';
+  }, 2000);
 }

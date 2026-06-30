@@ -10,6 +10,10 @@
 
 {macro_strategy}
 
+## 量化仓位约束
+
+{allocation_bounds}
+
 ## 观察池个股信号
 
 {watchlist_signals}
@@ -67,7 +71,19 @@
         "target_weight_pct": 12,
         "role": "core",
         "thesis": "AI算力瓶颈核心受益者",
-        "entry_strategy": "分批建仓，回调买入"
+        "entry_strategy": "分批建仓，回调买入",
+        "scenario_valuation": {
+          "bear_price": 750,
+          "bear_probability": 20,
+          "bear_rationale": "AI支出放缓+竞争加剧",
+          "base_price": 1050,
+          "base_probability": 55,
+          "base_rationale": "维持当前增长节奏",
+          "bull_price": 1400,
+          "bull_probability": 25,
+          "bull_rationale": "推理需求加速+数据中心份额提升",
+          "valuation_method": "relative"
+        }
       }
     ],
     "tactical_holdings": [
@@ -76,7 +92,16 @@
         "target_weight_pct": 5,
         "role": "tactical",
         "thesis": "AI芯片第二梯队，催化剂驱动",
-        "catalyst": "Q3新品发布"
+        "catalyst": "Q3新品发布",
+        "scenario_valuation": {
+          "bear_price": 110,
+          "bear_probability": 25,
+          "base_price": 165,
+          "base_probability": 50,
+          "bull_price": 210,
+          "bull_probability": 25,
+          "valuation_method": "relative"
+        }
       }
     ],
     "watchlist_only": ["INTC", "QCOM"]
@@ -103,3 +128,4 @@
 - 核心持仓要有长期逻辑，战术持仓要有明确催化剂
 - 参考历史教训，避免重复犯错
 - 与上一版对比，说明变化原因（如有变化）
+- 对核心持仓和战术持仓，尽量给出 Bear/Base/Bull 三场景估值（scenario_valuation），概率之和应为100%

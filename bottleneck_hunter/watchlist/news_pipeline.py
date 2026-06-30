@@ -49,19 +49,47 @@ def _fetch_yfinance_news(ticker: str, limit: int = 10) -> list[dict]:
     raw = t.news or []
     results = []
     for item in raw[:limit]:
-        title = item.get("title", "")
+        content = item.get("content", {}) if isinstance(item.get("content"), dict) else {}
+        title = content.get("title") or item.get("title", "")
         if not title:
             continue
-        pub_ts = item.get("providerPublishTime", 0)
-        date_str = datetime.fromtimestamp(pub_ts, tz=timezone.utc).strftime("%Y-%m-%d") if pub_ts else ""
+
+        pub_date = content.get("pubDate") or content.get("displayTime", "")
+        if pub_date:
+            date_str = pub_date[:10]
+        else:
+            pub_ts = item.get("providerPublishTime", 0)
+            date_str = datetime.fromtimestamp(pub_ts, tz=timezone.utc).strftime("%Y-%m-%d") if pub_ts else ""
+
+        link = ""
+        canonical = content.get("canonicalUrl")
+        if isinstance(canonical, dict):
+            link = canonical.get("url", "")
+        elif isinstance(canonical, str):
+            link = canonical
+        if not link:
+            click = content.get("clickThroughUrl")
+            if isinstance(click, dict):
+                link = click.get("url", "")
+        if not link:
+            link = item.get("link", "")
+
+        provider = content.get("provider", {})
+        publisher = provider.get("displayName", "") if isinstance(provider, dict) else ""
+        if not publisher:
+            publisher = item.get("publisher", "")
+
+        summary = content.get("summary", "")
+
         news_id = hashlib.md5(f"{ticker}:{title}".encode()).hexdigest()[:12]
         results.append({
             "id": news_id,
             "ticker": ticker,
             "date": date_str,
             "title": title,
-            "source_url": item.get("link", ""),
-            "source_name": item.get("publisher", ""),
+            "summary": summary,
+            "source_url": link,
+            "source_name": publisher,
         })
     return results
 

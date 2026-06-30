@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import AsyncGenerator
 
+from bottleneck_hunter.llm_clients.factory import get_llm_for_position
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 
@@ -23,23 +23,6 @@ def _sse(event: str, **data) -> dict:
     """SSE event格式化"""
     return {"event": event, "data": data}
 
-
-def _get_llm():
-    """获取便宜LLM，优先级：deepseek > qwen > kimi > glm"""
-    try:
-        from bottleneck_hunter.llm_clients.factory import create_llm
-
-        for provider, model, key_env in [
-            ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-            ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-            ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-            ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-        ]:
-            if os.getenv(key_env):
-                return create_llm(provider, model, temperature=0.3)
-    except Exception as e:
-        logger.warning("Failed to create LLM: %s", e)
-    return None
 
 
 # ─────────────────────────────────────────────────────────
@@ -70,10 +53,14 @@ async def refresh_intelligence_all(
             async for evt in refresh_intelligence_one(ticker, entry_id, store, budget):
                 yield evt
             completed += 1
+            yield _sse("intel_progress", completed=completed, failed=failed, total=total,
+                       message=f"情报聚合进度 [{completed}/{total}]：{ticker} 完成")
         except Exception as e:
             logger.exception("Intelligence refresh failed for %s", ticker)
             failed += 1
-            yield _sse("stock_intel_error", ticker=ticker, error=str(e))
+            yield _sse("stock_intel_error", ticker=ticker, error=str(e),
+                       completed=completed, failed=failed, total=total,
+                       message=f"情报聚合进度 [{completed + failed}/{total}]：{ticker} 失败")
 
     yield _sse("intel_done", completed=completed, failed=failed, total=total,
                message=f"情报聚合完成：成功 {completed}，失败 {failed}")
@@ -91,6 +78,9 @@ async def refresh_intelligence_one(
 
     try:
         entry = store.get(entry_id)
+
+        yield _sse("stock_intel_progress", ticker=ticker, step="aggregating",
+                   message=f"{ticker} 正在读取数据源（价格/新闻/SEC/期权/财报）...")
 
         # 并行读取所有数据源
         results = await asyncio.gather(
@@ -123,9 +113,11 @@ async def refresh_intelligence_one(
         # LLM 生成简报（可选）
         brief_text = ""
         key_signals = []
-        llm = _get_llm()
+        llm, _, _ = get_llm_for_position(position="watchlist_strategy")
 
         if llm and budget and budget.can_spend(estimated_tokens=1500):
+            yield _sse("stock_intel_progress", ticker=ticker, step="llm_brief",
+                       message=f"{ticker} 正在调用 LLM 生成情报简报...")
             try:
                 brief_text, key_signals = await _generate_brief(llm, ticker, aggregated, budget)
                 yield _sse("stock_intel_progress", ticker=ticker, step="brief_generated",
@@ -371,10 +363,14 @@ async def refresh_strategy_all(
             async for evt in refresh_strategy_one(ticker, entry_id, store, budget):
                 yield evt
             completed += 1
+            yield _sse("strategy_progress", completed=completed, failed=failed, total=total,
+                       message=f"策略生成进度 [{completed}/{total}]：{ticker} 完成")
         except Exception as e:
             logger.exception("Strategy refresh failed for %s", ticker)
             failed += 1
-            yield _sse("stock_strategy_error", ticker=ticker, error=str(e))
+            yield _sse("stock_strategy_error", ticker=ticker, error=str(e),
+                       completed=completed, failed=failed, total=total,
+                       message=f"策略生成进度 [{completed + failed}/{total}]：{ticker} 失败")
 
     yield _sse("strategy_done", completed=completed, failed=failed, total=total,
                message=f"策略生成完成：成功 {completed}，失败 {failed}")
@@ -403,7 +399,7 @@ async def refresh_strategy_one(
 
     try:
         # 获取 LLM
-        llm = _get_llm()
+        llm, _, _ = get_llm_for_position(position="watchlist_strategy")
         if not llm:
             # Mock 数据
             store.complete_strategy(
@@ -437,6 +433,8 @@ async def refresh_strategy_one(
             budget.record("deepseek", "deepseek-chat", 2000, 1500, "strategy_generation")
 
         # 解析响应
+        yield _sse("stock_strategy_progress", ticker=ticker, step="parsing",
+                   message=f"{ticker} 正在解析策略结果...")
         sections = _parse_strategy_response(response)
 
         # 对比上次策略
@@ -467,6 +465,15 @@ async def refresh_strategy_one(
         yield _sse("stock_strategy_done", ticker=ticker, version=version, strategy_id=strategy_id,
                    signal=signal, confidence=confidence,
                    message=f"{ticker} 策略生成完成（v{version}，{signal} {confidence}/10）")
+
+        # 策略生成后自动提取/更新投资论点
+        try:
+            from bottleneck_hunter.watchlist.thesis_tracker import create_thesis_from_strategy
+            completed_strategy = store.get_latest_strategy(entry_id)
+            if completed_strategy:
+                await create_thesis_from_strategy(store, entry_id, completed_strategy, budget)
+        except Exception as e:
+            logger.warning("论点提取失败 %s: %s", ticker, e)
 
     except Exception as e:
         logger.exception("Strategy generation failed for %s", ticker)

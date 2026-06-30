@@ -10,6 +10,10 @@
 - **收益率**: {return_pct}%
 - **持有天数**: {holding_days}
 
+## 持仓期间市场数据
+
+{period_market_data}
+
 ## 入场决策背景
 
 ### L4 执行方案
@@ -30,6 +34,11 @@
 3. **出场时机**：卖出时机是否合理？是否过早或过晚？
 4. **催化剂兑现**：预期的催化剂是否按时兑现？对股价影响如何？
 5. **经验提炼**：这笔交易最重要的经验教训是什么？
+6. **归因分析**：
+   - **择股归因**：该股票选择本身是否正确？基本面/技术面/催化剂判断的准确度如何？
+   - **择时归因**：入场/出场时机是否最优？对比持仓期间最高价 {period_high} 和最低价 {period_low}
+   - **宏观归因**：同期大盘表现 {benchmark_return_pct}%，alpha 是正还是负？
+   - **计划偏差**：实际成交价与计划目标价的偏差
 
 ## 输出格式
 
@@ -40,6 +49,12 @@
   "what_went_wrong": ["错误或不足1", "错误或不足2"],
   "key_lessons": ["经验教训1", "经验教训2"],
   "trade_quality_score": 7,
+  "attribution": {
+    "stock_selection": {"score": 7, "assessment": "择股评估说明"},
+    "market_timing": {"score": 5, "assessment": "择时评估说明"},
+    "macro_alignment": {"score": 8, "assessment": "宏观评估说明"},
+    "plan_deviation": {"entry_diff_pct": 1.2, "exit_diff_pct": -2.5, "assessment": "偏差评估"}
+  },
   "experience_card": {
     "title": "简短的经验标题",
     "content": "一段话总结可复用的经验",

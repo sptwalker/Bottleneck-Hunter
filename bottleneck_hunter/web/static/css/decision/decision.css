@@ -216,25 +216,56 @@
 
 .dc-progress-bar {
   width: 100%;
-  height: 6px;
+  height: 8px;
   background: oklch(0.92 0.003 250);
-  border-radius: 3px;
+  border-radius: 4px;
   overflow: hidden;
 }
 
 .dc-progress-fill {
   height: 100%;
   width: 0%;
-  background: var(--accent);
-  border-radius: 3px;
+  border-radius: 4px;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--accent),
+    var(--accent) 8px,
+    oklch(0.60 0.15 250) 8px,
+    oklch(0.60 0.15 250) 16px
+  );
+  background-size: 22.6px 100%;
+  animation: dc-zebra-move 0.6s linear infinite;
   transition: width 0.3s ease;
 }
 
+@keyframes dc-zebra-move {
+  from { background-position: 0 0; }
+  to   { background-position: 22.6px 0; }
+}
+
+.dc-progress-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
 .dc-progress-text {
-  display: block;
   font-size: 12px;
   color: var(--muted);
-  margin-top: 4px;
+}
+
+.dc-progress-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+#dc-progress-pct {
+  font-weight: 600;
+  color: var(--accent);
 }
 
 .dc-grid {
@@ -272,6 +303,31 @@
   border-bottom: 1px solid var(--border);
   font-weight: 600;
   font-size: 14px;
+}
+
+.dc-col-main .dc-card-header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.dc-card-toggle {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--muted);
+  transition: transform var(--transition);
+  margin-left: 6px;
+}
+
+.dc-card.collapsed .dc-card-toggle {
+  transform: rotate(-90deg);
+}
+
+.dc-card.collapsed .dc-card-body {
+  display: none;
+}
+
+.dc-card.collapsed .dc-card-header {
+  border-bottom: none;
 }
 
 .dc-card-header h3 {
@@ -597,6 +653,32 @@
   border-bottom: none;
 }
 
+.dc-strategic-info { margin-top: 8px; }
+
+.dc-alloc-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.dc-alloc-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 10px;
+  background: oklch(0.95 0.01 250);
+  color: var(--ink);
+}
+
+.dc-strategic-text {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
 /* ── AI 配置模态框 ──────────────────────────────────── */
 
 .dc-ai-group-title {
@@ -727,240 +809,179 @@
   color: oklch(0.65 0.22 25);
 }
 
-/* ── 复盘面板 ───────────────────────────────────────── */
+/* ── AI 配置 Tab 导航 ─────────────────────────────── */
 
-.dc-review-actions {
+.dc-ai-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 14px;
+}
+
+.dc-ai-tab {
+  background: transparent;
+  border: none;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.15s;
+}
+
+.dc-ai-tab:hover {
+  color: var(--ink);
+}
+
+.dc-ai-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.dc-ai-tab-content {
+  min-height: 200px;
+}
+
+/* ── 可折叠分组 ───────────────────────────────────── */
+
+.dc-ai-collapsible {
+  cursor: pointer;
+  user-select: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 6px;
 }
 
-.dc-review-status {
+.dc-ai-collapsible:hover {
+  color: var(--accent);
+}
+
+.dc-ai-chevron {
   font-size: 12px;
+  color: var(--muted);
+  transition: transform 0.15s;
+  flex-shrink: 0;
 }
 
-.dc-review-status.success {
-  color: oklch(0.72 0.19 145);
+/* ── optgroup 样式 ────────────────────────────────── */
+
+.dc-ai-select optgroup {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--muted);
 }
 
-.dc-review-status.error {
-  color: oklch(0.65 0.22 25);
+.dc-ai-select optgroup option {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--ink);
 }
 
-.dc-review-item {
+/* ── 自定义端点管理 ───────────────────────────────── */
+
+.dc-ai-empty-hint {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  padding: 24px 0;
+  margin: 0;
+}
+
+.dc-ai-custom-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  margin-bottom: 12px;
-  overflow: hidden;
-}
-
-.dc-review-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  background: var(--bg);
-  font-size: 13px;
-}
-
-.dc-review-score {
-  font-size: 12px;
-  color: oklch(0.55 0.12 250);
-  font-weight: 500;
-}
-
-.dc-review-body {
-  padding: 10px 14px;
-  font-size: 13px;
-}
-
-.dc-review-section {
+  background: var(--surface);
   margin-bottom: 8px;
 }
 
-.dc-review-section strong {
-  display: block;
-  font-size: 12px;
+.dc-ai-custom-card:last-child {
+  margin-bottom: 0;
+}
+
+.dc-ai-custom-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.dc-ai-custom-info strong {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.dc-ai-custom-url,
+.dc-ai-custom-model,
+.dc-ai-custom-key-hint {
+  font-size: 11px;
   color: var(--muted);
-  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.dc-review-section ul {
-  margin: 0;
-  padding-left: 18px;
+.dc-ai-custom-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
-.dc-review-section li {
-  margin-bottom: 2px;
-  line-height: 1.5;
-}
-
-/* 经验卡片 */
-
-.dc-exp-card {
+.dc-ai-custom-form {
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 10px 14px;
+  padding: 14px;
+  margin-bottom: 12px;
+  background: var(--surface-alt, oklch(0.975 0.003 250));
+}
+
+.dc-ai-custom-form .dc-ai-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin-bottom: 10px;
 }
 
-.dc-exp-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.dc-ai-custom-form .dc-ai-form-row:last-of-type {
+  margin-bottom: 0;
+}
+
+.dc-ai-custom-form label {
   font-size: 12px;
-  margin-bottom: 6px;
-}
-
-.dc-exp-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 10px;
-  background: oklch(0.92 0.03 250);
-  color: oklch(0.4 0.08 250);
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.dc-exp-cat {
-  background: oklch(0.92 0.03 145);
-  color: oklch(0.4 0.1 145);
-}
-
-.dc-exp-scope-key {
   font-weight: 500;
   color: var(--ink);
 }
 
-.dc-exp-confidence {
-  color: var(--muted);
-}
-
-.dc-exp-delete {
-  margin-left: auto;
-  border: none;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 14px;
-  padding: 0 4px;
-  line-height: 1;
-}
-
-.dc-exp-delete:hover {
-  color: oklch(0.65 0.22 25);
-}
-
-.dc-exp-title {
-  font-weight: 600;
-  font-size: 13px;
-  margin-bottom: 4px;
-}
-
-.dc-exp-content {
-  font-size: 13px;
-  color: oklch(0.35 0.02 250);
-  line-height: 1.6;
-}
-
-/* ── 绩效报告 ─────────────────────────────────────────── */
-
-.dc-perf-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  margin-bottom: 20px;
-}
-
-.dc-perf-card {
-  background: oklch(0.97 0.005 250);
-  border: 1px solid oklch(0.88 0.01 250);
-  border-radius: 10px;
-  padding: 16px;
-  text-align: center;
-}
-
-.dc-perf-value {
-  display: block;
-  font-size: 22px;
-  font-weight: 700;
-  margin-bottom: 4px;
-}
-
-.dc-perf-label {
-  display: block;
+.dc-ai-custom-form input[type="text"],
+.dc-ai-custom-form input[type="password"] {
+  width: 100%;
+  padding: 5px 8px;
   font-size: 12px;
-  color: oklch(0.45 0.02 250);
-}
-
-.dc-perf-section {
-  margin-bottom: 16px;
-}
-
-.dc-tuning-item {
-  border: 1px solid oklch(0.88 0.01 250);
-  border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 10px;
-}
-
-.dc-tuning-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.dc-tuning-type {
-  background: oklch(0.92 0.04 250);
-  padding: 2px 8px;
+  border: 1px solid var(--border);
   border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
+  background: var(--surface);
+  color: var(--ink);
+  box-sizing: border-box;
 }
 
-.dc-tuning-body {
-  margin-bottom: 8px;
+.dc-ai-custom-form input:focus {
+  outline: none;
+  border-color: oklch(0.6 0.15 250);
 }
 
-.dc-tuning-change {
-  font-size: 13px;
-  margin-bottom: 6px;
-}
-
-.dc-tuning-reason {
-  font-size: 13px;
-  color: oklch(0.40 0.02 250);
-  line-height: 1.5;
-  margin: 0;
-}
-
-.dc-tuning-evidence {
-  margin-top: 6px;
-  font-size: 12px;
-}
-
-.dc-tuning-evidence summary {
-  cursor: pointer;
-  color: oklch(0.45 0.08 250);
-}
-
-.dc-tuning-evidence ul {
-  margin: 4px 0 0 16px;
-  padding: 0;
-  color: oklch(0.45 0.02 250);
-}
-
-.dc-tuning-actions {
+.dc-ai-custom-form .dc-ai-form-actions {
   display: flex;
-  justify-content: flex-end;
   gap: 8px;
-}
-
-@media (max-width: 640px) {
-  .dc-perf-cards { grid-template-columns: repeat(2, 1fr); }
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 /* ── 17F.1 决策路径追溯 ─────────────────────────────────── */
@@ -1170,4 +1191,385 @@
   background: oklch(0.88 0.01 250);
   color: var(--muted);
   text-align: center;
+}
+
+/* ── 会议历史 ──────────────────────────────────────── */
+
+.dc-meeting-filters {
+  display: flex;
+  gap: 6px;
+}
+
+.dc-meeting-type-select {
+  padding: 2px 6px;
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.dc-meeting-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dc-meeting-item:last-child {
+  border-bottom: none;
+}
+
+.dc-meeting-item:hover {
+  background: var(--bg);
+}
+
+.dc-meeting-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.dc-meeting-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  margin-top: 2px;
+}
+
+.dc-meeting-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dc-meeting-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dc-meeting-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+
+.dc-meeting-tickers {
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.dc-meeting-verdict {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--surface-alt, oklch(0.975 0.003 250));
+  border: 1px solid var(--border);
+}
+
+.dc-verdict-pass {
+  background: oklch(0.5 0.16 145 / 0.15);
+  color: oklch(0.75 0.16 145);
+  border-color: oklch(0.5 0.16 145 / 0.3);
+}
+
+.dc-verdict-fail {
+  background: oklch(0.5 0.18 25 / 0.15);
+  color: oklch(0.75 0.18 25);
+  border-color: oklch(0.5 0.18 25 / 0.3);
+}
+
+/* ── 会议详情抽屉 ─────────────────────────────────── */
+
+.dc-mtg-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dc-mtg-kv {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  padding: 4px 0;
+  border-bottom: 1px solid oklch(0.92 0.005 250);
+}
+
+.dc-mtg-kv:last-child {
+  border-bottom: none;
+}
+
+.dc-mtg-kv > span:first-child {
+  color: var(--muted);
+}
+
+.dc-mtg-kv > span:last-child {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.dc-mtg-verdict {
+  font-weight: 700;
+}
+
+.dc-mtg-participants {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.dc-mtg-participant {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--surface-alt, oklch(0.975 0.003 250));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.dc-mtg-p-role {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.dc-mtg-p-model {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.dc-mtg-list {
+  margin-bottom: 10px;
+}
+
+.dc-mtg-list:last-child {
+  margin-bottom: 0;
+}
+
+.dc-mtg-list-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.dc-mtg-list-item {
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 4px 8px;
+  border-left: 3px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.dc-mtg-agree .dc-mtg-list-item {
+  border-left-color: oklch(0.5 0.16 145);
+  background: oklch(0.5 0.16 145 / 0.05);
+}
+
+.dc-mtg-disagree .dc-mtg-list-item {
+  border-left-color: oklch(0.65 0.18 70);
+  background: oklch(0.65 0.18 70 / 0.05);
+}
+
+.dc-mtg-risk-item {
+  border-left-color: oklch(0.65 0.22 25);
+  background: oklch(0.5 0.18 25 / 0.05);
+  color: oklch(0.65 0.22 25);
+}
+
+/* ── 模型评分排行 ─────────────────────────────────── */
+
+.dc-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.dc-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.dc-model-row:last-child {
+  border-bottom: none;
+}
+
+.dc-model-rank {
+  flex-shrink: 0;
+  width: 26px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  text-align: center;
+}
+
+.dc-model-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dc-model-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dc-model-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+
+.dc-model-role {
+  background: oklch(0.55 0.15 250 / 0.15);
+  color: oklch(0.55 0.12 250);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+.dc-model-weight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  width: 80px;
+}
+
+.dc-model-bar {
+  flex: 1;
+  height: 6px;
+  background: oklch(0.92 0.005 250);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.dc-model-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.dc-bar-good {
+  background: oklch(0.55 0.16 145);
+}
+
+.dc-bar-mid {
+  background: oklch(0.65 0.15 250);
+}
+
+.dc-bar-low {
+  background: oklch(0.65 0.18 25);
+}
+
+.dc-model-w-val {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 28px;
+  text-align: right;
+  color: var(--ink);
+}
+
+.btn-outline-accent.btn-xs {
+  padding: 2px 8px;
+  font-size: 10px;
+  border-radius: 4px;
+}
+
+/* ── P0 已拦截区 + 计划标记 ──────────────────────────── */
+
+.dc-badge-danger {
+  background: oklch(0.6 0.2 25 / 0.2);
+  color: oklch(0.72 0.18 25);
+}
+
+.dc-blocked-item {
+  border: 1px solid oklch(0.6 0.12 25 / 0.3);
+  border-left: 3px solid oklch(0.62 0.18 25);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: oklch(0.6 0.15 25 / 0.04);
+}
+
+.dc-blocked-reason {
+  font-size: 12px;
+  color: oklch(0.7 0.12 25);
+  margin: 6px 0;
+  line-height: 1.5;
+}
+
+.dc-blocked-tag {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.dc-blocked-tag--system {
+  background: oklch(0.6 0.18 25 / 0.18);
+  color: oklch(0.72 0.16 25);
+}
+.dc-blocked-tag--committee {
+  background: oklch(0.6 0.15 300 / 0.18);
+  color: oklch(0.72 0.14 300);
+}
+
+.dc-btn-restore {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 5px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.dc-btn-restore:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.dc-btn-restore:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dc-pending-flag {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.dc-flag-repair {
+  background: oklch(0.65 0.15 250 / 0.18);
+  color: oklch(0.75 0.13 250);
+}
+.dc-flag-adjust {
+  background: oklch(0.65 0.16 70 / 0.18);
+  color: oklch(0.78 0.14 70);
+}
+.dc-flag-committee {
+  background: oklch(0.6 0.15 300 / 0.18);
+  color: oklch(0.72 0.14 300);
 }

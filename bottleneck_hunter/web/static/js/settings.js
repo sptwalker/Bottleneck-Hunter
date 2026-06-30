@@ -3,6 +3,7 @@
  */
 
 import { syncProviderFromSettings } from './panel.js';
+import { showConfirm } from './utils/confirm.js';
 
 let providers = [];
 let _onProvidersChange = null;
@@ -71,7 +72,7 @@ function renderProviders(containerId) {
   list.querySelectorAll('.btn-delete-key').forEach(btn => {
     btn.addEventListener('click', async () => {
       const provider = btn.dataset.provider;
-      if (!confirm(`确定删除 ${provider} 的个人 API KEY？将回退到全局 KEY（如有）。`)) return;
+      if (!await showConfirm(`确定删除 ${provider} 的个人 API KEY？将回退到全局 KEY（如有）。`)) return;
       try {
         const res = await fetch(`/api/user/api-keys/${provider}`, { method: 'DELETE' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -206,7 +207,7 @@ export function onProvidersChange(fn) {
 function escapeHtml(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 export function initSettings() {

@@ -9,13 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 from typing import AsyncGenerator
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.chain.json_utils import extract_json_object
+from bottleneck_hunter.llm_clients.factory import get_llm_for_position, get_models_for_role
 
 logger = logging.getLogger(__name__)
 
@@ -24,22 +24,6 @@ PROMPTS_DIR = Path(__file__).resolve().parents[1] / "chain" / "prompts"
 
 def _sse(event: str, **data) -> dict:
     return {"event": event, "data": data}
-
-
-def _get_llm():
-    try:
-        from bottleneck_hunter.llm_clients.factory import create_llm
-        for provider, model, key_env in [
-            ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-            ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-            ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-            ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-        ]:
-            if os.getenv(key_env):
-                return create_llm(provider, model, temperature=0.2), provider, model
-    except Exception as e:
-        logger.warning("无法创建 LLM: %s", e)
-    return None, "", ""
 
 
 async def check_catalyst_expiry(
@@ -68,7 +52,9 @@ async def detect_catalysts(
     total = len(entries)
     yield _sse("catalyst_scan_start", total=total, message=f"开始扫描 {total} 只股票的催化剂...")
 
-    llm, provider, model = _get_llm()
+    llm, provider, model = get_llm_for_position(position="watchlist_catalyst")
+    all_catalyst_models = get_models_for_role("watchlist_catalyst")
+    second_llm = all_catalyst_models[1][0] if len(all_catalyst_models) >= 2 else None
     created = 0
 
     for entry in entries:
@@ -90,6 +76,16 @@ async def detect_catalysts(
                     llm, ticker, strategy, intel, existing, budget, provider, model
                 )
                 for cat in catalysts:
+                    if second_llm and cat.get("impact_level") in ("high", "critical"):
+                        confirmed = await _cross_confirm_catalyst(
+                            second_llm, ticker, cat, budget,
+                            all_catalyst_models[1][1], all_catalyst_models[1][2],
+                        )
+                        if not confirmed:
+                            cat["confidence"] = max(1, cat.get("confidence", 5) - 3)
+                            cat["_cross_rejected"] = True
+                            logger.info("高影响催化剂 %s 未通过交叉确认，置信度下调", cat.get("title"))
+
                     store.create_catalyst(
                         entry_id=entry_id,
                         ticker=ticker,
@@ -99,6 +95,11 @@ async def detect_catalysts(
                         expected_date=cat.get("expected_date"),
                         impact_level=cat.get("impact_level", "medium"),
                         confidence=cat.get("confidence", 5),
+                        source_category=cat.get("source_category", "other"),
+                        impact_color=cat.get("impact_color", "yellow"),
+                        direction=cat.get("direction", "neutral"),
+                        time_window=cat.get("time_window", ""),
+                        position_implication=cat.get("position_implication", ""),
                     )
                     created += 1
 
@@ -165,6 +166,11 @@ async def _extract_catalysts_llm(
 - expected_date: 预期日期（YYYY-MM-DD 或 null）
 - impact_level: low / medium / high / critical
 - confidence: 1-10
+- source_category: 来源维度 (earnings / corporate / industry / macro)
+- impact_color: 影响颜色 (red=高冲击 / yellow=中等 / green=常规)
+- direction: 方向 (bullish / neutral / bearish)
+- time_window: 时间窗口描述（如 "2026-07-15 ± 3天"）
+- position_implication: 对头寸的影响建议（如 "利好持仓，可加仓" 或 "风险事件，建议减仓对冲"）
 
 返回 JSON 数组，不要多余文字。"""
 
@@ -177,6 +183,34 @@ async def _extract_catalysts_llm(
     from bottleneck_hunter.chain.json_utils import extract_json_array
     arr = extract_json_array(text)
     return arr if arr else []
+
+
+async def _cross_confirm_catalyst(
+    llm, ticker: str, catalyst: dict,
+    budget: BudgetTracker, provider: str, model: str,
+) -> bool:
+    """用第二个模型独立验证高影响催化剂的合理性。"""
+    prompt = f"""请独立评估以下催化剂事件的真实性和影响程度。
+
+股票: {ticker}
+催化剂标题: {catalyst.get('title', '')}
+描述: {catalyst.get('description', '')}
+影响等级: {catalyst.get('impact_level', 'medium')}
+置信度: {catalyst.get('confidence', 5)}/10
+
+请返回 JSON:
+{{"confirmed": true/false, "adjusted_confidence": 1-10, "reason": "简要说明"}}
+仅当你认为该催化剂确实存在且影响等级合理时返回 confirmed=true。"""
+
+    try:
+        response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+        if budget:
+            budget.record(provider, model, 400, 200, "catalyst_cross_confirm")
+        result = extract_json_object(response)
+        return result.get("confirmed", True)
+    except Exception as e:
+        logger.warning("催化剂交叉确认失败: %s", e)
+        return True
 
 
 def _extract_catalysts_from_strategy(strategy: dict | None) -> list[dict]:
@@ -366,3 +400,106 @@ async def judge_expired_catalysts(
 
     yield _sse("catalyst_judge_done", judged=judged_count,
                message=f"催化剂判定完成：{judged_count}/{len(unjudged)} 个")
+
+
+# ---------------------------------------------------------------------------
+# Phase 20B: 催化剂日历 + 周度前瞻
+# ---------------------------------------------------------------------------
+
+def get_catalyst_calendar(store: WatchlistStore, days: int = 30) -> dict:
+    """按日期+来源维度组织催化剂日历视图。
+
+    返回:
+        {"dates": {"2026-07-01": [...], ...},
+         "by_category": {"earnings": [...], ...},
+         "summary": {"total": N, "red": N, "yellow": N, "green": N}}
+    """
+    from datetime import datetime, timezone, timedelta
+
+    catalysts = store.get_upcoming_catalysts(days=days)
+
+    dates: dict[str, list] = {}
+    by_category: dict[str, list] = {}
+    color_counts = {"red": 0, "yellow": 0, "green": 0}
+
+    for c in catalysts:
+        date_key = (c.get("expected_date") or "未定")[:10]
+        item = {
+            "id": c.get("id"),
+            "ticker": c.get("ticker", ""),
+            "title": c.get("title", ""),
+            "catalyst_type": c.get("catalyst_type", "event"),
+            "impact_level": c.get("impact_level", "medium"),
+            "source_category": c.get("source_category", "other"),
+            "impact_color": c.get("impact_color", "yellow"),
+            "direction": c.get("direction", "neutral"),
+            "time_window": c.get("time_window", ""),
+            "position_implication": c.get("position_implication", ""),
+            "confidence": c.get("confidence", 5),
+        }
+
+        dates.setdefault(date_key, []).append(item)
+
+        cat = item["source_category"]
+        by_category.setdefault(cat, []).append(item)
+
+        color = item["impact_color"]
+        if color in color_counts:
+            color_counts[color] += 1
+
+    return {
+        "dates": dict(sorted(dates.items())),
+        "by_category": by_category,
+        "summary": {
+            "total": len(catalysts),
+            **color_counts,
+        },
+    }
+
+
+def generate_weekly_preview(store: WatchlistStore) -> dict:
+    """生成未来 7 天催化剂周度前瞻。
+
+    按 source_category 分组，impact_color 排序（red > yellow > green）。
+
+    返回:
+        {"week_start": "2026-06-27", "week_end": "2026-07-03",
+         "categories": {"earnings": [...], "macro": [...]},
+         "highlights": [...], "total": N}
+    """
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime.now(timezone.utc)
+    week_start = now.strftime("%Y-%m-%d")
+    week_end = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    catalysts = store.get_upcoming_catalysts(days=7)
+
+    color_order = {"red": 0, "yellow": 1, "green": 2}
+    catalysts.sort(key=lambda c: color_order.get(c.get("impact_color", "yellow"), 1))
+
+    categories: dict[str, list] = {}
+    highlights = []
+
+    for c in catalysts:
+        cat = c.get("source_category", "other")
+        item = {
+            "ticker": c.get("ticker", ""),
+            "title": c.get("title", ""),
+            "expected_date": c.get("expected_date", ""),
+            "impact_color": c.get("impact_color", "yellow"),
+            "direction": c.get("direction", "neutral"),
+            "position_implication": c.get("position_implication", ""),
+        }
+        categories.setdefault(cat, []).append(item)
+
+        if c.get("impact_color") == "red" or c.get("impact_level") in ("high", "critical"):
+            highlights.append(item)
+
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "categories": categories,
+        "highlights": highlights[:5],
+        "total": len(catalysts),
+    }

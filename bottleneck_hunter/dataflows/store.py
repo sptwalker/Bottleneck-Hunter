@@ -54,6 +54,8 @@ _MIGRATIONS = [
     # Phase 16B: 多用户
     "ALTER TABLE analyses ADD COLUMN user_id TEXT DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_analyses_user ON analyses(user_id)",
+    # 进度级别从 4 级扩展到 5 级：瓶颈(1)/筛选(2)/评分(3)/验证(4)/会议(5)
+    "UPDATE analyses SET completed_phases = completed_phases + 1 WHERE completed_phases >= 3",
 ]
 
 # 列表查询不返回 result_json（体积大），只返回摘要
@@ -149,10 +151,13 @@ class AnalysisStore:
                 phases = 1
             if (row["supplier_count"] or 0) > 0:
                 phases = 2
-            if result.get("cross_validations"):
+            scoring_cfg = result.get("scoring_config")
+            if scoring_cfg or result.get("ranked_results"):
                 phases = 3
-            if result.get("meeting_result"):
+            if result.get("cross_validations"):
                 phases = 4
+            if result.get("meeting_result"):
+                phases = 5
             if phases > 0:
                 conn.execute("UPDATE analyses SET completed_phases = ? WHERE id = ?", (phases, row["id"]))
         logger.info(f"已为 {len(rows)} 条旧记录回填进度信息")
@@ -327,7 +332,7 @@ class AnalysisStore:
             q, p = self._user_filter(
                 """UPDATE analyses
                    SET result_json = ?, top_picks = ?,
-                       completed_phases = MAX(COALESCE(completed_phases, 0), 3),
+                       completed_phases = MAX(COALESCE(completed_phases, 0), 4),
                        updated_at = ?
                    WHERE id = ?""",
                 (
@@ -355,7 +360,7 @@ class AnalysisStore:
         with self._connect() as conn:
             q, p = self._user_filter(
                 """UPDATE analyses SET result_json = ?,
-                       completed_phases = MAX(COALESCE(completed_phases, 0), 4),
+                       completed_phases = MAX(COALESCE(completed_phases, 0), 5),
                        updated_at = ? WHERE id = ?""",
                 (
                     json.dumps(result, ensure_ascii=False, default=str),
@@ -425,6 +430,16 @@ class AnalysisStore:
 
         logger.info(f"供应商数据已更新: {analysis_id}")
         return True
+
+    def set_completed_phases(self, analysis_id: str, phases: int) -> None:
+        """将 completed_phases 推进到至少 phases 级别。"""
+        with self._connect() as conn:
+            q, p = self._user_filter(
+                "UPDATE analyses SET completed_phases = MAX(COALESCE(completed_phases, 0), ?) WHERE id = ?",
+                (phases, analysis_id),
+            )
+            conn.execute(q, p)
+            conn.commit()
 
     def update_ai_report(
         self, analysis_id: str, report_key: str, text: str, scoring_config: dict,

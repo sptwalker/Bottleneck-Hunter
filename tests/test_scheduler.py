@@ -60,7 +60,7 @@ class TestSchedulerInit:
 
     @skip_no_apscheduler
     async def test_init_creates_14_jobs(self, store):
-        """init_scheduler 后应注册 16 个定时任务（6 数据 + 1 institutional + 1 macro + 8 决策）。"""
+        """init_scheduler 后应注册 17 个定时任务（6 数据 + 1 institutional + 1 macro + 8 决策 + 1 校准）。"""
         from bottleneck_hunter.watchlist.scheduler import (
             get_job_statuses,
             init_scheduler,
@@ -74,7 +74,7 @@ class TestSchedulerInit:
         scheduler.start(paused=True)
         try:
             jobs = get_job_statuses()
-            assert len(jobs) == 16
+            assert len(jobs) == 17
 
             # 验证所有预期 job id 都存在
             expected_ids = {
@@ -94,6 +94,7 @@ class TestSchedulerInit:
                 "cn_auto_review",
                 "macro_update",
                 "us_institutional_update",
+                "model_calibration",
             }
             actual_ids = {j["id"] for j in jobs}
             assert actual_ids == expected_ids
@@ -112,7 +113,7 @@ class TestSchedulerInit:
         scheduler = init_scheduler(store)
         scheduler.start(paused=True)
         # 关闭之前确认有 job
-        assert len(get_job_statuses()) == 16
+        assert len(get_job_statuses()) == 17
 
         shutdown_scheduler()
         # 关闭之后应为空

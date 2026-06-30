@@ -112,12 +112,12 @@ async def refresh_pipeline(pipeline: str, request: Request, user: dict = Depends
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/refresh-intelligence")
-async def refresh_intelligence(request: Request, user: dict = Depends(get_current_user)):
+async def refresh_intelligence(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """SSE 流：刷新所有股票的情报聚合"""
     from bottleneck_hunter.watchlist.strategy_engine import refresh_intelligence_all
     from bottleneck_hunter.watchlist.budget import BudgetTracker
 
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
     budget = BudgetTracker(store)
 
     async def event_generator():
@@ -133,12 +133,12 @@ async def refresh_intelligence(request: Request, user: dict = Depends(get_curren
 
 
 @router.post("/refresh-strategy")
-async def refresh_strategy(request: Request, user: dict = Depends(get_current_user)):
+async def refresh_strategy(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """SSE 流：刷新所有股票的策略生成"""
     from bottleneck_hunter.watchlist.strategy_engine import refresh_strategy_all
     from bottleneck_hunter.watchlist.budget import BudgetTracker
 
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
     budget = BudgetTracker(store)
 
     async def event_generator():
@@ -154,9 +154,9 @@ async def refresh_strategy(request: Request, user: dict = Depends(get_current_us
 
 
 @router.get("/strategy-summaries")
-async def get_strategy_summaries(user: dict = Depends(get_current_user)):
+async def get_strategy_summaries(market: str = "us_stock", user: dict = Depends(get_current_user)):
     """批量获取所有股票的最新策略信号（避免 N+1）"""
-    store = _user_store(user)
+    store = _user_store(user).for_market(market)
     summaries = store.get_all_strategy_summaries()
     return {"summaries": summaries}
 
@@ -364,6 +364,21 @@ async def get_earnings(entry_id: str, user: dict = Depends(get_current_user)):
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
     return {"earnings": store.get_earnings(entry["ticker"])}
+
+
+@router.get("/{entry_id}/overview")
+async def get_overview(entry_id: str, user: dict = Depends(get_current_user)):
+    """聚合返回单只股票的概览数据（基本信息 tab 使用）。"""
+    store = _user_store(user)
+    entry = store.get(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    ticker = entry["ticker"]
+    return {
+        "latest_snapshot": store.get_latest_snapshot(ticker),
+        "profile": store.get_company_profile(ticker),
+        "earnings": store.get_earnings(ticker),
+    }
 
 
 # ─────────────────────────────────────────────────────────────

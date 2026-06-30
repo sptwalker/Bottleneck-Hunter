@@ -1,6 +1,8 @@
 """Price data pipeline — fetch daily OHLCV + compute technical indicators.
 
-Uses yfinance for US stocks, akshare for A-stocks.
+Uses FetcherManager for auto-failover across data sources:
+  A-stock: efinance → akshare → pytdx
+  US-stock: yfinance → finnhub
 """
 
 from __future__ import annotations
@@ -162,7 +164,17 @@ def _fetch_daily_data(ticker: str, days: int = 180) -> list[dict]:
             if macd_result:
                 snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
         result.append(snap)
-    return result
+    return result, info
+
+
+def _fetch_company_info_us(ticker: str) -> dict:
+    """获取美股企业基本面信息 (yfinance Ticker.info)。同步。"""
+    try:
+        t = yf.Ticker(ticker)
+        return t.info or {}
+    except Exception as e:
+        logger.debug("获取 %s company info 失败: %s", ticker, e)
+        return {}
 
 
 def _fetch_astock_fundamentals(code: str) -> dict:
@@ -273,24 +285,126 @@ def _fetch_astock_daily(ticker: str, days: int = 180) -> list[dict]:
             if macd_result:
                 snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
         result.append(snap)
-    return result
+    return result, {}
 
 
 async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market: str = "us_stock") -> str:
-    """Fetch one ticker asynchronously with semaphore. Returns status string."""
+    """Fetch one ticker asynchronously with semaphore. Returns status string.
+
+    优先通过 FetcherManager 获取（自动降级），若失败再走原有直连逻辑。
+    """
+    from bottleneck_hunter.watchlist.data_validator import validate_snapshot
+
     async with _get_sem():
         try:
-            fetch_fn = _fetch_astock_daily if market == "a_stock" else _fetch_daily_data
-            snapshots = await asyncio.to_thread(fetch_fn, ticker, days)
+            company_info = {}
+            snapshots = await _fetch_via_manager(ticker, days, market)
+            if not snapshots:
+                fetch_fn = _fetch_astock_daily if market == "a_stock" else _fetch_daily_data
+                snapshots, company_info = await asyncio.to_thread(fetch_fn, ticker, days)
+
+            if not company_info and market != "a_stock":
+                company_info = await asyncio.to_thread(_fetch_company_info_us, ticker)
+
+            if company_info:
+                try:
+                    store.save_company_profile(ticker, company_info)
+                except Exception as e:
+                    logger.debug("保存 %s company profile 失败: %s", ticker, e)
+
             if snapshots:
+                prev_snap = None
+                valid_snaps = []
+                is_st = False
+                if market == "a_stock":
+                    wl_entry = store.get_by_ticker(ticker)
+                    name = (wl_entry or {}).get("company_name_cn", "") or (wl_entry or {}).get("company_name", "")
+                    is_st = "ST" in name.upper()
                 for snap in snapshots:
                     snap["market"] = market
-                store.save_snapshots(snapshots)
+                    vr = validate_snapshot(snap, prev_snap, market, is_st=is_st)
+                    snap["data_quality"] = vr.data_quality
+                    snap["quality_notes"] = "; ".join(vr.warnings + vr.errors)
+                    if vr.valid:
+                        valid_snaps.append(snap)
+                        prev_snap = snap
+                    else:
+                        logger.warning("跳过异常数据 %s %s: %s",
+                                       ticker, snap.get("date"), vr.errors)
+                store.save_snapshots(valid_snaps)
                 return "ok"
             return "no_data"
         except Exception as e:
             logger.error("Price pipeline error for %s: %s", ticker, e)
             return f"error: {e}"
+
+
+async def _fetch_via_manager(ticker: str, days: int, market: str) -> list[dict]:
+    """通过 FetcherManager 获取 OHLCV + 计算技术指标。返回 snapshot list。"""
+    try:
+        from bottleneck_hunter.data_provider import get_fetcher_manager
+        mgr = get_fetcher_manager()
+    except Exception as e:
+        logger.debug("FetcherManager 不可用，将回退到直连: %s", e)
+        return []
+
+    df = await mgr.fetch_daily(ticker, market, days)
+    if df is None or df.empty:
+        return []
+
+    if "close" not in df.columns:
+        return []
+
+    closes = df["close"].tolist()
+    volumes = df["volume"].tolist() if "volume" in df.columns else [0] * len(df)
+    opens = df["open"].tolist() if "open" in df.columns else closes
+    highs = df["high"].tolist() if "high" in df.columns else closes
+    lows = df["low"].tolist() if "low" in df.columns else closes
+
+    rsi = _compute_rsi(closes)
+    macd_result = _compute_macd(closes)
+    sma_20 = _compute_sma(closes, 20)
+    sma_50 = _compute_sma(closes, 50)
+
+    fundamentals = {}
+    try:
+        quote = await mgr.fetch_realtime(ticker, market)
+        if quote:
+            fundamentals["market_cap"] = quote.market_cap
+            fundamentals["pe_ratio"] = quote.pe_ratio
+    except Exception:
+        pass
+
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result = []
+    start_idx = max(0, len(df) - days)
+    for i in range(start_idx, len(df)):
+        date_str = str(df.iloc[i].get("date", ""))[:10]
+        prev_close = closes[i - 1] if i > 0 else closes[i]
+        change_pct = ((closes[i] - prev_close) / prev_close * 100) if prev_close else 0.0
+        snap = {
+            "ticker": ticker,
+            "date": date_str,
+            "open": _safe(opens[i]),
+            "high": _safe(highs[i]),
+            "low": _safe(lows[i]),
+            "close": _safe(closes[i]),
+            "volume": int(volumes[i]) if volumes[i] else None,
+            "change_pct": round(change_pct, 2),
+            "fetched_at": now_iso,
+        }
+        if i == len(df) - 1:
+            snap["rsi_14"] = rsi
+            snap["sma_20"] = sma_20
+            snap["sma_50"] = sma_50
+            snap["market_cap"] = fundamentals.get("market_cap")
+            snap["pe_ratio"] = fundamentals.get("pe_ratio")
+            if macd_result:
+                snap["macd"], snap["macd_signal"], snap["macd_hist"] = macd_result
+        result.append(snap)
+
+    logger.info("通过 FetcherManager 获取 %s 成功: %d 条数据", ticker, len(result))
+    return result
 
 
 async def fetch_price_batch(tickers: list[str], store: WatchlistStore, days: int = 180, market: str = "us_stock") -> dict[str, str]:

@@ -14,14 +14,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.regime_mapper import get_allocation_bounds, format_bounds_for_prompt
 from bottleneck_hunter.chain.json_utils import extract_json_object
+from bottleneck_hunter.llm_clients.factory import get_llm_for_position, get_models_for_role
 
 logger = logging.getLogger(__name__)
 
@@ -37,41 +38,6 @@ def _load_prompt(name: str) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     raise FileNotFoundError(f"Prompt 模板不存在: {path}")
-
-
-def _get_llm(provider_hint: str | None = None, position: str | None = None):
-    """获取 LLM，优先读用户配置 DC_MODEL_<position>，再走 fallback 链"""
-    try:
-        from bottleneck_hunter.llm_clients.factory import create_llm
-
-        if position:
-            env_val = os.environ.get(f"DC_MODEL_{position.upper()}", "").strip()
-            if env_val and ":" in env_val:
-                p, m = env_val.split(":", 1)
-                return create_llm(p, m, temperature=0.3), p, m
-
-        if provider_hint:
-            configs = {
-                "deepseek": ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-                "qwen": ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-                "kimi": ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-                "glm": ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-            }
-            cfg = configs.get(provider_hint)
-            if cfg and os.getenv(cfg[2]):
-                return create_llm(cfg[0], cfg[1], temperature=0.3), cfg[0], cfg[1]
-
-        for provider, model, key_env in [
-            ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-            ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-            ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-            ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-        ]:
-            if os.getenv(key_env):
-                return create_llm(provider, model, temperature=0.3), provider, model
-    except Exception as e:
-        logger.warning("无法创建 LLM: %s", e)
-    return None, "", ""
 
 
 def _today() -> str:
@@ -114,6 +80,33 @@ def _get_market_context_text(markets: list[str] | None = None) -> str:
     return "\n\n".join(parts) if parts else _MARKET_CONTEXT["us_stock"]
 
 
+def _merge_macro_results(results: list[dict]) -> dict:
+    """合并多个 L1 宏观策略结果 — 多数投票 + 加权均值。"""
+    if len(results) == 1:
+        return results[0]
+
+    from collections import Counter
+
+    regimes = [r.get("regime", "sideways") for r in results]
+    regime = Counter(regimes).most_common(1)[0][0]
+
+    appetites = [r.get("risk_appetite", "balanced") for r in results]
+    risk_appetite = Counter(appetites).most_common(1)[0][0]
+
+    confidences = [r.get("regime_confidence", 5) for r in results]
+    avg_confidence = round(sum(confidences) / len(confidences), 1)
+
+    base = results[0].copy()
+    base["regime"] = regime
+    base["risk_appetite"] = risk_appetite
+    base["regime_confidence"] = avg_confidence
+
+    if any(r.get("regime") != regime for r in results):
+        base["_divergence_warning"] = f"模型分歧: regime 判断不一致 ({regimes})"
+
+    return base
+
+
 # ─────────────────────────────────────────────────────────
 # L1: 宏观策略
 # ─────────────────────────────────────────────────────────
@@ -121,12 +114,14 @@ def _get_market_context_text(markets: list[str] | None = None) -> str:
 async def run_macro_strategy(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """生成全新的 L1 宏观策略（通常每周一次）"""
+    store = store.for_market(market)
     yield _sse("decision_start", layer="L1", action="generate",
-               message="开始生成 L1 宏观策略...")
+               market=market, message="开始生成 L1 宏观策略...")
 
-    llm, provider, model = _get_llm(position="L1_macro")
+    llm, provider, model = get_llm_for_position(position="L1_macro")
     if not llm:
         yield _sse("decision_error", layer="L1", error="无可用 LLM")
         return
@@ -136,7 +131,7 @@ async def run_macro_strategy(
         return
 
     try:
-        market_data = await _collect_market_context(store)
+        market_data = await _collect_market_context(store, market)
         active_markets = market_data.get("markets", [])
         market_ctx = _get_market_context_text(active_markets)
         prompt_template = _load_prompt("decision_macro")
@@ -149,15 +144,39 @@ async def run_macro_strategy(
                   .replace("{market_news}", json.dumps(market_data.get("news", []), ensure_ascii=False))
                   )
 
-        yield _sse("decision_progress", layer="L1", step="llm_reasoning",
-                   message="L1 LLM 推理中...")
+        all_models = get_models_for_role("L1_macro")
+        use_cross = len(all_models) >= 2
 
-        response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+        if use_cross:
+            yield _sse("decision_progress", layer="L1", step="llm_reasoning",
+                       message=f"L1 双模型交叉验证中... ({len(all_models)} 路)")
 
-        if budget:
-            budget.record(provider, model, 5000, 2000, "macro_strategy")
+            async def _invoke_model(m_llm, m_prov, m_mod):
+                r = await asyncio.to_thread(lambda: m_llm.invoke(prompt).content)
+                if budget:
+                    budget.record(m_prov, m_mod, 5000, 2000, "macro_strategy")
+                return extract_json_object(r), m_prov, m_mod
 
-        result = extract_json_object(response)
+            tasks = [_invoke_model(*m) for m in all_models[:2]]
+            results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+            valid_results = [item for item in results_raw if not isinstance(item, Exception)]
+
+            if len(valid_results) >= 2:
+                result = _merge_macro_results([v[0] for v in valid_results])
+                result["_cross_validated"] = True
+                result["_models_used"] = [f"{v[1]}:{v[2]}" for v in valid_results]
+                logger.info("L1 宏观策略双模型交叉验证完成: regime=%s", result.get("regime"))
+            elif valid_results:
+                result = valid_results[0][0]
+            else:
+                raise RuntimeError("所有模型调用均失败")
+        else:
+            yield _sse("decision_progress", layer="L1", step="llm_reasoning",
+                       message="L1 LLM 推理中...")
+            response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+            if budget:
+                budget.record(provider, model, 5000, 2000, "macro_strategy")
+            result = extract_json_object(response)
         strategy_id = store.create_macro_strategy(result)
 
         yield _sse("decision_done", layer="L1", strategy_id=strategy_id,
@@ -173,8 +192,10 @@ async def run_macro_strategy(
 async def run_macro_check(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """L1 日常检查 — 判断现有宏观策略是否仍然有效"""
+    store = store.for_market(market)
     yield _sse("decision_start", layer="L1", action="check",
                message="L1 日常检查中...")
 
@@ -182,11 +203,11 @@ async def run_macro_check(
     if not current:
         yield _sse("decision_info", layer="L1",
                    message="无现有 L1 策略，需要先全面生成")
-        async for evt in run_macro_strategy(store, budget):
+        async for evt in run_macro_strategy(store, budget, market=market):
             yield evt
         return
 
-    llm, provider, model = _get_llm(position="L1_macro")
+    llm, provider, model = get_llm_for_position(position="L1_macro")
     if not llm:
         yield _sse("decision_error", layer="L1", error="无可用 LLM")
         return
@@ -196,7 +217,7 @@ async def run_macro_check(
         return
 
     try:
-        market_data = await _collect_market_context(store)
+        market_data = await _collect_market_context(store, market)
         active_markets = market_data.get("markets", [])
         market_ctx = _get_market_context_text(active_markets)
         created_at = current.get("created_at", "")
@@ -229,7 +250,7 @@ async def run_macro_check(
         if status == "needs_major_revision":
             yield _sse("decision_info", layer="L1",
                        message="L1 宏观策略需要重大修订，开始重新生成...")
-            async for evt in run_macro_strategy(store, budget):
+            async for evt in run_macro_strategy(store, budget, market=market):
                 yield evt
         else:
             store.update_macro_status(
@@ -253,8 +274,10 @@ async def run_macro_check(
 async def run_strategic_plan(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """生成全新的 L2 组合策略"""
+    store = store.for_market(market)
     yield _sse("decision_start", layer="L2", action="generate",
                message="开始生成 L2 组合策略...")
 
@@ -262,14 +285,14 @@ async def run_strategic_plan(
     if not macro:
         yield _sse("decision_info", layer="L2",
                    message="无 L1 宏观策略，需要先生成")
-        async for evt in run_macro_strategy(store, budget):
+        async for evt in run_macro_strategy(store, budget, market=market):
             yield evt
         macro = store.get_latest_macro_strategy()
         if not macro:
             yield _sse("decision_error", layer="L2", error="L1 策略生成失败，无法继续")
             return
 
-    llm, provider, model = _get_llm(position="L2_strategic")
+    llm, provider, model = get_llm_for_position(position="L2_strategic")
     if not llm:
         yield _sse("decision_error", layer="L2", error="无可用 LLM")
         return
@@ -279,7 +302,7 @@ async def run_strategic_plan(
         return
 
     try:
-        watchlist_signals = _collect_watchlist_signals(store)
+        watchlist_signals = _collect_watchlist_signals(store, market)
         active_markets = list(store.get_tickers_by_market().keys())
         market_ctx = _get_market_context_text(active_markets)
         account_status = store.get_sim_account()
@@ -295,9 +318,18 @@ async def run_strategic_plan(
             )
 
         prompt_template = _load_prompt("decision_strategic")
+
+        macro_json = macro.get("result_json", {})
+        regime = macro_json.get("regime", "sideways")
+        risk_appetite = macro_json.get("risk_appetite", "balanced")
+        confidence = macro_json.get("regime_confidence", 5)
+        alloc_bounds = get_allocation_bounds(regime, risk_appetite, confidence)
+        bounds_text = format_bounds_for_prompt(alloc_bounds)
+
         prompt = (prompt_template
                   .replace("{market_context}", market_ctx)
-                  .replace("{macro_strategy}", json.dumps(macro.get("result_json", {}), ensure_ascii=False))
+                  .replace("{macro_strategy}", json.dumps(macro_json, ensure_ascii=False))
+                  .replace("{allocation_bounds}", bounds_text)
                   .replace("{watchlist_signals}", json.dumps(watchlist_signals, ensure_ascii=False))
                   .replace("{account_status}", json.dumps({
                       "total_equity": account_status.get("total_equity", 100000),
@@ -323,6 +355,40 @@ async def run_strategic_plan(
         result = extract_json_object(response)
         plan_id = store.create_strategic_plan(macro["id"], result)
 
+        # Phase 20D: 解析并保存三场景估值
+        try:
+            stock_selection = result.get("stock_selection", {})
+            entry_map = {e["ticker"]: e["id"] for e in store.list_all() if e.get("market") == market}
+            for holding in (stock_selection.get("core_holdings", []) +
+                            stock_selection.get("tactical_holdings", [])):
+                sv = holding.get("scenario_valuation")
+                if not sv:
+                    continue
+                ticker = holding.get("ticker", "")
+                entry_id = entry_map.get(ticker, "")
+                if not entry_id:
+                    continue
+                snap = store.get_latest_snapshot(ticker)
+                current_price = snap.get("close", 0) if snap else 0
+                store.create_scenario_valuation(
+                    entry_id=entry_id,
+                    ticker=ticker,
+                    strategic_plan_id=plan_id,
+                    bear_price=sv.get("bear_price", 0),
+                    bear_probability=sv.get("bear_probability", 20),
+                    bear_rationale=sv.get("bear_rationale", ""),
+                    base_price=sv.get("base_price", 0),
+                    base_probability=sv.get("base_probability", 60),
+                    base_rationale=sv.get("base_rationale", ""),
+                    bull_price=sv.get("bull_price", 0),
+                    bull_probability=sv.get("bull_probability", 20),
+                    bull_rationale=sv.get("bull_rationale", ""),
+                    current_price=current_price,
+                    valuation_method=sv.get("valuation_method", "relative"),
+                )
+        except Exception as e:
+            logger.warning("场景估值保存失败: %s", e)
+
         yield _sse("decision_done", layer="L2", plan_id=plan_id,
                    stance=result.get("overall_stance", "balanced"),
                    message=f"L2 组合策略已生成：{result.get('overall_stance', '?')}")
@@ -335,8 +401,10 @@ async def run_strategic_plan(
 async def run_deviation_check(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """L2 偏离检查 — 对比实际持仓与目标策略"""
+    store = store.for_market(market)
     yield _sse("decision_start", layer="L2", action="deviation_check",
                message="L2 偏离检查中...")
 
@@ -346,7 +414,7 @@ async def run_deviation_check(
                    message="无 L2 组合策略，跳过偏离检查")
         return
 
-    llm, provider, model = _get_llm(position="L2_strategic")
+    llm, provider, model = get_llm_for_position(position="L2_strategic")
     if not llm:
         yield _sse("decision_error", layer="L2", error="无可用 LLM")
         return
@@ -406,8 +474,10 @@ async def run_deviation_check(
 async def run_tactical_plans(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """生成 L3 战术计划 — 每只目标股票的买卖时机"""
+    store = store.for_market(market)
     yield _sse("decision_start", layer="L3", action="generate",
                message="开始生成 L3 战术计划...")
 
@@ -421,7 +491,7 @@ async def run_tactical_plans(
         yield _sse("decision_error", layer="L3", error="无 L1 宏观策略")
         return
 
-    llm, provider, model = _get_llm(position="L3_tactical")
+    llm, provider, model = get_llm_for_position(position="L3_tactical")
     if not llm:
         yield _sse("decision_error", layer="L3", error="无可用 LLM")
         return
@@ -431,7 +501,7 @@ async def run_tactical_plans(
         return
 
     try:
-        watchlist_signals = _collect_watchlist_signals(store)
+        watchlist_signals = _collect_watchlist_signals(store, market)
         active_markets = list(store.get_tickers_by_market().keys())
         market_ctx = _get_market_context_text(active_markets)
         catalysts = store.get_upcoming_catalysts(days=30)
@@ -445,17 +515,69 @@ async def run_tactical_plans(
                 "confidence": c.get("confidence", 5),
             })
 
+        # P1.1 已判定催化剂(realized/failed/partial) → 买卖信号
+        judged = store.get_recently_judged_catalysts(days=7)
+        outcome_by_ticker = {}
+        catalyst_outcome_tickers = set()
+        for c in judged:
+            tk = c.get("ticker", "")
+            if not tk:
+                continue
+            outcome_by_ticker.setdefault(tk, []).append({
+                "title": c.get("title", ""),
+                "outcome": c.get("outcome", ""),
+                "impact": c.get("outcome_impact", 0),
+                "judged_at": (c.get("judged_at", "") or "")[:10],
+            })
+            catalyst_outcome_tickers.add(tk)
+
         stock_data = []
         entries = store.list_all()
+        entries = [e for e in entries if e.get("market") == market]
+
+        # 19C: 基于 L2 stock_selection 过滤，确保 L3 只为 L2 选定的标的生成战术计划
+        strategic_json = strategic.get("result_json", {})
+        stock_selection = strategic_json.get("stock_selection", {})
+        core_holdings = stock_selection.get("core_holdings", [])
+        tactical_holdings = stock_selection.get("tactical_holdings", [])
+        core_tickers = {s.get("ticker", "") for s in core_holdings if s.get("ticker")}
+        tactical_tickers = {s.get("ticker", "") for s in tactical_holdings if s.get("ticker")}
+        watch_tickers = set(stock_selection.get("watchlist_only", []))
+        selected_tickers = core_tickers | tactical_tickers | watch_tickers
+
+        # P1.1 强制纳入：持仓中且催化剂已落空的标的(即使不在 L2 选股)，确保能生成止损/减仓战术
+        held_tickers = {p["ticker"] for p in store.get_sim_positions(
+            store.get_sim_account().get("id")) if p.get("shares", 0) > 0}
+        forced = (catalyst_outcome_tickers & held_tickers)
+        if forced:
+            selected_tickers = selected_tickers | forced
+
+        if selected_tickers:
+            entries = [e for e in entries if e["ticker"] in selected_tickers]
+            if not entries:
+                logger.warning("L2 选股 %s 未匹配到观察池标的，降级为全量处理",
+                               selected_tickers)
+                entries = store.list_all()
+
         for entry in entries:
             ticker = entry["ticker"]
             snap = store.get_latest_snapshot(ticker)
             signal = next((s for s in watchlist_signals if s["ticker"] == ticker), {})
+
+            l2_role = "core" if ticker in core_tickers else "tactical" if ticker in tactical_tickers else "watch"
+            l2_target_weight = 0
+            for s in core_holdings + tactical_holdings:
+                if s.get("ticker") == ticker:
+                    l2_target_weight = s.get("target_weight_pct", 0)
+                    break
+
             stock_data.append({
                 "ticker": ticker,
                 "company_name": entry.get("company_name", ticker),
                 "sector": entry.get("sector", ""),
                 "tier": entry.get("tier", "track"),
+                "l2_role": l2_role,
+                "l2_target_weight": l2_target_weight,
                 "signal": signal.get("signal", "neutral"),
                 "confidence": signal.get("confidence", 5),
                 "price": snap.get("close") if snap else None,
@@ -474,6 +596,8 @@ async def run_tactical_plans(
                   .replace("{strategic_plan}", json.dumps(strategic.get("result_json", {}), ensure_ascii=False))
                   .replace("{stock_data}", json.dumps(stock_data, ensure_ascii=False))
                   .replace("{catalyst_timeline}", json.dumps(catalyst_by_ticker, ensure_ascii=False))
+                  .replace("{catalyst_outcomes}",
+                           json.dumps(outcome_by_ticker, ensure_ascii=False) if outcome_by_ticker else "暂无已判定催化剂")
                   )
 
         yield _sse("decision_progress", layer="L3", step="llm_reasoning",
@@ -517,11 +641,52 @@ async def run_tactical_plans(
 # L4: 执行方案
 # ─────────────────────────────────────────────────────────
 
+def _repair_execution_plan(llm, ep: dict, violations: list[str],
+                           account: dict, constraints: dict) -> dict | None:
+    """P0.2 LLM 自修正：带违规详情重新生成单个执行计划。
+
+    返回修正后的 ep dict；若 LLM 判定不可行或调用失败，返回 None。
+    """
+    try:
+        template = _load_prompt("decision_execution_repair")
+        prompt = (template
+                  .replace("{original_plan}", json.dumps(ep, ensure_ascii=False))
+                  .replace("{violations}", "\n".join(f"- {v}" for v in violations))
+                  .replace("{account_status}", json.dumps({
+                      "total_equity": account.get("total_equity", 100000),
+                      "cash_balance": account.get("cash_balance", 0),
+                  }, ensure_ascii=False))
+                  .replace("{constraints}", json.dumps(constraints, ensure_ascii=False)))
+        response = llm.invoke(prompt).content
+        fixed = extract_json_object(response)
+        if not fixed or not fixed.get("feasible", False):
+            return None
+        # 合并修正字段回原计划
+        ep = dict(ep)
+        if fixed.get("shares") is not None:
+            ep["shares"] = fixed["shares"]
+        if fixed.get("estimated_price") is not None:
+            ep["estimated_price"] = fixed["estimated_price"]
+            ep["target_price"] = fixed["estimated_price"]
+        if fixed.get("execution_method"):
+            ep["execution_method"] = fixed["execution_method"]
+        ep["estimated_amount"] = (ep.get("shares", 0) or 0) * (fixed.get("estimated_price")
+                                                               or ep.get("estimated_price", 0) or 0)
+        ep["auto_repaired"] = True
+        ep["repair_note"] = fixed.get("adjustment_note", "")
+        return ep
+    except Exception as e:
+        logger.warning("执行计划自修正失败: %s", e)
+        return None
+
+
 async def run_execution_plans(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """生成 L4 执行方案 — 可执行操作序列"""
+    store = store.for_market(market)
     yield _sse("decision_start", layer="L4", action="generate",
                message="开始生成 L4 执行方案...")
 
@@ -531,13 +696,13 @@ async def run_execution_plans(
                    message="今日无 L3 战术计划，跳过 L4")
         return
 
-    actionable = [tp for tp in tactical_plans if tp.get("action") != "hold"]
+    actionable = [tp for tp in tactical_plans if tp.get("action") not in ("hold", "wait_for_pullback")]
     if not actionable:
         yield _sse("decision_done", layer="L4",
                    message="L3 计划全部为持有，无需生成执行方案")
         return
 
-    llm, provider, model = _get_llm(position="L4_execution")
+    llm, provider, model = get_llm_for_position(position="L4_execution")
     if not llm:
         yield _sse("decision_error", layer="L4", error="无可用 LLM")
         return
@@ -596,6 +761,10 @@ async def run_execution_plans(
                      for c in all_cards[:8]], ensure_ascii=False)
                 applied_card_ids = [c["id"] for c in all_cards[:8]]
 
+        layer_perf = store.get_layer_performance_summary()
+        layer_perf_text = (json.dumps(layer_perf, ensure_ascii=False)
+                           if layer_perf else "暂无分层绩效数据")
+
         prompt = (prompt_template
                   .replace("{market_context}", market_ctx)
                   .replace("{tactical_plans}", tactical_json)
@@ -604,6 +773,7 @@ async def run_execution_plans(
                   .replace("{trade_feedback}", feedback_text)
                   .replace("{user_preferences}", pref_text)
                   .replace("{experience_cards}", experience_text)
+                  .replace("{layer_performance}", layer_perf_text)
                   )
 
         yield _sse("decision_progress", layer="L4", step="llm_reasoning",
@@ -617,16 +787,105 @@ async def run_execution_plans(
         result = extract_json_object(response)
         exec_plans = result.get("execution_plans", [])
 
-        entry_map = {e["ticker"]: e["id"] for e in store.list_all()}
+        entry_map = {e["ticker"]: e["id"] for e in store.list_all() if e.get("market") == market}
+        sector_map = {e["ticker"]: e.get("sector", "") for e in store.list_all() if e.get("market") == market}
         tactical_map = {tp["ticker"]: tp["id"] for tp in actionable}
         created_ids = []
+        skipped = 0
+        blocked = 0
+        repaired = 0
+
+        # P0.6 动态约束：按 L1 风险偏好选择约束集
+        from bottleneck_hunter.watchlist.constraint_validator import (
+            validate_execution_plan, max_compliant_shares, get_constraints_for_appetite,
+            validate_portfolio_beta)
+        macro = store.get_latest_macro_strategy()
+        risk_appetite = (macro or {}).get("risk_appetite", "")
+        constraints = get_constraints_for_appetite(risk_appetite)
+
+        # P2.1 构建 beta_map(从 company_profiles，缺失则降级)
+        beta_map = {}
+        for tk in set(list(entry_map.keys()) + [p["ticker"] for p in positions]):
+            try:
+                prof = store.get_company_profile(tk)
+                b = (prof or {}).get("raw", {}).get("beta")
+                if b is not None:
+                    beta_map[tk] = float(b)
+            except Exception:
+                pass
+
+        existing_tickers = {ep["ticker"] for ep in store.get_pending_executions() if ep.get("ticker")}
+        batch_tickers = set()
 
         for ep in exec_plans:
             ticker = ep.get("ticker", "")
             if not ticker:
                 continue
+            if ticker in existing_tickers:
+                logger.info("跳过已有 pending 执行计划的 %s", ticker)
+                skipped += 1
+                continue
+            if ticker in batch_tickers:
+                logger.info("跳过本批次重复的 %s", ticker)
+                skipped += 1
+                continue
+            batch_tickers.add(ticker)
             entry_id = entry_map.get(ticker, "")
             tactical_id = tactical_map.get(ticker, "")
+            ep["applied_card_ids"] = applied_card_ids
+            ep.setdefault("market", market)
+            ep.setdefault("sector", sector_map.get(ticker, ""))
+
+            # ── P0.1 前置约束校验 + P2.1 组合 beta 校验 ──
+            def _full_validate(plan_ep):
+                vr = validate_execution_plan(plan_ep, account, positions, constraints)
+                br = validate_portfolio_beta(plan_ep, account, positions, beta_map, constraints)
+                if not br.valid:
+                    vr.violations.extend(br.violations)
+                    vr.valid = False
+                return vr
+
+            vres = _full_validate(ep)
+
+            if not vres.valid:
+                # ── P0.2 LLM 自修正（最多 2 轮）──
+                for _ in range(2):
+                    fixed = await asyncio.to_thread(
+                        _repair_execution_plan, llm, ep, vres.violations, account, constraints)
+                    if fixed is None:
+                        break
+                    fixed.setdefault("market", market)
+                    fixed.setdefault("sector", sector_map.get(ticker, ""))
+                    vres2 = _full_validate(fixed)
+                    if vres2.valid:
+                        ep = fixed
+                        vres = vres2
+                        repaired += 1
+                        break
+                    ep, vres = fixed, vres2
+
+            if not vres.valid:
+                # ── P0.3 自动降级：缩量到合规 ──
+                n = max_compliant_shares(ep, account, positions, constraints)
+                if n > 0 and ep.get("action") in ("buy", "add"):
+                    ep["shares"] = n
+                    price = ep.get("target_price") or ep.get("estimated_price", 0)
+                    ep["estimated_amount"] = n * price
+                    ep["auto_adjusted"] = True
+                    vres = _full_validate(ep)
+
+            if not vres.valid:
+                # ── P0.3 无法降级：拦截，写入"已拦截"区 + 回灌反馈 ──
+                store.create_blocked_execution(
+                    tactical_plan_id=tactical_id, entry_id=entry_id,
+                    ticker=ticker, result_json=ep,
+                    reason="; ".join(vres.violations),
+                    marker=store.BLOCK_MARKER_SYSTEM,
+                )
+                blocked += 1
+                logger.info("拦截不合规执行计划 %s: %s", ticker, vres.violations)
+                continue
+
             plan_id = store.create_execution_plan(
                 tactical_plan_id=tactical_id,
                 entry_id=entry_id,
@@ -638,11 +897,33 @@ async def run_execution_plans(
         for cid in applied_card_ids:
             store.increment_card_applied(cid)
 
+        extra = []
+        if skipped:
+            extra.append(f"跳过 {skipped} 条重复")
+        if repaired:
+            extra.append(f"自修正 {repaired} 条")
+        if blocked:
+            extra.append(f"拦截 {blocked} 条不合规")
+        extra_msg = ("，" + "，".join(extra)) if extra else ""
         yield _sse("decision_done", layer="L4",
                    plan_count=len(created_ids),
+                   blocked_count=blocked,
+                   repaired_count=repaired,
                    execution_summary=result.get("execution_summary", {}),
                    skipped=result.get("skipped_plans", []),
-                   message=f"L4 执行方案已生成：{len(created_ids)} 条待确认操作")
+                   message=f"L4 执行方案已生成：{len(created_ids)} 条待确认操作{extra_msg}")
+
+        # P3.2 过度交易监控：近 7 天成交超阈值则告警
+        try:
+            from datetime import timedelta as _td
+            recent = store.get_sim_trades(limit=100)
+            cutoff = (datetime.now(timezone.utc) - _td(days=7)).isoformat()
+            recent_count = sum(1 for t in recent if (t.get("created_at", "") or "") >= cutoff)
+            if recent_count >= 15:
+                yield _sse("decision_warning", layer="L4",
+                           message=f"⚠ 过度交易提示：近7天已成交 {recent_count} 笔，注意手续费与择时损耗")
+        except Exception:
+            pass
 
     except Exception as e:
         logger.exception("L4 执行方案生成失败")
@@ -657,6 +938,7 @@ async def run_daily_decision(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
     scope: str = "full",
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """完整日常决策流程：L1→L2→L3→L4→投委会
 
@@ -664,44 +946,75 @@ async def run_daily_decision(
            "l3l4" = 仅 L3-L4 更新
            "full" = 全流程
     """
-    yield _sse("daily_start", scope=scope, message="开始日常决策流程...")
+    store = store.for_market(market)
+    yield _sse("daily_start", scope=scope, market=market, message="开始日常决策流程...")
 
     # Step 0: 催化剂时效检查
     from bottleneck_hunter.watchlist.catalyst_monitor import check_catalyst_expiry
     async for evt in check_catalyst_expiry(store):
         yield evt
 
+    # Step 0.5: 投资论点有效性检查
+    try:
+        from bottleneck_hunter.watchlist.thesis_tracker import check_all_theses
+        async for evt in check_all_theses(store):
+            yield evt
+    except Exception as e:
+        logger.warning("论点检查失败: %s", e)
+
     # Step 1: L1 宏观检查
     if scope in ("l1", "full"):
-        async for evt in run_macro_check(store, budget):
+        async for evt in run_macro_check(store, budget, market=market):
             yield evt
 
-    # Step 2: L2 偏离检查
+    # Step 2: L2 偏离检查 + pre_l2 质量门控
     if scope in ("full",):
+        from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
+        async for evt in run_quality_checks(store, "pre_l2"):
+            yield evt
+
         macro = store.get_latest_macro_strategy()
         plan = store.get_latest_strategic_plan()
 
         if not plan and macro:
             yield _sse("decision_info", layer="L2",
                        message="无 L2 组合策略，自动生成...")
-            async for evt in run_strategic_plan(store, budget):
+            async for evt in run_strategic_plan(store, budget, market=market):
                 yield evt
         elif plan:
-            async for evt in run_deviation_check(store, budget):
+            async for evt in run_deviation_check(store, budget, market=market):
                 yield evt
 
     if scope == "l1":
         yield _sse("daily_done", message="L1 检查完成")
         return
 
+    # Step 2.5: pre_l3 质量门控
+    if scope in ("l3l4", "full"):
+        try:
+            from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
+            async for evt in run_quality_checks(store, "pre_l3"):
+                yield evt
+        except Exception as e:
+            logger.warning("pre_l3 质量门控失败: %s", e)
+
     # Step 3: L3 战术计划
     if scope in ("l3l4", "full"):
-        async for evt in run_tactical_plans(store, budget):
+        async for evt in run_tactical_plans(store, budget, market=market):
             yield evt
+
+    # Step 3.5: pre_l4 质量门控
+    if scope in ("l3l4", "full"):
+        try:
+            from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
+            async for evt in run_quality_checks(store, "pre_l4"):
+                yield evt
+        except Exception as e:
+            logger.warning("pre_l4 质量门控失败: %s", e)
 
     # Step 4: L4 执行方案
     if scope in ("l3l4", "full"):
-        async for evt in run_execution_plans(store, budget):
+        async for evt in run_execution_plans(store, budget, market=market):
             yield evt
 
     # Step 5: 投委会评审
@@ -711,14 +1024,14 @@ async def run_daily_decision(
             from bottleneck_hunter.watchlist.committee import run_committee_review
             yield _sse("decision_info", layer="committee",
                        message=f"启动投委会评审 {len(pending)} 条执行计划...")
-            async for evt in run_committee_review(store, pending, budget):
+            async for evt in run_committee_review(store, pending, budget, market=market):
                 yield evt
         else:
             yield _sse("decision_info", layer="committee",
                        message="无待评审执行计划，跳过投委会")
 
     # Step 6: 更新观察池综合评分
-    _update_composite_scores(store)
+    _update_composite_scores(store, market)
 
     yield _sse("daily_done", message="日常决策流程完成")
 
@@ -726,29 +1039,31 @@ async def run_daily_decision(
 async def run_full_refresh(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
+    market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
     """全量刷新：重新生成 L1 + L2 + L3 + L4 + 投委会"""
+    store = store.for_market(market)
     yield _sse("refresh_start", message="开始全量决策刷新...")
 
-    async for evt in run_macro_strategy(store, budget):
+    async for evt in run_macro_strategy(store, budget, market=market):
         yield evt
 
-    async for evt in run_strategic_plan(store, budget):
+    async for evt in run_strategic_plan(store, budget, market=market):
         yield evt
 
-    async for evt in run_tactical_plans(store, budget):
+    async for evt in run_tactical_plans(store, budget, market=market):
         yield evt
 
-    async for evt in run_execution_plans(store, budget):
+    async for evt in run_execution_plans(store, budget, market=market):
         yield evt
 
     pending = store.get_pending_executions()
     if pending:
         from bottleneck_hunter.watchlist.committee import run_committee_review
-        async for evt in run_committee_review(store, pending, budget):
+        async for evt in run_committee_review(store, pending, budget, market=market):
             yield evt
 
-    _update_composite_scores(store)
+    _update_composite_scores(store, market)
     yield _sse("refresh_done", message="全量决策刷新完成")
 
 
@@ -756,13 +1071,13 @@ async def run_full_refresh(
 # 数据收集辅助
 # ─────────────────────────────────────────────────────────
 
-async def _collect_market_context(store: WatchlistStore) -> dict:
+async def _collect_market_context(store: WatchlistStore, market: str = "us_stock") -> dict:
     """收集市场宏观数据（从观察池数据中聚合），并附带市场类型列表。"""
     from bottleneck_hunter.watchlist.macro_data import fetch_macro_data
 
     by_market = store.get_tickers_by_market()
-    active_markets = [m for m, ts in by_market.items() if ts]
-    tickers = [t for ts in by_market.values() for t in ts]
+    tickers = by_market.get(market, [])
+    active_markets = [market]
 
     all_snapshots = []
     for ticker in tickers:
@@ -777,7 +1092,7 @@ async def _collect_market_context(store: WatchlistStore) -> dict:
     avg_change = sum(s.get("change_pct", 0) or 0 for s in all_snapshots) / max(len(all_snapshots), 1)
     avg_rsi = sum(s.get("rsi_14", 50) or 50 for s in all_snapshots) / max(len(all_snapshots), 1)
 
-    entries = store.list_all()
+    entries = [e for e in store.list_all() if e.get("market") == market]
     sectors = {}
     for entry in entries:
         sector = entry.get("sector", "未分类")
@@ -832,9 +1147,10 @@ async def _collect_market_context(store: WatchlistStore) -> dict:
     }
 
 
-def _collect_watchlist_signals(store: WatchlistStore) -> list[dict]:
+def _collect_watchlist_signals(store: WatchlistStore, market: str = "us_stock") -> list[dict]:
     """从已有的 strategy_records 收集个股信号"""
     entries = store.list_all()
+    entries = [e for e in entries if e.get("market") == market]
     signals = []
 
     strategy_summaries = store.get_all_strategy_summaries()
@@ -845,6 +1161,10 @@ def _collect_watchlist_signals(store: WatchlistStore) -> list[dict]:
         summary = strategy_summaries.get(entry_id, {})
 
         snap = store.get_latest_snapshot(ticker)
+
+        if snap and snap.get("data_quality") == "suspended":
+            logger.info("跳过停牌股 %s", ticker)
+            continue
 
         signals.append({
             "ticker": ticker,
@@ -861,10 +1181,14 @@ def _collect_watchlist_signals(store: WatchlistStore) -> list[dict]:
     return signals
 
 
-def _update_composite_scores(store: WatchlistStore) -> None:
+def _update_composite_scores(store: WatchlistStore, market: str = "us_stock") -> None:
     """根据策略信心、投委会评分、催化剂活跃度计算并更新观察池综合评分。"""
     entries = store.list_all()
+    entries = [e for e in entries if e.get("market") == market]
     strategy_summaries = store.get_all_strategy_summaries()
+
+    # P3.3 绩效驱动的动态层权重(样本不足时回退默认 0.4/0.3)
+    w_review, w_conf = _layer_weight_factors(store)
 
     for entry in entries:
         entry_id = entry["id"]
@@ -896,8 +1220,8 @@ def _update_composite_scores(store: WatchlistStore) -> None:
             freshness = 0.0
 
         composite = round(
-            avg_score * 0.4 +
-            confidence * 0.3 +
+            avg_score * w_review +
+            confidence * w_conf +
             catalyst_score * 0.15 +
             freshness * 0.15,
             2,
@@ -906,6 +1230,37 @@ def _update_composite_scores(store: WatchlistStore) -> None:
         store.update(entry_id, composite_score=composite)
 
     logger.info("更新了 %d 个标的的综合评分", len(entries))
+
+
+def _layer_weight_factors(store: WatchlistStore) -> tuple[float, float]:
+    """P3.3 绩效驱动：基于 layer_performance 历史表现，返回(委评权重, 信心权重)。
+
+    L2(选股)历史准→委评层加权；L3(择时)历史准→信心层加权。
+    仅在样本≥5时启用，调整幅度限制在基准 ±30% 内，且两者之和恒为 0.7。
+    """
+    base_review, base_conf = 0.4, 0.3
+    try:
+        summary = store.get_layer_performance_summary()
+    except Exception:
+        return base_review, base_conf
+    l2 = summary.get("L2", {})
+    l3 = summary.get("L3", {})
+    if l2.get("count", 0) < 5 or l3.get("count", 0) < 5:
+        return base_review, base_conf
+    # 以 5 分为中性基准，>5 加权 <5 减权，归一化到总和 0.7
+    l2_avg = l2.get("avg", 5)
+    l3_avg = l3.get("avg", 5)
+    # 限制偏移 ±30%
+    l2_factor = max(0.7, min(1.3, l2_avg / 5))
+    l3_factor = max(0.7, min(1.3, l3_avg / 5))
+    raw_review = base_review * l2_factor
+    raw_conf = base_conf * l3_factor
+    total = raw_review + raw_conf
+    if total <= 0:
+        return base_review, base_conf
+    # 归一化到原总和 0.7
+    scale = 0.7 / total
+    return round(raw_review * scale, 3), round(raw_conf * scale, 3)
 
 
 def _get_latest_reviews_for_ticker(store: WatchlistStore, ticker: str) -> list[dict]:
