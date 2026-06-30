@@ -878,8 +878,8 @@ export function initDecision() {
   document.getElementById('dc-pending-list')?.addEventListener('click', handlePendingAction);
   document.getElementById('dc-blocked-section')?.addEventListener('click', handleBlockedAction);
 
-  // 会议类型筛选
-  document.getElementById('dc-meeting-type')?.addEventListener('change', () => loadMeetings());
+  // 会议日期筛选
+  document.getElementById('dc-meeting-date')?.addEventListener('change', () => loadMeetings());
 
   // 模型校准按钮
   document.getElementById('dc-btn-calibrate')?.addEventListener('click', runCalibration);
@@ -1516,13 +1516,33 @@ async function loadMeetings() {
   const body = document.getElementById('dc-meetings-body');
   if (!body) return;
 
-  const typeFilter = document.getElementById('dc-meeting-type')?.value || '';
-  let qs = `?market=${encodeURIComponent(dcState.market)}&limit=10`;
-  if (typeFilter) qs += `&type=${encodeURIComponent(typeFilter)}`;
+  const dateFilter = document.getElementById('dc-meeting-date')?.value || '';
+  let qs = `?market=${encodeURIComponent(dcState.market)}&limit=50`;
+  if (dateFilter) qs += `&date_filter=${encodeURIComponent(dateFilter)}`;
 
   try {
     const data = await dcFetch(`/meetings${qs}`);
-    const meetings = data.meetings || [];
+    let meetings = data.meetings || [];
+
+    // 前端日期筛选（如果后端不支持）
+    if (dateFilter && meetings.length > 0) {
+      const now = new Date();
+      const filterDate = dateFilter === 'today'
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate())
+        : dateFilter === 'week'
+        ? new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+        : dateFilter === 'month'
+        ? new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+        : null;
+
+      if (filterDate) {
+        meetings = meetings.filter(m => {
+          const meetingDate = new Date(m.created_at);
+          return meetingDate >= filterDate;
+        });
+      }
+    }
+
     renderMeetings(meetings);
     // 投委会灯态：最近一次投委会会议新鲜→绿、过期→黄、无→灰（失败态由 SSE 置红，优先保留）
     if (!dcState.lightErrors.has('committee')) {
@@ -1553,6 +1573,16 @@ function renderMeetings(meetings) {
     const date = (m.created_at || '').replace('T', ' ').slice(0, 16);
     const verdict = m.final_verdict || '';
 
+    // 翻译结论
+    const translateVerdict = (v) => {
+      const vl = v.toLowerCase();
+      if (vl.includes('approved') && vl.includes('modification')) return '有条件通过';
+      if (vl.includes('approved') || vl.includes('pass')) return '通过';
+      if (vl.includes('rejected') || vl.includes('fail')) return '否决';
+      return v;
+    };
+    const verdictZh = translateVerdict(verdict);
+
     let verdictCls = '';
     if (verdict.includes('approved') || verdict.includes('pass')) verdictCls = 'dc-verdict-pass';
     else if (verdict.includes('rejected') || verdict.includes('fail')) verdictCls = 'dc-verdict-fail';
@@ -1578,7 +1608,7 @@ function renderMeetings(meetings) {
             ${tickers.length ? `<span class="dc-meeting-tickers">${tickers.map(t => escDC(t)).join(', ')}</span>` : ''}
           </div>
         </div>
-        <span class="dc-meeting-verdict ${verdictCls}">${escDC(verdict)}</span>
+        <span class="dc-meeting-verdict ${verdictCls}">${escDC(verdictZh)}</span>
       </div>
     </div>`;
   }).join('');
@@ -1800,6 +1830,44 @@ function renderMeetingDetail(data, container) {
           ${gaugeHtml}
         </div>`;
       }).join('')}</div>
+    </div>`;
+  }
+
+  // 共识修改（投委会）
+  const consensusMods = result.consensus_modifications || [];
+  if (Array.isArray(consensusMods) && consensusMods.length > 0) {
+    html += `<div class="drawer-section">
+      <h4>共识修改</h4>
+      <div class="dc-consensus-mods">
+        ${consensusMods.map(mod => {
+          const supporters = Array.isArray(mod.supporters) ? mod.supporters : [];
+          const supportersZh = supporters.map(s => translateRole(s)).join('、');
+          return `<div class="dc-consensus-mod-item">
+            <div class="dc-mod-header">
+              <span class="dc-mod-ticker">${escDC(mod.ticker || '')}</span>
+              <span class="dc-mod-field">${escDC(mod.field || '')}</span>
+            </div>
+            <div class="dc-mod-change">
+              <span class="dc-mod-original">${escDC(String(mod.original || ''))}</span>
+              <span class="dc-mod-arrow">→</span>
+              <span class="dc-mod-modified">${escDC(String(mod.modified || ''))}</span>
+            </div>
+            <div class="dc-mod-reason">
+              <strong>支持者：</strong>${escDC(supportersZh || '—')}<br>
+              ${escDC(mod.reason || '')}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
+  // 会议总结
+  const summary = result.summary || '';
+  if (summary) {
+    html += `<div class="drawer-section">
+      <h4>会议总结</h4>
+      <p class="dc-meeting-summary">${escDC(summary)}</p>
     </div>`;
   }
 

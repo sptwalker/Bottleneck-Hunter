@@ -1797,3 +1797,81 @@
   display: inline-flex;
   align-items: center;
 }
+
+/* 共识修改 */
+.dc-consensus-mods {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dc-consensus-mod-item {
+  padding: 12px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  border-left: 3px solid var(--primary);
+}
+
+.dc-mod-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.dc-mod-ticker {
+  font-weight: bold;
+  color: var(--primary);
+  font-size: 14px;
+}
+
+.dc-mod-field {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.dc-mod-change {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.dc-mod-original {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.dc-mod-arrow {
+  color: var(--primary);
+  font-weight: bold;
+}
+
+.dc-mod-modified {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.dc-mod-reason {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.dc-mod-reason strong {
+  color: var(--text);
+}
+
+.dc-meeting-summary {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text);
+  background: var(--bg-secondary);
+  padding: 12px;
+  border-radius: 6px;
+  border-left: 3px solid var(--accent);
+}
