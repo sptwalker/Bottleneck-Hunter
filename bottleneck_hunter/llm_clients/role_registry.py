@@ -39,30 +39,36 @@ def list_roles(group: str | None = None) -> list[RoleDefinition]:
     return roles
 
 
+# 各角色组能力权重差异化：让不同组真正分化排名，避免单一模型通吃。
+# - 决策层：重中文分析与指令遵循（长文推理、严格 JSON）
 _DECISION_WEIGHTS = {
     "connectivity": 0.05, "json_output": 0.15,
-    "chinese_analysis": 0.30, "speed": 0.10,
-    "scoring_variance": 0.15, "instruction_follow": 0.25,
+    "chinese_analysis": 0.30, "speed": 0.05,
+    "scoring_variance": 0.15, "instruction_follow": 0.30,
 }
+# - 投委会：重打分区分度（scoring_variance）与中文分析，速度无所谓（多模型并行）
 _COMMITTEE_WEIGHTS = {
-    "connectivity": 0.05, "json_output": 0.20,
-    "chinese_analysis": 0.30, "speed": 0.10,
-    "scoring_variance": 0.15, "instruction_follow": 0.20,
+    "connectivity": 0.05, "json_output": 0.15,
+    "chinese_analysis": 0.25, "speed": 0.05,
+    "scoring_variance": 0.35, "instruction_follow": 0.15,
 }
+# - 产业链管线：重 JSON 结构化与速度（批量调用），中文次之
 _PIPELINE_WEIGHTS = {
-    "connectivity": 0.05, "json_output": 0.25,
-    "chinese_analysis": 0.20, "speed": 0.20,
-    "scoring_variance": 0.10, "instruction_follow": 0.20,
+    "connectivity": 0.05, "json_output": 0.35,
+    "chinese_analysis": 0.10, "speed": 0.30,
+    "scoring_variance": 0.05, "instruction_follow": 0.15,
 }
+# - 看板模块：重速度与 JSON（高频小任务），均衡
 _WATCHLIST_WEIGHTS = {
-    "connectivity": 0.05, "json_output": 0.20,
-    "chinese_analysis": 0.25, "speed": 0.20,
-    "scoring_variance": 0.10, "instruction_follow": 0.20,
-}
-_BOTTLENECK_WEIGHTS = {
     "connectivity": 0.05, "json_output": 0.25,
-    "chinese_analysis": 0.20, "speed": 0.10,
-    "scoring_variance": 0.25, "instruction_follow": 0.15,
+    "chinese_analysis": 0.15, "speed": 0.35,
+    "scoring_variance": 0.05, "instruction_follow": 0.15,
+}
+# - 瓶颈评分：重打分区分度（多模型交叉），JSON 次之
+_BOTTLENECK_WEIGHTS = {
+    "connectivity": 0.05, "json_output": 0.20,
+    "chinese_analysis": 0.15, "speed": 0.05,
+    "scoring_variance": 0.40, "instruction_follow": 0.15,
 }
 
 _INIT_ROLES = [

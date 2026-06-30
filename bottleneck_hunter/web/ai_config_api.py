@@ -377,6 +377,13 @@ async def generate_recommendations(user: dict = Depends(get_current_user)):
 
     from bottleneck_hunter.web.model_tester import compute_composite_score
 
+    # 跨角色 provider 负载：用于打破单一模型通吃（每个 provider 已被分配的角色数）
+    provider_load: dict[str, int] = {}
+    # 单模型角色的负载惩罚系数（按 0-10 分制，0.5 表示每多占一个槽扣 0.5 分）
+    LOAD_PENALTY = 0.5
+    # 投委会刻意种子（qwen/kimi/glm）的让步阈值：种子分差在此值内即优先采用，保留多样性设计
+    DEFAULT_SEED_EPS = 1.5
+
     recommendations = []
     for role_def in ROLE_REGISTRY.values():
         weights = role_def.capability_weights
@@ -409,7 +416,8 @@ async def generate_recommendations(user: dict = Depends(get_current_user)):
                 })
 
             for slot in slots_assigned:
-                rid = store.save_recommendation(
+                provider_load[slot["provider"]] = provider_load.get(slot["provider"], 0) + 1
+                store.save_recommendation(
                     role_key=role_def.key,
                     slot_index=slot["slot_index"],
                     provider=slot["provider"],
@@ -427,7 +435,22 @@ async def generate_recommendations(user: dict = Depends(get_current_user)):
                 })
         else:
             if ranked:
-                best_key, best_cs, best_provider, best_model = ranked[0]
+                # 1) 跨角色负载均衡：综合分 - 该 provider 已占角色数 × 惩罚，打破单一模型通吃
+                def _adjusted(item):
+                    _k, _cs, _prov, _m = item
+                    return _cs - LOAD_PENALTY * provider_load.get(_prov, 0)
+                best_key, best_cs, best_provider, best_model = max(ranked, key=_adjusted)
+
+                # 2) 尊重注册表「刻意分散」的种子默认（仅投委会 growth=qwen/value=kimi/contrarian=glm
+                #    等非 deepseek 默认；deepseek 是通用兜底默认，不参与让步以免抵消负载均衡）
+                seed = role_def.default_provider
+                if seed and seed != "deepseek" and best_provider != seed:
+                    for key, cs, provider, model in ranked:
+                        if provider == seed and (best_cs - cs) < DEFAULT_SEED_EPS:
+                            best_key, best_cs, best_provider, best_model = key, cs, provider, model
+                            break
+
+                provider_load[best_provider] = provider_load.get(best_provider, 0) + 1
                 store.save_recommendation(
                     role_key=role_def.key,
                     slot_index=0,
