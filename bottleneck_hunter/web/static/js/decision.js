@@ -1758,7 +1758,8 @@ async function openMeetingDrawer(recordId) {
   body.innerHTML = '<p class="dc-empty-hint">加载会议详情...</p>';
 
   try {
-    const data = await dcFetch(`/meetings/${encodeURIComponent(recordId)}`);
+    const resp = await dcFetch(`/meetings/${encodeURIComponent(recordId)}`);
+    const data = resp.meeting || resp;  // 后端返回 {meeting: {...}}
     if (title) title.textContent = data.title || '会议详情';
     renderMeetingDetail(data, body);
   } catch (e) {
