@@ -42,6 +42,10 @@
 5. **价格敏感性**：在当前估值下，业绩需要超预期多少才能支撑股价？
 6. **护城河持久性**：估值溢价是否有持久的竞争优势支撑？
 
+## 数据接地要求
+
+你的评审必须基于上方提供的**真实数据**作答：在 `key_concerns` / `valuation_assessment` / `overall_assessment` 中**引用具体数字**（如 trailing_pe、price_to_book、margin_of_safety、同业 PE 对比等）。若某项数据显示"暂无"，明确指出该数据缺口并据此降低 confidence，而非凭空臆测。
+
 ## 输出格式
 
 返回严格 JSON 格式：

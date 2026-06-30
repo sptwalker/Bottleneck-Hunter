@@ -15,7 +15,100 @@ const dcState = {
   catalystView: 'list',
   calendarMonth: null,
   riskChart: null,
+  lightErrors: new Set(),   // 本轮决策中失败的模块（保留红灯）
 };
+
+/* ── 面板信号灯 ─────────────────────────────────────── */
+
+// SSE 事件 layer → 面板灯 id 后缀
+const DC_LIGHT_LAYER_MAP = {
+  L1: 'macro', L2: 'strategic', L3: 'tactical', L4: 'pending',
+};
+// 各模块数据的过期阈值（小时）：L1/L2 周级，L3/L4/催化剂 日级
+const DC_LIGHT_STALE_HOURS = {
+  macro: 24 * 8, strategic: 24 * 8,
+  tactical: 30, pending: 30, committee: 30, catalysts: 24 * 8,
+};
+const DC_LIGHT_LABELS = {
+  gray: '无数据', green: '决策完成，数据有效', blink: '正在分析',
+  yellow: '有数据但已过期', red: '决策失败，数据无效',
+};
+
+function setLight(panel, state) {
+  const el = document.getElementById(`dc-light-${panel}`);
+  if (!el) return;
+  el.className = `dc-light dc-light-${state}`;
+  el.title = DC_LIGHT_LABELS[state] || '';
+}
+
+// 根据时间戳判断新鲜/过期
+function _lightFreshness(panel, ts) {
+  if (!ts) return 'green';
+  try {
+    const age = (Date.now() - new Date(ts.replace(' ', 'T')).getTime()) / 3600000;
+    const limit = DC_LIGHT_STALE_HOURS[panel] || 30;
+    return age > limit ? 'yellow' : 'green';
+  } catch { return 'green'; }
+}
+
+// 从 overview 数据计算各面板静态灯态（绿/黄/灰/红）
+function updateLightsFromData(data) {
+  data = data || {};
+  const macro = data.macro_strategy;
+  const strat = data.strategic_plan;
+  const tac = data.tactical_plans || [];
+  const pend = data.pending_executions || [];
+  const cats = data.upcoming_catalysts || [];
+
+  const compute = (panel, present, ts) => {
+    if (dcState.lightErrors.has(panel)) return 'red';
+    if (!present) return 'gray';
+    return _lightFreshness(panel, ts);
+  };
+
+  setLight('macro', compute('macro', !!macro, macro && (macro.updated_at || macro.created_at)));
+  setLight('strategic', compute('strategic', !!strat, strat && (strat.updated_at || strat.created_at)));
+  setLight('tactical', compute('tactical', tac.length > 0,
+    tac.length ? (tac[0].created_at || tac[0].plan_date) : null));
+  // L4：有待确认操作即为有效绿灯（无过期概念）
+  setLight('pending', dcState.lightErrors.has('pending') ? 'red' : (pend.length ? 'green' : 'gray'));
+  setLight('catalysts', compute('catalysts', cats.length > 0,
+    cats.length ? cats[0].created_at : null));
+  // 委员会灯态由 loadMeetings 根据最近会议设置；此处仅在失败时置红
+  if (dcState.lightErrors.has('committee')) setLight('committee', 'red');
+}
+
+// SSE 事件 → 动态灯态（闪烁/绿/红）
+function handleLightEvent(data) {
+  const evt = data.event || '';
+  const layer = data.layer || '';
+  const panel = DC_LIGHT_LAYER_MAP[layer];
+
+  // 决策层（L1-L4）
+  if (panel) {
+    if (evt === 'decision_error') { setLight(panel, 'red'); dcState.lightErrors.add(panel); }
+    else if (evt === 'decision_done') { setLight(panel, 'green'); dcState.lightErrors.delete(panel); }
+    else if (evt === 'decision_start' || evt === 'decision_progress') setLight(panel, 'blink');
+  }
+  // 投委会
+  if (evt.startsWith('committee_')) {
+    if (evt === 'committee_error') { setLight('committee', 'red'); dcState.lightErrors.add('committee'); }
+    else if (evt === 'committee_done') { setLight('committee', 'green'); dcState.lightErrors.delete('committee'); }
+    else if (evt === 'committee_start' || evt === 'committee_plan_start') setLight('committee', 'blink');
+  }
+  // 催化剂扫描
+  if (evt === 'catalyst_scan_start' || evt === 'catalyst_judge_start') setLight('catalysts', 'blink');
+  if (evt === 'catalyst_scan_done' || evt === 'catalyst_judge_done') setLight('catalysts', 'green');
+}
+
+// 决策开始时：把本轮 scope 内的模块灯重置为待运行（清除上轮红灯/绿灯，准备闪烁）
+function resetLightsForRun(scope) {
+  dcState.lightErrors.clear();
+  const panels = scope === 'l3l4'
+    ? ['tactical', 'pending', 'committee']
+    : ['macro', 'strategic', 'tactical', 'pending', 'committee'];
+  panels.forEach(p => setLight(p, 'gray'));
+}
 
 /* ── helpers ─────────────────────────────────────────── */
 
@@ -164,9 +257,11 @@ function renderAll(data) {
   renderPending(data.pending_executions || []);
   loadBlocked();
   renderCatalysts(data.upcoming_catalysts || []);
+  renderCommittee(data.committee || [], data.committee_meta);
   loadRiskDashboard();
   loadMeetings();
   loadModelRatings();
+  updateLightsFromData(data);
 }
 
 /* ── L1 宏观 ──────────────────────────────────────── */
@@ -563,7 +658,7 @@ function renderCatalysts(catalysts) {
 
 /* ── 投委会 ───────────────────────────────────────── */
 
-function renderCommittee(reviews) {
+function renderCommittee(reviews, meta) {
   const body = document.getElementById('dc-committee-body');
   if (!body) return;
 
@@ -572,7 +667,20 @@ function renderCommittee(reviews) {
     return;
   }
 
-  body.innerHTML = `<div class="dc-votes-grid">${reviews.map(r => {
+  let header = '';
+  if (meta && (meta.ticker || meta.verdict)) {
+    const vCls = (meta.verdict || '').includes('approved') ? 'approve'
+      : (meta.verdict || '').includes('rejected') ? 'reject' : 'conditional';
+    const date = (meta.created_at || '').replace('T', ' ').slice(0, 16);
+    header = `<div class="dc-committee-meta">
+      <span class="dc-committee-ticker">${escDC(meta.ticker || '')}</span>
+      <span class="dc-member-decision ${vCls}">${escDC(_voteLabel(meta.verdict || '--'))}</span>
+      ${meta.approval_rate != null ? `<span class="dc-tr-conf">通过率 ${Math.round(meta.approval_rate)}%</span>` : ''}
+      <span class="dc-tr-conf">${escDC(date)}</span>
+    </div>`;
+  }
+
+  const votesHtml = `<div class="dc-votes-grid">${reviews.map(r => {
     let rj = r.result_json;
     if (typeof rj === 'string') {
       try { rj = JSON.parse(rj); } catch { rj = {}; }
@@ -582,14 +690,38 @@ function renderCommittee(reviews) {
     const decision = rj.decision || rj.vote || '--';
     const decClass = decision.includes('approve') || decision.includes('通过') ? 'approve'
       : decision.includes('reject') || decision.includes('否决') ? 'reject' : 'conditional';
-    const reasoning = rj.reasoning || rj.summary || '';
+    const reasoning = rj.overall_assessment || rj.reasoning || rj.summary || '';
+    const conf = rj.confidence != null ? rj.confidence : null;
+    const concerns = Array.isArray(rj.key_concerns) ? rj.key_concerns : [];
+    // 因 LLM 调用失败而弃权：明确标注，区分于真实弃权
+    const errAbstain = (decision === 'abstain' && rj.error) ? rj.error : '';
 
     return `<div class="dc-member-vote">
-      <div class="dc-member-name">${escDC(r.member_name || r.reviewer || '--')}</div>
-      <div class="dc-member-decision ${decClass}">${escDC(decision)}</div>
-      <div class="dc-member-reasoning">${escDC(String(reasoning).slice(0, 80))}</div>
+      <div class="dc-member-name">${escDC(r.member_name || r.reviewer || r.member_role || '--')}${conf != null && !errAbstain ? ` <span class="dc-tr-conf">信心 ${conf}/10</span>` : ''}</div>
+      <div class="dc-member-decision ${errAbstain ? 'conditional' : decClass}">${errAbstain ? '弃权（系统错误）' : escDC(_voteLabel(decision))}</div>
+      ${errAbstain
+        ? `<div class="dc-member-reasoning dc-muted">模型调用失败，本次未参与投票：${escDC(String(errAbstain).slice(0, 80))}</div>`
+        : `<div class="dc-member-reasoning">${escDC(String(reasoning))}</div>
+           ${concerns.length ? `<div class="dc-tr-sub"><b>关注：</b>${concerns.slice(0, 3).map(c => escDC(typeof c === 'string' ? c : JSON.stringify(c))).join('；')}</div>` : ''}`}
     </div>`;
   }).join('')}</div>`;
+
+  // 集体结论
+  let conclusion = '';
+  if (meta && (meta.summary || (meta.modifications && meta.modifications.length) || (meta.risks && meta.risks.length))) {
+    const mods = Array.isArray(meta.modifications) ? meta.modifications : [];
+    const risks = Array.isArray(meta.risks) ? meta.risks : [];
+    conclusion = `<div class="dc-committee-conclusion">
+      <div class="dc-cc-title">📋 集体结论</div>
+      ${meta.summary ? `<div class="dc-cc-summary">${escDC(meta.summary)}</div>` : ''}
+      ${mods.length ? `<div class="dc-tr-sub"><b>共识修改：</b>${mods.map(m => escDC(typeof m === 'object'
+        ? `${m.ticker || ''} ${m.field || ''}: ${m.original ?? ''}→${m.modified ?? ''}（${m.reason || ''}）`
+        : String(m))).join('；')}</div>` : ''}
+      ${risks.length ? `<div class="dc-tr-sub dc-cc-risks"><b>风险提示：</b>${risks.map(r => escDC(typeof r === 'string' ? r : JSON.stringify(r))).join('；')}</div>` : ''}
+    </div>`;
+  }
+
+  body.innerHTML = header + votesHtml + conclusion;
 }
 
 /* ── 操作按钮 ──────────────────────────────────────── */
@@ -599,12 +731,14 @@ async function runDaily() {
   dcState.loading = true;
   let step = 0;
   const totalSteps = 5;
+  resetLightsForRun('full');
 
   await dcSSE('/daily', {
     body: { scope: 'full', market: dcState.market },
     onEvent(data) {
       const evt = data.event || '';
       const msg = data.message || data.error || evt;
+      handleLightEvent(data);
       if (evt.includes('_start') || evt.includes('decision_start')) step++;
       if (evt.includes('_error')) {
         setProgress(step / totalSteps * 100, `[${data.layer || ''}] 错误: ${data.error || msg}`);
@@ -617,9 +751,11 @@ async function runDaily() {
       dcState.loading = false;
       await loadOverview();
     },
-    onError(e) {
+    async onError(e) {
       setProgress(0, `错误: ${e.message}`);
       dcState.loading = false;
+      // 即使 SSE 流中途异常，也刷新面板展示已落库的 L1-L4/投委会结果，避免面板空白
+      await loadOverview().catch(() => {});
     },
   });
   dcState.loading = false;
@@ -630,12 +766,14 @@ async function runFullRefresh() {
   if (!await showConfirm('全量刷新将重新运行 L1→L2→L3→L4→投委会全流程，确认继续？')) return;
   dcState.loading = true;
   let step = 0;
+  resetLightsForRun('full');
 
   await dcSSE('/full-refresh', {
     body: { market: dcState.market },
     onEvent(data) {
       const evt = data.event || '';
       const msg = data.message || data.error || evt;
+      handleLightEvent(data);
       if (evt.includes('_start') || evt.includes('decision_start')) step++;
       if (evt.includes('_error')) {
         setProgress(step / 6 * 100, `[${data.layer || ''}] 错误: ${data.error || msg}`);
@@ -648,9 +786,10 @@ async function runFullRefresh() {
       dcState.loading = false;
       await loadOverview();
     },
-    onError(e) {
+    async onError(e) {
       setProgress(0, `错误: ${e.message}`);
       dcState.loading = false;
+      await loadOverview().catch(() => {});
     },
   });
   dcState.loading = false;
@@ -676,9 +815,10 @@ async function scanCatalysts() {
       dcState.loading = false;
       await loadOverview();
     },
-    onError(e) {
+    async onError(e) {
       setProgress(0, `扫描失败: ${e.message}`);
       dcState.loading = false;
+      await loadOverview().catch(() => {});
     },
   });
   dcState.loading = false;
@@ -1538,6 +1678,15 @@ async function loadMeetings() {
     const data = await dcFetch(`/meetings${qs}`);
     const meetings = data.meetings || [];
     renderMeetings(meetings);
+    // 投委会灯态：最近一次投委会会议新鲜→绿、过期→黄、无→灰（失败态由 SSE 置红，优先保留）
+    if (!dcState.lightErrors.has('committee')) {
+      const lastCommittee = meetings.find(m => m.meeting_type === 'committee');
+      if (lastCommittee) {
+        setLight('committee', _lightFreshness('committee', lastCommittee.created_at));
+      } else {
+        setLight('committee', 'gray');
+      }
+    }
   } catch (e) {
     body.innerHTML = `<p class="dc-empty-hint">加载失败: ${escDC(e.message)}</p>`;
   }
@@ -1749,6 +1898,15 @@ function renderMeetingDetail(data, container) {
     </div>`;
   }
 
+  // 讨论过程（transcript：背景资料 + 各委员评审 + 圆桌讨论）
+  let transcript = data.transcript_json || [];
+  if (typeof transcript === 'string') {
+    try { transcript = JSON.parse(transcript); } catch { transcript = []; }
+  }
+  if (Array.isArray(transcript) && transcript.length > 0) {
+    html += renderCommitteeTranscript(transcript);
+  }
+
   // 回溯结果
   if (data.outcome_recorded && data.outcome_summary) {
     html += `<div class="drawer-section">
@@ -1760,7 +1918,101 @@ function renderMeetingDetail(data, container) {
   container.innerHTML = html;
 }
 
-/* ── 模型评分排行 ─────────────────────────────────── */
+/* ── 投委会讨论过程渲染（阶段 1.4）─────────────────── */
+
+function _voteCls(vote) {
+  const v = String(vote || '').toLowerCase();
+  if (v.includes('approve') || v.includes('通过')) return 'approve';
+  if (v.includes('reject') || v.includes('否决')) return 'reject';
+  return 'conditional';
+}
+
+function _voteLabel(vote) {
+  const v = String(vote || '').toLowerCase();
+  if (v === 'approve') return '赞成';
+  if (v === 'approve_with_modification') return '有条件赞成';
+  if (v === 'reject') return '反对';
+  if (v === 'abstain') return '弃权';
+  return vote || '--';
+}
+
+function _fmtBgVal(v) {
+  if (v == null) return '<span class="dc-muted">暂无</span>';
+  if (typeof v === 'string') return escDC(v);
+  if (Array.isArray(v)) {
+    if (!v.length) return '<span class="dc-muted">暂无</span>';
+    return v.map(x => typeof x === 'object'
+      ? escDC(JSON.stringify(x, null, 0)) : escDC(String(x))).join('<br>');
+  }
+  if (typeof v === 'object') {
+    return Object.entries(v).map(([k, val]) =>
+      `<span class="dc-bg-k">${escDC(k)}</span>: ${escDC(typeof val === 'object' ? JSON.stringify(val) : String(val))}`
+    ).join('<br>');
+  }
+  return escDC(String(v));
+}
+
+function renderCommitteeTranscript(transcript) {
+  const bg = transcript.find(t => t.role === '_background');
+  const members = transcript.filter(t => t.round === 1);
+  const discussion = transcript.find(t => t.role === '_discussion');
+
+  let html = '<div class="drawer-section"><h4>讨论过程</h4>';
+
+  // 各委员独立评审（完整理由，不截断）
+  html += '<div class="dc-transcript">';
+  members.forEach(m => {
+    const concerns = Array.isArray(m.key_concerns) ? m.key_concerns : [];
+    const sugg = Array.isArray(m.suggestions) ? m.suggestions : [];
+    html += `<div class="dc-tr-turn">
+      <div class="dc-tr-head">
+        <span class="dc-tr-name">${escDC(m.name || m.role)}</span>
+        <span class="dc-member-decision ${_voteCls(m.vote)}">${escDC(_voteLabel(m.vote))}</span>
+        <span class="dc-tr-conf">信心 ${m.confidence != null ? m.confidence : '--'}/10</span>
+        <span class="dc-tr-model">${escDC(m.model || '')}</span>
+      </div>
+      ${m.content ? `<div class="dc-tr-content">${escDC(m.content)}</div>` : ''}
+      ${concerns.length ? `<div class="dc-tr-sub"><b>关注点：</b>${concerns.map(c => escDC(typeof c === 'string' ? c : JSON.stringify(c))).join('；')}</div>` : ''}
+      ${sugg.length ? `<div class="dc-tr-sub"><b>建议：</b>${sugg.map(s => escDC(typeof s === 'object' ? `${s.field || ''} ${s.original ?? ''}→${s.suggested ?? ''} (${s.reason || ''})` : String(s))).join('；')}</div>` : ''}
+    </div>`;
+  });
+  html += '</div>';
+
+  // 圆桌讨论（如有）
+  if (discussion && (discussion.content || discussion.key_disagreement)) {
+    html += `<div class="dc-tr-discussion">
+      <div class="dc-tr-disc-title">🗣 圆桌讨论</div>
+      ${discussion.content ? `<div class="dc-tr-content">${escDC(discussion.content)}</div>` : ''}
+      ${discussion.key_agreement ? `<div class="dc-tr-sub"><b>共识：</b>${escDC(discussion.key_agreement)}</div>` : ''}
+      ${discussion.key_disagreement ? `<div class="dc-tr-sub"><b>分歧：</b>${escDC(discussion.key_disagreement)}</div>` : ''}
+    </div>`;
+  }
+
+  html += '</div>';
+
+  // 会议输入资料（背景数据，可折叠）
+  if (bg && bg.data) {
+    const fields = [
+      ['估值数据', bg.data.valuation_data],
+      ['市场情绪', bg.data.sentiment_data],
+      ['持仓拥挤度', bg.data.crowding_data],
+      ['同业对比', bg.data.peer_comparison],
+      ['催化剂', bg.data.catalyst_data],
+      ['行业趋势', bg.data.sector_trends],
+    ];
+    html += `<div class="drawer-section"><details class="dc-bg-details">
+      <summary>会议输入资料（各委员读入的背景数据）</summary>
+      <div class="dc-bg-grid">
+        ${fields.map(([label, val]) => `<div class="dc-bg-row">
+          <div class="dc-bg-label">${label}</div>
+          <div class="dc-bg-val">${_fmtBgVal(val)}</div>
+        </div>`).join('')}
+      </div>
+    </details></div>`;
+  }
+
+  return html;
+}
 
 async function loadModelRatings() {
   const body = document.getElementById('dc-model-ratings-body');

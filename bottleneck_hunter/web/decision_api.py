@@ -473,6 +473,51 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     tactical_plans = store.get_tactical_plans_by_date(today)
 
+    # 最近一次投委会评审（从会议 transcript 提取各委员投票，供投委会面板展示）
+    committee = []
+    committee_meta = None
+    try:
+        recs = store.get_meeting_records(meeting_type="committee", limit=1)
+        if recs:
+            rec = recs[0]
+            transcript = rec.get("transcript_json", []) or []
+            for t in transcript:
+                if t.get("round") == 1:
+                    committee.append({
+                        "member_name": t.get("name", t.get("role", "")),
+                        "member_role": t.get("role", ""),
+                        "result_json": {
+                            "vote": t.get("vote", ""),
+                            "confidence": t.get("confidence"),
+                            "overall_assessment": t.get("content", ""),
+                            "key_concerns": t.get("key_concerns", []),
+                            "error": t.get("error", ""),
+                        },
+                    })
+            tickers = rec.get("tickers_discussed", []) or []
+            consensus = rec.get("result_json", {})
+            if isinstance(consensus, str):
+                try:
+                    import json as _json
+                    consensus = _json.loads(consensus)
+                except (ValueError, TypeError):
+                    consensus = {}
+            consensus = consensus or {}
+            committee_meta = {
+                "ticker": tickers[0] if tickers else "",
+                "verdict": rec.get("final_verdict", ""),
+                "created_at": rec.get("created_at", ""),
+                "meeting_id": rec.get("id", ""),
+                # 集体结论详情
+                "approval_rate": consensus.get("approval_rate"),
+                "summary": consensus.get("summary", ""),
+                "modifications": consensus.get("consensus_modifications", []),
+                "risks": consensus.get("key_risks_flagged", []),
+                "minority": consensus.get("minority_opinions", []),
+            }
+    except Exception:
+        logger.debug("加载投委会概览失败", exc_info=True)
+
     return {
         "macro_strategy": macro,
         "strategic_plan": strategic,
@@ -481,6 +526,8 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
         "upcoming_catalysts": catalysts[:10],
         "account": account,
         "positions": positions,
+        "committee": committee,
+        "committee_meta": committee_meta,
     }
 
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -590,6 +590,16 @@ async def run_tactical_plans(
         prompt_template = _load_prompt("decision_tactical")
         macro_text = macro.get("market_summary", "") or json.dumps(
             macro.get("result_json", {}), ensure_ascii=False)[:500]
+
+        recent_map = _recent_executed_by_ticker(store)
+        recent_trades_text = "暂无近期已执行交易"
+        if recent_map:
+            recent_list = []
+            for tk, trades in recent_map.items():
+                for tr in trades:
+                    recent_list.append(f"{tk} {tr['side']} {tr['shares']}股 ({tr['date']})")
+            recent_trades_text = "\n".join(recent_list)
+
         prompt = (prompt_template
                   .replace("{market_context}", market_ctx)
                   .replace("{macro_summary}", macro_text)
@@ -598,6 +608,7 @@ async def run_tactical_plans(
                   .replace("{catalyst_timeline}", json.dumps(catalyst_by_ticker, ensure_ascii=False))
                   .replace("{catalyst_outcomes}",
                            json.dumps(outcome_by_ticker, ensure_ascii=False) if outcome_by_ticker else "暂无已判定催化剂")
+                  .replace("{recent_trades}", recent_trades_text)
                   )
 
         yield _sse("decision_progress", layer="L3", step="llm_reasoning",
@@ -640,6 +651,34 @@ async def run_tactical_plans(
 # ─────────────────────────────────────────────────────────
 # L4: 执行方案
 # ─────────────────────────────────────────────────────────
+
+# 执行去重：5天冷却窗口
+EXECUTION_COOLDOWN_DAYS = 5
+_BUY_FAMILY = {"buy", "add"}
+_SELL_FAMILY = {"sell", "reduce"}
+
+def _recent_executed_by_ticker(store, days=EXECUTION_COOLDOWN_DAYS) -> dict[str, list[dict]]:
+    """返回 {ticker: [{side, shares, date}]}，仅含近 days 天已执行的 sim_trades。"""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    trades = store.get_sim_trades(limit=200)
+    out = {}
+    for t in trades:
+        if (t.get("created_at", "") or "") < cutoff:
+            continue
+        out.setdefault(t["ticker"], []).append({
+            "side": t.get("side", ""),
+            "shares": t.get("shares", 0),
+            "date": (t.get("created_at", "") or "")[:10],
+        })
+    return out
+
+def _is_recent_duplicate(action, ticker, recent_map) -> bool:
+    """该 ticker 的同向操作族近期是否已执行过。"""
+    fam = _BUY_FAMILY if action in _BUY_FAMILY else _SELL_FAMILY if action in _SELL_FAMILY else set()
+    for t in recent_map.get(ticker, []):
+        if t["side"] in fam:
+            return True
+    return False
 
 def _repair_execution_plan(llm, ep: dict, violations: list[str],
                            account: dict, constraints: dict) -> dict | None:
@@ -765,12 +804,22 @@ async def run_execution_plans(
         layer_perf_text = (json.dumps(layer_perf, ensure_ascii=False)
                            if layer_perf else "暂无分层绩效数据")
 
+        recent_map = _recent_executed_by_ticker(store)
+        recent_trades_text = "暂无近期已执行交易"
+        if recent_map:
+            recent_list = []
+            for tk, trades in recent_map.items():
+                for tr in trades:
+                    recent_list.append(f"{tk} {tr['side']} {tr['shares']}股 ({tr['date']})")
+            recent_trades_text = "\n".join(recent_list)
+
         prompt = (prompt_template
                   .replace("{market_context}", market_ctx)
                   .replace("{tactical_plans}", tactical_json)
                   .replace("{account_status}", account_json)
                   .replace("{available_cash}", f"{cash_balance:,.0f}")
                   .replace("{trade_feedback}", feedback_text)
+                  .replace("{recent_trades}", recent_trades_text)
                   .replace("{user_preferences}", pref_text)
                   .replace("{experience_cards}", experience_text)
                   .replace("{layer_performance}", layer_perf_text)
@@ -816,6 +865,7 @@ async def run_execution_plans(
 
         existing_tickers = {ep["ticker"] for ep in store.get_pending_executions() if ep.get("ticker")}
         batch_tickers = set()
+        recent_map = _recent_executed_by_ticker(store)
 
         for ep in exec_plans:
             ticker = ep.get("ticker", "")
@@ -827,6 +877,10 @@ async def run_execution_plans(
                 continue
             if ticker in batch_tickers:
                 logger.info("跳过本批次重复的 %s", ticker)
+                skipped += 1
+                continue
+            if _is_recent_duplicate(ep.get("action", ""), ticker, recent_map):
+                logger.info("跳过近期已执行同向操作的 %s (%s)", ticker, ep.get("action"))
                 skipped += 1
                 continue
             batch_tickers.add(ticker)
@@ -950,9 +1004,12 @@ async def run_daily_decision(
     yield _sse("daily_start", scope=scope, market=market, message="开始日常决策流程...")
 
     # Step 0: 催化剂时效检查
-    from bottleneck_hunter.watchlist.catalyst_monitor import check_catalyst_expiry
-    async for evt in check_catalyst_expiry(store):
-        yield evt
+    try:
+        from bottleneck_hunter.watchlist.catalyst_monitor import check_catalyst_expiry
+        async for evt in check_catalyst_expiry(store):
+            yield evt
+    except Exception as e:
+        logger.warning("催化剂时效检查失败: %s", e)
 
     # Step 0.5: 投资论点有效性检查
     try:
@@ -969,21 +1026,25 @@ async def run_daily_decision(
 
     # Step 2: L2 偏离检查 + pre_l2 质量门控
     if scope in ("full",):
-        from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
-        async for evt in run_quality_checks(store, "pre_l2"):
-            yield evt
-
-        macro = store.get_latest_macro_strategy()
-        plan = store.get_latest_strategic_plan()
-
-        if not plan and macro:
-            yield _sse("decision_info", layer="L2",
-                       message="无 L2 组合策略，自动生成...")
-            async for evt in run_strategic_plan(store, budget, market=market):
+        try:
+            from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
+            async for evt in run_quality_checks(store, "pre_l2"):
                 yield evt
-        elif plan:
-            async for evt in run_deviation_check(store, budget, market=market):
-                yield evt
+
+            macro = store.get_latest_macro_strategy()
+            plan = store.get_latest_strategic_plan()
+
+            if not plan and macro:
+                yield _sse("decision_info", layer="L2",
+                           message="无 L2 组合策略，自动生成...")
+                async for evt in run_strategic_plan(store, budget, market=market):
+                    yield evt
+            elif plan:
+                async for evt in run_deviation_check(store, budget, market=market):
+                    yield evt
+        except Exception as e:
+            logger.exception("L2 阶段失败")
+            yield _sse("decision_error", layer="L2", error=str(e))
 
     if scope == "l1":
         yield _sse("daily_done", message="L1 检查完成")
@@ -1019,19 +1080,27 @@ async def run_daily_decision(
 
     # Step 5: 投委会评审
     if scope in ("l3l4", "full"):
-        pending = store.get_pending_executions()
-        if pending:
-            from bottleneck_hunter.watchlist.committee import run_committee_review
-            yield _sse("decision_info", layer="committee",
-                       message=f"启动投委会评审 {len(pending)} 条执行计划...")
-            async for evt in run_committee_review(store, pending, budget, market=market):
-                yield evt
-        else:
-            yield _sse("decision_info", layer="committee",
-                       message="无待评审执行计划，跳过投委会")
+        try:
+            pending = store.get_pending_executions()
+            if pending:
+                from bottleneck_hunter.watchlist.committee import run_committee_review
+                yield _sse("decision_info", layer="committee",
+                           message=f"启动投委会评审 {len(pending)} 条执行计划...")
+                async for evt in run_committee_review(store, pending, budget, market=market):
+                    yield evt
+            else:
+                yield _sse("decision_info", layer="committee",
+                           message="无待评审执行计划，跳过投委会")
+        except Exception as e:
+            logger.exception("投委会评审失败")
+            yield _sse("decision_error", layer="committee", error=str(e))
 
-    # Step 6: 更新观察池综合评分
-    _update_composite_scores(store, market)
+    # Step 6: 更新观察池综合评分（裸调用需保护，否则崩溃会中断 SSE 流导致前端面板空白）
+    try:
+        _update_composite_scores(store, market)
+    except Exception as e:
+        logger.exception("综合评分更新失败")
+        yield _sse("decision_error", layer="composite", error=str(e))
 
     yield _sse("daily_done", message="日常决策流程完成")
 
@@ -1063,7 +1132,11 @@ async def run_full_refresh(
         async for evt in run_committee_review(store, pending, budget, market=market):
             yield evt
 
-    _update_composite_scores(store, market)
+    try:
+        _update_composite_scores(store, market)
+    except Exception as e:
+        logger.exception("综合评分更新失败")
+        yield _sse("decision_error", layer="composite", error=str(e))
     yield _sse("refresh_done", message="全量决策刷新完成")
 
 
@@ -1193,41 +1266,44 @@ def _update_composite_scores(store: WatchlistStore, market: str = "us_stock") ->
     for entry in entries:
         entry_id = entry["id"]
         ticker = entry["ticker"]
+        try:
+            strategy = strategy_summaries.get(entry_id, {})
+            confidence = strategy.get("confidence", 5)
 
-        strategy = strategy_summaries.get(entry_id, {})
-        confidence = strategy.get("confidence", 5)
+            reviews = _get_latest_reviews_for_ticker(store, ticker)
+            if reviews:
+                avg_score = sum(r.get("score", 5) or 5 for r in reviews) / len(reviews)
+            else:
+                avg_score = 5.0
 
-        reviews = _get_latest_reviews_for_ticker(store, ticker)
-        if reviews:
-            avg_score = sum(r.get("score", 5) or 5 for r in reviews) / len(reviews)
-        else:
-            avg_score = 5.0
+            catalysts = store.get_catalysts_for_ticker(ticker)
+            active_catalysts = [c for c in catalysts if c.get("status") in ("pending", "monitoring")]
+            catalyst_score = min(len(active_catalysts) * 3, 10)
 
-        catalysts = store.get_catalysts_for_ticker(ticker)
-        active_catalysts = [c for c in catalysts if c.get("status") in ("pending", "monitoring")]
-        catalyst_score = min(len(active_catalysts) * 3, 10)
+            snap = store.get_latest_snapshot(ticker)
+            if snap and snap.get("fetched_at"):
+                from datetime import datetime, timezone
+                try:
+                    fetched = datetime.fromisoformat(snap["fetched_at"].replace("Z", "+00:00"))
+                    age_hours = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
+                    freshness = max(0, min(10, 10 - age_hours / 12))
+                except (ValueError, TypeError):
+                    freshness = 5.0
+            else:
+                freshness = 0.0
 
-        snap = store.get_latest_snapshot(ticker)
-        if snap and snap.get("fetched_at"):
-            from datetime import datetime, timezone
-            try:
-                fetched = datetime.fromisoformat(snap["fetched_at"].replace("Z", "+00:00"))
-                age_hours = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
-                freshness = max(0, min(10, 10 - age_hours / 12))
-            except (ValueError, TypeError):
-                freshness = 5.0
-        else:
-            freshness = 0.0
+            composite = round(
+                avg_score * w_review +
+                confidence * w_conf +
+                catalyst_score * 0.15 +
+                freshness * 0.15,
+                2,
+            )
 
-        composite = round(
-            avg_score * w_review +
-            confidence * w_conf +
-            catalyst_score * 0.15 +
-            freshness * 0.15,
-            2,
-        )
-
-        store.update(entry_id, composite_score=composite)
+            store.update(entry_id, composite_score=composite)
+        except Exception as e:
+            # 单标的失败不阻断其余标的评分更新
+            logger.warning("综合评分更新失败 %s: %s", ticker, e)
 
     logger.info("更新了 %d 个标的的综合评分", len(entries))
 
@@ -1273,6 +1349,7 @@ def _get_latest_reviews_for_ticker(store: WatchlistStore, ticker: str) -> list[d
                WHERE ep.ticker = ?
                ORDER BY cr.created_at DESC LIMIT 4""",
             (ticker,),
+            table="cr",
         )
         rows = conn.execute(q, p).fetchall()
         return [dict(r) for r in rows]

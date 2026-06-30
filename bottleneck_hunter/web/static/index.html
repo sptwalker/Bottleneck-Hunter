@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BottleneckHunter — AI 产业链瓶颈选股</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=58">
+  <link rel="stylesheet" href="/static/css/style.css?v=62">
   <link rel="stylesheet" href="/static/css/admin.css?v=1">
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
@@ -712,6 +712,15 @@
           </div>
         </div>
 
+        <!-- 信号灯图例 -->
+        <div class="dc-light-legend">
+          <span class="dc-legend-item"><span class="dc-light dc-light-gray"></span>无数据</span>
+          <span class="dc-legend-item"><span class="dc-light dc-light-green"></span>有效</span>
+          <span class="dc-legend-item"><span class="dc-light dc-light-blink"></span>分析中</span>
+          <span class="dc-legend-item"><span class="dc-light dc-light-yellow"></span>已过期</span>
+          <span class="dc-legend-item"><span class="dc-light dc-light-red"></span>失败</span>
+        </div>
+
         <!-- 两列布局 -->
         <div class="dc-grid">
           <!-- 左列: 策略 -->
@@ -719,7 +728,7 @@
             <!-- L1 宏观环境 -->
             <div class="dc-card" id="dc-macro">
               <div class="dc-card-header">
-                <h3>L1 宏观环境 <span class="dc-card-toggle">▼</span></h3>
+                <h3><span class="dc-light dc-light-gray" id="dc-light-macro"></span>L1 宏观环境 <span class="dc-card-toggle">▼</span></h3>
                 <span class="dc-badge dc-badge-info" id="dc-macro-risk">--</span>
               </div>
               <div class="dc-card-body" id="dc-macro-body">
@@ -730,7 +739,7 @@
             <!-- L3 战术计划 -->
             <div class="dc-card" id="dc-tactical">
               <div class="dc-card-header">
-                <h3>L3 战术计划 <span class="dc-card-toggle">▼</span></h3>
+                <h3><span class="dc-light dc-light-gray" id="dc-light-tactical"></span>L3 战术计划 <span class="dc-card-toggle">▼</span></h3>
                 <span class="dc-badge" id="dc-tactical-count">0</span>
               </div>
               <div class="dc-card-body">
@@ -754,7 +763,7 @@
             <!-- L4 待确认执行 -->
             <div class="dc-card" id="dc-pending">
               <div class="dc-card-header">
-                <h3>L4 待确认执行 <span class="dc-card-toggle">▼</span></h3>
+                <h3><span class="dc-light dc-light-gray" id="dc-light-pending"></span>L4 待确认执行 <span class="dc-card-toggle">▼</span></h3>
                 <span class="dc-badge dc-badge-warn" id="dc-pending-count">0</span>
               </div>
               <div class="dc-card-body" id="dc-pending-list">
@@ -768,7 +777,7 @@
             <!-- 投委会评审 -->
             <div class="dc-card" id="dc-committee">
               <div class="dc-card-header">
-                <h3>投委会评审 <span class="dc-card-toggle">▼</span></h3>
+                <h3><span class="dc-light dc-light-gray" id="dc-light-committee"></span>投委会评审 <span class="dc-card-toggle">▼</span></h3>
               </div>
               <div class="dc-card-body" id="dc-committee-body">
                 <p class="dc-empty-hint">暂无评审记录</p>
@@ -798,7 +807,7 @@
             <!-- L2 组合配置 -->
             <div class="dc-card" id="dc-strategic">
               <div class="dc-card-header">
-                <h3>L2 组合配置</h3>
+                <h3><span class="dc-light dc-light-gray" id="dc-light-strategic"></span>L2 组合配置</h3>
               </div>
               <div class="dc-card-body">
                 <div id="dc-alloc-chart" style="height:200px"></div>
@@ -809,7 +818,7 @@
             <!-- 催化剂 -->
             <div class="dc-card" id="dc-catalysts">
               <div class="dc-card-header">
-                <h3>近期催化剂</h3>
+                <h3><span class="dc-light dc-light-gray" id="dc-light-catalysts"></span>近期催化剂</h3>
                 <div class="dc-view-switch">
                   <button class="dc-view-btn active" id="dc-catalyst-list-btn" title="列表视图">列表</button>
                   <button class="dc-view-btn" id="dc-catalyst-cal-btn" title="日历视图">日历</button>
@@ -1587,7 +1596,7 @@
   </div>
 </div>
 
-<script type="module" src="/static/js/app.js?v=70"></script>
+<script type="module" src="/static/js/app.js?v=75"></script>
 <script src="/static/js/syslog.js"></script>
 <script>
   window.addEventListener('error', e => {

@@ -34,6 +34,8 @@
 
 ## 输出格式
 
+**重要：所有文本字段（summary / reason / opinion / recommendation / committee_note / key_risks_flagged 等）必须用简体中文撰写，不得使用英文。**
+
 返回严格 JSON 格式：
 
 ```json

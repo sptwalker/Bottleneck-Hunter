@@ -40,6 +40,12 @@
 
 {catalyst_outcomes}
 
+## 近期已执行交易
+
+以下标的近 5 天已实际成交。若持仓已按计划建立，请输出 action=hold，不要重复 buy/sell：
+
+{recent_trades}
+
 ## 分析维度
 
 对每只目标股票，从以下维度分析：

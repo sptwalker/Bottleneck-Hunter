@@ -1573,3 +1573,227 @@
   background: oklch(0.6 0.15 300 / 0.18);
   color: oklch(0.72 0.14 300);
 }
+
+/* ── 投委会讨论过程 transcript（阶段 1.4）─────────────── */
+
+.dc-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dc-tr-turn {
+  border: 1px solid var(--border);
+  border-left: 3px solid oklch(0.65 0.05 250);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: oklch(0.5 0 0 / 0.02);
+}
+.dc-tr-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.dc-tr-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.dc-tr-conf {
+  font-size: 11px;
+  color: var(--muted);
+}
+.dc-tr-model {
+  font-size: 10px;
+  color: var(--muted);
+  margin-left: auto;
+}
+.dc-tr-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  margin: 4px 0;
+  white-space: pre-wrap;
+}
+.dc-tr-sub {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.dc-tr-discussion {
+  margin-top: 12px;
+  border: 1px dashed oklch(0.65 0.12 300 / 0.5);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: oklch(0.6 0.15 300 / 0.04);
+}
+.dc-tr-disc-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.dc-bg-details {
+  margin-top: 6px;
+}
+.dc-bg-details summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 4px 0;
+}
+.dc-bg-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.dc-bg-row {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 8px;
+  font-size: 12px;
+}
+.dc-bg-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+.dc-bg-val {
+  line-height: 1.5;
+  word-break: break-word;
+}
+.dc-bg-k {
+  color: var(--muted);
+}
+.dc-muted {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.dc-committee-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.dc-committee-ticker {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.dc-committee-conclusion {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid oklch(0.65 0.1 250 / 0.35);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: oklch(0.6 0.1 250 / 0.05);
+}
+.dc-cc-title {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.dc-cc-summary {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+}
+.dc-cc-risks {
+  color: oklch(0.7 0.14 50);
+}
+
+/* ── 面板信号灯（status lights）─────────────────────── */
+
+.dc-light {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  position: relative;
+  flex: 0 0 auto;
+  background: oklch(0.6 0 0);          /* 默认灰 */
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+/* 灰：无数据 */
+.dc-light-gray {
+  background: oklch(0.6 0 0 / 0.55);
+}
+
+/* 绿：决策完成，数据有效 */
+.dc-light-green {
+  background: oklch(0.72 0.18 145);
+  box-shadow: 0 0 6px oklch(0.72 0.18 145 / 0.7);
+}
+
+/* 黄：有数据但已过期 */
+.dc-light-yellow {
+  background: oklch(0.8 0.16 90);
+  box-shadow: 0 0 6px oklch(0.8 0.16 90 / 0.7);
+}
+
+/* 红：决策失败，数据无效 */
+.dc-light-red {
+  background: oklch(0.62 0.2 25);
+  box-shadow: 0 0 6px oklch(0.62 0.2 25 / 0.8);
+}
+
+/* 绿灯闪烁 + 循环动画：正在分析 */
+.dc-light-blink {
+  background: oklch(0.72 0.18 145);
+  animation: dc-light-pulse 1s ease-in-out infinite;
+}
+.dc-light-blink::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-radius: 50%;
+  border: 2px solid oklch(0.72 0.18 145 / 0.85);
+  border-top-color: transparent;
+  border-right-color: transparent;
+  animation: dc-light-spin 0.8s linear infinite;
+}
+
+@keyframes dc-light-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px oklch(0.72 0.18 145 / 0.5); }
+  50% { opacity: 0.35; box-shadow: 0 0 10px oklch(0.72 0.18 145 / 0.95); }
+}
+@keyframes dc-light-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 图例 */
+.dc-light-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+  padding: 6px 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.dc-legend-item {
+  display: inline-flex;
+  align-items: center;
+}
+.dc-light-legend .dc-light {
+  margin-right: 5px;
+}
+
+/* 让 card-header 的 h3 能容纳信号灯并垂直居中 */
+.dc-card-header h3 {
+  display: inline-flex;
+  align-items: center;
+}

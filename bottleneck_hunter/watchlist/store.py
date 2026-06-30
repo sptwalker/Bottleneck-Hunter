@@ -3499,7 +3499,9 @@ class WatchlistStore:
     def get_evidence_log(self, thesis_id: str, limit: int = 50) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._filtered(
+            # thesis_evidence_log 无 market 列，且已通过 thesis_id 外键隶属市场隔离的
+            # investment_theses，故只做 user 过滤，避免 _market_filter 触发 no such column: market
+            q, p = self._user_filter(
                 "SELECT * FROM thesis_evidence_log WHERE thesis_id = ? ORDER BY date DESC LIMIT ?",
                 (thesis_id, limit),
             )
