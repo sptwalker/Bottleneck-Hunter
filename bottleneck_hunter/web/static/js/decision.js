@@ -656,6 +656,51 @@ function renderCatalysts(catalysts) {
   }).join('');
 }
 
+/* ── 统一投票/结论 译名与样式 ────────────────────────
+ * 后端 vote/verdict 取值不统一：approve / approved / approve_with_modification
+ * / approved_with_modifications / reject / rejected / conditional / abstain，
+ * 还可能已是中文。这里统一用子串匹配，所有渲染器复用，避免 4 处各写一份导致
+ * 同一票在列表/抽屉/概览显示不同文字和颜色。 */
+const ROLE_LABELS = {
+  risk_officer: '风险控制官',
+  growth_investor: '成长投资人',
+  value_investor: '价值投资人',
+  contrarian: '逆向投资人',
+  consensus_builder: '共识构建者',
+};
+function roleLabel(role) { return ROLE_LABELS[role] || role; }
+
+// CSS 颜色类：approve(绿)/reject(红)/conditional(黄)。有条件（modification）优先，避免误染绿。
+function voteClass(v) {
+  const s = String(v || '').toLowerCase();
+  if (s.includes('modification') || s.includes('conditional') || s.includes('有条件')) return 'conditional';
+  if (s.includes('approve') || s.includes('pass') || s.includes('通过') || s.includes('赞成')) return 'approve';
+  if (s.includes('reject') || s.includes('fail') || s.includes('否决') || s.includes('反对')) return 'reject';
+  return 'conditional';
+}
+
+// 个人委员票：赞成 / 反对 / 有条件赞成 / 弃权
+function voteLabel(v) {
+  const s = String(v || '').toLowerCase();
+  if (!s || s === '--') return v || '--';
+  if (s.includes('modification') || s.includes('conditional')) return '有条件赞成';
+  if (s.includes('approve') || s.includes('赞成')) return '赞成';
+  if (s.includes('reject') || s.includes('反对')) return '反对';
+  if (s.includes('abstain') || s.includes('弃权')) return '弃权';
+  return v || '--';
+}
+
+// 会议集体结论：通过 / 否决 / 有条件通过
+function verdictLabel(v) {
+  const s = String(v || '').toLowerCase();
+  if (!s || s === '--') return v || '--';
+  if (s.includes('modification') || s.includes('conditional') || s.includes('有条件')) return '有条件通过';
+  if (s.includes('approve') || s.includes('pass') || s.includes('通过')) return '通过';
+  if (s.includes('reject') || s.includes('fail') || s.includes('否决')) return '否决';
+  if (s.includes('abstain') || s.includes('弃权')) return '弃权';
+  return v || '--';
+}
+
 /* ── 投委会 ───────────────────────────────────────── */
 
 function renderCommittee(reviews, meta) {
@@ -669,12 +714,11 @@ function renderCommittee(reviews, meta) {
 
   let header = '';
   if (meta && (meta.ticker || meta.verdict)) {
-    const vCls = (meta.verdict || '').includes('approved') ? 'approve'
-      : (meta.verdict || '').includes('rejected') ? 'reject' : 'conditional';
+    const vCls = voteClass(meta.verdict || '');
     const date = (meta.created_at || '').replace('T', ' ').slice(0, 16);
     header = `<div class="dc-committee-meta">
       <span class="dc-committee-ticker">${escDC(meta.ticker || '')}</span>
-      <span class="dc-member-decision ${vCls}">${escDC(_voteLabel(meta.verdict || '--'))}</span>
+      <span class="dc-member-decision ${vCls}">${escDC(verdictLabel(meta.verdict || '--'))}</span>
       ${meta.approval_rate != null ? `<span class="dc-tr-conf">通过率 ${Math.round(meta.approval_rate)}%</span>` : ''}
       <span class="dc-tr-conf">${escDC(date)}</span>
     </div>`;
@@ -688,8 +732,7 @@ function renderCommittee(reviews, meta) {
     rj = rj || {};
 
     const decision = rj.decision || rj.vote || '--';
-    const decClass = decision.includes('approve') || decision.includes('通过') ? 'approve'
-      : decision.includes('reject') || decision.includes('否决') ? 'reject' : 'conditional';
+    const decClass = voteClass(decision);
     const reasoning = rj.overall_assessment || rj.reasoning || rj.summary || '';
     const conf = rj.confidence != null ? rj.confidence : null;
     const concerns = Array.isArray(rj.key_concerns) ? rj.key_concerns : [];
@@ -698,7 +741,7 @@ function renderCommittee(reviews, meta) {
 
     return `<div class="dc-member-vote">
       <div class="dc-member-name">${escDC(r.member_name || r.reviewer || r.member_role || '--')}${conf != null && !errAbstain ? ` <span class="dc-tr-conf">信心 ${conf}/10</span>` : ''}</div>
-      <div class="dc-member-decision ${errAbstain ? 'conditional' : decClass}">${errAbstain ? '弃权（系统错误）' : escDC(_voteLabel(decision))}</div>
+      <div class="dc-member-decision ${errAbstain ? 'conditional' : decClass}">${errAbstain ? '弃权（系统错误）' : escDC(voteLabel(decision))}</div>
       ${errAbstain
         ? `<div class="dc-member-reasoning dc-muted">模型调用失败，本次未参与投票：${escDC(String(errAbstain).slice(0, 80))}</div>`
         : `<div class="dc-member-reasoning">${escDC(String(reasoning))}</div>
@@ -1573,19 +1616,13 @@ function renderMeetings(meetings) {
     const date = (m.created_at || '').replace('T', ' ').slice(0, 16);
     const verdict = m.final_verdict || '';
 
-    // 翻译结论
-    const translateVerdict = (v) => {
-      const vl = v.toLowerCase();
-      if (vl.includes('approved') && vl.includes('modification')) return '有条件通过';
-      if (vl.includes('approved') || vl.includes('pass')) return '通过';
-      if (vl.includes('rejected') || vl.includes('fail')) return '否决';
-      return v;
-    };
-    const verdictZh = translateVerdict(verdict);
+    // 翻译结论（统一复用 verdictLabel / voteClass）
+    const verdictZh = verdictLabel(verdict);
 
     let verdictCls = '';
-    if (verdict.includes('approved') || verdict.includes('pass')) verdictCls = 'dc-verdict-pass';
-    else if (verdict.includes('rejected') || verdict.includes('fail')) verdictCls = 'dc-verdict-fail';
+    const vc = verdict ? voteClass(verdict) : '';
+    if (vc === 'approve') verdictCls = 'dc-verdict-pass';
+    else if (vc === 'reject') verdictCls = 'dc-verdict-fail';
 
     let tickers = [];
     try {
@@ -1649,32 +1686,9 @@ function closeMeetingDrawer() {
 }
 
 function renderMeetingDetail(data, container) {
-  // 角色英文→中文映射
-  const roleMap = {
-    'risk_officer': '风险控制官',
-    'growth_investor': '成长投资人',
-    'value_investor': '价值投资人',
-    'contrarian': '逆向投资人',
-    'consensus_builder': '共识构建者'
-  };
-
-  // 投票结论英文→中文映射
-  const voteMap = {
-    'approve': '通过',
-    'approve_with_modification': '有条件通过',
-    'reject': '否决',
-    'conditional': '有条件通过',
-    'abstain': '弃权'
-  };
-
-  const translateRole = (role) => roleMap[role] || role;
-  const translateVote = (vote) => {
-    const v = String(vote).toLowerCase();
-    for (const [en, zh] of Object.entries(voteMap)) {
-      if (v.includes(en)) return zh;
-    }
-    return vote;
-  };
+  // 角色/投票译名统一复用模块级 roleLabel / voteLabel / voteClass
+  const translateRole = roleLabel;
+  const translateVote = voteLabel;
 
   let participants = data.participants || [];
   if (typeof participants === 'string') {
@@ -1809,7 +1823,7 @@ function renderMeetingDetail(data, container) {
       <div class="dc-votes-grid">${Object.entries(voteDetail).map(([role, info]) => {
         const vote = typeof info === 'object' ? (info.vote || '--') : String(info);
         const conf = typeof info === 'object' ? (info.confidence || 0) : 0;
-        const vCls = vote.includes('approve') && !vote.includes('modification') ? 'approve' : vote.includes('reject') ? 'reject' : 'conditional';
+        const vCls = voteClass(vote);
 
         // 信心指数仪表盘（0-10）
         const confPercent = Math.min(100, (conf / 10) * 100);
@@ -1894,19 +1908,11 @@ function renderMeetingDetail(data, container) {
 /* ── 投委会讨论过程渲染（阶段 1.4）─────────────────── */
 
 function _voteCls(vote) {
-  const v = String(vote || '').toLowerCase();
-  if (v.includes('approve') || v.includes('通过')) return 'approve';
-  if (v.includes('reject') || v.includes('否决')) return 'reject';
-  return 'conditional';
+  return voteClass(vote);
 }
 
 function _voteLabel(vote) {
-  const v = String(vote || '').toLowerCase();
-  if (v === 'approve') return '赞成';
-  if (v === 'approve_with_modification') return '有条件赞成';
-  if (v === 'reject') return '反对';
-  if (v === 'abstain') return '弃权';
-  return vote || '--';
+  return voteLabel(vote);
 }
 
 function _fmtBgVal(v) {
@@ -1927,7 +1933,10 @@ function _fmtBgVal(v) {
 
 function renderCommitteeTranscript(transcript) {
   const bg = transcript.find(t => t.role === '_background');
-  const members = transcript.filter(t => t.round === 1);
+  const isMember = (t) => !String(t.role || '').startsWith('_');
+  const members = transcript.filter(t => t.round === 1 && isMember(t));
+  // 第 2 轮辩论后改票（仅有立场/理由变化的委员才落库）
+  const revisions = transcript.filter(t => t.round === 2 && isMember(t));
   const discussion = transcript.find(t => t.role === '_discussion');
 
   let html = '<div class="drawer-section"><h4>讨论过程</h4>';
@@ -1950,6 +1959,26 @@ function renderCommitteeTranscript(transcript) {
     </div>`;
   });
   html += '</div>';
+
+  // 第 2 轮辩论后改票（首轮立场 → 终票）
+  if (revisions.length) {
+    html += '<div class="dc-tr-revisions"><div class="dc-tr-disc-title">🔁 辩论后改票</div>';
+    revisions.forEach(m => {
+      const concerns = Array.isArray(m.key_concerns) ? m.key_concerns : [];
+      html += `<div class="dc-tr-turn">
+        <div class="dc-tr-head">
+          <span class="dc-tr-name">${escDC(m.name || m.role)}</span>
+          ${m.prev_vote ? `<span class="dc-member-decision ${_voteCls(m.prev_vote)}" style="opacity:.6">${escDC(_voteLabel(m.prev_vote))}</span><span class="dc-mod-arrow">→</span>` : ''}
+          <span class="dc-member-decision ${_voteCls(m.vote)}">${escDC(_voteLabel(m.vote))}</span>
+          <span class="dc-tr-conf">信心 ${m.confidence != null ? m.confidence : '--'}/10</span>
+          <span class="dc-tr-model">${escDC(m.model || '')}</span>
+        </div>
+        ${m.content ? `<div class="dc-tr-content">${escDC(m.content)}</div>` : ''}
+        ${concerns.length ? `<div class="dc-tr-sub"><b>关注点：</b>${concerns.map(c => escDC(typeof c === 'string' ? c : JSON.stringify(c))).join('；')}</div>` : ''}
+      </div>`;
+    });
+    html += '</div>';
+  }
 
   // 圆桌讨论（如有）
   if (discussion && (discussion.content || discussion.key_disagreement)) {

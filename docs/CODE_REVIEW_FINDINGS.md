@@ -2,7 +2,7 @@
 
 > **审查范围**: `git diff a3a9ef6..HEAD`（21 文件，+1491/-519）
 > **审查方式**: code-review skill，8 角度并行（3 correctness + 3 cleanup + altitude + conventions）
-> **状态**: 审查已完成，**问题待修复**（上个会话工具异常中断在验证阶段）
+> **状态**: ✅ 全部修复完成（2026-06-30）。#14 确认无需处理。回归验证：py_compile + node --check 通过；pytest 与基线一致（46 failed / 657 passed，均为预先存在的鉴权/fixture 问题，本次改动零回归）。
 > **日期**: 2026-06-30
 
 ## 待修复问题清单（按严重度排序）
@@ -98,3 +98,22 @@
 - 启动: `bottleneck-hunter serve --port 8899`（见记忆 project_server_start_command）
 - 修完后跑: `python -m pytest tests/ -x` 确认无回归
 - 前端改动硬刷新 Ctrl+Shift+R 验证
+
+## 修复记录（2026-06-30 完成）
+
+| # | 严重度 | 状态 | 修复摘要 |
+|---|--------|------|----------|
+| 1 | P0 | ✅ | committee.py `_review_single` try 前预置 `provider, model = "", ""`，消除 except 块 UnboundLocalError |
+| 2 | P0 | ✅ | decision.js 抽取模块级 `voteLabel`/`verdictLabel`/`voteClass`（子串匹配），header 用 `verdictLabel` 翻译 |
+| 3 | P1 | ✅ | 4 处译名/类映射统一为 `ROLE_LABELS`/`voteLabel`/`verdictLabel`/`voteClass`，所有渲染器复用；`_voteLabel`/`_voteCls` 改为委托 |
+| 4 | P1 | ✅ | `voteClass` 中 modification/conditional 优先判定，conditional 不再误染绿；renderMeetingDetail 投票详情同步 |
+| 5 | P1 | ✅ | decision_api.py overview：transcript 为空时按 `execution_plan_id` 回退 `get_reviews_for_execution` |
+| 6 | P2 | ✅ | `_recent_executed_by_ticker` 用 `t.get("ticker")` 并跳过空值 |
+| 7 | P2 | ✅ | `_BUY_FAMILY`/`_SELL_FAMILY` 扩充（accumulate/open/trim/close），未知 action 记 warning |
+| 8 | P2 | ✅ | cooldown 改用 datetime 对象比较（解析 created_at，兼容 Z 后缀/无微秒），消除字符串字典序边界 bug |
+| 9 | P2 | ✅ | sentiment_data 过滤只剔除 None/[]，保留合法 0 值 |
+| 10 | P3 | ✅ | L4 prompt 构建与去重循环复用同一份 `recent_map`（去掉第二次 `get_sim_trades`） |
+| 11 | P3 | ✅ | 抽取 `_format_recent_trades` helper，L3/L4 复用 |
+| 12 | P3 | ✅ | 确认 approval_rate 两条路径（规则兜底 + LLM prompt）均存 0-100 百分数，前端展示正确，无需改 |
+| 13 | P3 | ✅ | transcript 分别记录 round1（首轮真实立场，reviews1）与 round2（改票，reviews2 仅变化项）；overview 取每委员最新轮次显示终票；前端新增"辩论后改票"区块 |
+| 14 | — | ➖ | get_evidence_log 去 market 过滤为有意修复，无需处理 |

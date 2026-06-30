@@ -592,13 +592,7 @@ async def run_tactical_plans(
             macro.get("result_json", {}), ensure_ascii=False)[:500]
 
         recent_map = _recent_executed_by_ticker(store)
-        recent_trades_text = "暂无近期已执行交易"
-        if recent_map:
-            recent_list = []
-            for tk, trades in recent_map.items():
-                for tr in trades:
-                    recent_list.append(f"{tk} {tr['side']} {tr['shares']}股 ({tr['date']})")
-            recent_trades_text = "\n".join(recent_list)
+        recent_trades_text = _format_recent_trades(recent_map)
 
         prompt = (prompt_template
                   .replace("{market_context}", market_ctx)
@@ -654,31 +648,58 @@ async def run_tactical_plans(
 
 # 执行去重：5天冷却窗口
 EXECUTION_COOLDOWN_DAYS = 5
-_BUY_FAMILY = {"buy", "add"}
-_SELL_FAMILY = {"sell", "reduce"}
+_BUY_FAMILY = {"buy", "add", "accumulate", "open"}
+_SELL_FAMILY = {"sell", "reduce", "trim", "close"}
 
 def _recent_executed_by_ticker(store, days=EXECUTION_COOLDOWN_DAYS) -> dict[str, list[dict]]:
     """返回 {ticker: [{side, shares, date}]}，仅含近 days 天已执行的 sim_trades。"""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     trades = store.get_sim_trades(limit=200)
     out = {}
     for t in trades:
-        if (t.get("created_at", "") or "") < cutoff:
+        ticker = t.get("ticker")
+        if not ticker:
+            continue  # 坏数据（ticker 为空）跳过，避免 KeyError 中断整批生成
+        created = t.get("created_at", "") or ""
+        try:
+            created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue  # 时间戳缺失/非法，无法判定冷却窗口，跳过
+        if created_dt < cutoff:
             continue
-        out.setdefault(t["ticker"], []).append({
+        out.setdefault(ticker, []).append({
             "side": t.get("side", ""),
             "shares": t.get("shares", 0),
-            "date": (t.get("created_at", "") or "")[:10],
+            "date": created[:10],
         })
     return out
 
 def _is_recent_duplicate(action, ticker, recent_map) -> bool:
     """该 ticker 的同向操作族近期是否已执行过。"""
-    fam = _BUY_FAMILY if action in _BUY_FAMILY else _SELL_FAMILY if action in _SELL_FAMILY else set()
+    if action in _BUY_FAMILY:
+        fam = _BUY_FAMILY
+    elif action in _SELL_FAMILY:
+        fam = _SELL_FAMILY
+    else:
+        # 未知动作无法归入买/卖族，去重失效 → 记日志告警而非静默放行
+        logger.warning("去重：未知 action=%r (ticker=%s)，跳过冷却检查", action, ticker)
+        return False
     for t in recent_map.get(ticker, []):
         if t["side"] in fam:
             return True
     return False
+
+def _format_recent_trades(recent_map: dict[str, list[dict]]) -> str:
+    """把近期已执行交易 map 格式化为 prompt 文本（L3/L4 复用）。"""
+    if not recent_map:
+        return "暂无近期已执行交易"
+    lines = []
+    for tk, trades in recent_map.items():
+        for tr in trades:
+            lines.append(f"{tk} {tr['side']} {tr['shares']}股 ({tr['date']})")
+    return "\n".join(lines) if lines else "暂无近期已执行交易"
 
 def _repair_execution_plan(llm, ep: dict, violations: list[str],
                            account: dict, constraints: dict) -> dict | None:
@@ -804,14 +825,9 @@ async def run_execution_plans(
         layer_perf_text = (json.dumps(layer_perf, ensure_ascii=False)
                            if layer_perf else "暂无分层绩效数据")
 
+        # 近期已执行交易：同一函数内 prompt 构建与下方去重循环复用同一份 recent_map
         recent_map = _recent_executed_by_ticker(store)
-        recent_trades_text = "暂无近期已执行交易"
-        if recent_map:
-            recent_list = []
-            for tk, trades in recent_map.items():
-                for tr in trades:
-                    recent_list.append(f"{tk} {tr['side']} {tr['shares']}股 ({tr['date']})")
-            recent_trades_text = "\n".join(recent_list)
+        recent_trades_text = _format_recent_trades(recent_map)
 
         prompt = (prompt_template
                   .replace("{market_context}", market_ctx)
@@ -865,7 +881,7 @@ async def run_execution_plans(
 
         existing_tickers = {ep["ticker"] for ep in store.get_pending_executions() if ep.get("ticker")}
         batch_tickers = set()
-        recent_map = _recent_executed_by_ticker(store)
+        # recent_map 已在上方 prompt 构建时计算，此处直接复用（同批生成期间无新成交）
 
         for ep in exec_plans:
             ticker = ep.get("ticker", "")

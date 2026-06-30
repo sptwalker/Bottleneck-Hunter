@@ -177,6 +177,7 @@ async def _review_single(
             v = json.dumps(v, ensure_ascii=False, default=str)
         prompt = prompt.replace("{" + k + "}", v)
 
+    provider, model = "", ""
     try:
         response, provider, model = await _invoke_with_retry(chain, prompt, member["role"])
         result = extract_json_object(response)
@@ -441,8 +442,10 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
             "put_call_ratio": pcr,
             "recent_headlines": [n.get("title", "") for n in news[:5] if n.get("title")],
         }
+        # 只过滤真正缺失（None/空列表），保留合法 0 值（如中性情绪、零正面新闻），
+        # 否则"零正面新闻"与"未采集"无法区分
         bg["sentiment_data"] = ({k: v for k, v in sent.items()
-                                 if v not in (None, [], 0)} or "暂无市场情绪数据")
+                                 if v not in (None, [])} or "暂无市场情绪数据")
     except Exception:
         bg["sentiment_data"] = "暂无市场情绪数据"
 
@@ -723,8 +726,8 @@ async def run_committee_review(
                     "macro_summary": context.get("macro_summary"),
                 },
             })
-            # 第 1 轮：各委员独立评审
-            for role, r in reviews.items():
+            # 第 1 轮：各委员独立评审（真实首轮立场，用 reviews1 而非终票）
+            for role, r in reviews1.items():
                 transcript.append({
                     "round": 1, "role": role, "name": role_label.get(role, role),
                     "model": f"{r.get('provider', '')}/{r.get('model', '')}",
@@ -735,6 +738,24 @@ async def run_committee_review(
                     "suggestions": r.get("suggestions", []),
                     "strengths": r.get("strengths", []),
                     # 记录 LLM 调用错误，使"因系统错误弃权"可被前端区分于真实弃权
+                    "error": r.get("error", ""),
+                })
+            # 第 2 轮：辩论后改票/终票（仅记录立场或理由确有变化的委员，避免重复）
+            for role, r in reviews2.items():
+                prev = reviews1.get(role, {})
+                if (r.get("vote") == prev.get("vote")
+                        and r.get("overall_assessment") == prev.get("overall_assessment")):
+                    continue
+                transcript.append({
+                    "round": 2, "role": role, "name": role_label.get(role, role),
+                    "model": f"{r.get('provider', '')}/{r.get('model', '')}",
+                    "vote": r.get("vote", "abstain"),
+                    "confidence": r.get("confidence", 5),
+                    "content": r.get("overall_assessment", "") or "",
+                    "key_concerns": r.get("key_concerns", []),
+                    "suggestions": r.get("suggestions", []),
+                    "strengths": r.get("strengths", []),
+                    "prev_vote": prev.get("vote", ""),
                     "error": r.get("error", ""),
                 })
             # 圆桌讨论（如有分歧才触发）

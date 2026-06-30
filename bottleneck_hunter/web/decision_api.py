@@ -481,19 +481,50 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
         if recs:
             rec = recs[0]
             transcript = rec.get("transcript_json", []) or []
+            # 取每位委员的最新一轮（round 2 改票优先于 round 1 首轮），展示终票
+            latest_by_role: dict = {}
             for t in transcript:
-                if t.get("round") == 1:
-                    committee.append({
-                        "member_name": t.get("name", t.get("role", "")),
-                        "member_role": t.get("role", ""),
-                        "result_json": {
-                            "vote": t.get("vote", ""),
-                            "confidence": t.get("confidence"),
-                            "overall_assessment": t.get("content", ""),
-                            "key_concerns": t.get("key_concerns", []),
-                            "error": t.get("error", ""),
-                        },
-                    })
+                role = t.get("role", "")
+                if not role or role.startswith("_"):
+                    continue
+                if t.get("round") not in (1, 2):
+                    continue
+                prev = latest_by_role.get(role)
+                if prev is None or t.get("round", 0) >= prev.get("round", 0):
+                    latest_by_role[role] = t
+            for t in latest_by_role.values():
+                committee.append({
+                    "member_name": t.get("name", t.get("role", "")),
+                    "member_role": t.get("role", ""),
+                    "result_json": {
+                        "vote": t.get("vote", ""),
+                        "confidence": t.get("confidence"),
+                        "overall_assessment": t.get("content", ""),
+                        "key_concerns": t.get("key_concerns", []),
+                        "error": t.get("error", ""),
+                    },
+                })
+            # 回退：transcript_json 特性之前的旧会议记录 transcript=[]，
+            # 但 committee_reviews 行仍有真实投票，按 execution_plan_id 重建面板
+            if not committee:
+                exec_plan_id = rec.get("execution_plan_id", "")
+                if exec_plan_id:
+                    try:
+                        for rv in store.get_reviews_for_execution(exec_plan_id):
+                            rj = rv.get("result_json") or {}
+                            committee.append({
+                                "member_name": rj.get("name", rv.get("member_role", "")),
+                                "member_role": rv.get("member_role", ""),
+                                "result_json": {
+                                    "vote": rv.get("vote", rj.get("vote", "")),
+                                    "confidence": rv.get("confidence", rj.get("confidence")),
+                                    "overall_assessment": rj.get("overall_assessment", ""),
+                                    "key_concerns": rv.get("key_concerns", rj.get("key_concerns", [])),
+                                    "error": rj.get("error", ""),
+                                },
+                            })
+                    except Exception:
+                        logger.debug("回退读取投委会评审失败", exc_info=True)
             tickers = rec.get("tickers_discussed", []) or []
             consensus = rec.get("result_json", {})
             if isinstance(consensus, str):
