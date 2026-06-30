@@ -1773,6 +1773,33 @@ function closeMeetingDrawer() {
 }
 
 function renderMeetingDetail(data, container) {
+  // 角色英文→中文映射
+  const roleMap = {
+    'risk_officer': '风险控制官',
+    'growth_investor': '成长投资人',
+    'value_investor': '价值投资人',
+    'contrarian': '逆向投资人',
+    'consensus_builder': '共识构建者'
+  };
+
+  // 投票结论英文→中文映射
+  const voteMap = {
+    'approve': '通过',
+    'approve_with_modification': '有条件通过',
+    'reject': '否决',
+    'conditional': '有条件通过',
+    'abstain': '弃权'
+  };
+
+  const translateRole = (role) => roleMap[role] || role;
+  const translateVote = (vote) => {
+    const v = String(vote).toLowerCase();
+    for (const [en, zh] of Object.entries(voteMap)) {
+      if (v.includes(en)) return zh;
+    }
+    return vote;
+  };
+
   let participants = data.participants || [];
   if (typeof participants === 'string') {
     try { participants = JSON.parse(participants); } catch { participants = []; }
@@ -1853,7 +1880,7 @@ function renderMeetingDetail(data, container) {
         ${disagreements.map(d => {
           if (typeof d === 'string') return `<div class="dc-mtg-list-item">${escDC(d)}</div>`;
           // 对象格式：member + opinion + recommendation
-          const member = d.member ? `<strong>${escDC(d.member)}:</strong> ` : '';
+          const member = d.member ? `<strong>${escDC(translateRole(d.member))}:</strong> ` : '';
           const opinion = escDC(d.opinion || d.point || '');
           const rec = d.recommendation ? `<div style="margin-top:4px;color:var(--muted);font-size:12px">💡 ${escDC(d.recommendation)}</div>` : '';
           return `<div class="dc-mtg-list-item">${member}${opinion}${rec}</div>`;
@@ -1905,12 +1932,26 @@ function renderMeetingDetail(data, container) {
       <h4>投票详情</h4>
       <div class="dc-votes-grid">${Object.entries(voteDetail).map(([role, info]) => {
         const vote = typeof info === 'object' ? (info.vote || '--') : String(info);
-        const conf = typeof info === 'object' ? (info.confidence || '--') : '--';
-        const vCls = vote.includes('approve') ? 'approve' : vote.includes('reject') ? 'reject' : 'conditional';
+        const conf = typeof info === 'object' ? (info.confidence || 0) : 0;
+        const vCls = vote.includes('approve') && !vote.includes('modification') ? 'approve' : vote.includes('reject') ? 'reject' : 'conditional';
+
+        // 信心指数仪表盘（0-10）
+        const confPercent = Math.min(100, (conf / 10) * 100);
+        const confColor = conf >= 8 ? '#22c55e' : conf >= 6 ? '#eab308' : '#ef4444';
+        const gaugeHtml = `
+          <div class="dc-confidence-gauge">
+            <svg width="60" height="35" viewBox="0 0 60 35">
+              <path d="M 5,30 A 25,25 0 0,1 55,30" fill="none" stroke="#e5e7eb" stroke-width="6" stroke-linecap="round"/>
+              <path d="M 5,30 A 25,25 0 0,1 55,30" fill="none" stroke="${confColor}" stroke-width="6" stroke-linecap="round"
+                    stroke-dasharray="${confPercent * 0.785} 100" style="transition: stroke-dasharray 0.3s ease"/>
+              <text x="30" y="28" text-anchor="middle" font-size="11" font-weight="bold" fill="${confColor}">${conf}/10</text>
+            </svg>
+          </div>`;
+
         return `<div class="dc-member-vote">
-          <div class="dc-member-name">${escDC(role)}</div>
-          <div class="dc-member-decision ${vCls}">${escDC(vote)}</div>
-          <div class="dc-member-reasoning">信心: ${conf}/10</div>
+          <div class="dc-member-name">${escDC(translateRole(role))}</div>
+          <div class="dc-member-decision ${vCls}">${escDC(translateVote(vote))}</div>
+          ${gaugeHtml}
         </div>`;
       }).join('')}</div>
     </div>`;
