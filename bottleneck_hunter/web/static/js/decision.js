@@ -3,6 +3,7 @@
  * L1 宏观 / L2 组合 / L3 战术 / L4 执行 / 投委会 / 模拟账户
  */
 import { showConfirm } from './utils/confirm.js';
+import { openReport, buildMeetingReport, buildDecisionReport } from './report-export.js';
 
 const DC_API = '/api/decision';
 
@@ -873,6 +874,7 @@ export function initDecision() {
   document.getElementById('dc-btn-daily')?.addEventListener('click', runDaily);
   document.getElementById('dc-btn-refresh')?.addEventListener('click', runFullRefresh);
   document.getElementById('dc-btn-catalysts')?.addEventListener('click', scanCatalysts);
+  document.getElementById('dc-btn-export')?.addEventListener('click', exportDecisionReport);
 
   // 左列卡片折叠
   document.querySelectorAll('.dc-col-main .dc-card-header').forEach(header => {
@@ -918,6 +920,7 @@ export function initDecision() {
   // 会议详情抽屉
   const meetingDrawer = document.getElementById('dc-meeting-drawer');
   document.getElementById('dc-meeting-drawer-close')?.addEventListener('click', closeMeetingDrawer);
+  document.getElementById('dc-meeting-export')?.addEventListener('click', exportMeetingReport);
   meetingDrawer?.addEventListener('click', (e) => {
     if (e.target === meetingDrawer) closeMeetingDrawer();
   });
@@ -1278,6 +1281,7 @@ async function openMeetingDrawer(recordId) {
   try {
     const resp = await dcFetch(`/meetings/${encodeURIComponent(recordId)}`);
     const data = resp.meeting || resp;  // 后端返回 {meeting: {...}}
+    dcState.currentMeeting = data;
     if (title) title.textContent = data.title || '会议详情';
     renderMeetingDetail(data, body);
     _bindMeetingChallenge(body);
@@ -1336,6 +1340,24 @@ function _bindMeetingChallenge(container) {
 function closeMeetingDrawer() {
   const drawer = document.getElementById('dc-meeting-drawer');
   if (drawer) drawer.style.display = 'none';
+}
+
+/* ── 导出报告（HTML / PDF）───────────────────────── */
+function exportDecisionReport() {
+  const data = dcState.overview;
+  if (!data) { alert('暂无决策数据，请先加载决策中心'); return; }
+  const mkt = dcState.market === 'a_stock' ? 'A股' : dcState.market === 'hk_stock' ? '港股' : '美股';
+  const date = new Date().toISOString().slice(0, 10);
+  openReport('决策中心总结报告', `决策总结_${mkt}_${date}.html`, buildDecisionReport(data, dcState.market));
+}
+
+function exportMeetingReport() {
+  const m = dcState.currentMeeting;
+  if (!m) { alert('暂无会议数据'); return; }
+  const type = m.meeting_type === 'committee' ? '投委会纪要' : '圆桌会议纪要';
+  const tk = (Array.isArray(m.tickers_discussed) ? m.tickers_discussed : []).join('-');
+  const fname = `${type}${tk ? '_' + tk : ''}_${(m.created_at || '').slice(0, 10)}.html`;
+  openReport(m.title || type, fname, buildMeetingReport(m));
 }
 
 function renderMeetingDetail(data, container) {

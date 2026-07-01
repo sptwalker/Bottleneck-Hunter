@@ -670,6 +670,7 @@
             <button class="btn btn-sm" id="dc-btn-daily" title="L1 检查 → L3 战术 → L4 执行 → 投委会评审">一键日常决策</button>
             <button class="btn btn-sm" id="dc-btn-refresh" title="全量刷新 L1+L2+L3+L4+投委会">全量刷新</button>
             <button class="btn btn-sm" id="dc-btn-catalysts" title="扫描催化剂事件">催化剂扫描</button>
+            <button class="btn btn-sm" id="dc-btn-export" title="导出各层决策总结报告 (HTML/PDF)">📄 导出报告</button>
           </div>
         </div>
 
@@ -1202,7 +1203,10 @@
   <div class="drawer-panel">
     <div class="drawer-header">
       <h3 id="dc-meeting-drawer-title">会议详情</h3>
-      <button class="drawer-close" id="dc-meeting-drawer-close">&#10005;</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-sm" id="dc-meeting-export" title="导出会议记录 (HTML/PDF)">📄 导出</button>
+        <button class="drawer-close" id="dc-meeting-drawer-close">&#10005;</button>
+      </div>
     </div>
     <div class="drawer-body" id="dc-meeting-drawer-body"></div>
   </div>
@@ -1465,7 +1469,7 @@
   </div>
 </div>
 
-<script type="module" src="/static/js/app.js?v=80"></script>
+<script type="module" src="/static/js/app.js?v=81"></script>
 <script src="/static/js/syslog.js"></script>
 <script>
   window.addEventListener('error', e => {
