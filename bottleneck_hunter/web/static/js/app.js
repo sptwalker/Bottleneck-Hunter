@@ -3,8 +3,8 @@
  */
 
 import { resizeAll, initChartFullscreen, initChainTabs, initWizChainTabs, initWizFullscreen } from './charts.js';
-import { initSettings } from './settings.js';
 import { initWizard } from './phases.js';
+import { initReverse } from './reverse.js';
 import { initWatchlist } from './watchlist.js';
 import { initDecision } from './decision.js';
 import { initSimTrading, ensureSimTradingLoaded } from './simtrading.js';
@@ -69,13 +69,13 @@ async function initAuth() {
 /* ── Bootstrap ───────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
   initAuth();
-  initSettings();
   initAdmin();
   initChartFullscreen();
   initChainTabs();
   initWizChainTabs();
   initWizFullscreen();
   initWizard();
+  initReverse();
   initWatchlist();
   initDecision();
   initSimTrading();

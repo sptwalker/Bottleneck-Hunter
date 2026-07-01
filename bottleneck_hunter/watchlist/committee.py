@@ -292,16 +292,47 @@ async def _run_discussion(
 # 共识汇总
 # ─────────────────────────────────────────────────────────
 
+def _member_weights(store, reviews: dict[str, dict], market: str = "") -> dict[str, float]:
+    """取每位委员的历史可信权重（model_ratings.calibration_weight，默认 1.0）。
+
+    与 record_prediction 的键一致：(provider, model, role_context=committee_{role})。
+    无校准数据时全为 1.0 → 加权表决退化为等权，向后兼容。
+    """
+    weights: dict[str, float] = {}
+    for role, r in reviews.items():
+        try:
+            w = store.get_calibration_weight(
+                r.get("provider", ""), r.get("model", ""),
+                role_context=f"committee_{role}", market=market)
+            weights[role] = float(w) if w and float(w) > 0 else 1.0
+        except Exception:
+            weights[role] = 1.0
+    return weights
+
+
 async def _build_consensus(
     reviews: dict[str, dict],
     discussion_results: dict | None = None,
+    weights: dict[str, float] | None = None,
 ) -> dict:
-    """汇总评审意见，生成最终共识"""
+    """汇总评审意见，生成最终共识。
+
+    final_verdict / approval_rate / vote_detail / member_weights 以**加权规则表决**为准
+    （确保历史权重真正影响结论），LLM 仅负责叙述性字段（修改建议/风险/总结/少数意见）。
+    """
+    fallback = _fallback_consensus(reviews, weights)
+
     llm, provider, model = get_llm_for_position(position="committee_consensus", provider_hint="deepseek")
     if not llm:
         llm, provider, model = get_llm_for_position()
     if not llm:
-        return _fallback_consensus(reviews)
+        return fallback
+
+    role_label = {m["role"]: m["label"] for m in MEMBERS}
+    weights = weights or {}
+    wlines = [f"- {role_label.get(role, role)}：历史可信权重 {float(weights.get(role, 1.0)):.2f}x"
+              for role in reviews]
+    weights_text = "\n".join(wlines) if wlines else "（暂无历史权重，按等权处理）"
 
     prompt_template = _load_prompt("committee_consensus")
     prompt = (prompt_template
@@ -311,48 +342,87 @@ async def _build_consensus(
               .replace("{contrarian_review}", json.dumps(reviews.get("contrarian", {}), ensure_ascii=False))
               .replace("{discussion_results}",
                        json.dumps(discussion_results, ensure_ascii=False) if discussion_results else "无圆桌讨论")
+              .replace("{member_weights}", weights_text)
               )
 
     try:
         response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
-        return extract_json_object(response)
+        result = extract_json_object(response)
     except Exception as e:
-        logger.warning("共识汇总 LLM 失败，使用规则引擎: %s", e)
-        return _fallback_consensus(reviews)
+        logger.warning("共识汇总 LLM 失败，使用加权规则引擎: %s", e)
+        return fallback
+
+    # verdict/比率/权重以加权规则为准；保留 LLM 的叙述性字段
+    result["final_verdict"] = fallback["final_verdict"]
+    result["approval_rate"] = fallback["approval_rate"]
+    result["vote_detail"] = fallback["vote_detail"]
+    result["member_weights"] = fallback["member_weights"]
+    result.setdefault("consensus_modifications", [])
+    result.setdefault("final_execution_plan", [])
+    result.setdefault("key_risks_flagged", [])
+    result.setdefault("minority_opinions", [])
+    result.setdefault("summary", fallback["summary"])
+    return result
 
 
-def _fallback_consensus(reviews: dict[str, dict]) -> dict:
-    """规则引擎兜底共识"""
-    votes = {}
+def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | None = None) -> dict:
+    """规则引擎兜底共识——按委员历史权重做**加权表决**。
+
+    权重缺省全为 1.0 时，与原等权计票结果一致（向后兼容）。
+    """
+    weights = weights or {}
+    votes: dict[str, dict] = {}
+    w_approve = w_reject = w_all = 0.0
+    n_approve = n_reject = 0
     for role, review in reviews.items():
         vote = review.get("vote", "abstain")
-        votes[role] = {"vote": vote, "confidence": review.get("confidence", 5)}
+        try:
+            w = float(weights.get(role, 1.0))
+        except (TypeError, ValueError):
+            w = 1.0
+        if w <= 0:
+            w = 1.0
+        votes[role] = {"vote": vote, "confidence": review.get("confidence", 5), "weight": round(w, 2)}
+        w_all += w
+        if vote in ("approve", "approve_with_modification"):
+            w_approve += w
+            n_approve += 1
+        elif vote == "reject":
+            w_reject += w
+            n_reject += 1
 
-    approve_count = sum(1 for v in votes.values()
-                        if v["vote"] in ("approve", "approve_with_modification"))
-    reject_count = sum(1 for v in votes.values() if v["vote"] == "reject")
-    total = len(votes) or 1
+    decisive = w_approve + w_reject
+    approve_ratio = (w_approve / decisive) if decisive > 0 else 0.0
+    reject_ratio = (w_reject / decisive) if decisive > 0 else 0.0
 
-    if approve_count >= 3:
-        verdict = "approved"
-    elif reject_count >= 3:
+    if decisive == 0:
         verdict = "rejected"
-    elif approve_count == 2 and reject_count == 2:
+    elif approve_ratio >= 0.75:
+        verdict = "approved"
+    elif reject_ratio >= 0.75:
+        verdict = "rejected"
+    elif abs(approve_ratio - reject_ratio) < 1e-9:
         verdict = "needs_discussion"
-    elif approve_count >= 2:
+    elif w_approve > w_reject:
         verdict = "approved_with_modifications"
     else:
         verdict = "rejected"
 
+    approval_rate = round(w_approve / w_all * 100) if w_all > 0 else 0
+    weighted = any(abs(v["weight"] - 1.0) > 1e-9 for v in votes.values())
+    note = "（加权规则引擎兜底）" if weighted else "（规则引擎兜底）"
+    tally = (f"加权 赞成 {w_approve:.1f} / 反对 {w_reject:.1f}（{n_approve}赞成/{n_reject}反对）"
+             if weighted else f"{n_approve} 票赞成, {n_reject} 票反对")
     return {
         "final_verdict": verdict,
-        "approval_rate": round(approve_count / total * 100),
+        "approval_rate": approval_rate,
         "vote_detail": votes,
+        "member_weights": {role: votes[role]["weight"] for role in votes},
         "consensus_modifications": [],
         "final_execution_plan": [],
         "key_risks_flagged": [],
         "minority_opinions": [],
-        "summary": f"投票结果: {approve_count} 票赞成, {reject_count} 票反对（规则引擎兜底）",
+        "summary": f"投票结果: {tally}{note}",
     }
 
 
@@ -657,12 +727,13 @@ async def run_committee_review(
                 logger.warning("圆桌讨论失败: %s", e)
                 yield _sse("committee_discussion_error", ticker=ticker, error=str(e))
 
-        # 生成共识
+        # 生成共识（按委员历史可信权重加权表决）
+        weights = _member_weights(store, reviews, market)
         try:
-            consensus = await _build_consensus(reviews, discussion_result)
+            consensus = await _build_consensus(reviews, discussion_result, weights)
         except Exception as e:
             logger.warning("共识生成失败: %s", e)
-            consensus = _fallback_consensus(reviews)
+            consensus = _fallback_consensus(reviews, weights)
 
         try:
             store.create_committee_consensus(
@@ -731,6 +802,9 @@ async def run_committee_review(
                 transcript.append({
                     "round": 1, "role": role, "name": role_label.get(role, role),
                     "model": f"{r.get('provider', '')}/{r.get('model', '')}",
+                    "provider": r.get("provider", ""),
+                    "model_name": r.get("model", ""),
+                    "weight": round(float(weights.get(role, 1.0)), 2),
                     "vote": r.get("vote", "abstain"),
                     "confidence": r.get("confidence", 5),
                     "content": r.get("overall_assessment", "") or "",
@@ -749,6 +823,9 @@ async def run_committee_review(
                 transcript.append({
                     "round": 2, "role": role, "name": role_label.get(role, role),
                     "model": f"{r.get('provider', '')}/{r.get('model', '')}",
+                    "provider": r.get("provider", ""),
+                    "model_name": r.get("model", ""),
+                    "weight": round(float(weights.get(role, 1.0)), 2),
                     "vote": r.get("vote", "abstain"),
                     "confidence": r.get("confidence", 5),
                     "content": r.get("overall_assessment", "") or "",
@@ -807,3 +884,212 @@ async def run_committee_review(
 
     yield _sse("committee_done", total=total,
                message=f"投委会评审完成，共处理 {total} 条执行计划")
+
+
+# ─────────────────────────────────────────────────────────
+# 用户交互质询（讨论后可质询任一委员，接受则改票 → 重算共识 → 重新 gating）
+# ─────────────────────────────────────────────────────────
+
+_VALID_VOTES = {"approve", "approve_with_modification", "reject", "abstain"}
+# LLM 可能返回复数或 verdict 风格的票值，归一化到规范的成员票值
+_VOTE_ALIASES = {
+    "approve_with_modifications": "approve_with_modification",
+    "approved_with_modifications": "approve_with_modification",
+    "approved": "approve",
+    "rejected": "reject",
+    "abstained": "abstain",
+}
+
+
+def _reviews_from_transcript(transcript: list[dict]) -> dict[str, dict]:
+    """从会议 transcript 重建每位委员的最新评审（取该 role 的最大 round，跳过质询条目）。"""
+    by_role: dict[str, dict] = {}
+    for t in transcript:
+        role = t.get("role", "")
+        if not role or role.startswith("_") or t.get("type") == "challenge":
+            continue
+        if t.get("round") not in (1, 2, 3):
+            continue
+        prev = by_role.get(role)
+        if prev is None or t.get("round", 0) >= prev.get("_round", -1):
+            by_role[role] = {
+                "vote": t.get("vote", "abstain"),
+                "confidence": t.get("confidence", 5),
+                "overall_assessment": t.get("content", ""),
+                "key_concerns": t.get("key_concerns", []),
+                "provider": t.get("provider", ""),
+                "model": t.get("model_name", ""),
+                "_round": t.get("round", 0),
+            }
+    return by_role
+
+
+def _regate_after_challenge(store, plan_id: str, verdict: str, consensus: dict, ticker: str) -> str:
+    """质询改票后按新结论重新 gating 执行计划，返回动作标识。"""
+    plan = store.get_execution_plan(plan_id)
+    if not plan:
+        return "plan_not_found"
+    status = plan.get("status", "")
+    try:
+        if verdict == "rejected":
+            if status == "pending":
+                store.reject_execution(
+                    plan_id, f"{store.BLOCK_MARKER_COMMITTEE} 用户质询后改判否决")
+                return "rejected"
+            return "kept_rejected" if status == "rejected" else "noop_not_pending"
+        # 非否决：若此前被投委会否决，恢复为 pending
+        action = "kept_pending"
+        if status == "rejected":
+            store.restore_execution(plan_id)
+            action = "restored"
+        if verdict == "approved_with_modifications":
+            mods: dict = {}
+            for m in consensus.get("consensus_modifications", []) or []:
+                if m.get("ticker") and ticker and m["ticker"] != ticker:
+                    continue
+                field = m.get("field")
+                val = m.get("modified")
+                if field in ("shares", "target_price", "method", "execution_method") and val is not None:
+                    mods[field] = val
+            if mods:
+                store.apply_committee_modifications(plan_id, mods)
+        return action
+    except Exception as e:
+        logger.warning("质询后 re-gating 失败 %s: %s", plan_id, e)
+        return "regate_error"
+
+
+async def challenge_member(
+    store: WatchlistStore,
+    *,
+    meeting_id: str,
+    role: str,
+    user_message: str,
+    market: str = "us_stock",
+) -> dict:
+    """用户对某委员发起质询。委员可被说服而改票；改票则重算加权共识并重新 gating。
+
+    返回 {ok, response, accept_user_point, vote_changed, old_vote, new_vote,
+          verdict, approval_rate, gating_action} 或 {error}。
+    """
+    store = store.for_market(market)
+    user_message = (user_message or "").strip()
+    if not user_message:
+        return {"error": "质询内容为空"}
+
+    rec = store.get_meeting_record(meeting_id)
+    if not rec or rec.get("meeting_type") != "committee":
+        return {"error": "投委会会议记录不存在"}
+
+    member = next((m for m in MEMBERS if m["role"] == role), None)
+    if not member:
+        return {"error": f"未知委员: {role}"}
+
+    transcript = rec.get("transcript_json", []) or []
+    member_entries = [t for t in transcript
+                      if t.get("role") == role and t.get("type") != "challenge"
+                      and t.get("round") in (1, 2, 3)]
+    if not member_entries:
+        return {"error": "该委员无评审记录，无法质询"}
+    latest = max(member_entries, key=lambda t: t.get("round", 0))
+    old_vote = latest.get("vote", "abstain")
+    tickers = rec.get("tickers_discussed", []) or []
+    ticker = tickers[0] if tickers else ""
+
+    original_review = {
+        "vote": old_vote,
+        "confidence": latest.get("confidence", 5),
+        "overall_assessment": latest.get("content", ""),
+        "key_concerns": latest.get("key_concerns", []),
+    }
+
+    chain = _build_llm_chain(member)
+    if not chain:
+        return {"error": "无可用 LLM"}
+
+    prompt = (_load_prompt("committee_challenge")
+              .replace("{member_label}", member["label"])
+              .replace("{ticker}", ticker or "该标的")
+              .replace("{original_review}", json.dumps(original_review, ensure_ascii=False))
+              .replace("{user_message}", user_message))
+    try:
+        response, provider, model = await _invoke_with_retry(chain, prompt, role)
+        result = extract_json_object(response)
+    except Exception as e:
+        logger.warning("委员 %s 质询失败: %s", role, e)
+        return {"error": f"委员未能回应: {e}"}
+
+    new_vote = result.get("new_vote", old_vote) or old_vote
+    new_vote = _VOTE_ALIASES.get(new_vote, new_vote)
+    if new_vote not in _VALID_VOTES:
+        new_vote = old_vote
+    member_response = result.get("response", "") or ""
+    new_conf = result.get("new_confidence", original_review["confidence"])
+    revised = result.get("revised_assessment", "") or original_review["overall_assessment"]
+    vote_changed = new_vote != old_vote
+
+    # transcript 始终追加质询记录
+    transcript.append({
+        "round": 3, "role": role, "name": latest.get("name", role),
+        "type": "challenge",
+        "user_message": user_message,
+        "response": member_response,
+        "accept_user_point": bool(result.get("accept_user_point", False)),
+        "old_vote": old_vote, "new_vote": new_vote, "vote_changed": vote_changed,
+        "provider": provider, "model_name": model, "model": f"{provider}/{model}",
+    })
+    # 改票则追加一条 round-3 修订评审（供概览/共识取最新票）
+    if vote_changed:
+        transcript.append({
+            "round": 3, "role": role, "name": latest.get("name", role),
+            "provider": provider, "model_name": model, "model": f"{provider}/{model}",
+            "weight": latest.get("weight", 1.0),
+            "vote": new_vote, "confidence": new_conf, "content": revised,
+            "key_concerns": original_review["key_concerns"],
+            "prev_vote": old_vote, "revised_by_challenge": True,
+        })
+
+    consensus = rec.get("result_json", {})
+    if not isinstance(consensus, dict):
+        consensus = {}
+    gating_action = "none"
+
+    if vote_changed:
+        reviews_by_role = _reviews_from_transcript(transcript)
+        weights = _member_weights(store, reviews_by_role, market)
+        new_consensus = _fallback_consensus(reviews_by_role, weights)
+        consensus = dict(consensus)
+        consensus["final_verdict"] = new_consensus["final_verdict"]
+        consensus["approval_rate"] = new_consensus["approval_rate"]
+        consensus["vote_detail"] = new_consensus["vote_detail"]
+        consensus["member_weights"] = new_consensus["member_weights"]
+        base_summary = consensus.get("summary", "") or ""
+        consensus["summary"] = (
+            base_summary
+            + f"\n[用户质询] {member['label']} 由「{old_vote}」改为「{new_vote}」，"
+              f"重算结论：{new_consensus['final_verdict']}（加权通过率 {new_consensus['approval_rate']}%）。")
+        plan_id = rec.get("execution_plan_id", "")
+        if plan_id:
+            gating_action = _regate_after_challenge(
+                store, plan_id, new_consensus["final_verdict"], consensus, ticker)
+
+    store.update_meeting_review(
+        meeting_id,
+        transcript_json=transcript,
+        result_json=consensus,
+        final_verdict=consensus.get("final_verdict", rec.get("final_verdict", "")),
+    )
+
+    return {
+        "ok": True,
+        "role": role,
+        "member_label": member["label"],
+        "response": member_response,
+        "accept_user_point": bool(result.get("accept_user_point", False)),
+        "vote_changed": vote_changed,
+        "old_vote": old_vote,
+        "new_vote": new_vote,
+        "verdict": consensus.get("final_verdict", rec.get("final_verdict", "")),
+        "approval_rate": consensus.get("approval_rate"),
+        "gating_action": gating_action,
+    }

@@ -873,7 +873,6 @@ export function initDecision() {
   document.getElementById('dc-btn-daily')?.addEventListener('click', runDaily);
   document.getElementById('dc-btn-refresh')?.addEventListener('click', runFullRefresh);
   document.getElementById('dc-btn-catalysts')?.addEventListener('click', scanCatalysts);
-  document.getElementById('dc-btn-ai-config')?.addEventListener('click', openAIConfig);
 
   // 左列卡片折叠
   document.querySelectorAll('.dc-col-main .dc-card-header').forEach(header => {
@@ -906,17 +905,6 @@ export function initDecision() {
     dcState.calendarMonth = null; // 当前月
     loadCatalystCalendar();
   });
-
-  document.getElementById('dc-ai-config-close')?.addEventListener('click', closeAIConfig);
-  document.getElementById('dc-ai-config-cancel')?.addEventListener('click', closeAIConfig);
-  document.getElementById('dc-ai-config-save')?.addEventListener('click', saveAIConfig);
-
-  const aiModal = document.getElementById('dc-ai-config-modal');
-  if (aiModal) {
-    aiModal.addEventListener('click', (e) => {
-      if (e.target.classList.contains('modal-overlay')) closeAIConfig();
-    });
-  }
 
   document.getElementById('dc-pending-list')?.addEventListener('click', handlePendingAction);
   document.getElementById('dc-blocked-section')?.addEventListener('click', handleBlockedAction);
@@ -992,390 +980,6 @@ async function loadSchedulerStatus() {
     bar.style.display = 'none';
   }
 }
-
-/* ── AI 模型配置 ────────────────────────────────────── */
-
-let aiConfigData = null;
-
-function openAIConfig() {
-  document.getElementById('dc-ai-config-modal').style.display = '';
-  document.getElementById('dc-ai-status').textContent = '';
-  _initAIConfigTabs();
-  loadAIConfig();
-  loadCustomProviders();
-}
-
-function closeAIConfig() {
-  document.getElementById('dc-ai-config-modal').style.display = 'none';
-}
-
-function _initAIConfigTabs() {
-  document.querySelectorAll('.dc-ai-tab').forEach(tab => {
-    tab.onclick = () => {
-      document.querySelectorAll('.dc-ai-tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.dc-ai-tab-content').forEach(c => {
-        c.style.display = 'none';
-        c.classList.remove('active');
-      });
-      tab.classList.add('active');
-      const target = document.getElementById(`dc-ai-tab-${tab.dataset.tab}`);
-      if (target) { target.style.display = ''; target.classList.add('active'); }
-    };
-  });
-
-  document.querySelectorAll('.dc-ai-collapsible').forEach(h3 => {
-    h3.onclick = () => {
-      const collapsed = h3.dataset.collapsed === 'true';
-      const body = h3.nextElementSibling;
-      const chevron = h3.querySelector('.dc-ai-chevron');
-      if (collapsed) {
-        body.style.display = '';
-        h3.dataset.collapsed = 'false';
-        if (chevron) chevron.textContent = '▾';
-      } else {
-        body.style.display = 'none';
-        h3.dataset.collapsed = 'true';
-        if (chevron) chevron.textContent = '▸';
-      }
-    };
-  });
-}
-
-const _GROUP_CONTAINERS = {
-  decision: 'dc-ai-decision-list',
-  committee: 'dc-ai-committee-list',
-  pipeline: 'dc-ai-pipeline-list',
-  watchlist: 'dc-ai-watchlist-list',
-};
-
-async function loadAIConfig() {
-  const firstContainer = document.getElementById('dc-ai-decision-list');
-  if (!firstContainer) return;
-  firstContainer.innerHTML = '<p style="color:var(--muted);font-size:12px">加载中...</p>';
-
-  try {
-    const res = await fetch(`${DC_API}/ai-config`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    aiConfigData = await res.json();
-
-    const providers = aiConfigData.available_providers || [];
-
-    for (const [group, containerId] of Object.entries(_GROUP_CONTAINERS)) {
-      const el = document.getElementById(containerId);
-      if (!el) continue;
-      const positions = aiConfigData.positions.filter(p => p.group === group);
-      el.innerHTML = positions.map(p => renderAIConfigRow(p, providers)).join('');
-    }
-
-    bindAIConfigEvents();
-  } catch (e) {
-    firstContainer.innerHTML = `<p style="color:var(--danger);font-size:12px">加载失败: ${e.message}</p>`;
-  }
-}
-
-function renderAIConfigRow(pos, providers) {
-  const currentProvider = pos.configured_provider || '';
-  const currentModel = pos.configured_model || '';
-  const isCustom = !!currentProvider;
-
-  const builtIn = providers.filter(p => !p.is_custom && p.configured);
-  const custom = providers.filter(p => p.is_custom);
-
-  let providerOptions = '';
-  if (builtIn.length) {
-    providerOptions += `<optgroup label="内置 Provider">`;
-    providerOptions += builtIn.map(p => {
-      const sel = (currentProvider === p.id) ? 'selected' : '';
-      return `<option value="${escDC(p.id)}" ${sel}>${escDC(p.name)}</option>`;
-    }).join('');
-    providerOptions += `</optgroup>`;
-  }
-  if (custom.length) {
-    providerOptions += `<optgroup label="自定义端点">`;
-    providerOptions += custom.map(p => {
-      const sel = (currentProvider === p.id) ? 'selected' : '';
-      return `<option value="${escDC(p.id)}" ${sel}>${escDC(p.name)}</option>`;
-    }).join('');
-    providerOptions += `</optgroup>`;
-  }
-
-  const displayModel = currentModel || pos.default_model;
-  const placeholder = `默认: ${pos.default_provider}/${pos.default_model}`;
-
-  return `<div class="dc-ai-row" data-key="${escDC(pos.key)}">
-    <span class="dc-ai-label">${escDC(pos.label)}</span>
-    <select class="dc-ai-select" data-key="${escDC(pos.key)}">
-      <option value="">默认</option>
-      ${providerOptions}
-    </select>
-    <input type="text" class="dc-ai-model-input" data-key="${escDC(pos.key)}"
-           value="${isCustom ? escDC(displayModel) : ''}"
-           placeholder="${escDC(placeholder)}">
-    <button class="dc-ai-test-btn" data-key="${escDC(pos.key)}" title="测试连接">测试</button>
-    <span class="dc-ai-test-status" data-test-key="${escDC(pos.key)}"></span>
-  </div>`;
-}
-
-function bindAIConfigEvents() {
-  document.querySelectorAll('.dc-ai-select').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const key = sel.dataset.key;
-      const input = document.querySelector(`.dc-ai-model-input[data-key="${key}"]`);
-      if (!input) return;
-
-      const provider = sel.value;
-      if (!provider) {
-        input.value = '';
-        return;
-      }
-
-      const prov = (aiConfigData?.available_providers || []).find(p => p.id === provider);
-      if (prov && prov.default_model) {
-        input.value = prov.default_model;
-      }
-    });
-  });
-
-  document.querySelectorAll('.dc-ai-test-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const key = btn.dataset.key;
-      const sel = document.querySelector(`.dc-ai-select[data-key="${key}"]`);
-      const input = document.querySelector(`.dc-ai-model-input[data-key="${key}"]`);
-      const statusEl = document.querySelector(`[data-test-key="${key}"]`);
-      if (!sel || !input || !statusEl) return;
-
-      const provider = sel.value;
-      const model = input.value.trim();
-
-      if (!provider || !model) {
-        statusEl.className = 'dc-ai-test-status';
-        statusEl.innerHTML = '';
-        statusEl.title = '请先选择 Provider 和 Model';
-        return;
-      }
-
-      testSingleModel(provider, model, statusEl, btn);
-    });
-  });
-}
-
-async function testSingleModel(provider, model, statusEl, btn) {
-  btn.disabled = true;
-  btn.textContent = '...';
-  statusEl.className = 'dc-ai-test-status test-loading';
-  statusEl.innerHTML = '<span class="spinner"></span>';
-
-  try {
-    const res = await fetch(`${DC_API}/ai-config/test`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, model }),
-    });
-    const data = await res.json();
-
-    if (data.success) {
-      statusEl.className = 'dc-ai-test-status test-pass';
-      statusEl.innerHTML = '&#x2714;';
-      statusEl.title = '测试通过';
-    } else {
-      statusEl.className = 'dc-ai-test-status test-fail';
-      statusEl.innerHTML = '&#x2718;';
-      statusEl.title = data.error || '测试失败';
-    }
-  } catch (e) {
-    statusEl.className = 'dc-ai-test-status test-fail';
-    statusEl.innerHTML = '&#x2718;';
-    statusEl.title = e.message;
-  }
-
-  btn.disabled = false;
-  btn.textContent = '测试';
-}
-
-async function saveAIConfig() {
-  const configs = {};
-  document.querySelectorAll('.dc-ai-row').forEach(row => {
-    const key = row.dataset.key;
-    const sel = row.querySelector('.dc-ai-select');
-    const input = row.querySelector('.dc-ai-model-input');
-    if (!sel || !input) return;
-
-    const provider = sel.value;
-    const model = input.value.trim();
-
-    if (provider && model) {
-      configs[key] = `${provider}:${model}`;
-    } else {
-      configs[key] = '';
-    }
-  });
-
-  const statusEl = document.getElementById('dc-ai-status');
-  try {
-    const res = await fetch(`${DC_API}/ai-config`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ configs }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    if (statusEl) {
-      statusEl.textContent = '已保存，即时生效';
-      statusEl.className = 'dc-ai-status success';
-    }
-    setTimeout(() => closeAIConfig(), 1200);
-  } catch (e) {
-    if (statusEl) {
-      statusEl.textContent = `保存失败: ${e.message}`;
-      statusEl.className = 'dc-ai-status error';
-    }
-  }
-}
-
-/* ── 自定义端点管理 ──────────────────────────────────── */
-
-async function loadCustomProviders() {
-  const list = document.getElementById('dc-ai-custom-list');
-  if (!list) return;
-  list.innerHTML = '<p style="color:var(--muted);font-size:12px">加载中...</p>';
-
-  try {
-    const res = await fetch('/api/custom-providers');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const providers = data.providers || [];
-
-    if (!providers.length) {
-      list.innerHTML = '<p class="dc-ai-empty-hint">暂无自定义端点</p>';
-      return;
-    }
-
-    list.innerHTML = providers.map(p => `
-      <div class="dc-ai-custom-card" data-pid="${escDC(p.provider_id)}">
-        <div class="dc-ai-custom-info">
-          <strong>${escDC(p.display_name)}</strong>
-          <span class="dc-ai-custom-url">${escDC(p.base_url)}</span>
-          <span class="dc-ai-custom-model">默认模型: ${escDC(p.default_model)}</span>
-          ${p.api_key_hint ? `<span class="dc-ai-custom-key-hint">KEY: ${escDC(p.api_key_hint)}</span>` : ''}
-        </div>
-        <div class="dc-ai-custom-actions">
-          <button class="btn btn-sm btn-secondary dc-ai-custom-test-btn" data-pid="${escDC(p.provider_id)}">测试</button>
-          <button class="btn btn-sm btn-secondary dc-ai-custom-edit-btn" data-pid="${escDC(p.provider_id)}"
-                  data-name="${escDC(p.display_name)}" data-url="${escDC(p.base_url)}"
-                  data-model="${escDC(p.default_model)}">编辑</button>
-          <button class="btn btn-sm btn-danger dc-ai-custom-del-btn" data-pid="${escDC(p.provider_id)}">删除</button>
-        </div>
-      </div>
-    `).join('');
-
-    _bindCustomProviderEvents();
-  } catch (e) {
-    list.innerHTML = `<p style="color:var(--danger);font-size:12px">加载失败: ${e.message}</p>`;
-  }
-}
-
-function _bindCustomProviderEvents() {
-  document.querySelectorAll('.dc-ai-custom-test-btn').forEach(btn => {
-    btn.onclick = async () => {
-      btn.disabled = true; btn.textContent = '...';
-      try {
-        const res = await fetch(`/api/custom-providers/${btn.dataset.pid}/test`, { method: 'POST' });
-        const data = await res.json();
-        btn.textContent = data.ok ? '✓' : '✗';
-        btn.title = data.ok ? '连接成功' : (data.error || '失败');
-      } catch (e) { btn.textContent = '✗'; btn.title = e.message; }
-      setTimeout(() => { btn.disabled = false; btn.textContent = '测试'; }, 2000);
-    };
-  });
-
-  document.querySelectorAll('.dc-ai-custom-edit-btn').forEach(btn => {
-    btn.onclick = () => {
-      const form = document.getElementById('dc-ai-custom-form');
-      document.getElementById('dc-ai-custom-edit-id').value = btn.dataset.pid;
-      document.getElementById('dc-ai-custom-id').value = btn.dataset.pid;
-      document.getElementById('dc-ai-custom-id').disabled = true;
-      document.getElementById('dc-ai-custom-name').value = btn.dataset.name;
-      document.getElementById('dc-ai-custom-url').value = btn.dataset.url;
-      document.getElementById('dc-ai-custom-key').value = '';
-      document.getElementById('dc-ai-custom-model').value = btn.dataset.model;
-      form.style.display = '';
-    };
-  });
-
-  document.querySelectorAll('.dc-ai-custom-del-btn').forEach(btn => {
-    btn.onclick = async () => {
-      if (!confirm(`确定删除自定义端点 ${btn.dataset.pid}？`)) return;
-      try {
-        const res = await fetch(`/api/custom-providers/${btn.dataset.pid}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        loadCustomProviders();
-        loadAIConfig();
-      } catch (e) { alert(`删除失败: ${e.message}`); }
-    };
-  });
-}
-
-function _initCustomProviderForm() {
-  const addBtn = document.getElementById('dc-ai-add-custom-btn');
-  const cancelBtn = document.getElementById('dc-ai-custom-cancel');
-  const saveBtn = document.getElementById('dc-ai-custom-save');
-  const form = document.getElementById('dc-ai-custom-form');
-  if (!addBtn || !form) return;
-
-  addBtn.onclick = () => {
-    document.getElementById('dc-ai-custom-edit-id').value = '';
-    document.getElementById('dc-ai-custom-id').value = '';
-    document.getElementById('dc-ai-custom-id').disabled = false;
-    document.getElementById('dc-ai-custom-name').value = '';
-    document.getElementById('dc-ai-custom-url').value = '';
-    document.getElementById('dc-ai-custom-key').value = '';
-    document.getElementById('dc-ai-custom-model').value = '';
-    form.style.display = '';
-  };
-
-  cancelBtn.onclick = () => { form.style.display = 'none'; };
-
-  saveBtn.onclick = async () => {
-    const editId = document.getElementById('dc-ai-custom-edit-id').value;
-    const pid = document.getElementById('dc-ai-custom-id').value.trim();
-    const name = document.getElementById('dc-ai-custom-name').value.trim();
-    const url = document.getElementById('dc-ai-custom-url').value.trim();
-    const key = document.getElementById('dc-ai-custom-key').value;
-    const model = document.getElementById('dc-ai-custom-model').value.trim();
-
-    if (!pid || !name || !url || !model) {
-      alert('请填写必填字段（名称、标识符、API 地址、默认模型）');
-      return;
-    }
-
-    saveBtn.disabled = true; saveBtn.textContent = '保存中...';
-    try {
-      const body = { provider_id: pid, display_name: name, base_url: url, api_key: key, default_model: model };
-      const isEdit = !!editId;
-      const endpoint = isEdit ? `/api/custom-providers/${editId}` : '/api/custom-providers';
-      const method = isEdit ? 'PUT' : 'POST';
-
-      const res = await fetch(endpoint, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
-
-      form.style.display = 'none';
-      loadCustomProviders();
-      loadAIConfig();
-    } catch (e) {
-      alert(`保存失败: ${e.message}`);
-    }
-    saveBtn.disabled = false; saveBtn.textContent = '保存';
-  };
-}
-
-_initCustomProviderForm();
 
 /* ── 17F.2 风险仪表盘 ──────────────────────────────────── */
 
@@ -1666,6 +1270,7 @@ async function openMeetingDrawer(recordId) {
   const body = document.getElementById('dc-meeting-drawer-body');
   if (!drawer || !body) return;
 
+  dcState.currentMeetingId = recordId;
   drawer.style.display = '';
   if (title) title.textContent = '加载中...';
   body.innerHTML = '<p class="dc-empty-hint">加载会议详情...</p>';
@@ -1675,9 +1280,57 @@ async function openMeetingDrawer(recordId) {
     const data = resp.meeting || resp;  // 后端返回 {meeting: {...}}
     if (title) title.textContent = data.title || '会议详情';
     renderMeetingDetail(data, body);
+    _bindMeetingChallenge(body);
   } catch (e) {
     body.innerHTML = `<p class="dc-empty-hint">加载失败: ${escDC(e.message)}</p>`;
   }
+}
+
+/* ── 用户质询投委会成员 ───────────────────────────── */
+function _bindMeetingChallenge(container) {
+  if (!container) return;
+  if (container._challengeHandler) container.removeEventListener('click', container._challengeHandler);
+  container._challengeHandler = async (e) => {
+    const toggle = e.target.closest('.dc-challenge-btn');
+    if (toggle) {
+      const role = toggle.dataset.role;
+      const box = container.querySelector(`.dc-challenge-box[data-role-box="${role}"]`);
+      if (box) box.style.display = box.style.display === 'none' ? '' : 'none';
+      return;
+    }
+    const send = e.target.closest('.dc-challenge-send');
+    if (send) {
+      const role = send.dataset.role;
+      const box = container.querySelector(`.dc-challenge-box[data-role-box="${role}"]`);
+      const ta = box && box.querySelector('textarea');
+      const status = box && box.querySelector('.dc-challenge-status');
+      const msg = (ta && ta.value || '').trim();
+      if (!msg) { if (status) status.textContent = '请输入质询内容'; return; }
+      send.disabled = true;
+      if (status) status.textContent = '委员思考中…';
+      try {
+        const res = await dcFetch('/committee/challenge', {
+          method: 'POST',
+          body: JSON.stringify({
+            meeting_id: dcState.currentMeetingId, role, message: msg,
+            market: dcState.market,
+          }),
+        });
+        if (status) {
+          status.textContent = res.vote_changed
+            ? `✓ 委员改票（${res.old_vote}→${res.new_vote}），共识已更新为「${res.verdict}」`
+            : '✓ 委员已回应（维持原票）';
+        }
+        // 重载抽屉 + 概览，反映更新后的 transcript / 共识 / gating
+        await openMeetingDrawer(dcState.currentMeetingId);
+        if (typeof loadOverview === 'function') await loadOverview().catch(() => {});
+      } catch (err) {
+        if (status) status.textContent = '质询失败: ' + err.message;
+        send.disabled = false;
+      }
+    }
+  };
+  container.addEventListener('click', container._challengeHandler);
 }
 
 function closeMeetingDrawer() {
@@ -1941,21 +1594,46 @@ function renderCommitteeTranscript(transcript) {
 
   let html = '<div class="drawer-section"><h4>讨论过程</h4>';
 
-  // 各委员独立评审（完整理由，不截断）
+  // 用户质询记录（按委员分组）
+  const challengesByRole = {};
+  transcript.filter(t => t.type === 'challenge').forEach(t => {
+    (challengesByRole[t.role] = challengesByRole[t.role] || []).push(t);
+  });
+
+  // 各委员独立评审（完整理由，不截断）+ 历史权重 + 用户质询入口
   html += '<div class="dc-transcript">';
   members.forEach(m => {
     const concerns = Array.isArray(m.key_concerns) ? m.key_concerns : [];
     const sugg = Array.isArray(m.suggestions) ? m.suggestions : [];
+    const wBadge = (m.weight != null && Math.abs(Number(m.weight) - 1) > 0.001)
+      ? `<span class="dc-tr-weight" title="历史可信权重">权重 ${Number(m.weight).toFixed(2)}x</span>` : '';
+    const myCh = challengesByRole[m.role] || [];
+    const chHtml = myCh.map(c => `
+      <div class="dc-challenge-item">
+        <div class="dc-challenge-q"><b>🙋 质询：</b>${escDC(c.user_message)}</div>
+        <div class="dc-challenge-a"><b>${escDC(m.name || m.role)}：</b>${escDC(c.response)}
+          ${c.vote_changed
+            ? `<span class="dc-vote-change"><span class="dc-member-decision ${_voteCls(c.old_vote)}" style="opacity:.6">${escDC(_voteLabel(c.old_vote))}</span><span class="dc-mod-arrow">→</span><span class="dc-member-decision ${_voteCls(c.new_vote)}">${escDC(_voteLabel(c.new_vote))}</span></span>`
+            : '<span class="dc-vote-keep">维持原票</span>'}
+        </div>
+      </div>`).join('');
     html += `<div class="dc-tr-turn">
       <div class="dc-tr-head">
         <span class="dc-tr-name">${escDC(m.name || m.role)}</span>
         <span class="dc-member-decision ${_voteCls(m.vote)}">${escDC(_voteLabel(m.vote))}</span>
         <span class="dc-tr-conf">信心 ${m.confidence != null ? m.confidence : '--'}/10</span>
+        ${wBadge}
         <span class="dc-tr-model">${escDC(m.model || '')}</span>
+        ${m.role ? `<button class="dc-challenge-btn" data-role="${escDC(m.role)}">质询</button>` : ''}
       </div>
       ${m.content ? `<div class="dc-tr-content">${escDC(m.content)}</div>` : ''}
       ${concerns.length ? `<div class="dc-tr-sub"><b>关注点：</b>${concerns.map(c => escDC(typeof c === 'string' ? c : JSON.stringify(c))).join('；')}</div>` : ''}
       ${sugg.length ? `<div class="dc-tr-sub"><b>建议：</b>${sugg.map(s => escDC(typeof s === 'object' ? `${s.field || ''} ${s.original ?? ''}→${s.suggested ?? ''} (${s.reason || ''})` : String(s))).join('；')}</div>` : ''}
+      ${chHtml ? `<div class="dc-challenge-history">${chHtml}</div>` : ''}
+      ${m.role ? `<div class="dc-challenge-box" data-role-box="${escDC(m.role)}" style="display:none">
+        <textarea class="dc-challenge-input" rows="2" placeholder="向${escDC(m.name || m.role)}提出你的异议或论据，若被说服TA可改票…"></textarea>
+        <div class="dc-challenge-actions"><button class="btn btn-sm dc-challenge-send" data-role="${escDC(m.role)}">提交质询</button><span class="dc-challenge-status"></span></div>
+      </div>` : ''}
     </div>`;
   });
   html += '</div>';

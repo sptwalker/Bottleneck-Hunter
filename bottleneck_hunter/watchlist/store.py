@@ -871,6 +871,27 @@ _MIGRATIONS: list[str] = [
         UNIQUE(role_key, slot_index, user_id)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_model_rec_role ON model_recommendation(role_key, user_id)",
+    # ── 反向分析：从企业代码反推瓶颈环节并评分，结果持久化 ──
+    """CREATE TABLE IF NOT EXISTS reverse_analyses (
+        id              TEXT PRIMARY KEY,
+        ticker          TEXT NOT NULL,
+        company_name    TEXT DEFAULT '',
+        company_name_cn TEXT DEFAULT '',
+        market          TEXT DEFAULT 'us_stock',
+        sector          TEXT DEFAULT '',
+        bottleneck_node TEXT DEFAULT '',
+        quality_score   REAL DEFAULT 0,
+        alpha_score     REAL DEFAULT 0,
+        final_score     REAL DEFAULT 0,
+        source          TEXT DEFAULT 'llm',
+        matched_analysis_id TEXT DEFAULT '',
+        result_json     TEXT DEFAULT '{}',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT DEFAULT '',
+        user_id         TEXT DEFAULT ''
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_reverse_ticker ON reverse_analyses(ticker, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_reverse_market ON reverse_analyses(market, user_id)",
 ]
 
 
@@ -2322,6 +2343,24 @@ class WatchlistStore:
         finally:
             conn.close()
 
+    def delete_tactical_plans_by_date(self, plan_date: str, only_active: bool = True) -> int:
+        """删除指定日期的战术计划（默认仅 active），返回删除行数。
+
+        L3 重新生成前调用，避免「日常决策 / 全量刷新 / 定时任务 / 重复点击」
+        在同一 plan_date 下累积重复战术计划。已执行(executed)的计划默认保留。
+        """
+        conn = self._connect()
+        try:
+            sql = "DELETE FROM tactical_plans WHERE plan_date = ?"
+            if only_active:
+                sql += " AND status = 'active'"
+            q, p = self._filtered(sql, (plan_date,))
+            cur = conn.execute(q, p)
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
     def get_tactical_plan_for_ticker(self, ticker: str, plan_date: str | None = None) -> dict | None:
         plan_date = plan_date or _today()
         conn = self._connect()
@@ -2610,8 +2649,78 @@ class WatchlistStore:
             conn.close()
 
     # ------------------------------------------------------------------
-    # Catalyst Tracking
+    # 反向分析（reverse_analyses）
     # ------------------------------------------------------------------
+
+    def create_reverse_analysis(self, *, ticker: str, company_name: str = "",
+                                company_name_cn: str = "", sector: str = "",
+                                bottleneck_node: str = "", quality_score: float = 0.0,
+                                alpha_score: float = 0.0, final_score: float = 0.0,
+                                source: str = "llm", matched_analysis_id: str = "",
+                                result_json: dict | None = None) -> str:
+        """落库一条反向分析结果。result_json 存完整 SupplierScorecard（前端详情据此渲染）。"""
+        rid = uuid.uuid4().hex[:12]
+        conn = self._connect()
+        try:
+            conn.execute(
+                f"""INSERT INTO reverse_analyses
+                   (id, ticker, company_name, company_name_cn, sector, bottleneck_node,
+                    quality_score, alpha_score, final_score, source, matched_analysis_id,
+                    result_json, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (
+                    rid, ticker, company_name, company_name_cn, sector, bottleneck_node,
+                    quality_score, alpha_score, final_score, source, matched_analysis_id,
+                    json.dumps(result_json or {}, ensure_ascii=False, default=str),
+                    _now_iso(), _now_iso(),
+                ) + self._user_insert_params() + self._market_insert_params(),
+            )
+            conn.commit()
+            return rid
+        finally:
+            conn.close()
+
+    def list_reverse_analyses(self, limit: int = 100) -> list[dict]:
+        """列表（不含 result_json，轻量）。按当前 user + market 过滤。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT id, ticker, company_name, company_name_cn, market, sector, "
+                "bottleneck_node, quality_score, alpha_score, final_score, source, "
+                "matched_analysis_id, created_at, updated_at FROM reverse_analyses"
+            )
+            q += " ORDER BY created_at DESC LIMIT ?"
+            p = p + (limit,)
+            rows = conn.execute(q, p).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_reverse_analysis(self, analysis_id: str) -> dict | None:
+        """单条完整记录（含解析后的 result_json）。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM reverse_analyses WHERE id = ?", (analysis_id,))
+            row = conn.execute(q, p).fetchone()
+            if not row:
+                return None
+            return self._parse_json_fields(dict(row), ("result_json",))
+        finally:
+            conn.close()
+
+    def delete_reverse_analysis(self, analysis_id: str) -> bool:
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "DELETE FROM reverse_analyses WHERE id = ?", (analysis_id,))
+            cur = conn.execute(q, p)
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
 
     def create_catalyst(self, entry_id: str, ticker: str, title: str,
                         catalyst_type: str = "event", description: str = "",
@@ -4235,6 +4344,36 @@ class WatchlistStore:
                 q = """UPDATE meeting_records SET outcome_recorded = 1,
                        outcome_summary = ? WHERE id = ?"""
                 p = (outcome_summary, record_id)
+                if self._user_id:
+                    q += " AND user_id = ?"
+                    p = p + (self._user_id,)
+                cur = conn.execute(q, p)
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def update_meeting_review(self, record_id: str, *, transcript_json=None,
+                              result_json=None, final_verdict: str | None = None) -> bool:
+        """质询/复议后更新会议记录的 transcript / 共识 / 最终结论。仅更新传入的字段。"""
+        sets: list[str] = []
+        vals: list = []
+        if transcript_json is not None:
+            sets.append("transcript_json = ?")
+            vals.append(json.dumps(transcript_json, ensure_ascii=False))
+        if result_json is not None:
+            sets.append("result_json = ?")
+            vals.append(json.dumps(result_json, ensure_ascii=False))
+        if final_verdict is not None:
+            sets.append("final_verdict = ?")
+            vals.append(final_verdict)
+        if not sets:
+            return False
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                q = f"UPDATE meeting_records SET {', '.join(sets)} WHERE id = ?"
+                p = tuple(vals) + (record_id,)
                 if self._user_id:
                     q += " AND user_id = ?"
                     p = p + (self._user_id,)

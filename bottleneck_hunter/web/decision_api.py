@@ -266,6 +266,26 @@ async def get_committee_consensus(plan_id: str, user: dict = Depends(get_current
         conn.close()
 
 
+class CommitteeChallengeRequest(BaseModel):
+    meeting_id: str
+    role: str
+    message: str
+    market: str = "us_stock"
+
+
+@router.post("/committee/challenge")
+async def committee_challenge(req: CommitteeChallengeRequest, user: dict = Depends(get_current_user)):
+    """用户对某投委会成员发起质询；成员可被说服改票 → 重算加权共识 → 重新 gating。"""
+    from bottleneck_hunter.watchlist.committee import challenge_member
+    store = _user_store(user).for_market(req.market)
+    result = await challenge_member(
+        store, meeting_id=req.meeting_id, role=req.role,
+        user_message=req.message, market=req.market)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
 # ─────────────────────────────────────────────────────────
 # 催化剂
 # ─────────────────────────────────────────────────────────
@@ -481,13 +501,15 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
         if recs:
             rec = recs[0]
             transcript = rec.get("transcript_json", []) or []
-            # 取每位委员的最新一轮（round 2 改票优先于 round 1 首轮），展示终票
+            # 取每位委员的最新一轮（round2 改票、round3 质询改票 优先于 round1 首轮），展示终票
             latest_by_role: dict = {}
             for t in transcript:
                 role = t.get("role", "")
                 if not role or role.startswith("_"):
                     continue
-                if t.get("round") not in (1, 2):
+                if t.get("type") == "challenge":
+                    continue  # 质询元数据条目无 vote 字段，跳过
+                if t.get("round") not in (1, 2, 3):
                     continue
                 prev = latest_by_role.get(role)
                 if prev is None or t.get("round", 0) >= prev.get("round", 0):

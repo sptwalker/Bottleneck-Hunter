@@ -1875,3 +1875,60 @@
   border-radius: 6px;
   border-left: 3px solid var(--accent);
 }
+
+/* ── 投委会：历史权重 + 用户质询 ───────────────────── */
+.dc-tr-weight {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(124, 58, 237, 0.12);
+  color: #6d28d9;
+  font-variant-numeric: tabular-nums;
+}
+.dc-challenge-btn {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted, #6b7280);
+  cursor: pointer;
+}
+.dc-challenge-btn:hover { border-color: var(--accent); color: var(--accent); }
+.dc-challenge-box {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px dashed var(--border, #d1d5db);
+  border-radius: 6px;
+}
+.dc-challenge-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  resize: vertical;
+}
+.dc-challenge-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+.dc-challenge-status { font-size: 12px; color: var(--muted, #6b7280); }
+.dc-challenge-history { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.dc-challenge-item {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(59, 130, 246, 0.06);
+  border-left: 3px solid #3b82f6;
+}
+.dc-challenge-q { color: var(--text); }
+.dc-challenge-a { color: var(--muted, #4b5563); margin-top: 2px; }
+.dc-vote-change { margin-left: 6px; display: inline-flex; align-items: center; gap: 4px; }
+.dc-vote-keep { margin-left: 6px; color: var(--muted, #9ca3af); font-size: 11px; }

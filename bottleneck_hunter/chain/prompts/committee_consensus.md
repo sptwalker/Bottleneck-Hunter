@@ -32,6 +32,13 @@
 
 {discussion_results}
 
+## 委员历史可信权重
+
+下列权重来自各委员历史投票的准确率校准（默认 1.00x；>1 表示历史更准、应给予更高话语权，<1 反之）。
+在判断共识与撰写 summary 时，请**让权重更高的委员意见更具分量**；最终 verdict 与 approval_rate 以系统的加权表决为准。
+
+{member_weights}
+
 ## 输出格式
 
 **重要：所有文本字段（summary / reason / opinion / recommendation / committee_note / key_risks_flagged 等）必须用简体中文撰写，不得使用英文。**

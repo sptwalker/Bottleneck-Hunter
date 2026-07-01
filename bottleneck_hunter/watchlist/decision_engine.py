@@ -618,11 +618,20 @@ async def run_tactical_plans(
 
         entry_map = {e["ticker"]: e["id"] for e in entries}
         plan_ids = []
+        # 去重：仅在确有新计划时，先清理今日同市场已有的 active 战术计划再写入，
+        # 避免「日常决策 / 全量刷新 / 定时任务 / 重复点击」多次运行累积重复；
+        # LLM 返回空时不清空当日，保留既有计划。
+        if tactical_plans:
+            cleared = store.delete_tactical_plans_by_date(_today())
+            if cleared:
+                logger.info("L3 重新生成：清理今日旧战术计划 %d 条", cleared)
+        seen_tickers: set[str] = set()
         for tp in tactical_plans:
             ticker = tp.get("ticker", "")
+            if not ticker or ticker in seen_tickers:
+                continue  # 跳过空标的 / 同批次内 LLM 重复返回的标的
+            seen_tickers.add(ticker)
             entry_id = entry_map.get(ticker, "")
-            if not ticker:
-                continue
             plan_id = store.create_tactical_plan(
                 strategic_plan_id=strategic["id"],
                 entry_id=entry_id,

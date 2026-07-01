@@ -2657,3 +2657,42 @@
   .wl-card-grid { grid-template-columns: 1fr; }
 }
 
+/* ── 反向分析 ─────────────────────────────── */
+.reverse-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+.reverse-ticker-input {
+  flex: 0 1 320px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.reverse-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+.rev-src-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.rev-src-matched { background: #dbeafe; color: #1e40af; }
+.rev-src-llm { background: #f3e8ff; color: #6b21a8; }
+.rev-ops { white-space: nowrap; }
+.rev-ops .btn { margin-right: 4px; }
+.rev-del-btn { color: #dc2626; }
+.rev-detail-slot { padding: 4px; }
+.rev-cross-title {
+  font-weight: 600;
+  margin: 12px 0 6px;
+  font-size: 13px;
+}
+#wiz-reverse-cross-result { margin-top: 8px; }
+

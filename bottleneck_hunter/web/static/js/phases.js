@@ -4,7 +4,7 @@
  */
 
 import { renderPhase1, renderPhase2Table, renderPhase3Table, renderPhase4Table, renderScatterPlot, renderRadarChart, renderBarCompare, renderAlphaStack, setP2SelectionCallback, getP2SelectedTickers, resetP2Selection } from './phase-views.js';
-import { fetchAndRender, testAll, saveAll, onProvidersChange, getProviders } from './settings.js';
+import { onProvidersChange, getProviders } from './settings.js';
 import { state, logMsg, clearLog, getScoreColor, scoreNeedsDarkText, SCORE_COLORS, getMainModel, formatMarkdown } from './wizard-state.js';
 import { readSSEStream } from './sse.js';
 import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, MEETING_ROLES } from './ai-features.js';
@@ -340,12 +340,6 @@ function _savePhaseStatus() {
   }).catch(() => {});
 }
 
-function showSettingsPage() {
-  state.currentPage = 'settings';
-  updateSidebarActive();
-  showPage('wizard-settings');
-}
-
 /* ── 侧边栏状态更新 ──────────────────────── */
 function updateSidebarActive() {
   document.querySelectorAll('.wiz-sidebar-item').forEach(item => {
@@ -427,8 +421,6 @@ function initSidebar() {
         toggleLogPanel();
       } else if (item.dataset.phase !== undefined) {
         goToPhase(parseInt(item.dataset.phase));
-      } else if (item.dataset.page === 'settings') {
-        showSettingsPage();
       }
     });
   }
@@ -1542,77 +1534,11 @@ export function initWizard() {
   initWizardSettings();
 }
 
-/* ── AI 模型设置页面初始化 ──────────────── */
+/* ── 模型选择器填充（旧「AI 模型设置」页面已移除，统一在顶部「AI 配置」中心配置；
+ *    此处仅保留筛选流程所需的主模型/CV 模型下拉填充）── */
 async function initWizardSettings() {
-  const providers = await fetchAndRender('wiz-provider-list');
-  await refreshModelSelectors(providers);
-
+  await refreshModelSelectors();
   onProvidersChange(refreshModelSelectors);
-
-  document.getElementById('wiz-save-settings')?.addEventListener('click', () => {
-    saveAll('wiz-provider-list', 'wiz-settings-status');
-    _saveAndSyncMainModel();
-  });
-
-  document.getElementById('wiz-test-providers')?.addEventListener('click', () => {
-    const btn = document.getElementById('wiz-test-providers');
-    btn.disabled = true;
-    btn.textContent = '测试中...';
-    testAll('wiz-provider-list', 'wiz-settings-status').finally(() => {
-      btn.disabled = false;
-      btn.textContent = '测试全部连接';
-    });
-  });
-
-  document.getElementById('wiz-test-main-model')?.addEventListener('click', async () => {
-    const provSel = document.getElementById('wiz-settings-provider');
-    const modelInput = document.getElementById('wiz-settings-model');
-    const statusEl = document.getElementById('wiz-main-model-status');
-    const btn = document.getElementById('wiz-test-main-model');
-    if (!provSel || !modelInput || !statusEl) return;
-
-    const provider = provSel.value;
-    const model = modelInput.value.trim();
-    if (!provider || !model) {
-      statusEl.className = 'provider-test-status test-fail';
-      statusEl.innerHTML = '&#x2718;';
-      statusEl.title = '请选择 Provider 并填写模型名称';
-      return;
-    }
-
-    btn.disabled = true;
-    btn.textContent = '测试中...';
-    statusEl.className = 'provider-test-status test-loading';
-    statusEl.innerHTML = '<span class="spinner"></span>';
-    statusEl.title = '';
-
-    try {
-      const resp = await fetch('/api/validate-models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ main_provider: provider, main_model: model, cv_models: [], market: 'us_stock' }),
-      });
-      const data = await resp.json();
-      const mainResult = (data.results || []).find(r => r.label === '主分析模型');
-      if (mainResult?.success) {
-        statusEl.className = 'provider-test-status test-pass';
-        statusEl.innerHTML = '&#x2714;';
-        statusEl.title = '测试通过';
-        _saveAndSyncMainModel();
-      } else {
-        statusEl.className = 'provider-test-status test-fail';
-        statusEl.innerHTML = '&#x2718;';
-        statusEl.title = mainResult?.error || '测试失败';
-      }
-    } catch (err) {
-      statusEl.className = 'provider-test-status test-fail';
-      statusEl.innerHTML = '&#x2718;';
-      statusEl.title = err.message;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '测试';
-    }
-  });
 }
 
 /* ── 历史记录 ─────────────────────────────── */
@@ -1962,65 +1888,7 @@ async function refreshModelSelectors(fallbackProviderList) {
     }
   });
 
-  const provSel = document.getElementById('wiz-settings-provider');
-  const modelInput = document.getElementById('wiz-settings-model');
-  if (provSel) {
-    const prevProv = provSel.value;
-    provSel.innerHTML = configured.map(p =>
-      `<option value="${p.id}">${_escapeHtml(p.name)}</option>`
-    ).join('');
-
-    const saved = _loadMainModel();
-    if (saved && provSel.querySelector(`option[value="${saved.provider}"]`)) {
-      provSel.value = saved.provider;
-      if (modelInput) modelInput.value = saved.model;
-    } else if (provSel.querySelector(`option[value="${prevProv}"]`)) {
-      provSel.value = prevProv;
-      if (modelInput) modelInput.value = DEFAULT_MODELS[prevProv] || '';
-    } else {
-      if (modelInput) modelInput.value = DEFAULT_MODELS[provSel.value] || '';
-    }
-
-    provSel.onchange = () => {
-      if (modelInput) modelInput.value = DEFAULT_MODELS[provSel.value] || '';
-      _saveAndSyncMainModel();
-    };
-    if (modelInput) modelInput.onchange = () => _saveAndSyncMainModel();
-  }
-
-  _syncMainModelFromSettings();
   loadCvModels(configured);
-}
-
-function _saveAndSyncMainModel() {
-  const provSel = document.getElementById('wiz-settings-provider');
-  const modelInput = document.getElementById('wiz-settings-model');
-  if (!provSel || !modelInput) return;
-  const provider = provSel.value;
-  const model = modelInput.value.trim();
-  localStorage.setItem('bh_main_model', JSON.stringify({ provider, model }));
-  _syncMainModelFromSettings();
-}
-
-function _loadMainModel() {
-  try {
-    const raw = localStorage.getItem('bh_main_model');
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
-
-function _syncMainModelFromSettings() {
-  const provSel = document.getElementById('wiz-settings-provider');
-  const modelInput = document.getElementById('wiz-settings-model');
-  if (!provSel || !modelInput) return;
-  const val = `${provSel.value}::${modelInput.value.trim()}`;
-  ['wiz-main-model', 'wiz-p1-model', 'wiz-auto-model'].forEach(id => {
-    const sel = document.getElementById(id);
-    if (!sel) return;
-    if (sel.querySelector(`option[value="${val}"]`)) {
-      sel.value = val;
-    }
-  });
 }
 
 function _escapeHtml(str) {

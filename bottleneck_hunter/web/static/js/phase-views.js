@@ -262,6 +262,130 @@ export function renderPhase2Table(scorecards, failedTickers) {
   container.addEventListener('click', container._p2ClickHandler);
 }
 
+/* ── 反向分析列表 ───────────────────────────
+ * 镜像 Phase2 可展开表，展开行复用 buildDetailGrid → 详情与入围企业完全一致。
+ */
+const _reverseSelected = new Set();
+export function getReverseSelected() { return new Set(_reverseSelected); }
+
+function _escRev(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+async function _reverseAddToPool(btn, records, market) {
+  const id = btn.dataset.id;
+  const r = records.find(x => x.id === id);
+  if (!r) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/watchlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticker: r.ticker, company_name: r.company_name || r.ticker,
+        company_name_cn: r.company_name_cn || '', market: r.market || market,
+        tier: 'track', sector: r.sector || '', source: 'reverse',
+        bottleneck_node: r.bottleneck_node || '',
+      }),
+    });
+    if (res.ok) { btn.textContent = '已加入'; btn.classList.add('wl-p4-add-done'); }
+    else {
+      const err = await res.json().catch(() => ({}));
+      btn.textContent = (err.detail || '').includes('already') ? '已存在' : '失败';
+    }
+  } catch (e) { btn.textContent = '失败'; }
+}
+
+export function renderReverseTable(records, opts = {}) {
+  const { market = 'us_stock', onChange, onSelectionChange } = opts;
+  const container = document.getElementById('wiz-reverse-table');
+  if (!container) return;
+
+  if (!records || records.length === 0) {
+    container.innerHTML = '<p class="empty-text">暂无反向分析记录，输入企业代码开始分析</p>';
+    _reverseSelected.clear();
+    if (onSelectionChange) onSelectionChange(new Set());
+    return;
+  }
+
+  // 清理已不存在的选中项
+  const ids = new Set(records.map(r => r.id));
+  [..._reverseSelected].forEach(id => { if (!ids.has(id)) _reverseSelected.delete(id); });
+
+  const srcLabel = s => (s === 'matched' ? '匹配链' : 'LLM');
+  let html = `<table class="data-table p2-expandable-table"><thead><tr>
+    <th style="width:32px"></th><th style="width:36px"></th><th>#</th><th>公司</th><th>代码</th><th>瓶颈环节</th>
+    <th>质量分</th><th>预期差</th><th>推荐分</th><th>来源</th><th>操作</th>
+  </tr></thead><tbody>`;
+
+  records.forEach((r, i) => {
+    const checked = _reverseSelected.has(r.id);
+    html += `<tr class="p2-summary-row" data-idx="${i}" data-id="${_escRev(r.id)}" data-ticker="${_escRev(r.ticker)}">
+      <td class="p2-arrow-cell"><span class="expand-arrow">▸</span></td>
+      <td class="p2-check-cell"><input type="checkbox" class="rev-row-check" data-id="${_escRev(r.id)}" ${checked ? 'checked' : ''}></td>
+      <td>${i + 1}</td>
+      <td class="col-name">${_escRev(r.company_name || r.ticker)}</td>
+      <td class="col-ticker">${_escRev(r.ticker)}</td>
+      <td>${_escRev((r.bottleneck_node || '').split(',')[0])}</td>
+      <td><span class="score-badge" style="background:${scoreColor(r.quality_score)}">${(r.quality_score || 0).toFixed(1)}</span></td>
+      <td><span class="score-badge score-badge--alpha" style="background:${scoreColor(r.alpha_score)}">${(r.alpha_score || 0).toFixed(1)}</span></td>
+      <td><span class="score-badge score-badge--final" style="background:${scoreColor(r.final_score)}">${(r.final_score || 0).toFixed(2)}</span></td>
+      <td><span class="rev-src-badge rev-src-${_escRev(r.source)}">${srcLabel(r.source)}</span></td>
+      <td class="rev-ops">
+        <button class="btn btn-sm rev-add-btn" data-id="${_escRev(r.id)}">加入观察池</button>
+        <button class="btn btn-sm rev-del-btn" data-id="${_escRev(r.id)}">删除</button>
+      </td>
+    </tr>`;
+    html += `<tr class="p2-expand-row" data-idx="${i}" data-id="${_escRev(r.id)}"><td colspan="11" class="p2-expand-cell"><div class="rev-detail-slot">展开加载详情...</div></td></tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+
+  if (container._revHandler) container.removeEventListener('click', container._revHandler);
+  container._revHandler = async (e) => {
+    const chk = e.target.closest('.rev-row-check');
+    if (chk) {
+      if (chk.checked) _reverseSelected.add(chk.dataset.id); else _reverseSelected.delete(chk.dataset.id);
+      if (onSelectionChange) onSelectionChange(getReverseSelected());
+      return;
+    }
+    const addBtn = e.target.closest('.rev-add-btn');
+    if (addBtn) { e.stopPropagation(); await _reverseAddToPool(addBtn, records, market); return; }
+    const delBtn = e.target.closest('.rev-del-btn');
+    if (delBtn) {
+      e.stopPropagation();
+      if (!confirm('确定删除该反向分析记录？')) return;
+      const res = await fetch(`/api/reverse/${encodeURIComponent(delBtn.dataset.id)}?market=${encodeURIComponent(market)}`, { method: 'DELETE' });
+      if (res.ok && onChange) onChange();
+      return;
+    }
+    const row = e.target.closest('.p2-summary-row');
+    if (!row) return;
+    const idx = row.dataset.idx;
+    const detail = container.querySelector(`.p2-expand-row[data-idx="${idx}"]`);
+    if (!detail) return;
+    detail.classList.toggle('open');
+    const arrow = row.querySelector('.expand-arrow');
+    if (arrow) arrow.textContent = detail.classList.contains('open') ? '▾' : '▸';
+    const slot = detail.querySelector('.rev-detail-slot');
+    if (detail.classList.contains('open') && slot && !slot.dataset.loaded) {
+      slot.innerHTML = '<p class="empty-text">加载详情...</p>';
+      try {
+        const resp = await fetch(`/api/reverse/${encodeURIComponent(row.dataset.id)}?market=${encodeURIComponent(market)}`);
+        const rec = await resp.json();
+        slot.innerHTML = buildDetailGrid(rec.result_json || {});
+        slot.dataset.loaded = '1';
+      } catch (err) {
+        slot.innerHTML = `<p class="empty-text">加载失败: ${err.message}</p>`;
+      }
+    }
+  };
+  container.addEventListener('click', container._revHandler);
+  if (onSelectionChange) onSelectionChange(getReverseSelected());
+}
+
 function buildDetailGrid(sc) {
   const alpha = sc.alpha || {};
   const moat = sc.moat || {};
