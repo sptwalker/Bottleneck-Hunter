@@ -19,6 +19,7 @@ class RoleDefinition:
     default_provider: str = "deepseek"
     default_model: str = "deepseek-chat"
     capability_weights: dict[str, float] = field(default_factory=dict)
+    slot_labels: list[str] = field(default_factory=list)  # 多槽角色各槽的语义标签（配置界面显示）
 
 
 ROLE_REGISTRY: dict[str, RoleDefinition] = {}
@@ -74,6 +75,8 @@ _BOTTLENECK_WEIGHTS = {
 _INIT_ROLES = [
     # 决策层级
     RoleDefinition("L1_macro", "L1 宏观策略", "decision",
+                   multi_model=True, max_slots=2,
+                   slot_labels=["宏观市场分析师", "产业动向分析师"],
                    capability_weights=_DECISION_WEIGHTS),
     RoleDefinition("L2_strategic", "L2 组合策略", "decision",
                    capability_weights=_DECISION_WEIGHTS),

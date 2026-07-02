@@ -177,7 +177,8 @@ class TestFetchFilings:
 
 class TestParseInsiderTrades:
     @pytest.mark.asyncio
-    async def test_extracts_form4(self):
+    async def test_xml_fail_produces_no_stub(self):
+        """诚信原则（改进 0.1）：Form 4 XML 解析失败时不再落库占位空壳。"""
         filings = [
             {"id": "abc", "filing_type": "4", "filed_date": "2025-03-15",
              "title": "Form 4", "is_insider_trade": True},
@@ -186,10 +187,24 @@ class TestParseInsiderTrades:
         ]
         with patch("bottleneck_hunter.watchlist.sec_pipeline._fetch_form4_xml", return_value=[]):
             trades = await _parse_insider_trades_from_filings("0000320193", "AAPL", filings)
+        assert trades == []  # 无真实交易数据 → 不生成任何记录
+
+    @pytest.mark.asyncio
+    async def test_extracts_real_form4(self):
+        """XML 解析成功时生成真实交易记录（含 shares/price/name）。"""
+        filings = [{"id": "abc", "filing_type": "4", "filed_date": "2025-03-15",
+                    "title": "Form 4", "is_insider_trade": True}]
+        fake_xml = [{
+            "insider_name": "Tim Cook", "insider_title": "CEO",
+            "transaction_type": "Sale", "shares": 1000, "price": 150.0,
+            "total_value": 150000.0, "date": "2025-03-14",
+        }]
+        with patch("bottleneck_hunter.watchlist.sec_pipeline._fetch_form4_xml", return_value=fake_xml):
+            trades = await _parse_insider_trades_from_filings("0000320193", "AAPL", filings)
         assert len(trades) == 1
-        assert trades[0]["ticker"] == "AAPL"
-        assert trades[0]["shares"] == 0
-        assert trades[0]["source_filing_id"] == "abc"
+        assert trades[0]["insider_name"] == "Tim Cook"
+        assert trades[0]["shares"] == 1000
+        assert trades[0]["price"] == 150.0
 
     @pytest.mark.asyncio
     async def test_empty_filings(self):
@@ -202,14 +217,17 @@ class TestParseInsiderTrades:
         assert await _parse_insider_trades_from_filings("0000320193", "AAPL", filings) == []
 
     @pytest.mark.asyncio
-    async def test_id_is_deterministic(self):
+    async def test_real_record_id_is_deterministic(self):
         filings = [{"id": "abc", "filing_type": "4", "filed_date": "2025-03-15",
                      "title": "Form 4", "is_insider_trade": True}]
-        with patch("bottleneck_hunter.watchlist.sec_pipeline._fetch_form4_xml", return_value=[]):
+        fake_xml = [{"insider_name": "Tim Cook", "insider_title": "CEO",
+                     "transaction_type": "Sale", "shares": 1000, "price": 150.0,
+                     "total_value": 150000.0, "date": "2025-03-14"}]
+        with patch("bottleneck_hunter.watchlist.sec_pipeline._fetch_form4_xml", return_value=fake_xml):
             t1 = await _parse_insider_trades_from_filings("0000320193", "AAPL", filings)
             t2 = await _parse_insider_trades_from_filings("0000320193", "AAPL", filings)
         assert t1[0]["id"] == t2[0]["id"]
-        expected = hashlib.md5("AAPL:insider:abc".encode()).hexdigest()[:12]
+        expected = hashlib.md5("AAPL:insider:abc:0".encode()).hexdigest()[:12]
         assert t1[0]["id"] == expected
 
 

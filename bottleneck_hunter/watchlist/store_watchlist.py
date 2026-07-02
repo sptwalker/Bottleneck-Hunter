@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from bottleneck_hunter.watchlist.store_base import _now_iso
+from bottleneck_hunter.watchlist.store_base import _now_iso, normalize_market
 from bottleneck_hunter.watchlist.tier_limits import derive_tier_caps
 
 
@@ -52,7 +52,7 @@ class _WatchlistMixin:
                     entry["ticker"],
                     entry.get("company_name", entry["ticker"]),
                     entry.get("company_name_cn", ""),
-                    entry.get("market", "us_stock"),
+                    normalize_market(entry.get("market")),
                     tier,
                     entry.get("tier_rank", 0),
                     entry.get("composite_score", 0.0),

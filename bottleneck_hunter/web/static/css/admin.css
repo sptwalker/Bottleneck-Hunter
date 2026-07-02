@@ -352,3 +352,42 @@
 .nav-btn-admin svg {
   stroke: #a855f7;
 }
+
+/* ── 用户数据详情抽屉 ─────────────────────────────── */
+#admin-user-drawer .drawer-panel { width: 880px; }
+.admin-ov-sec { margin-bottom: 22px; }
+.admin-ov-sec h4 {
+  font-size: 14px; font-weight: 700; margin: 0 0 8px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.admin-ov-count {
+  background: var(--bg); color: var(--muted);
+  font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 10px;
+}
+.admin-ov-sub { font-size: 12px; color: var(--muted); margin: 8px 0 6px; font-weight: 600; }
+.admin-ov-table { font-size: 12px; }
+.admin-ov-table th, .admin-ov-table td { padding: 5px 8px; white-space: nowrap; }
+.admin-empty { color: var(--muted); font-size: 13px; padding: 10px 0; }
+
+.admin-ov-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.admin-chip {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 3px 8px; font-size: 12px; font-weight: 600;
+}
+.admin-chip small { color: var(--muted); font-weight: 400; font-size: 11px; }
+
+.admin-ov-cards { display: flex; flex-wrap: wrap; gap: 12px; }
+.admin-ov-card {
+  flex: 1; min-width: 160px;
+  border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface);
+}
+.admin-ov-card-title { font-weight: 700; font-size: 13px; margin-bottom: 8px; }
+.admin-ov-kv { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0; }
+.admin-ov-kv span { color: var(--muted); }
+.admin-ov-kv b { font-variant-numeric: tabular-nums; }
+
+.admin-ov-copy { margin-top: 10px; display: flex; align-items: center; gap: 10px; }
+.admin-pos { color: oklch(0.6 0.18 145); }
+.admin-neg { color: oklch(0.6 0.2 25); }

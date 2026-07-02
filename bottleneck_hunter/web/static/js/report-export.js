@@ -123,6 +123,9 @@ export function openReport(title, filename, bodyHtml) {
     + `<button id="__dl">⬇ 下载 HTML</button>`
     + `<span class="rpt-hint">PDF：打印时目标选择「另存为 PDF」</span></div>`
     + `<main class="rpt">${bodyHtml}</main>`
+    + `<footer class="rpt-disclaimer" style="margin-top:24px;padding-top:12px;border-top:1px solid #ddd;color:#888;font-size:12px;line-height:1.6">`
+    + `本报告由 BottleneckHunter AI 生成，所有分析、评分与买卖计划仅供研究参考，不构成投资建议；据此操作风险自负。`
+    + `</footer>`
     + `<script>document.getElementById('__dl').addEventListener('click',function(){`
     + `var h='<!DOCTYPE html>\\n'+document.documentElement.outerHTML;`
     + `var b=new Blob([h],{type:'text/html;charset=utf-8'});`

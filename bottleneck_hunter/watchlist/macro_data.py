@@ -68,11 +68,16 @@ _CN_INDICATORS = [
     ("csi300", "000300.SS", "沪深300"),
 ]
 
+_HK_INDICATORS = [
+    ("hsi", "^HSI", "恒生指数"),
+    ("hstech", "^HSTECH", "恒生科技指数"),
+]
+
 # 各市场用于填充"大盘指数"的真实指数键（区别于 VIX/汇率等宏观指标）
 MARKET_INDEX_KEYS: dict[str, list[str]] = {
     "us_stock": ["sp500", "nasdaq"],
     "a_stock": ["sse_index", "csi300"],
-    "hk_stock": ["sp500"],
+    "hk_stock": ["hsi", "hstech"],
 }
 
 
@@ -92,6 +97,8 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
     indicators = list(_US_INDICATORS)
     if "a_stock" in markets:
         indicators.extend(_CN_INDICATORS)
+    if "hk_stock" in markets:
+        indicators.extend(_HK_INDICATORS)
 
     results: dict[str, dict] = {}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -102,7 +109,8 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
             data = await asyncio.to_thread(_fetch_yf_quote, symbol)
             if data:
                 results[key] = {**data, "label": label}
-                store.save_macro_snapshot(key, today, data["value"], now_iso)
+                store.save_macro_snapshot(key, today, data["value"], now_iso,
+                                          change_pct=data.get("change_pct", 0.0))
         except Exception as e:
             logger.warning("宏观指标 %s 采集失败: %s", key, e)
 
@@ -114,7 +122,8 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
                 data = await asyncio.to_thread(_fetch_northbound_flow)
                 if data:
                     results["northbound_flow"] = {**data, "label": "北向资金净流入(亿)"}
-                    store.save_macro_snapshot("northbound_flow", today, data["value"], now_iso)
+                    store.save_macro_snapshot("northbound_flow", today, data["value"], now_iso,
+                                              change_pct=data.get("change_pct", 0.0))
             except Exception as e:
                 logger.warning("北向资金采集失败: %s", e)
         tasks.append(_fetch_north())
@@ -125,7 +134,8 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
         cached = store.get_latest_macro_snapshots()
         for row in cached:
             results[row["indicator"]] = {
-                "value": row["value"], "change_pct": 0.0, "label": row["indicator"],
+                "value": row["value"], "change_pct": row.get("change_pct", 0.0) or 0.0,
+                "label": row["indicator"],
             }
 
     return results

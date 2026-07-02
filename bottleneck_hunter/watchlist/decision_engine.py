@@ -67,6 +67,15 @@ _MARKET_CONTEXT = {
 - 止损参考：-10%
 - 估值体系：DCF 为主，EV/EBITDA、P/S 常用
 - 宏观驱动：联储利率决议、非农/CPI 数据""",
+
+    "hk_stock": """## 市场特性（港股）
+- 无涨跌幅限制；设有 VCM 市调机制
+- 交易规则：T+0，可做空，港币计价
+- 关键指标：恒生指数/恒生科技、南向资金（港股通）、AH 溢价
+- 行业分类：恒生行业分类（HSICS）
+- 止损参考：-10%
+- 估值体系：PE/PB 偏低，注意流动性折价与仙股风险
+- 宏观驱动：美联储（联系汇率下利率同步）、中国内地政策、南向资金流""",
 }
 
 
@@ -81,8 +90,76 @@ def _get_market_context_text(markets: list[str] | None = None) -> str:
     return "\n\n".join(parts) if parts else _MARKET_CONTEXT["us_stock"]
 
 
+def _as_num(v, default):
+    """把 LLM 返回的数字字段容错转 float，失败返回 default。"""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v.strip().rstrip("%"))
+        except ValueError:
+            return default
+    return default
+
+
+def _union_strs(lists: list) -> list:
+    """把多个字符串列表并集去重（保序），用于合并各模型的风险/信号。"""
+    out: list = []
+    seen: set = set()
+    for lst in lists:
+        if not isinstance(lst, list):
+            continue
+        for item in lst:
+            s = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False, sort_keys=True)
+            if s not in seen:
+                seen.add(s)
+                out.append(item)
+    return out
+
+
+def _merge_key_signals(lists: list) -> list:
+    """合并各模型的 key_signals（dict 列表），按 name 去重，保留首次出现。"""
+    out: list = []
+    seen: set = set()
+    for lst in lists:
+        if not isinstance(lst, list):
+            continue
+        for sig in lst:
+            if not isinstance(sig, dict):
+                continue
+            name = str(sig.get("name", "")).strip().lower()
+            key = name or json.dumps(sig, ensure_ascii=False, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                out.append(sig)
+    return out
+
+
+def _merge_sector_rotation(dicts: list) -> dict:
+    """合并 sector_rotation 的 strengthening/weakening/neutral 三桶（各自并集）。"""
+    merged = {"strengthening": [], "weakening": [], "neutral": []}
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        for bucket in merged:
+            merged[bucket] = _union_strs([merged[bucket], d.get(bucket)])
+    # 同一板块被某模型判为强、另一模型判为弱时，从 neutral 移除以免自相矛盾
+    strong_weak = set(merged["strengthening"]) | set(merged["weakening"])
+    merged["neutral"] = [s for s in merged["neutral"] if s not in strong_weak]
+    return merged
+
+
 def _merge_macro_results(results: list[dict]) -> dict:
-    """合并多个 L1 宏观策略结果 — 多数投票 + 加权均值。"""
+    """合并多个 L1 宏观策略结果 — 真交叉验证。
+
+    - regime / risk_appetite：多数投票
+    - regime_confidence / recommended_cash_pct：数值均值；有分歧时下调 confidence（不确定性惩罚）
+    - risk_factors / key_signals / sector_rotation：并集去重（保留每个模型的风险与信号，不丢弃）
+    - strategy_text 等自由文本：取命中多数 regime 的模型（保持内在一致），而非盲取第一个
+    - 分歧时写入 _divergence_warning（regime 与 appetite 各自判定）
+    """
     if len(results) == 1:
         return results[0]
 
@@ -92,16 +169,36 @@ def _merge_macro_results(results: list[dict]) -> dict:
     appetites = [r.get("risk_appetite", "balanced") for r in results]
     risk_appetite = Counter(appetites).most_common(1)[0][0]
 
-    confidences = [r.get("regime_confidence", 5) for r in results]
-    avg_confidence = round(sum(confidences) / len(confidences), 1)
+    regime_divergent = any(x != regime for x in regimes)
+    appetite_divergent = any(x != risk_appetite for x in appetites)
 
-    base = results[0].copy()
+    # 以"命中多数 regime"的模型为主体，保其 strategy_text/sector_rotation 内在一致
+    base = next((r for r in results if r.get("regime") == regime), results[0]).copy()
     base["regime"] = regime
     base["risk_appetite"] = risk_appetite
-    base["regime_confidence"] = avg_confidence
 
-    if any(r.get("regime") != regime for r in results):
-        base["_divergence_warning"] = f"模型分歧: regime 判断不一致 ({regimes})"
+    # confidence 均值，分歧即不确定：每类分歧 -1，下限 1
+    avg_conf = sum(_as_num(r.get("regime_confidence"), 5) for r in results) / len(results)
+    penalty = (1 if regime_divergent else 0) + (1 if appetite_divergent else 0)
+    base["regime_confidence"] = max(1, round(avg_conf - penalty, 1))
+
+    cash_vals = [_as_num(r.get("recommended_cash_pct"), None) for r in results]
+    cash_vals = [c for c in cash_vals if c is not None]
+    if cash_vals:
+        base["recommended_cash_pct"] = round(sum(cash_vals) / len(cash_vals), 1)
+
+    # 列表字段并集：两个模型的风险/信号都保留，避免丢弃 model B 的告警
+    base["risk_factors"] = _union_strs([r.get("risk_factors") for r in results])
+    base["key_signals"] = _merge_key_signals([r.get("key_signals") for r in results])
+    base["sector_rotation"] = _merge_sector_rotation([r.get("sector_rotation") for r in results])
+
+    warnings = []
+    if regime_divergent:
+        warnings.append(f"regime 不一致 ({regimes})")
+    if appetite_divergent:
+        warnings.append(f"risk_appetite 不一致 ({appetites})")
+    if warnings:
+        base["_divergence_warning"] = "模型分歧: " + "; ".join(warnings)
 
     return base
 
@@ -276,12 +373,31 @@ def _chip_context(store: WatchlistStore, ticker: str) -> dict:
 # L1: 宏观策略
 # ─────────────────────────────────────────────────────────
 
+async def _inject_market_news(store: WatchlistStore, market: str, market_data: dict,
+                              llm, budget: BudgetTracker | None) -> None:
+    """把市场/主题级近期新闻注入 market_data['news']（优先读库，未采集则实时兜底）。"""
+    from bottleneck_hunter.watchlist.news_pipeline import fetch_market_news, market_sentinel
+    _mnews = store.get_news(market_sentinel(market), limit=15)
+    if _mnews:
+        market_data["news"] = [{"topic": n.get("llm_analysis", ""), "title": n.get("title", ""),
+                                "date": n.get("date", ""), "source_name": n.get("source_name", ""),
+                                "sentiment": n.get("sentiment", "")} for n in _mnews]
+    else:
+        market_data["news"] = await fetch_market_news(market, llm, budget)
+
+
 async def run_macro_strategy(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
     market: str = "us_stock",
+    *,
+    market_data: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
-    """生成全新的 L1 宏观策略（通常每周一次）"""
+    """生成全新的 L1 宏观策略（通常每周一次）。
+
+    market_data 可由上游（如 L1 日检判定重大修订时）传入已采集好的市场数据，
+    避免重复跑一轮 yfinance/akshare 采集与新闻注入。
+    """
     store = store.for_market(market)
     yield _sse("decision_start", layer="L1", action="generate",
                market=market, message="开始生成 L1 宏观策略...")
@@ -296,16 +412,9 @@ async def run_macro_strategy(
         return
 
     try:
-        market_data = await _collect_market_context(store, market)
-        # 注入市场/主题级近期新闻：优先读库（scheduler 定时采集），未采集则实时兜底
-        from bottleneck_hunter.watchlist.news_pipeline import fetch_market_news, market_sentinel
-        _mnews = store.get_news(market_sentinel(market), limit=15)
-        if _mnews:
-            market_data["news"] = [{"topic": n.get("llm_analysis", ""), "title": n.get("title", ""),
-                                    "date": n.get("date", ""), "source_name": n.get("source_name", ""),
-                                    "sentiment": n.get("sentiment", "")} for n in _mnews]
-        else:
-            market_data["news"] = await fetch_market_news(market, llm, budget)
+        if market_data is None:
+            market_data = await _collect_market_context(store, market)
+            await _inject_market_news(store, market, market_data, llm, budget)
         active_markets = market_data.get("markets", [])
         market_ctx = _get_market_context_text(active_markets)
         prompt_template = _load_prompt("decision_macro")
@@ -392,15 +501,7 @@ async def run_macro_check(
 
     try:
         market_data = await _collect_market_context(store, market)
-        # 注入市场/主题级近期新闻（优先读库，未采集则实时兜底）
-        from bottleneck_hunter.watchlist.news_pipeline import fetch_market_news, market_sentinel
-        _mnews = store.get_news(market_sentinel(market), limit=15)
-        if _mnews:
-            market_data["news"] = [{"topic": n.get("llm_analysis", ""), "title": n.get("title", ""),
-                                    "date": n.get("date", ""), "source_name": n.get("source_name", ""),
-                                    "sentiment": n.get("sentiment", "")} for n in _mnews]
-        else:
-            market_data["news"] = await fetch_market_news(market, llm, budget)
+        await _inject_market_news(store, market, market_data, llm, budget)
         active_markets = market_data.get("markets", [])
         market_ctx = _get_market_context_text(active_markets)
         created_at = current.get("created_at", "")
@@ -433,7 +534,8 @@ async def run_macro_check(
         if status == "needs_major_revision":
             yield _sse("decision_info", layer="L1",
                        message="L1 宏观策略需要重大修订，开始重新生成...")
-            async for evt in run_macro_strategy(store, budget, market=market):
+            # 复用日检已采集的 market_data，避免重复跑一轮 yfinance/akshare 采集
+            async for evt in run_macro_strategy(store, budget, market=market, market_data=market_data):
                 yield evt
         else:
             store.update_macro_status(
@@ -548,17 +650,24 @@ async def run_strategic_plan(
         plan_id = store.create_strategic_plan(macro["id"], result)
 
         # Phase 20D: 解析并保存三场景估值
+        # 诚信原则：写入失败/跳过必须计数并告警，不再静默吞（历史上此表长期 0 行无人知）。
+        sv_saved, sv_skipped_no_entry, sv_missing = 0, 0, 0
         try:
+            from bottleneck_hunter.watchlist.store_base import normalize_market
             stock_selection = result.get("stock_selection", {})
-            entry_map = {e["ticker"]: e["id"] for e in store.list_all() if e.get("market") == market}
+            entry_map = {e["ticker"]: e["id"] for e in store.list_all()
+                         if normalize_market(e.get("market")) == normalize_market(market)}
             for holding in (stock_selection.get("core_holdings", []) +
                             stock_selection.get("tactical_holdings", [])):
                 sv = holding.get("scenario_valuation")
                 if not sv:
+                    sv_missing += 1
                     continue
                 ticker = holding.get("ticker", "")
                 entry_id = entry_map.get(ticker, "")
                 if not entry_id:
+                    sv_skipped_no_entry += 1
+                    logger.warning("场景估值跳过：%s 在市场 %s 的观察池中无匹配 entry", ticker, market)
                     continue
                 snap = store.get_latest_snapshot(ticker)
                 current_price = snap.get("close", 0) if snap else 0
@@ -578,8 +687,14 @@ async def run_strategic_plan(
                     current_price=current_price,
                     valuation_method=sv.get("valuation_method", "relative"),
                 )
+                sv_saved += 1
         except Exception as e:
-            logger.warning("场景估值保存失败: %s", e)
+            logger.error("场景估值保存异常: %s", e, exc_info=True)
+        if sv_skipped_no_entry or (sv_missing and not sv_saved):
+            yield _sse("decision_warning", layer="L2",
+                       message=f"⚠ 场景估值：已存 {sv_saved}，无匹配entry跳过 {sv_skipped_no_entry}，LLM未产出 {sv_missing}")
+        logger.info("场景估值 L2: saved=%d skipped_no_entry=%d missing=%d",
+                    sv_saved, sv_skipped_no_entry, sv_missing)
 
         yield _sse("decision_done", layer="L2", plan_id=plan_id,
                    stance=result.get("overall_stance", "balanced"),
@@ -1493,10 +1608,17 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
         macro = {}
         cached = store.get_latest_macro_snapshots()
         for row in cached:
-            macro[row["indicator"]] = {"value": row["value"], "change_pct": 0.0, "label": row["indicator"]}
+            macro[row["indicator"]] = {"value": row["value"],
+                                       "change_pct": row.get("change_pct", 0.0) or 0.0,
+                                       "label": row["indicator"]}
 
     # 真实大盘指数（区别于 VIX/汇率等宏观指标）
     real_indices = {k: macro[k] for k in MARKET_INDEX_KEYS.get(market, ["sp500"]) if k in macro}
+
+    # VIX 属市场情绪而非宏观经济：移入 sentiment 段，macro 段保留利率/汇率等真宏观
+    macro_sentiment = {}
+    if "vix" in macro:
+        macro_sentiment["vix"] = macro.pop("vix")
 
     all_snapshots = []
     for ticker in tickers:
@@ -1505,8 +1627,8 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
             all_snapshots.append(snap)
 
     if not all_snapshots:
-        return {"indices": dict(real_indices), "sectors": {}, "sentiment": {}, "macro": macro,
-                "news": [], "markets": active_markets}
+        return {"indices": dict(real_indices), "sectors": {}, "sentiment": dict(macro_sentiment),
+                "macro": macro, "news": [], "markets": active_markets}
 
     avg_change = sum(s.get("change_pct", 0) or 0 for s in all_snapshots) / max(len(all_snapshots), 1)
     avg_rsi = sum(s.get("rsi_14", 50) or 50 for s in all_snapshots) / max(len(all_snapshots), 1)
@@ -1547,6 +1669,7 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
         },
         "sectors": sectors,
         "sentiment": {
+            **macro_sentiment,  # VIX 恐慌指数（真市场情绪）
             "avg_rsi": round(avg_rsi, 1),
             "stocks_above_sma50": sum(
                 1 for s in all_snapshots

@@ -115,6 +115,41 @@ async def get_macro_history(limit: int = 10, market: str = "us_stock", user: dic
 
 
 # ─────────────────────────────────────────────────────────
+# L1 宏观咨询互动（两位分析师流式多轮对话，每市场一条滚动会话）
+# ─────────────────────────────────────────────────────────
+
+class MacroConsultAsk(BaseModel):
+    market: str = "us_stock"
+    question: str = ""
+
+
+@router.post("/macro/consult/open")
+async def macro_consult_open(request: Request, market: str = "us_stock",
+                             user: dict = Depends(get_current_user)):
+    """打开咨询抽屉：陈列 L1 数据快照 + 两位分析师自动流式开场解读（SSE）。"""
+    from bottleneck_hunter.watchlist.macro_consultation import stream_opening
+    store = _user_store(user).for_market(market)
+    return _sse_response(request, stream_opening(store, _user_budget(user), market))
+
+
+@router.post("/macro/consult/ask")
+async def macro_consult_ask(request: Request, req: MacroConsultAsk,
+                            user: dict = Depends(get_current_user)):
+    """用户提问：round1 各自作答 → round2 互评辩论（SSE）。"""
+    from bottleneck_hunter.watchlist.macro_consultation import stream_consult
+    store = _user_store(user).for_market(req.market)
+    return _sse_response(request, stream_consult(store, _user_budget(user), req.market, req.question))
+
+
+@router.get("/macro/consult/history")
+async def macro_consult_history(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """取该市场的滚动会话（含完整 transcript）。"""
+    from bottleneck_hunter.watchlist.macro_consultation import _load_session
+    store = _user_store(user).for_market(market)
+    return {"session": _load_session(store, market)}
+
+
+# ─────────────────────────────────────────────────────────
 # L2 组合策略
 # ─────────────────────────────────────────────────────────
 
@@ -1113,6 +1148,9 @@ async def get_meetings(meeting_type: str | None = None, market: str = "us_stock"
     """会议历史列表"""
     store = _user_store(user)
     records = store.get_meeting_records(meeting_type=meeting_type, market=market, limit=limit)
+    # 宏观咨询是聊天会话（有独立抽屉），不混入正式会议历史列表
+    if meeting_type is None:
+        records = [r for r in records if r.get("meeting_type") != "macro_consult"]
     return {"meetings": records}
 
 

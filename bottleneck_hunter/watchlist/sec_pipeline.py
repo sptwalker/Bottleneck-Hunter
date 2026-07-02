@@ -308,23 +308,6 @@ async def _fetch_form4_xml(cik: str, filing: dict) -> list[dict]:
     return []
 
 
-def _make_stub_trade(ticker: str, filing: dict) -> dict:
-    """Create a stub/placeholder insider trade record from filing metadata only."""
-    tid = hashlib.md5(f"{ticker}:insider:{filing['id']}".encode()).hexdigest()[:12]
-    return {
-        "id": tid,
-        "ticker": ticker,
-        "insider_name": filing.get("title", "Unknown"),
-        "insider_title": "",
-        "transaction_type": "unknown",
-        "shares": 0,
-        "price": None,
-        "total_value": None,
-        "date": filing["filed_date"],
-        "source_filing_id": filing["id"],
-    }
-
-
 async def _parse_insider_trades_from_filings(cik: str, ticker: str, filings: list[dict]) -> list[dict]:
     """Extract insider trade records from Form 4 filings.
 
@@ -363,8 +346,9 @@ async def _parse_insider_trades_from_filings(cik: str, ticker: str, filings: lis
                     "source_filing_id": f["id"],
                 })
         else:
-            # Fall back to stub record
-            trades.append(_make_stub_trade(ticker, f))
+            # 诚信原则：XML 解析失败时不落库占位空壳（shares=0/price=None 会被下游当真实信号）。
+            # 原始 filing 已存 sec_filings 表可追溯；此处只跳过无法解析的内幕交易。
+            logger.debug("Form 4 XML 解析失败，跳过占位记录: %s/%s", ticker, f.get("id"))
 
     return trades
 

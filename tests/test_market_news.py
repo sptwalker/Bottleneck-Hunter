@@ -85,6 +85,9 @@ class TestRealIndicesInContext:
         assert "sp500" in ctx["indices"] and "nasdaq" in ctx["indices"]
         assert "watchlist_breadth" in ctx["indices"]
         assert ctx["indices"]["watchlist_breadth"]["stocks_tracked"] == 1
+        # VIX 应归入 sentiment（市场情绪），并从 macro 段移除，避免两处重复
+        assert ctx["sentiment"].get("vix", {}).get("value") == 14
+        assert "vix" not in ctx["macro"]
 
 
 class TestMarketNewsPersistence:

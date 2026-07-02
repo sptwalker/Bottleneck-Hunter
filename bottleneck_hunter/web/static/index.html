@@ -6,9 +6,9 @@
   <title>BottleneckHunter — AI 产业链瓶颈选股</title>
   <link rel="stylesheet" href="/static/css/style.css?v=64">
   <link rel="stylesheet" href="/static/css/admin.css?v=1">
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+  <script src="/static/vendor/echarts.min.js"></script>
+  <script src="/static/vendor/d3.min.js"></script>
+  <script src="/static/vendor/marked.min.js"></script>
 </head>
 <body class="wizard-active">
 
@@ -32,7 +32,7 @@
       <span class="nav-flow-sep">|</span>
       <button class="nav-btn" data-view="aiconfig" role="tab" aria-selected="false">AI 配置</button>
     </div>
-    <button class="nav-btn nav-btn-icon nav-btn-admin" id="btn-admin" title="管理后台" style="display:none">
+    <button class="nav-btn nav-btn-icon nav-btn-admin" id="btn-admin" data-view="admin" title="用户管理中心" style="display:none">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 4.354a4 4 0 1 1 0 5.292M15 21H3v-1a6 6 0 0 1 12 0v1zm0 0h6v-1a6 6 0 0 0-9-5.197"/>
       </svg>
@@ -712,7 +712,10 @@
             <div class="dc-card" id="dc-macro">
               <div class="dc-card-header">
                 <h3><span class="dc-light dc-light-gray" id="dc-light-macro"></span>L1 宏观环境 <span class="dc-card-toggle">▼</span></h3>
-                <span class="dc-badge dc-badge-info" id="dc-macro-risk">--</span>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <button class="btn btn-sm" id="dc-macro-consult-btn" title="与两位AI分析师实时讨论宏观">💬 宏观咨询</button>
+                  <span class="dc-badge dc-badge-info" id="dc-macro-risk">--</span>
+                </div>
               </div>
               <div class="dc-card-body" id="dc-macro-body">
                 <p class="dc-empty-hint">尚未生成宏观策略，点击"一键日常决策"开始</p>
@@ -1198,7 +1201,6 @@
         </div><!-- /aic-layout -->
       </div>
     </div>
-</main>
 
 
 <!-- 详情抽屉 800px -->
@@ -1213,6 +1215,22 @@
       </div>
     </div>
     <div class="drawer-body" id="dc-meeting-drawer-body"></div>
+  </div>
+</div>
+
+<!-- L1 宏观咨询抽屉 -->
+<div class="drawer-overlay" id="dc-consult-drawer" style="display:none">
+  <div class="drawer-panel dc-consult-panel">
+    <div class="drawer-header">
+      <h3>💬 宏观咨询 <span id="dc-consult-market" style="font-size:13px;color:var(--muted)"></span></h3>
+      <button class="drawer-close" id="dc-consult-close">&#10005;</button>
+    </div>
+    <div class="dc-consult-snapshot" id="dc-consult-snapshot"></div>
+    <div class="dc-consult-log" id="dc-consult-log"></div>
+    <div class="dc-consult-footer">
+      <textarea id="dc-consult-input" rows="2" placeholder="向两位分析师提问，例如：当前该防守还是进攻？半导体还能追吗？"></textarea>
+      <button class="btn btn-primary" id="dc-consult-send">发送</button>
+    </div>
   </div>
 </div>
 
@@ -1232,6 +1250,13 @@
   <div class="fg"><label>市场</label><select id="ctx-market"><option value="a_stock">A 股</option><option value="us_stock" selected>美股</option></select></div>
   <div class="fg"><label>产业方向</label><input type="text" id="ctx-sector"></div>
   <div class="fg"><label>终端产品</label><input type="text" id="ctx-product"></div>
+  <div class="fg"><label>主分析模型</label><select id="ctx-model">
+    <option value="deepseek::deepseek-chat" selected>DeepSeek</option>
+    <option value="openai::gpt-5.5">GPT-5.5</option>
+    <option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option>
+    <option value="qwen::qwen-plus">Qwen Plus</option>
+    <option value="google::gemini-2.5-flash">Gemini Flash</option>
+  </select></div>
   <div class="ctx-menu-btns">
     <button class="btn btn-sm btn-secondary" id="ctx-cancel">取消</button>
     <button class="btn btn-sm" style="color:var(--danger)" id="ctx-delete">删除</button>
@@ -1258,17 +1283,17 @@
     <span class="syslog-dot" id="syslog-dot"></span>
     <div class="syslog-scroll" id="syslog-scroll"></div>
   </div>
+  <span class="app-disclaimer">本系统所有分析、评分、买卖计划均由 AI 生成，仅供研究参考，不构成投资建议；据此操作风险自负。</span>
   <span class="app-version">v0.4.0</span>
 </footer>
 
 <!-- Admin Modal -->
-<div id="admin-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true">
-  <div class="modal">
-    <div class="modal-header">
-      <h2 class="modal-title">管理后台</h2>
-      <button class="modal-close" id="admin-close" aria-label="关闭">&times;</button>
+<div id="view-admin" class="view">
+  <div class="wl-container">
+    <div class="st-header">
+      <h2 class="wl-page-title">用户管理中心</h2>
     </div>
-    <div class="modal-body">
+    <div>
       <div class="admin-tabs" role="tablist">
         <button class="admin-tab active" data-tab="users" role="tab" aria-selected="true">用户管理</button>
         <button class="admin-tab" data-tab="invites" role="tab" aria-selected="false">邀请码</button>
@@ -1289,6 +1314,8 @@
               <th>角色</th>
               <th>状态</th>
               <th style="text-align:center">观察池</th>
+              <th style="text-align:center">分析</th>
+              <th style="text-align:center">AI配置</th>
               <th>创建时间</th>
               <th>操作</th>
             </tr>
@@ -1412,6 +1439,18 @@
         </div>
       </div>
     </div>
+  </div>
+</div>
+</main>
+
+<!-- 用户数据详情抽屉 -->
+<div class="drawer-overlay" id="admin-user-drawer" style="display:none">
+  <div class="drawer-panel">
+    <div class="drawer-header">
+      <h3 id="admin-user-drawer-title">用户详情</h3>
+      <button class="drawer-close" id="admin-user-drawer-close">&#10005;</button>
+    </div>
+    <div class="drawer-body" id="admin-user-drawer-body"></div>
   </div>
 </div>
 

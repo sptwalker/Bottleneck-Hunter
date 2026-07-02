@@ -100,6 +100,7 @@ async def get_roles(user: dict = Depends(get_current_user)):
             "max_slots": role_def.max_slots,
             "default_provider": role_def.default_provider,
             "default_model": role_def.default_model,
+            "slot_labels": role_def.slot_labels,
             "slots": slots,
         })
 

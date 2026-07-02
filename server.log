@@ -1,0 +1,720 @@
+2026-07-02 16:04:29 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
++-----------------------------------------------------------------------------+
+| BottleneckHunter Web UI                                                     |
+| http://127.0.0.1:8000                                                       |
++-----------------------------------------------------------------------------+
+INFO:     Started server process [21320]
+INFO:     Waiting for application startup.
+2026-07-02 16:04:29 INFO bottleneck_hunter.llm_clients.factory | 已注册自定义 provider: xiaomi_mimo (https://api.xiaomimimo.com/v1)
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-02 16:04:29 INFO bottleneck_hunter.watchlist.scheduler | Watchlist scheduler configured with 17 jobs (6 data + 1 institutional + 1 macro + 8 decision + 1 calibration)
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "US pre-market price update" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "US post-market price update" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "US daily news/SEC/options scan" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "A-stock pre-market price update" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "A-stock post-market price update" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "A-stock daily news scan" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "Macro data update (VIX/Treasury/DXY)" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "Daily decision (L1→L4+committee)" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "Catalyst scan & expiry check" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "Weekly macro strategy (L1+L2)" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "Auto review unreviewed sells" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "A-stock daily decision (L1→L4+committee)" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "A-stock catalyst scan & expiry" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "A-stock weekly macro strategy (L1+L2)" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "A-stock auto review unreviewed sells" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "Weekly institutional holders & analyst ratings" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Added job "Weekly AI model accuracy calibration" to job store "default"
+2026-07-02 16:04:29 INFO apscheduler.scheduler | Scheduler started
+2026-07-02 16:04:29 INFO bottleneck_hunter.web.app | Watchlist scheduler started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:61653 - "GET /api/system/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /static/css/style.css?v=64 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56067 - "GET /static/vendor/echarts.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /static/vendor/d3.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /static/vendor/marked.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62045 - "GET /static/css/admin.css?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /static/js/app.js?v=81 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /static/js/syslog.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /static/js/account.js?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62045 - "GET /static/css/base/tokens.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /static/css/base/reset.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /static/css/layout/header.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /static/css/layout/panels.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /static/css/components/modals.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62045 - "GET /static/css/components/common.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /static/css/components/markdown.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /static/css/components/analysis-tag.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /static/css/wizard/wizard.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62045 - "GET /static/css/watchlist/watchlist.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /static/css/decision/decision.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /static/css/simtrading/simtrading.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /static/css/aiconfig/aiconfig.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /static/js/charts.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /static/js/watchlist.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /static/js/phases.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56067 - "GET /static/js/reverse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /static/js/simtrading.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62045 - "GET /static/js/decision.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /static/js/ai-config.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /static/js/admin.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /static/js/utils/confirm.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56067 - "GET /static/js/sse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62045 - "GET /static/js/settings.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /static/js/phase-views.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /static/js/wizard-state.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /static/js/ai-features.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56067 - "GET /static/js/drawer.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /static/js/analysis-tag.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /static/js/report-export.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /api/reverse/list?market=us_stock HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62045 - "GET /api/watchlist/budget HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56067 - "GET /api/ai-config/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /api/watchlist/pipeline-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /api/ai-config/roles HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /api/ai-config/test/results HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62045 - "GET /api/ai-config/recommendations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56067 - "GET /api/custom-providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49381 - "GET /api/watchlist/strategy-summaries HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64105 - "GET /api/system/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53795 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:53688 - "GET /api/watchlist/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /api/auth/me HTTP/1.1" 200 OK
+2026-07-02 16:06:27 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
+INFO:     127.0.0.1:53688 - "GET /api/admin/users HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /api/admin/invite-codes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53688 - "GET /api/admin/config HTTP/1.1" 200 OK
+2026-07-02 16:06:30 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
+INFO:     127.0.0.1:62889 - "GET /api/admin/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62889 - "GET /api/admin/smtp-config HTTP/1.1" 200 OK
+2026-07-02 16:06:32 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
+INFO:     127.0.0.1:62889 - "GET /api/admin/users HTTP/1.1" 200 OK
+2026-07-02 16:06:34 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
+INFO:     127.0.0.1:62889 - "GET /api/admin/users/f491ed280c914b20/overview HTTP/1.1" 200 OK
+2026-07-02 16:06:43 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
+INFO:     127.0.0.1:56907 - "GET /api/admin/users/9644de83da2d40cb/overview HTTP/1.1" 200 OK
+2026-07-02 16:07:01 INFO bottleneck_hunter.web.admin_api | 管理员更新用户 admin: {'watchlist_limit': 48}
+INFO:     127.0.0.1:59002 - "PATCH /api/admin/users/9031155156574a7c HTTP/1.1" 200 OK
+2026-07-02 16:07:01 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
+INFO:     127.0.0.1:59002 - "GET /api/admin/users HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59002 - "GET /api/auth/me HTTP/1.1" 200 OK
+2026-07-02 16:09:52 WARNING bottleneck_hunter.chain.hot_sector | AKShare 板块数据获取失败，使用纯 LLM 推荐: 
+2026-07-02 16:09:56 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:09:58 INFO bottleneck_hunter.chain.hot_sector | LLM 热点推荐完成: 8 个赛道
+INFO:     127.0.0.1:64237 - "POST /api/hot-scan HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /static/css/style.css?v=64 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /static/css/admin.css?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65452 - "GET /static/vendor/echarts.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52305 - "GET /static/vendor/d3.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /static/vendor/marked.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57027 - "GET /static/js/app.js?v=81 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /static/js/syslog.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /static/js/account.js?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /static/css/base/tokens.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57027 - "GET /static/css/base/reset.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /static/css/layout/header.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52305 - "GET /static/css/components/common.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /static/css/layout/panels.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /static/css/components/modals.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57027 - "GET /static/css/components/markdown.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /static/css/components/analysis-tag.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /static/css/wizard/wizard.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52305 - "GET /static/css/watchlist/watchlist.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /static/css/decision/decision.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57027 - "GET /static/css/simtrading/simtrading.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /static/css/aiconfig/aiconfig.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65452 - "GET /static/js/reverse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52305 - "GET /static/js/simtrading.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /static/js/decision.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /static/js/watchlist.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /static/js/charts.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57027 - "GET /static/js/phases.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52305 - "GET /static/js/admin.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65452 - "GET /static/js/ai-config.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /static/js/utils/confirm.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /static/js/sse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /static/js/phase-views.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57027 - "GET /static/js/report-export.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52305 - "GET /static/js/wizard-state.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65452 - "GET /static/js/settings.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /static/js/ai-features.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /static/js/analysis-tag.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /static/js/drawer.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /api/ai-config/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65452 - "GET /api/reverse/list?market=us_stock HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52305 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57027 - "GET /api/watchlist/budget HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /api/watchlist/pipeline-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /api/watchlist/strategy-summaries HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65452 - "GET /api/ai-config/roles HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56857 - "GET /api/ai-config/test/results HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52305 - "GET /api/ai-config/recommendations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57027 - "GET /api/custom-providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59602 - "GET /api/system/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49746 - "GET /api/watchlist/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /static/css/style.css?v=64 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /static/css/admin.css?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54990 - "GET /static/vendor/echarts.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57500 - "GET /static/vendor/d3.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /static/vendor/marked.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /static/js/app.js?v=81 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /static/js/syslog.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /static/js/account.js?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /static/css/base/tokens.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /static/css/base/reset.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /static/css/layout/header.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57500 - "GET /static/css/layout/panels.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /static/css/components/common.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /static/css/components/modals.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /static/css/components/markdown.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /static/css/components/analysis-tag.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57500 - "GET /static/css/wizard/wizard.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /static/css/watchlist/watchlist.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /static/css/decision/decision.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /static/css/simtrading/simtrading.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /static/css/aiconfig/aiconfig.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /static/js/watchlist.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /static/js/decision.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57500 - "GET /static/js/simtrading.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /static/js/phases.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /static/js/reverse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54990 - "GET /static/js/charts.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /static/js/admin.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57500 - "GET /static/js/ai-config.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /static/js/utils/confirm.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /static/js/sse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54990 - "GET /static/js/phase-views.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /static/js/report-export.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /static/js/wizard-state.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /static/js/ai-features.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57500 - "GET /static/js/settings.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /static/js/drawer.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /static/js/analysis-tag.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /api/ai-config/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /api/reverse/list?market=us_stock HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57500 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54990 - "GET /api/watchlist/budget HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /api/watchlist/pipeline-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /api/watchlist/strategy-summaries HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /api/ai-config/roles HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57500 - "GET /api/ai-config/recommendations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54990 - "GET /api/custom-providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54870 - "GET /api/ai-config/test/results HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57770 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50927 - "GET /api/system/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62572 - "GET /api/watchlist/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /static/css/style.css?v=64 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /static/css/admin.css?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /static/vendor/echarts.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56867 - "GET /static/vendor/d3.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /static/vendor/marked.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60811 - "GET /static/js/app.js?v=81 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /static/js/syslog.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /static/js/account.js?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /static/css/base/tokens.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56867 - "GET /static/css/layout/panels.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /static/css/base/reset.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60811 - "GET /static/css/components/modals.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /static/css/components/common.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /static/css/layout/header.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /static/css/components/markdown.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60811 - "GET /static/css/watchlist/watchlist.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56867 - "GET /static/css/decision/decision.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /static/css/components/analysis-tag.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /static/css/wizard/wizard.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /static/css/simtrading/simtrading.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /static/css/aiconfig/aiconfig.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /static/js/charts.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /static/js/reverse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /static/js/watchlist.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60811 - "GET /static/js/simtrading.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /static/js/phases.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56867 - "GET /static/js/decision.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /static/js/ai-config.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /static/js/admin.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60811 - "GET /static/js/sse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /static/js/phase-views.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /static/js/utils/confirm.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56867 - "GET /static/js/settings.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /static/js/wizard-state.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /static/js/ai-features.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60811 - "GET /static/js/drawer.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /static/js/analysis-tag.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /static/js/report-export.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /api/reverse/list?market=us_stock HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56867 - "GET /api/watchlist/budget HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60811 - "GET /api/ai-config/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55594 - "GET /api/watchlist/pipeline-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /api/watchlist/strategy-summaries HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /api/ai-config/roles HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58122 - "GET /api/ai-config/test/results HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56867 - "GET /api/ai-config/recommendations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60811 - "GET /api/custom-providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65236 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55594 - "GET /api/system/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59291 - "GET /api/watchlist/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /static/css/style.css?v=64 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /static/css/admin.css?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64825 - "GET /static/vendor/echarts.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /static/vendor/d3.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /static/vendor/marked.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /static/js/app.js?v=81 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /static/js/syslog.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /static/js/account.js?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /static/css/base/tokens.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /static/css/base/reset.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /static/css/layout/header.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /static/css/layout/panels.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /static/css/components/common.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /static/css/components/modals.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /static/css/components/markdown.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /static/css/components/analysis-tag.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /static/css/wizard/wizard.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /static/css/watchlist/watchlist.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /static/css/decision/decision.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /static/css/aiconfig/aiconfig.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /static/css/simtrading/simtrading.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /static/js/reverse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /static/js/simtrading.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64825 - "GET /static/js/watchlist.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /static/js/decision.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /static/js/phases.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /static/js/charts.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /static/js/ai-config.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /static/js/admin.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64825 - "GET /static/js/sse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /static/js/utils/confirm.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /static/js/phase-views.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /static/js/settings.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /static/js/wizard-state.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /static/js/ai-features.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64825 - "GET /static/js/drawer.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /static/js/analysis-tag.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /static/js/report-export.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64825 - "GET /api/ai-config/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /api/reverse/list?market=us_stock HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /api/watchlist/budget HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54947 - "GET /api/watchlist/pipeline-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /api/watchlist/strategy-summaries HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64825 - "GET /api/ai-config/roles HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56790 - "GET /api/ai-config/test/results HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53308 - "GET /api/ai-config/recommendations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50632 - "GET /api/custom-providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53495 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:54947 - "GET /api/system/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64825 - "GET /api/watchlist/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56794 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51964 - "POST /api/phase1 HTTP/1.1" 200 OK
+2026-07-02 16:53:01 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:53:33 INFO bottleneck_hunter.chain.decomposer | Decomposed layer 1: found 7 nodes
+2026-07-02 16:53:38 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:53:39 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:53:40 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:53:50 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:54:01 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:54:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:54:15 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:54:51 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '注射用辅料(上游工艺与包装)' → '注射用辅料'
+2026-07-02 16:54:51 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '保护氨基酸（Fmoc/tBoc衍生物）' → '保护氨基酸'
+2026-07-02 16:54:51 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '缩合试剂（HBTU/HATU等）' → '缩合试剂'
+2026-07-02 16:54:51 INFO bottleneck_hunter.chain.decomposer | Decomposed layer 2: found 25 nodes
+2026-07-02 16:54:51 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:55:02 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:55:04 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:55:08 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:55:21 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:55:23 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:55:43 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:55:54 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:55:59 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:12 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:16 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:20 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:25 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:40 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:47 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:50 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:55 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:56:56 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:57:05 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:57:16 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:57:23 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:57:27 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:57:54 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:57:57 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:57:59 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '注射笔外壳模具' → '注射笔外壳组件'
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '三氟乙酸' → '三氟乙酸（TFA）'
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高纯有机硅基切割试剂（TIS/H2O等添加剂）' → '切割试剂'
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '超纯水制备系统与离子交换树脂' → '离子交换树脂'
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '溶剂（己烷）' → '反应溶剂（DMF/NMP等）'
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '温控系统（加热圈与冷却管路）' → '温控与热交换模块'
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '模具（注射笔外壳专用）' → '模具与模仁'
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '医用级聚丙烯专用添加剂' → '医用级聚丙烯'
+2026-07-02 16:58:35 INFO bottleneck_hunter.chain.decomposer | Decomposed layer 3: found 105 nodes
+2026-07-02 16:58:36 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:58:36 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:58:39 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:58:43 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:58:52 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:05 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:09 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:12 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:17 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:21 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:24 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:44 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:45 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 16:59:46 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:00:25 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:00:32 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:00:40 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:00:59 WARNING bottleneck_hunter.chain.decomposer | LLM 超时 (120s)，重试 1/2: 缩合剂生产设备
+2026-07-02 17:01:01 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:01:05 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:01:12 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:01:15 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:01:37 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:01:39 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:01:48 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:02:10 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:02:16 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:02:17 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:02:49 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:02:50 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:03:00 WARNING bottleneck_hunter.chain.decomposer | LLM 超时 (120s)，重试 1/2: 上海伍丰
+2026-07-02 17:03:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:03:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:03:28 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:03:30 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:03:37 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:03:46 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:03:53 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:04:02 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:04:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:04:16 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:04:30 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:04:48 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:04:58 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:04:59 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:05:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:05:25 WARNING bottleneck_hunter.chain.decomposer | LLM 超时 (120s)，重试 1/2: 外壳表面处理剂
+2026-07-02 17:05:28 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:05:34 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:05:38 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:06:03 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:06:07 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:06:20 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:06:25 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:06:42 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:06:48 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:06:49 WARNING bottleneck_hunter.chain.decomposer | LLM 超时 (120s)，重试 1/2: 发酵原料（葡萄糖/淀粉/玉米浆）
+2026-07-02 17:07:03 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:07:07 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:07:09 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:07:20 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:07:43 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:07:45 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:08:03 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:08:17 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:08:18 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:08:37 WARNING bottleneck_hunter.chain.decomposer | LLM 超时 (120s)，重试 1/2: 哌啶
+2026-07-02 17:08:41 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:08:41 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:09:10 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:09:15 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:09:17 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:09:33 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:09:34 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:09:55 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:10:11 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:10:12 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:10:20 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:10:45 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:10:49 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:11:07 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:11:07 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:11:09 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:11:24 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:11:26 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:11:43 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:11:59 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:12:01 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:12:10 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:12:36 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:12:57 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:12:58 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:13:00 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:13:00 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:13:36 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:13:53 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:13:55 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:14:10 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:14:14 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:14:27 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:14:28 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:15:05 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:15:11 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:15:28 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:15:28 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:15:40 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:15:58 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:16:05 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:16:16 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:16:41 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:16:58 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:17:11 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:17:13 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:17:30 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:18:12 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '芴甲醇' → '甲醇'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '催化剂（如DMAP）' → '连接臂合成用催化剂（HATU/DIC等）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高精度反应釜与搅拌系统' → '反应釜'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '三氟乙酸（TFA）合成原料' → '三氟乙酸（TFA）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '精密减速器与丝杠副' → '精密减速器'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '搅拌系统组件（磁力耦合器/搅拌桨）' → '搅拌桨叶与电机驱动总成'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '316L不锈钢管材' → '精密不锈钢管材'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '液相色谱泵核心零部件（柱塞杆/密封圈/单向阀）' → '液相色谱系统'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '液相色谱泵模块' → '液相色谱系统'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '光学元件（透镜、反射镜等）' → '光谱仪核心光学元件'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高效液相色谱泵模块' → '液相色谱系统'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '检测器模块（除质谱外）' → '紫外检测器模块'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '连续退火炉' → '退火炉'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '可编程逻辑控制器（PLC）与运动控制卡' → '可编程逻辑控制器（PLC）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '医用级抗氧剂（如BHT或生育酚）' → '抗氧剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '医用级色母粒挤出造粒设备' → '医用级色母粒'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '稀释剂' → '溶剂与稀释剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '医用级硅油终端封端剂' → '医用级硅油'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '医用级硅油生物相容性测试服务' → '医用级硅油'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '齿轮测量与检测设备' → '精密测量与检测设备'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '特种工程塑料（PEEK/POM）' → '高性能工程塑料或金属粉末原料'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '注塑模具（精密螺杆/螺母专用）' → '精密注塑模具（电机外壳）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '微控制器（MCU）' → '工业处理器与微控制器'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '传感器（MEMS）' → '微型开关与传感器'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '隔膜（聚丙烯微孔膜）' → '隔膜与单向阀组件'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '负极集流体（镍网/不锈钢壳）' → '负极材料（锂金属或石墨）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '交联剂' → '二乙烯基苯交联剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '催化剂（胺化催化剂）' → '连接臂合成用催化剂（HATU/DIC等）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '工业控制系统（DCS）' → '工业控制与编程系统'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '甲醇合成反应器' → '甲醇'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '精馏系统' → '高纯溶剂精馏与纯化设备'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: 'γ-丁内酯（GBL）合成原料' → 'γ-丁内酯（GBL）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '催化剂（GBL加氢用）' → '连接臂合成用催化剂（HATU/DIC等）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '工业甲醇' → '甲醇'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '顺酐（马来酸酐）' → '顺酐'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '液氨储运设备' → '液氨'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高纯氢气' → '氢气'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '次氯酸钠' → '氯酸钠'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '合成氨' → '合成氨工业（Haber-Bosch工艺）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '乙烯' → '交联聚苯乙烯微球'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '催化剂（铁基/分子筛）' → '连接臂合成用催化剂（HATU/DIC等）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '脱氢反应装置' → '脱氢反应器与分离塔'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '聚乙二醇(PEG)' → '聚乙二醇（PEG）衍生物'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '阻聚剂(如对羟基苯甲醚MEHQ)' → '阻聚剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '引发剂专用高纯溶剂(如甲苯、DMF)' → '引发剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '致孔剂专用有机聚合物' → '致孔剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '致孔剂用成孔剂' → '致孔剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '致孔剂用溶剂与分散介质' → '致孔剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高纯溶剂（二氯甲烷/乙腈等）' → '反应溶剂（DMF/NMP等）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '挥发性有机溶剂' → '高纯有机溶剂（苯甲醚/茴香醚）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '羟基苯并三氮唑/吡啶衍生物' → '吡啶'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '有机溶剂与精制试剂' → '高纯有机溶剂（苯甲醚/茴香醚）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '真空感应熔炼炉' → '真空系统组件'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '热处理设备' → '弹簧热处理与表面处理设备'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '机械密封壳体与法兰' → '机械密封系统'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '特种电机（伺服/步进电机）' → '微型步进电机与驱动芯片'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高精度减速器（行星减速器/谐波减速器）' → '精密减速器'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '密封组件（机械密封/磁力密封）' → '机械密封系统'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '轴承（耐腐蚀/高温轴承）' → '高精度轴承与轴系组件'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '传感器（扭矩/转速/振动传感器）' → '微型开关与传感器'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '表面修饰功能硅烷偶联剂' → '高纯硅烷偶联剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高纯溶剂(乙醇/甲醇)' → '反应溶剂（DMF/NMP等）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '交联剂' → '二乙烯基苯交联剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '交联反应釜' → '反应釜'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '活化功能基团试剂' → '功能基团试剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高纯反应溶剂' → '反应溶剂（DMF/NMP等）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高纯精馏设备' → '高纯溶剂精馏与纯化设备'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '有机胺类表面活性剂' → '表面活性剂（如聚山梨酯/泊洛沙姆）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '模板剂纯化用膜分离设备' → '膜分离设备（超滤/纳滤系统）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '光亮退火设备' → '光亮退火保护气体'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '医用级聚醚醚酮（PEEK）' → '聚醚醚酮（PEEK）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高精度激光切割与焊接设备' → '焊接材料（锡膏）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '精密注塑模具与成型耗材' → '精密注塑模具（电机外壳）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '四氟乙烯' → '聚四氟乙烯（PTFE）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高纯度不锈钢管材' → '精密不锈钢管材'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '精密焊接与成型设备' → '焊接材料（锡膏）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高压密封垫片与O型圈' → '耐高压密封垫片与O型圈'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '压力传感器与安全阀' → '压力传感器（耐腐蚀型）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '压力传感器与流量计模块' → '压力传感器（耐腐蚀型）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高压泵控制系统电路板' → '高压泵（液相色谱用）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '煤化工或天然气制甲醇' → '甲醇'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '工业级甲醇精制设备' → '甲醇'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '真空系统与泵组' → '真空系统组件'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '石英砂（高纯二氧化硅）' → '高纯石英砂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '精密滚珠丝杠与直线导轨' → '高精度滚珠丝杠与直线导轨'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '可编程逻辑控制器与运动控制卡' → '可编程逻辑控制器（PLC）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '光学检测模块' → '光学检测模块（Spectrophotometry Module）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高纯异丁烯精制设备' → '异丁烯'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '受阻酚类主抗氧剂' → '抗氧剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '亚磷酸酯类辅助抗氧剂' → '抗氧剂'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '液压油' → '液压油箱'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '密封件' → '高精度单向阀与密封件'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '压力传感器' → '压力传感器（耐腐蚀型）'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '高精度模具钢与合金材料' → '模具钢与合金材料'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '精密传感器与控制系统' → '温度传感器与控制器'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | 合并相似节点: '丙烯' → '医用级聚丙烯'
+2026-07-02 17:18:22 INFO bottleneck_hunter.chain.decomposer | Decomposed layer 4: found 442 nodes
+2026-07-02 17:18:48 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:19:54 INFO bottleneck_hunter.chain.chain_store | 产业链已保存: GLP-1药物 v1 (id=202, model=deepseek-chat)
+2026-07-02 17:19:54 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:19:56 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:19:59 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:15 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:16 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:19 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:20 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:33 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:35 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:40 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:40 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:53 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:20:58 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:00 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:12 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:17 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:20 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:23 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:27 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:40 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:43 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:44 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:21:49 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:03 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:03 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:07 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:20 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:23 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:27 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:35 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:38 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:39 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:47 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:52 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:53 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:22:57 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:23:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:23:08 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:23:08 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:24:31 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:24:33 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:24:35 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:24:38 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:24:51 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 503 Service Temporarily Unavailable"
+2026-07-02 17:24:51 INFO openai._base_client | Retrying request to /chat/completions in 0.415648 seconds
+2026-07-02 17:24:52 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:24:57 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:24:58 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:25:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:25:12 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:25:16 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:25:21 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:25:25 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:25:31 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:25:31 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:27:21 WARNING bottleneck_hunter.chain.bottleneck | 瓶颈分析超时，重试 1/2: 聚光科技
+2026-07-02 17:27:24 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:27:25 WARNING bottleneck_hunter.chain.bottleneck | 瓶颈分析超时，重试 1/2: 上海伍丰
+2026-07-02 17:27:28 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:27:30 WARNING bottleneck_hunter.chain.bottleneck | 瓶颈分析超时，重试 1/2: 赛科希德
+2026-07-02 17:27:31 WARNING bottleneck_hunter.chain.bottleneck | 瓶颈分析超时，重试 1/2: 仪电科仪
+2026-07-02 17:27:33 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:27:33 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:28:56 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:28:57 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:28:58 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:28:58 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:11 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:11 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:11 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:11 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:22 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:24 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:25 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:27 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:35 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:38 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:39 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:41 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:49 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:53 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:53 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:53 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:29:59 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:03 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:06 ERROR bottleneck_hunter.chain.bottleneck | Failed to analyze node: 高精度电池（纽扣电池）
+Traceback (most recent call last):
+  File "C:\Users\walker\Documents\walker\Vibecode\Bottleneck-Hunter\bottleneck_hunter\chain\bottleneck.py", line 555, in _analyze_node
+    reasoning=s["reasoning"],
+              ~^^^^^^^^^^^^^
+KeyError: 'reasoning'
+2026-07-02 17:30:06 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:13 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:16 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:18 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:20 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:25 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:28 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:30 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:30 ERROR bottleneck_hunter.chain.bottleneck | Failed to analyze node: 氨
+Traceback (most recent call last):
+  File "C:\Users\walker\Documents\walker\Vibecode\Bottleneck-Hunter\bottleneck_hunter\chain\bottleneck.py", line 555, in _analyze_node
+    reasoning=s["reasoning"],
+              ~^^^^^^^^^^^^^
+KeyError: 'reasoning'
+2026-07-02 17:30:31 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:35 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:41 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:41 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:41 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:46 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:49 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:50 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:54 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:30:57 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-07-02 17:31:00 INFO httpx | HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"

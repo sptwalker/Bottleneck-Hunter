@@ -445,6 +445,7 @@ CREATE TABLE IF NOT EXISTS macro_snapshots (
     date        TEXT NOT NULL,
     indicator   TEXT NOT NULL,
     value       REAL,
+    change_pct  REAL DEFAULT 0,
     market      TEXT DEFAULT 'global',
     fetched_at  TEXT,
     UNIQUE(date, indicator)
@@ -874,4 +875,6 @@ MIGRATIONS: list[str] = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_reverse_ticker ON reverse_analyses(ticker, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_reverse_market ON reverse_analyses(market, user_id)",
+    # ── L1 宏观：快照记录变动率，兜底读库时不再丢失 change_pct ──
+    "ALTER TABLE macro_snapshots ADD COLUMN change_pct REAL DEFAULT 0",
 ]

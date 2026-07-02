@@ -152,8 +152,13 @@ async function loadEquityChart(days) {
       container.innerHTML = '<p class="st-empty-hint">暂无权益数据</p>';
       return;
     }
-    if (!stState.chartEquity) {
-      stState.chartEquity = echarts.init(container);
+    if (typeof echarts === 'undefined') {
+      container.innerHTML = '<p class="st-empty-hint">图表库未加载，请刷新重试</p>';
+      return;
+    }
+    // getInstanceByDom 兜底：若容器曾被 innerHTML 覆盖，旧实例已失效，需重新 init
+    if (!stState.chartEquity || stState.chartEquity.isDisposed?.()) {
+      stState.chartEquity = echarts.getInstanceByDom(container) || echarts.init(container);
     }
     const dates = history.map(h => h.date);
     const values = history.map(h => h.equity);
@@ -172,6 +177,7 @@ async function loadEquityChart(days) {
       }],
     });
   } catch (e) {
+    console.error('权益曲线渲染失败:', e);
     container.innerHTML = '<p class="st-empty-hint">加载失败</p>';
   }
 }

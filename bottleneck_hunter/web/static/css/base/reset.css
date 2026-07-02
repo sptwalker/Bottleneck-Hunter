@@ -11,6 +11,7 @@
 html {
   font-size: 16px;
   -webkit-text-size-adjust: 100%;
+  scrollbar-gutter: stable; /* 恒定预留竖向滚动条宽度，避免页签/视图内容高矮不同导致宽度左右跳动 */
 }
 
 body {

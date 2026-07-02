@@ -78,6 +78,23 @@ class _SimTradingMixin:
             conn.close()
 
 
+    def list_sim_accounts(self, user_id: str) -> list[dict]:
+        """只读列出某用户所有市场的模拟账户（不自动创建）——供管理端聚合查看。
+
+        get_sim_account() 在无账户时会自动 INSERT 默认账户，管理端查看不能触发副作用，
+        故此处直接按 user_id 读全部市场的账户行。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM sim_account WHERE user_id = ? ORDER BY market",
+                (user_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
     def create_sim_trade(self, account_id: str, ticker: str, side: str,
                          shares: int, price: float, amount: float,
                          execution_plan_id: str | None = None,

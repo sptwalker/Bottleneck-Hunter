@@ -1203,6 +1203,14 @@ function applySectorConfig(s) {
   if (sectorEl) sectorEl.value = s.sector || '';
   const productEl = document.getElementById('wiz-product');
   if (productEl) productEl.value = s.product || '';
+  // 赛道自带的主分析模型（在“配置赛道参数”详细设置里选）→ 同步到 getMainModel() 读取的 wiz-main-model
+  const mainModel = document.getElementById('wiz-main-model');
+  if (s.model && mainModel) {
+    if (!Array.from(mainModel.options).some(o => o.value === s.model)) {
+      mainModel.add(new Option(s.model, s.model));
+    }
+    mainModel.value = s.model;
+  }
   updateSidebarStatus();
 }
 
@@ -1220,6 +1228,15 @@ function showCtxMenu(e, btn) {
   document.getElementById('ctx-market').value = s.market || 'us_stock';
   document.getElementById('ctx-sector').value = s.sector || '';
   document.getElementById('ctx-product').value = s.product || '';
+  const ctxModel = document.getElementById('ctx-model');
+  if (ctxModel && s.model) {
+    if (!Array.from(ctxModel.options).some(o => o.value === s.model)) {
+      ctxModel.add(new Option(s.model, s.model));
+    }
+    ctxModel.value = s.model;
+  } else if (ctxModel) {
+    ctxModel.selectedIndex = 0;  // 未设置则回到默认
+  }
 
   menu.style.display = 'block';
   if (e.type === 'click') {
@@ -1248,6 +1265,7 @@ function initCtxMenu() {
       sectors[idx].market = document.getElementById('ctx-market').value;
       sectors[idx].sector = document.getElementById('ctx-sector').value;
       sectors[idx].product = document.getElementById('ctx-product').value;
+      sectors[idx].model = document.getElementById('ctx-model')?.value || '';
       sectors[idx].name = sectors[idx].sector;
       saveSectors(sectors);
       renderSectorButtons();
@@ -1258,6 +1276,7 @@ function initCtxMenu() {
     const sector = document.getElementById('ctx-sector')?.value?.trim();
     const product = document.getElementById('ctx-product')?.value?.trim();
     const market = document.getElementById('ctx-market')?.value || 'us_stock';
+    const model = document.getElementById('ctx-model')?.value || '';
     if (!sector || !product) { alert('请输入产业方向和终端产品'); return; }
     if (ctxTarget) {
       const idx = parseInt(ctxTarget.dataset.idx);
@@ -1266,6 +1285,7 @@ function initCtxMenu() {
         sectors[idx].market = market;
         sectors[idx].sector = sector;
         sectors[idx].product = product;
+        sectors[idx].model = model;
         sectors[idx].name = sector;
         saveSectors(sectors);
         renderSectorButtons();
@@ -1273,7 +1293,7 @@ function initCtxMenu() {
     }
     hideCtxMenu();
     resetForNewAnalysis();
-    applySectorConfig({ sector, product, market });
+    applySectorConfig({ sector, product, market, model });
     goToPhase(1);
   });
   document.getElementById('ctx-delete')?.addEventListener('click', () => {
@@ -1879,7 +1899,7 @@ async function refreshModelSelectors(fallbackProviderList) {
     return `<option value="${val}">${_escapeHtml(p.name)}</option>`;
   }).join('');
 
-  ['wiz-main-model', 'wiz-p1-model', 'wiz-auto-model'].forEach(id => {
+  ['wiz-main-model', 'wiz-p1-model', 'wiz-auto-model', 'ctx-model'].forEach(id => {
     const sel = document.getElementById(id);
     if (!sel) return;
     const prev = sel.value;

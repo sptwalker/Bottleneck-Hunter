@@ -729,7 +729,7 @@ function renderMatrixForGroup(group) {
 
     for (let i = 0; i < numSlots; i++) {
       const existing = (role.slots || []).find(s => s.slot_index === i);
-      const slotLabel = role.multi_model ? `模型 ${i + 1}` : '';
+      const slotLabel = role.multi_model ? ((role.slot_labels && role.slot_labels[i]) || `模型 ${i + 1}`) : '';
       const selectedProvider = existing?.provider || '';
       const selectedModel = existing?.model || '';
 

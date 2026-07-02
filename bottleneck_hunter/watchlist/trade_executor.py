@@ -42,10 +42,18 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
                      or result_json.get("target_price")
                      or result_json.get("estimated_price", 0))
 
-    # 消除前视偏差：成交基准价用「下单确认时的最新市价」而非 L4 规划时 LLM 估的目标价，
-    # 否则 win_rate/收益率会被系统性美化并污染自进化回路。取不到快照才回退规划价。
+    # 诚信/防前视偏差：成交必须基于真实市价快照。取不到真实快照时【拒绝成交】，
+    # 绝不用 L4 规划时 LLM 估的目标价成交（那会用幻觉价污染 sim_trades / win_rate / 自进化回路）。
     snap = store.get_latest_snapshot(ticker)
-    exec_basis = (snap.get("close") if snap and snap.get("close") else None) or planned_price
+    real_px = snap.get("close") if snap and snap.get("close") else None
+    if not real_px:
+        return {"error": "无真实市价快照，拒绝以 LLM 估价成交", "plan_id": plan_id,
+                "needs": "price_snapshot", "ticker": ticker}
+    # 偏离度硬校验：规划价与真实市价偏离过大（>30%）时，说明 LLM 估价严重失真或标的异动，暂缓成交。
+    if planned_price and abs(real_px - planned_price) / planned_price > 0.30:
+        return {"error": "规划价与真实市价偏离 >30%，暂缓成交待复核", "plan_id": plan_id,
+                "planned_price": planned_price, "market_price": real_px, "ticker": ticker}
+    exec_basis = real_px
     # 注：result_json 的 limit_price/split_plan/execution_method 当前执行器未支持（死配置）。
 
     if not action or not ticker or not shares or not exec_basis:

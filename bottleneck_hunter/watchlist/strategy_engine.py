@@ -392,16 +392,11 @@ async def refresh_strategy_one(
         # 获取 LLM
         llm, _, _ = get_llm_for_position(position="watchlist_strategy")
         if not llm:
-            # Mock 数据
-            store.complete_strategy(
-                strategy_id,
-                intelligence_summary="模拟数据（未配置 LLM）",
-                core_logic="当前无 LLM 配置，无法生成策略",
-                signal="neutral",
-                confidence=5,
-            )
-            yield _sse("stock_strategy_done", ticker=ticker, version=version,
-                       signal="neutral", confidence=5, message=f"{ticker} 策略生成完成（Mock）")
+            # 诚信原则：无 LLM 时不生成 mock 策略冒充 completed（会流入 L3/决策链）。
+            # 标记为 failed，前端与下游明确感知"策略不可用"而非"中性策略"。
+            store.fail_strategy(strategy_id, "未配置 LLM，无法生成策略")
+            yield _sse("stock_strategy_error", ticker=ticker, version=version,
+                       error="未配置 LLM", message=f"{ticker} 策略生成跳过（未配置 LLM）")
             return
 
         # 检查预算

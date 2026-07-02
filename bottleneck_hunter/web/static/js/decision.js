@@ -19,6 +19,11 @@ const dcState = {
   lightErrors: new Set(),   // 本轮决策中失败的模块（保留红灯）
 };
 
+/* ── L1 宏观咨询抽屉 ─────────────────────────────── */
+const CONSULT_ROLES = { macro_market: '🌐 宏观市场分析师', industry_trend: '🏭 产业动向分析师' };
+const CONSULT_ROUND = { 0: '开场', 1: '', 2: '· 辩论' };
+const dcConsult = { market: null, streaming: false, bubbles: {} };
+
 /* ── 面板信号灯 ─────────────────────────────────────── */
 
 // SSE 事件 layer → 面板灯 id 后缀
@@ -889,6 +894,7 @@ export function initDecision() {
     marketSel.addEventListener('change', (e) => {
       dcState.market = e.target.value;
       dcState.overview = null;
+      closeConsultDrawer();   // 抽屉绑定打开时的市场，切换市场即关闭
       loadOverview();
     });
   }
@@ -923,6 +929,19 @@ export function initDecision() {
   document.getElementById('dc-meeting-export')?.addEventListener('click', exportMeetingReport);
   meetingDrawer?.addEventListener('click', (e) => {
     if (e.target === meetingDrawer) closeMeetingDrawer();
+  });
+
+  // L1 宏观咨询抽屉
+  document.getElementById('dc-macro-consult-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();   // 不触发 L1 卡片折叠
+    openConsultDrawer();
+  });
+  document.getElementById('dc-consult-close')?.addEventListener('click', closeConsultDrawer);
+  const consultDrawer = document.getElementById('dc-consult-drawer');
+  consultDrawer?.addEventListener('click', (e) => { if (e.target === consultDrawer) closeConsultDrawer(); });
+  document.getElementById('dc-consult-send')?.addEventListener('click', sendConsult);
+  document.getElementById('dc-consult-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendConsult(); }
   });
 
   const navBtn = document.querySelector('.nav-btn[data-view="trading"]');
@@ -1340,6 +1359,246 @@ function _bindMeetingChallenge(container) {
 function closeMeetingDrawer() {
   const drawer = document.getElementById('dc-meeting-drawer');
   if (drawer) drawer.style.display = 'none';
+}
+
+/* ── L1 宏观咨询互动 ──────────────────────────────── */
+
+function marketLabel(m) { return m === 'a_stock' ? 'A股' : m === 'hk_stock' ? '港股' : '美股'; }
+
+// 无进度条副作用、无重试的 SSE 读取（对会创建消息的流更安全，避免断连重发重复生成）
+async function consultStream(path, body, { onEvent, onDone, onError } = {}) {
+  try {
+    const res = await fetch(`${DC_API}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : null,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try { const data = JSON.parse(line.slice(6)); if (onEvent) onEvent(data); } catch {}
+        }
+      }
+    }
+    if (onDone) onDone();
+  } catch (e) {
+    if (onError) onError(e); else console.error('consult SSE error:', e);
+  }
+}
+
+function setConsultSending(on) {
+  dcConsult.streaming = on;
+  const btn = document.getElementById('dc-consult-send');
+  const ta = document.getElementById('dc-consult-input');
+  if (btn) { btn.disabled = on; btn.textContent = on ? '思考中…' : '发送'; }
+  if (ta) ta.disabled = on;
+}
+
+function _modelLabel(provider, model) {
+  if (!provider && !model) return '';
+  return provider && model ? `${provider}/${model}` : (model || provider);
+}
+
+function _consultBubbleEl(m) {
+  const div = document.createElement('div');
+  if (m.type === 'user') {
+    div.className = 'dc-bubble dc-bubble-user';
+    div.textContent = m.content || '';
+  } else if (m.type === 'summary') {
+    div.className = 'dc-bubble dc-bubble-summary';
+    div.innerHTML = '<div class="dc-bubble-role">📋 历史摘要</div>';
+    const c = document.createElement('div'); c.textContent = m.content || ''; div.appendChild(c);
+  } else if (m.type === 'system') {
+    div.className = 'dc-bubble dc-bubble-system';
+    div.textContent = m.content || '';
+  } else { // analyst
+    div.className = `dc-bubble dc-bubble-analyst dc-bubble-${m.role}`;
+    const name = CONSULT_ROLES[m.role] || m.name || m.role || '';
+    const rmark = CONSULT_ROUND[m.round] || '';
+    const head = document.createElement('div');
+    head.className = 'dc-bubble-role';
+    head.innerHTML = `${escDC(name)}<span class="dc-bubble-round">${escDC(rmark)}</span>`
+      + `<span class="dc-bubble-model">${escDC(_modelLabel(m.provider, m.model))}</span>`;
+    const c = document.createElement('div'); c.textContent = m.content || '';
+    div.appendChild(head); div.appendChild(c);
+  }
+  return div;
+}
+
+function _createStreamBubble(role, round) {
+  const log = document.getElementById('dc-consult-log');
+  const div = _consultBubbleEl({ type: 'analyst', role, round, content: '' });
+  log.appendChild(div);
+  div._content = div.querySelector('div:last-child');
+  div._modelEl = div.querySelector('.dc-bubble-model');  // msg_done 时回填具体模型
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+function appendConsultBubble(m) {
+  const log = document.getElementById('dc-consult-log');
+  if (!log) return;
+  log.appendChild(_consultBubbleEl(m));
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderConsultSnapshot(snap) {
+  const el = document.getElementById('dc-consult-snapshot');
+  if (!el || !snap) return;
+  const fmtInd = (obj) => Object.entries(obj || {})
+    .filter(([k]) => k !== 'watchlist_breadth')
+    .map(([k, v]) => {
+      const label = (v && v.label) || k;
+      const val = v && v.value != null ? v.value : '';
+      const chg = v && v.change_pct != null ? ` (${v.change_pct > 0 ? '+' : ''}${v.change_pct}%)` : '';
+      return `${escDC(label)} ${escDC(String(val))}${escDC(chg)}`;
+    }).join(' · ');
+  const rows = [];
+  const push = (label, val) => { if (val) rows.push(`<div class="dc-snap-row"><span class="dc-snap-label">${label}</span>${val}</div>`); };
+  push('大盘', fmtInd(snap.indices));
+  push('情绪', fmtInd(snap.sentiment));
+  push('宏观', fmtInd(snap.macro));
+  const sectors = Object.entries(snap.sectors || {})
+    .map(([k, v]) => `${escDC(k)} ${v && v.avg_change != null ? (v.avg_change > 0 ? '+' : '') + v.avg_change + '%' : ''}`)
+    .join(' · ');
+  push('板块', sectors);
+  const st = snap.strategy || {};
+  if (st.regime || st.market_summary) {
+    push('当前L1策略', `${escDC(st.regime || '')} / ${escDC(st.risk_appetite || '')} — ${escDC(st.market_summary || '')}`);
+  }
+  const news = snap.news || [];
+  if (news.length) push('新闻', `${news.length} 条 · ${escDC((news[0] && (news[0].title || news[0].topic)) || '')}…`);
+  const wl = snap.watchlist || [];
+  if (wl.length) push('观察池', `${wl.length} 只 · ` + wl.slice(0, 12).map(w => escDC(w.ticker)).join(' ') + (wl.length > 12 ? ' …' : ''));
+  const pos = snap.positions;
+  if (Array.isArray(pos)) {
+    push('持仓', pos.length
+      ? pos.map(p => `${escDC(p.ticker)}${p.pnl_pct != null ? ` <span style="color:${p.pnl_pct >= 0 ? 'var(--up,#16a34a)' : 'var(--down,#dc2626)'}">${p.pnl_pct > 0 ? '+' : ''}${p.pnl_pct}%</span>` : ''}`).join(' · ')
+      : '空仓');
+  }
+  el.innerHTML = rows.join('') || '<div class="dc-snap-row">（暂无数据快照）</div>';
+}
+
+function renderConsultLog(transcript) {
+  const log = document.getElementById('dc-consult-log');
+  if (!log) return;
+  log.innerHTML = '';
+  const cutoff = Date.now() - 14 * 864e5;
+  const conv = transcript.filter(m => ['user', 'analyst', 'summary', 'system'].includes(m.type));
+  const folded = [], live = [];
+  for (const m of conv) {
+    const ts = Date.parse(m.ts || '') || 0;
+    if ((m.type === 'user' || m.type === 'analyst') && ts && ts < cutoff) folded.push(m);
+    else live.push(m);
+  }
+  if (folded.length) {
+    const det = document.createElement('details');
+    const sum = document.createElement('summary');
+    sum.textContent = `展开 ${folded.length} 条两周前的历史消息`;
+    det.appendChild(sum);
+    folded.forEach(m => det.appendChild(_consultBubbleEl(m)));
+    log.appendChild(det);
+  }
+  live.forEach(m => log.appendChild(_consultBubbleEl(m)));
+  log.scrollTop = log.scrollHeight;
+}
+
+function handleConsultEvent(data) {
+  const evt = data.event || '';
+  if (evt === 'snapshot') { renderConsultSnapshot(data); return; }
+  if (evt === 'system') { appendConsultBubble({ type: 'system', content: data.content }); return; }
+  if (evt === 'error') { appendConsultBubble({ type: 'system', content: '⚠ ' + (data.message || '出错') }); return; }
+  if (evt === 'chunk') {
+    const key = `${data.role}-${data.round}`;
+    let el = dcConsult.bubbles[key];
+    if (!el) { el = _createStreamBubble(data.role, data.round); dcConsult.bubbles[key] = el; }
+    el._content.textContent += data.text || '';
+    const log = document.getElementById('dc-consult-log');
+    if (log) log.scrollTop = log.scrollHeight;
+    return;
+  }
+  if (evt === 'msg_done') {
+    const el = dcConsult.bubbles[`${data.role}-${data.round}`];
+    if (el && el._modelEl) el._modelEl.textContent = _modelLabel(data.provider, data.model);
+    return;
+  }
+  // start / done：流式渲染无需额外处理
+}
+
+function _todayHasOpening(transcript) {
+  const today = new Date().toISOString().slice(0, 10);
+  const snaps = transcript.filter(m => m.type === 'snapshot' && (m.ts || '').slice(0, 10) === today);
+  if (!snaps.length) return false;
+  const lastSnapTs = snaps[snaps.length - 1].ts || '';
+  return transcript.some(m => m.type === 'analyst' && m.round === 0 && (m.ts || '') >= lastSnapTs);
+}
+
+async function openConsultDrawer() {
+  const drawer = document.getElementById('dc-consult-drawer');
+  if (!drawer) return;
+  dcConsult.market = dcState.market;
+  dcConsult.bubbles = {};
+  drawer.style.display = '';
+  const mkLabel = document.getElementById('dc-consult-market');
+  if (mkLabel) mkLabel.textContent = '· ' + marketLabel(dcConsult.market);
+  const log = document.getElementById('dc-consult-log');
+  const snapEl = document.getElementById('dc-consult-snapshot');
+  if (log) log.innerHTML = '';
+  if (snapEl) snapEl.innerHTML = '<div class="dc-snap-row">加载中…</div>';
+
+  let transcript = null;
+  try {
+    const resp = await dcFetch(`/macro/consult/history?market=${encodeURIComponent(dcConsult.market)}`);
+    const session = resp.session;
+    if (session && Array.isArray(session.transcript_json) && session.transcript_json.length) {
+      transcript = session.transcript_json;
+      const snaps = transcript.filter(m => m.type === 'snapshot');
+      if (snaps.length) renderConsultSnapshot(snaps[snaps.length - 1]);
+      renderConsultLog(transcript);
+    }
+  } catch (e) { /* 无历史，继续走 open 生成 */ }
+
+  // 当日已有开场 → 历史已展示，不再调用 open（省重复烧钱）；否则生成快照+开场
+  if (transcript && _todayHasOpening(transcript)) return;
+  setConsultSending(true);
+  await consultStream('/macro/consult/open', { market: dcConsult.market }, {
+    onEvent: handleConsultEvent,
+    onDone: () => setConsultSending(false),
+    onError: (e) => { appendConsultBubble({ type: 'system', content: '⚠ 打开失败: ' + e.message }); setConsultSending(false); },
+  });
+}
+
+function closeConsultDrawer() {
+  const d = document.getElementById('dc-consult-drawer');
+  if (d) d.style.display = 'none';
+}
+
+async function sendConsult() {
+  const ta = document.getElementById('dc-consult-input');
+  if (!ta) return;
+  const q = (ta.value || '').trim();
+  if (!q || dcConsult.streaming) return;
+  appendConsultBubble({ type: 'user', content: q });
+  ta.value = '';
+  dcConsult.bubbles = {};   // 每轮重置流式气泡映射
+  setConsultSending(true);
+  await consultStream('/macro/consult/ask', { market: dcConsult.market, question: q }, {
+    onEvent: handleConsultEvent,
+    onDone: () => setConsultSending(false),
+    onError: (e) => { appendConsultBubble({ type: 'system', content: '⚠ ' + e.message }); setConsultSending(false); },
+  });
 }
 
 /* ── 导出报告（HTML / PDF）───────────────────────── */

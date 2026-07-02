@@ -49,6 +49,8 @@ async def run_uzi_analysis(
             result = {}
 
         summary = _extract_summary(analysis_type, result)
+        if result.get("is_mock"):
+            summary = "⚠️ 模拟数据（未配置 LLM） · " + summary
         score = result.get("overall_score")
         signal = result.get("signal_distribution", {}).get("dominant")
         trap_level = result.get("trap_level")
@@ -350,6 +352,7 @@ async def _run_trap_detector(ticker: str, progress: list) -> dict:
 
 def _mock_deep_analysis(ticker: str) -> dict:
     return {
+        "is_mock": True,
         "overall_score": 6.5,
         "dimensions": {
             f"{i}_{k}": {"score": 5 + (i % 4), "label": l, "comment": "模拟数据（未配置 LLM）"}
@@ -367,6 +370,7 @@ def _mock_deep_analysis(ticker: str) -> dict:
 
 def _mock_investor_panel(ticker: str) -> dict:
     return {
+        "is_mock": True,
         "panel_consensus": 55.0,
         "signal_distribution": {"bullish": 5, "neutral": 3, "bearish": 1, "dominant": "bullish"},
         "investors": [
@@ -379,6 +383,7 @@ def _mock_investor_panel(ticker: str) -> dict:
 
 def _mock_trap_result(ticker: str) -> dict:
     return {
+        "is_mock": True,
         "ticker": ticker,
         "trap_score": 9,
         "trap_level": "🟢 安全",

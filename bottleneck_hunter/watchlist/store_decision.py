@@ -13,13 +13,13 @@ from bottleneck_hunter.watchlist.store_base import _now_iso, _today
 
 class _DecisionMixin:
     def save_macro_snapshot(self, indicator: str, date: str, value: float,
-                           fetched_at: str | None = None) -> None:
+                           fetched_at: str | None = None, change_pct: float = 0.0) -> None:
         with self._write_conn() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO macro_snapshots
-                   (date, indicator, value, fetched_at)
-                   VALUES (?, ?, ?, ?)""",
-                (date, indicator, value, fetched_at or _now_iso()),
+                   (date, indicator, value, change_pct, fetched_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (date, indicator, value, change_pct, fetched_at or _now_iso()),
             )
 
 
@@ -28,7 +28,7 @@ class _DecisionMixin:
         conn = self._connect()
         try:
             rows = conn.execute(
-                """SELECT indicator, value, date, fetched_at
+                """SELECT indicator, value, change_pct, date, fetched_at
                    FROM macro_snapshots
                    WHERE (indicator, date) IN (
                        SELECT indicator, MAX(date) FROM macro_snapshots GROUP BY indicator

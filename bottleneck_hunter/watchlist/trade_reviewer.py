@@ -339,12 +339,17 @@ async def run_trade_review(
     )
 
     # P1.2 分层绩效归因：从复盘 attribution 拆出四层评分
+    # 诚信原则：失败要以 error 级别可见（历史上此表长期 0 行且无人知晓）。
     try:
         attribution = result.get("attribution", {})
         if attribution:
             store.record_layer_performance(trade_id, ticker, attribution, return_pct)
+            logger.info("分层绩效已记录: trade=%s ticker=%s layers=%s",
+                        trade_id, ticker, list(attribution.keys()))
+        else:
+            logger.warning("复盘结果缺少 attribution，分层绩效未记录: trade=%s ticker=%s", trade_id, ticker)
     except Exception as e:
-        logger.debug("record_layer_performance failed for %s: %s", ticker, e)
+        logger.error("record_layer_performance failed for %s: %s", ticker, e, exc_info=True)
 
     if exp_card_data and exp_card_data.get("title"):
         try:
