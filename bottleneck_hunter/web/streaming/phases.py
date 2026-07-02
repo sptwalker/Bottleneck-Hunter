@@ -111,7 +111,7 @@ async def stream_phase1(
         bottleneck_llms = get_models_for_role("bottleneck")
         if not bottleneck_llms:
             bottleneck_llms = [(deep_llm, provider, model)]
-        analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=language, industry=sector)
+        analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=language, industry=sector, market=market)
         bn_queue = asyncio.Queue()
         bn_task = asyncio.create_task(
             _run_bottleneck_with_progress(analyzer, chain, top_n, bn_queue)

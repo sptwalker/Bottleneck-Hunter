@@ -203,6 +203,16 @@ function resetForNewAnalysis() {
   ['wiz-chart-scatter','wiz-chart-radar','wiz-chart-bar','wiz-chart-stack'].forEach(id => {
     const el = document.getElementById(id); if (el) el.innerHTML = '';
   });
+  // AI 图表解读面板：隐藏 + 清空 body + 复位触发按钮（防切换分析后旧解读文本残留在已展开的面板里）
+  document.querySelectorAll('.ai-expand').forEach(p => {
+    p.style.display = 'none';
+    const b = p.querySelector('.ai-expand-body');
+    if (b) b.innerHTML = '';
+  });
+  document.querySelectorAll('.ai-interp-trigger').forEach(btn => {
+    btn.classList.remove('has-cache');
+    btn.textContent = 'AI 解读';
+  });
   const aiReport = document.getElementById('wiz-ai-report');
   if (aiReport) aiReport.style.display = 'none';
   const reportBody = document.getElementById('wiz-report-body');
@@ -1771,9 +1781,13 @@ async function loadWizardAnalysis(analysisId) {
     state.p3NeedsUpdate = ps.p3 === 'yellow';
     state.p4NeedsUpdate = ps.p4 === 'yellow';
 
-    // ── AI 评点恢复 ──
+    // ── AI 评点恢复（重置 + 盖 analysis_id 防串台）──
+    ['scatter', 'radar', 'bar', 'stack'].forEach(k => updateTriggerBtn(k, false));
+    state.aiReports = {};
     if (data.ai_reports) {
-      state.aiReports = data.ai_reports;
+      for (const [key, val] of Object.entries(data.ai_reports)) {
+        state.aiReports[key] = { ...val, analysis_id: state.analysisId };
+      }
       for (const key of ['scatter', 'radar', 'bar', 'stack']) {
         if (state.aiReports[key]?.text) {
           updateTriggerBtn(key, true);

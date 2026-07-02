@@ -115,7 +115,8 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
         bottleneck_llms = get_models_for_role("bottleneck")
         if not bottleneck_llms:
             bottleneck_llms = [(deep_llm, provider, model)]
-        analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=config.language, industry=config.sector)
+        analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=config.language,
+                                      industry=config.sector, market=getattr(config, "market", ""))
 
         bn_queue = asyncio.Queue()
         bn_task = asyncio.create_task(

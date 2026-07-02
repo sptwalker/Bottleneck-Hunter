@@ -423,7 +423,9 @@ export function toggleAiInterp(chartType) {
 
   panel.style.display = '';
   const body = panel.querySelector('.ai-expand-body');
-  const cached = state.aiReports[chartType];
+  let cached = state.aiReports[chartType];
+  // 防串台：只复用属于当前分析的缓存，跨分析残留的缓存视作未命中、重新生成
+  if (cached && cached.analysis_id && cached.analysis_id !== state.analysisId) cached = null;
 
   if (cached?.text) {
     if (_aiConfigMatch(cached)) {
@@ -497,6 +499,7 @@ async function _fetchAiInterp(chartType, force) {
               model: d.model || model,
               provider: d.provider || provider,
               generated_at: d.generated_at || '',
+              analysis_id: state.analysisId,
             };
             state.aiReports[chartType] = reportData;
             _updateExpandMeta(panel, reportData);
@@ -520,7 +523,9 @@ export async function generateAiReport() {
   const btn = document.getElementById('wiz-gen-report');
   if (!body || !state.analysisId) return;
 
-  const cached = state.aiReports['comparison'];
+  let cached = state.aiReports['comparison'];
+  // 防串台：跨分析残留的缓存不复用
+  if (cached && cached.analysis_id && cached.analysis_id !== state.analysisId) cached = null;
   const isStale = cached?.text && !_aiConfigMatch(cached);
   const isFresh = cached?.text && _aiConfigMatch(cached);
 
@@ -591,6 +596,7 @@ async function _fetchAiReport(bodyEl, btn, force) {
               model: d.model || model,
               provider: d.provider || provider,
               generated_at: d.generated_at || '',
+              analysis_id: state.analysisId,
             };
           }
           if (d.message) bodyEl.innerHTML = `<p style="color:var(--danger)">${d.message}</p>`;

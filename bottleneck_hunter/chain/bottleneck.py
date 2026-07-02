@@ -198,6 +198,7 @@ class BottleneckAnalyzer:
         weights: dict[BottleneckDimension, float] | None = None,
         language: str = "zh",
         industry: str = "",
+        market: str = "",
         calibration_weights: dict[str, float] | None = None,
     ):
         if llms:
@@ -215,6 +216,7 @@ class BottleneckAnalyzer:
         else:
             self.weights = DEFAULT_WEIGHTS
         self.industry = industry
+        self.market = market
         self.language = language
         self._system_prompt = _load_prompt("bottleneck")
         self._timeout_count = 0
@@ -425,6 +427,14 @@ class BottleneckAnalyzer:
 
         overall = self._weighted_score(merged_scores)
 
+        # 集中度来源：各子报告真实数据同源（同一板块缓存），取任一 akshare 来源即可
+        real_report = next((r for r, _ in results if r.cr3_source == "akshare"), None)
+        cr3_source = "akshare" if real_report else "llm_estimate"
+        concentration_detail = real_report.concentration_detail if real_report else None
+        if real_report:
+            merged_cr3 = real_report.cr3_estimate
+            merged_hhi = real_report.hhi_estimate
+
         return BottleneckReport(
             node_name=node_name,
             node_description=description,
@@ -436,6 +446,8 @@ class BottleneckAnalyzer:
             cr3_estimate=merged_cr3,
             hhi_estimate=merged_hhi,
             hhi_adjustments=adjustments,
+            cr3_source=cr3_source,
+            concentration_detail=concentration_detail,
         )
 
     @staticmethod
@@ -469,6 +481,28 @@ class BottleneckAnalyzer:
 
         chain_context = self._build_context(node_name, graph)
 
+        # 真实行业集中度（仅 A 股）：用板块成分股市值算 CR3/HHI，作为事实锚点覆盖 LLM 估算。
+        # 东财接口间歇不可达 → 失败返回 None，静默降级回 LLM 估算，不阻断分析。
+        real_conc = None
+        if self.market == "a_stock":
+            try:
+                from bottleneck_hunter.chain.industry_concentration import compute_concentration
+                real_conc = await asyncio.to_thread(compute_concentration, node_name)
+            except Exception as e:
+                logger.debug("真实集中度计算异常(%s): %s", node_name, e)
+                real_conc = None
+
+        real_conc_block = ""
+        if real_conc:
+            tops = "、".join(f"{nm}({sh}%)" for nm, sh in real_conc.get("top_companies", [])[:5] if nm)
+            real_conc_block = (
+                f"\n## 真实市场集中度数据（来源：东方财富板块「{real_conc['board_name']}」成分股，非估算）\n"
+                f"- 该环节 A 股上市公司: {real_conc['company_count']} 家\n"
+                f"- CR3={real_conc['cr3']}%  CR5={real_conc['cr5']}%  HHI={real_conc['hhi']}\n"
+                + (f"- Top 公司（市值份额）: {tops}\n" if tops else "")
+                + "⚠ 请【直接采用】以上真实 CR3/HHI 校准 scarcity/pricing_power，不要另行估算集中度。\n"
+            )
+
         user_prompt = f"""{lang_note}
 
 产业链: {graph.sector}
@@ -477,7 +511,7 @@ class BottleneckAnalyzer:
 描述: {description}
 
 {chain_context}
-
+{real_conc_block}
 请对该环节进行瓶颈分析，对以下5个维度各打0-10分，并给出理由:
 {chr(10).join(f"- {d.value}: {desc}" for d, desc in DIMENSION_DESC.items())}
 
@@ -559,6 +593,19 @@ class BottleneckAnalyzer:
 
             cr3 = data.get("cr3_estimate")
             hhi = data.get("hhi_estimate")
+            cr3_source = "llm_estimate"
+            concentration_detail = None
+            # 真实数据存在时：用真实 CR3/HHI 覆盖 LLM 估算，并以真实值作为一致性校准锚点
+            if real_conc:
+                cr3 = int(round(real_conc["cr3"]))
+                hhi = int(real_conc["hhi"])
+                cr3_source = "akshare"
+                concentration_detail = {
+                    "board_name": real_conc["board_name"],
+                    "company_count": real_conc["company_count"],
+                    "cr5": real_conc["cr5"],
+                    "top_companies": real_conc.get("top_companies", []),
+                }
             adjustments = self._check_hhi_consistency(scores, cr3, hhi, node_name)
 
             overall = self._weighted_score(scores)
@@ -574,6 +621,8 @@ class BottleneckAnalyzer:
                 cr3_estimate=cr3,
                 hhi_estimate=hhi,
                 hhi_adjustments=adjustments,
+                cr3_source=cr3_source,
+                concentration_detail=concentration_detail,
             )
         except Exception:
             logger.exception(f"Failed to analyze node: {node_name}")

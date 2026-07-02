@@ -764,11 +764,23 @@ export function renderBottleneckBars(reports) {
   _hideBottleneckCompanyPanel();
 }
 
-function _showBottleneckCompanyPanel(companies, nodeName) {
+function _showBottleneckCompanyPanel(companies, nodeName, report) {
   const panel = document.getElementById('bottleneck-company-panel');
   if (!panel) return;
   const filtered = _filterCompaniesByMarket(companies);
   let html = `<div class="nip-header"><span class="nip-title">${_esc(nodeName)}</span><span class="nip-type">代表企业</span></div>`;
+  // 集中度来源徽章：真实计算 vs LLM 估算，让用户一眼分辨数据可信度
+  if (report && (report.cr3_estimate != null || report.hhi_estimate != null)) {
+    const cd = report.concentration_detail || {};
+    const cr3 = report.cr3_estimate != null ? report.cr3_estimate : '?';
+    const hhi = report.hhi_estimate != null ? report.hhi_estimate : '?';
+    if (report.cr3_source === 'akshare') {
+      const cnt = cd.company_count != null ? ` · A股${cd.company_count}家` : '';
+      html += `<div class="nip-conc">CR3 ${cr3}% · HHI ${hhi}${cnt} <span class="src-badge src-real" title="来源：东方财富板块成分股真实市值计算">真实计算</span></div>`;
+    } else {
+      html += `<div class="nip-conc">CR3 ~${cr3}%(估) · HHI ~${hhi} <span class="src-badge src-est" title="LLM 世界知识估算，未经数据核实">LLM估算</span></div>`;
+    }
+  }
   if (filtered.length === 0) html += `<div class="nip-empty">该环节暂无代表企业数据</div>`;
   else { html += `<table class="nip-table"><thead><tr><th>企业名称</th><th>股票代码</th></tr></thead><tbody>`; for (const c of filtered) html += `<tr><td>${_esc(c.name||'')}</td><td>${c.code?`<span class="nip-code">${_esc(c.code)}</span>`:'-'}</td></tr>`; html += `</tbody></table>`; }
   panel.innerHTML = html; panel.style.display = 'block';
@@ -787,7 +799,7 @@ export function renderRadar(report) {
   const name = report.node_name || report.name || '';
   const chainData = window.appState.results?.decompose;
   const node = chainData?.nodes?.find(n => n.name === name);
-  _showBottleneckCompanyPanel(node?.representative_companies || [], name);
+  _showBottleneckCompanyPanel(node?.representative_companies || [], name, report);
   chart.setOption({
     tooltip: { formatter: params => { if (!params.value) return ''; return dims.map((d, i) => `${d.label}: <b>${params.value[i]}</b>`).join('<br/>'); } },
     title: { text: name, left: 'center', top: 8, textStyle: { color: '#e0e0e0', fontSize: 15, fontWeight: 600 } },

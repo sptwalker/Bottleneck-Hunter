@@ -134,9 +134,12 @@ class BottleneckReport(BaseModel):
     rank: Optional[int] = None
     key_insights: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
-    cr3_estimate: Optional[int] = Field(None, ge=0, le=100, description="LLM 估算的 CR3 市场集中度(%)")
-    hhi_estimate: Optional[int] = Field(None, ge=0, le=10000, description="LLM 估算的 HHI 赫芬达尔指数")
+    cr3_estimate: Optional[int] = Field(None, ge=0, le=100, description="CR3 市场集中度(%)，来源见 cr3_source")
+    hhi_estimate: Optional[int] = Field(None, ge=0, le=10000, description="HHI 赫芬达尔指数，来源见 cr3_source")
     hhi_adjustments: list[str] = Field(default_factory=list, description="HHI 一致性校验的调整记录")
+    # 集中度数据来源标注：区分真实计算 vs LLM 估算，供前端徽章与可信度判断
+    cr3_source: str = Field("llm_estimate", description="'akshare'=板块成分股真实计算 | 'llm_estimate'=LLM估算")
+    concentration_detail: Optional[dict] = Field(None, description="真实集中度明细(板块名/公司数/CR5/Top公司)，仅 akshare 来源时有")
     # 可投性统计（H-12）：让"高瓶颈但无可投标的"在报告层可见，而非只在评估日志里
     total_supplier_count: int = Field(0, description="该瓶颈环节检索到的候选供应商总数")
     investable_supplier_count: int = Field(0, description="其中通过可投性过滤（市值/毛利/成交额/上市时长）的数量")

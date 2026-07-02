@@ -192,7 +192,7 @@ async def _llm_identify_bottleneck(llm, basic: dict, ticker: str, market: str,
     )
     graph = ChainGraph(sector=sector, end_product=end_product, nodes=[root, node])
 
-    analyzer = BottleneckAnalyzer(llm=llm, language=language, industry=sector)
+    analyzer = BottleneckAnalyzer(llm=llm, language=language, industry=sector, market=market)
     reports = await analyzer.analyze(graph)
     if reports:
         return reports[0]
