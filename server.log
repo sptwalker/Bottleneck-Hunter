@@ -1648,3 +1648,119 @@ INFO:     127.0.0.1:53247 - "POST /api/history/1bcd190e-85ee-464e-8cbc-456b99148
 INFO:     127.0.0.1:53247 - "GET /api/reverse/list?market=us_stock&owner_analysis_id=1bcd190e-85ee-464e-8cbc-456b99148ac3 HTTP/1.1" 200 OK
 INFO:     127.0.0.1:50482 - "POST /api/history/1bf42535-1f44-4d26-9b73-6b9e82a3721d/restore HTTP/1.1" 200 OK
 INFO:     127.0.0.1:50482 - "GET /api/reverse/list?market=us_stock&owner_analysis_id=1bf42535-1f44-4d26-9b73-6b9e82a3721d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /static/css/style.css?v=64 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /static/css/admin.css?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57508 - "GET /static/vendor/echarts.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60366 - "GET /static/vendor/d3.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /static/vendor/marked.min.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58113 - "GET /static/js/app.js?v=81 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /static/js/syslog.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /static/js/account.js?v=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /static/css/base/reset.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58113 - "GET /static/css/base/tokens.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /static/css/layout/header.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /static/css/layout/panels.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58113 - "GET /static/css/components/modals.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60366 - "GET /static/css/components/common.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /static/css/components/markdown.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /static/css/components/analysis-tag.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /static/css/wizard/wizard.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58113 - "GET /static/css/watchlist/watchlist.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60366 - "GET /static/css/decision/decision.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /static/css/simtrading/simtrading.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /static/css/aiconfig/aiconfig.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57508 - "GET /static/js/charts.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /static/js/simtrading.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /static/js/phases.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /static/js/reverse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60366 - "GET /static/js/watchlist.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58113 - "GET /static/js/decision.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57508 - "GET /static/js/ai-config.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /static/js/admin.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /static/js/utils/confirm.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /static/js/phase-views.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60366 - "GET /static/js/sse.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58113 - "GET /static/js/settings.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57508 - "GET /static/js/wizard-state.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /static/js/ai-features.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /static/js/analysis-tag.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /static/js/drawer.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60366 - "GET /static/js/report-export.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60366 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /api/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /api/ai-config/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /api/reverse/list?market=us_stock HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57508 - "GET /api/watchlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58113 - "GET /api/watchlist/budget HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60366 - "GET /api/watchlist/pipeline-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62668 - "GET /api/watchlist/strategy-summaries HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    raise exc
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Users\walker\Documents\walker\Vibecode\Bottleneck-Hunter\bottleneck_hunter\web\app.py", line 155, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\walker\Documents\walker\Vibecode\Bottleneck-Hunter\bottleneck_hunter\web\app.py", line 202, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\walker\AppData\Local\Programs\Python\Python312\Lib\site-packages\fastapi\routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\walker\Documents\walker\Vibecode\Bottleneck-Hunter\bottleneck_hunter\web\watchlist_api.py", line 188, in get_strategy_summaries
+    summaries = store.get_all_strategy_summaries()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\walker\Documents\walker\Vibecode\Bottleneck-Hunter\bottleneck_hunter\watchlist\store_intel.py", line 352, in get_all_strategy_summaries
+    q, p = self._user_filter(
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\walker\Documents\walker\Vibecode\Bottleneck-Hunter\bottleneck_hunter\watchlist\store.py", line 109, in _user_filter
+    raise ValueError("_user_filter 不支持含子查询的 SQL，请手写带 user_id 过滤或传 table= 别名")
+ValueError: _user_filter 不支持含子查询的 SQL，请手写带 user_id 过滤或传 table= 别名
+INFO:     127.0.0.1:60837 - "GET /api/ai-config/roles HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /api/ai-config/test/results HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57508 - "GET /api/ai-config/recommendations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58113 - "GET /api/custom-providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61595 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:60366 - "GET /api/system/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /api/watchlist/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "POST /api/history/b31873e7-2344-4fb0-afe6-ab718032d75e/restore HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET /api/reverse/list?market=us_stock&owner_analysis_id=b31873e7-2344-4fb0-afe6-ab718032d75e HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61026 - "POST /api/history/1bcd190e-85ee-464e-8cbc-456b99148ac3/restore HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61026 - "GET /api/reverse/list?market=us_stock&owner_analysis_id=1bcd190e-85ee-464e-8cbc-456b99148ac3 HTTP/1.1" 200 OK

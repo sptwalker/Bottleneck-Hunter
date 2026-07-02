@@ -105,50 +105,114 @@ def _norm_ticker(t: str) -> str:
     return (t or "").strip().upper().split(".")[0]
 
 
-def _match_existing_bottleneck(analysis_store, ticker: str) -> tuple[BottleneckReport | None, str]:
-    """在已有正向分析里找该 ticker 对应的瓶颈节点。命中返回 (report, analysis_id)。"""
+def _load_chain_context(analysis_store, owner_analysis_id: str) -> dict | None:
+    """读取当前正向分析记录的产业链上下文（赛道 + 瓶颈环节清单），供 LLM 链内定位。
+
+    返回 {sector, nodes:[{name, score, layer}]}；无 owner/读取失败/无节点 → None。
+    """
+    if not owner_analysis_id or analysis_store is None:
+        return None
+    try:
+        rec = analysis_store.get(owner_analysis_id)
+    except Exception:
+        return None
+    if not rec:
+        return None
+    rj = rec.get("result_json") or {}
+    reports = rj.get("bottleneck_reports") or []
+    if not reports:
+        return None
+    # 按瓶颈分降序，取前若干个环节名喂给 LLM
+    nodes = sorted(
+        ({"name": r.get("node_name", ""),
+          "score": r.get("overall_score"),
+          "layer": r.get("layer")}
+         for r in reports if r.get("node_name")),
+        key=lambda n: (n["score"] or 0), reverse=True,
+    )
+    if not nodes:
+        return None
+    return {"sector": rj.get("sector") or rec.get("sector", ""), "nodes": nodes}
+
+
+def _match_in_record(rec: dict, norm: str) -> BottleneckReport | None:
+    """在单条正向分析记录里找 ticker 对应的瓶颈节点。"""
+    rj = rec.get("result_json") or {}
+    reports = rj.get("bottleneck_reports") or []
+    report_by_node = {r.get("node_name", ""): r for r in reports}
+    # a) 命中已评估的供应商 → 取其瓶颈节点
+    for sc in rj.get("supplier_scorecards") or []:
+        sup = sc.get("supplier") or {}
+        if _norm_ticker(sup.get("ticker", "")) == norm:
+            node = (sc.get("bottleneck_node", "") or "").split(",")[0].strip()
+            rep = report_by_node.get(node)
+            if rep:
+                try:
+                    return BottleneckReport(**rep)
+                except Exception:
+                    pass
+    # b) 命中节点的代表性公司
+    for rep in reports:
+        for c in rep.get("representative_companies") or []:
+            if _norm_ticker(c.get("code", "")) == norm:
+                try:
+                    return BottleneckReport(**rep)
+                except Exception:
+                    pass
+    return None
+
+
+def _match_existing_bottleneck(
+    analysis_store, ticker: str, owner_analysis_id: str = "",
+) -> tuple[BottleneckReport | None, str]:
+    """在已有正向分析里找该 ticker 对应的瓶颈节点。命中返回 (report, analysis_id)。
+
+    owner_analysis_id 非空时【优先】在该正向记录（用户当前所在的产业链）里匹配，
+    使同一企业在不同赛道得到该赛道内的定位；当前链未命中才回退全局搜索。
+    """
     norm = _norm_ticker(ticker)
     if not norm or analysis_store is None:
         return None, ""
+
+    # 优先：当前产业链记录内匹配
+    if owner_analysis_id:
+        try:
+            rec = analysis_store.get(owner_analysis_id)
+            if rec:
+                rep = _match_in_record(rec, norm)
+                if rep:
+                    return rep, owner_analysis_id
+        except Exception:
+            pass
+
+    # 回退：全局搜索（当前链未命中时，仍尽量复用已有瓶颈分）
     try:
         summaries = analysis_store.list_all()[:30]
     except Exception:
         return None, ""
     for summ in summaries:
+        if summ["id"] == owner_analysis_id:
+            continue  # 已在上面查过
         try:
             rec = analysis_store.get(summ["id"])
         except Exception:
             continue
         if not rec:
             continue
-        rj = rec.get("result_json") or {}
-        reports = rj.get("bottleneck_reports") or []
-        report_by_node = {r.get("node_name", ""): r for r in reports}
-        # a) 命中已评估的供应商 → 取其瓶颈节点
-        for sc in rj.get("supplier_scorecards") or []:
-            sup = sc.get("supplier") or {}
-            if _norm_ticker(sup.get("ticker", "")) == norm:
-                node = (sc.get("bottleneck_node", "") or "").split(",")[0].strip()
-                rep = report_by_node.get(node)
-                if rep:
-                    try:
-                        return BottleneckReport(**rep), rec["id"]
-                    except Exception:
-                        pass
-        # b) 命中节点的代表性公司
-        for rep in reports:
-            for c in rep.get("representative_companies") or []:
-                if _norm_ticker(c.get("code", "")) == norm:
-                    try:
-                        return BottleneckReport(**rep), rec["id"]
-                    except Exception:
-                        pass
+        rep = _match_in_record(rec, norm)
+        if rep:
+            return rep, rec["id"]
     return None, ""
 
 
 async def _llm_identify_bottleneck(llm, basic: dict, ticker: str, market: str,
-                                   snap, language: str) -> BottleneckReport:
-    """LLM 反推产业方向 + 瓶颈环节，再用 BottleneckAnalyzer 真实打分。"""
+                                   snap, language: str,
+                                   chain_context: dict | None = None) -> BottleneckReport:
+    """LLM 反推产业方向 + 瓶颈环节，再用 BottleneckAnalyzer 真实打分。
+
+    chain_context（当前正向分析记录）非空时，把该产业链的赛道与瓶颈环节清单喂给 LLM，
+    要求它在【这条链】里给企业定位，从而实现"同一企业在不同赛道得到不同结果"。
+    """
     prompt_tpl = (PROMPTS_DIR / "reverse_identify.md").read_text(encoding="utf-8")
     lines = [
         f"- 代码: {ticker}",
@@ -167,6 +231,22 @@ async def _llm_identify_bottleneck(llm, basic: dict, ticker: str, market: str,
         if snap.gross_margin_pct is not None:
             lines.append(f"- 毛利率: {snap.gross_margin_pct:.1f}%")
     prompt = prompt_tpl.replace("{company_info}", "\n".join(lines))
+
+    # 注入当前产业链上下文：要求 LLM 在这条链里给企业定位（跨链差异化的关键）
+    if chain_context and chain_context.get("nodes"):
+        sector = chain_context.get("sector", "")
+        node_lines = "\n".join(
+            f"  - {n['name']}（瓶颈分 {n.get('score', '?')}，第{n.get('layer', '?')}层）"
+            for n in chain_context["nodes"][:30]
+        )
+        ctx_block = (
+            f"\n## 当前分析的产业链：{sector}\n"
+            f"该产业链已识别出以下瓶颈环节（节点名｜瓶颈分｜层级）：\n{node_lines}\n\n"
+            "⚠ 重要：请【优先】判断该企业在【上述这条产业链】中最贴近的瓶颈环节，"
+            "node_name 应尽量命中上面清单中的某个环节；只有当该企业确实与本链无关时，"
+            "才另行判断其所属环节。这样同一企业在不同产业链中会得到该链内的差异化定位。"
+        )
+        prompt = prompt + ctx_block
 
     resp = await llm.ainvoke(prompt)
     data = extract_json_object(getattr(resp, "content", resp))
@@ -272,15 +352,21 @@ async def stream_reverse_analysis(
 
     # ── 2. 判定瓶颈环节（混合） ──
     yield _sse("step_start", step="locate_bottleneck", message="判定所处瓶颈环节...")
-    bottleneck, matched_id = _match_existing_bottleneck(analysis_store, ticker)
+    # 当前产业链上下文（用户所在的正向记录）：既用于优先链内匹配，也喂给 LLM 兜底做链内定位
+    owner_chain_ctx = _load_chain_context(analysis_store, owner_analysis_id)
+    bottleneck, matched_id = _match_existing_bottleneck(analysis_store, ticker, owner_analysis_id)
     source = "matched" if bottleneck else "llm"
     if bottleneck:
+        in_chain = " [当前链内]" if matched_id and matched_id == owner_analysis_id else ""
         yield _sse("step_progress", step="locate_bottleneck",
-                   message=f"命中已有产业链：{bottleneck.node_name}（复用瓶颈分 {bottleneck.overall_score}）", log=True)
+                   message=f"命中已有产业链：{bottleneck.node_name}（复用瓶颈分 {bottleneck.overall_score}）{in_chain}", log=True)
     else:
-        yield _sse("step_progress", step="locate_bottleneck", message="无匹配产业链，LLM 反推中...", log=True)
+        ctx_note = f"（在 {owner_chain_ctx['sector']} 链内定位）" if owner_chain_ctx else ""
+        yield _sse("step_progress", step="locate_bottleneck", message=f"无直接匹配，LLM 反推中...{ctx_note}", log=True)
         try:
-            bottleneck = await _llm_identify_bottleneck(llm, basic, ticker, resolved_market, snap, language)
+            bottleneck = await _llm_identify_bottleneck(
+                llm, basic, ticker, resolved_market, snap, language,
+                chain_context=owner_chain_ctx)
         except Exception as e:
             logger.exception("反向分析 LLM 瓶颈识别失败")
             yield _sse("error", step="locate_bottleneck", message=f"瓶颈环节判定失败: {e}")
