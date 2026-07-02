@@ -100,16 +100,17 @@ class _SimTradingMixin:
                          execution_plan_id: str | None = None,
                          entry_id: str | None = None,
                          trade_type: str = "entry", reasoning: str = "",
-                         slippage_bps: float = 0.0) -> str:
+                         slippage_bps: float = 0.0,
+                         realized_pnl: float | None = None) -> str:
         tid = uuid.uuid4().hex[:12]
         with self._write_conn() as conn:
             conn.execute(
                 f"""INSERT INTO sim_trades
                    (id, account_id, execution_plan_id, entry_id, ticker, side,
-                    shares, price, amount, trade_type, reasoning, slippage_bps, created_at{self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                    shares, price, amount, trade_type, reasoning, slippage_bps, realized_pnl, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (tid, account_id, execution_plan_id, entry_id, ticker, side,
-                 shares, price, amount, trade_type, reasoning, slippage_bps, _now_iso()) + self._user_insert_params() + self._market_insert_params(),
+                 shares, price, amount, trade_type, reasoning, slippage_bps, realized_pnl, _now_iso()) + self._user_insert_params() + self._market_insert_params(),
             )
             return tid
 

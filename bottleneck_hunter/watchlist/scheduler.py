@@ -617,6 +617,21 @@ async def job_auto_review(market: str = "us_stock") -> None:
         except Exception as e:
             logger.debug("机会成本扫描 (user=%s) 失败: %s", uid[:8] if uid else "global", e)
 
+    # P1.6 用户偏好学习：从确认/拒绝历史归纳偏好写入 user_preferences，供 L4 参考。
+    # 需累计足够样本才有意义（交易+反馈 ≥3），否则跳过避免噪声偏好。
+    for uid, store, budget in _get_active_user_stores():
+        try:
+            from bottleneck_hunter.watchlist.preference_learner import learn_preferences
+            sample = len(store.get_sim_trades(limit=50)) + len(store.get_rejection_patterns(limit=50))
+            if sample < 3:
+                logger.debug("偏好学习 (user=%s) 跳过 — 样本不足 (%d<3)", uid[:8] if uid else "global", sample)
+                continue
+            prefs = learn_preferences(store)
+            logger.info("偏好学习 (user=%s) 完成 — %d 项: %s",
+                        uid[:8] if uid else "global", len(prefs), list(prefs.keys()))
+        except Exception as e:
+            logger.error("偏好学习 (user=%s) 失败: %s", uid[:8] if uid else "global", e)
+
 
 async def job_institutional_update() -> None:
     """每周更新美股机构持仓 & 分析师评级数据（多用户）。"""

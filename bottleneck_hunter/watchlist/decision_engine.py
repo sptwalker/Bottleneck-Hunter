@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.watchlist.store_base import normalize_market
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.regime_mapper import get_allocation_bounds, format_bounds_for_prompt
 from bottleneck_hunter.chain.json_utils import extract_json_object
@@ -306,7 +307,7 @@ def _compute_deviation_drift(store: WatchlistStore, plan_rj: dict, account: dict
         target_cash = ta.get("cash_pct")
 
     # sector 实际权重（用观察池 sector 映射）
-    sector_map = {e["ticker"]: e.get("sector", "未分类") for e in store.list_all() if e.get("market") == market}
+    sector_map = {e["ticker"]: e.get("sector", "未分类") for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)}
     actual_sector: dict[str, float] = {}
     for p in positions:
         sec = sector_map.get(p.get("ticker", ""), "未分类")
@@ -653,7 +654,6 @@ async def run_strategic_plan(
         # 诚信原则：写入失败/跳过必须计数并告警，不再静默吞（历史上此表长期 0 行无人知）。
         sv_saved, sv_skipped_no_entry, sv_missing = 0, 0, 0
         try:
-            from bottleneck_hunter.watchlist.store_base import normalize_market
             stock_selection = result.get("stock_selection", {})
             entry_map = {e["ticker"]: e["id"] for e in store.list_all()
                          if normalize_market(e.get("market")) == normalize_market(market)}
@@ -847,7 +847,7 @@ async def run_tactical_plans(
 
         stock_data = []
         entries = store.list_all()
-        entries = [e for e in entries if e.get("market") == market]
+        entries = [e for e in entries if normalize_market(e.get("market")) == normalize_market(market)]
 
         # 19C: 基于 L2 stock_selection 过滤，确保 L3 只为 L2 选定的标的生成战术计划
         strategic_json = strategic.get("result_json", {})
@@ -1194,8 +1194,8 @@ async def run_execution_plans(
         result = extract_json_object(response)
         exec_plans = result.get("execution_plans", [])
 
-        entry_map = {e["ticker"]: e["id"] for e in store.list_all() if e.get("market") == market}
-        sector_map = {e["ticker"]: e.get("sector", "") for e in store.list_all() if e.get("market") == market}
+        entry_map = {e["ticker"]: e["id"] for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)}
+        sector_map = {e["ticker"]: e.get("sector", "") for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)}
         tactical_map = {tp["ticker"]: tp["id"] for tp in actionable}
         created_ids = []
         skipped = 0
@@ -1633,7 +1633,7 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
     avg_change = sum(s.get("change_pct", 0) or 0 for s in all_snapshots) / max(len(all_snapshots), 1)
     avg_rsi = sum(s.get("rsi_14", 50) or 50 for s in all_snapshots) / max(len(all_snapshots), 1)
 
-    entries = [e for e in store.list_all() if e.get("market") == market]
+    entries = [e for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)]
     sectors = {}
     for entry in entries:
         sector = entry.get("sector", "未分类")
@@ -1686,7 +1686,7 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
 def _collect_watchlist_signals(store: WatchlistStore, market: str = "us_stock") -> list[dict]:
     """从已有的 strategy_records 收集个股信号"""
     entries = store.list_all()
-    entries = [e for e in entries if e.get("market") == market]
+    entries = [e for e in entries if normalize_market(e.get("market")) == normalize_market(market)]
     signals = []
 
     strategy_summaries = store.get_all_strategy_summaries()
@@ -1720,7 +1720,7 @@ def _collect_watchlist_signals(store: WatchlistStore, market: str = "us_stock") 
 def _update_composite_scores(store: WatchlistStore, market: str = "us_stock") -> None:
     """根据策略信心、投委会评分、催化剂活跃度计算并更新观察池综合评分。"""
     entries = store.list_all()
-    entries = [e for e in entries if e.get("market") == market]
+    entries = [e for e in entries if normalize_market(e.get("market")) == normalize_market(market)]
     strategy_summaries = store.get_all_strategy_summaries()
 
     # P3.3 绩效驱动的动态层权重(样本不足时回退默认 0.4/0.3)

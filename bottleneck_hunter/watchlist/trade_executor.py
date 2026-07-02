@@ -77,14 +77,24 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
             is_win = result.get("realized_pnl", 0) > 0
             _update_card_outcomes(store, plan_id, is_win)
             if trade_id:
-                try:
-                    asyncio.get_event_loop().create_task(
-                        _auto_review_sell(store, trade_id)
-                    )
-                except RuntimeError:
-                    logger.debug("No event loop for auto-review, skipping")
+                _schedule_auto_review(store, trade_id)
 
     return result
+
+
+def _schedule_auto_review(store: WatchlistStore, trade_id: str) -> None:
+    """触发卖出后自动复盘。诚信原则：不能像旧版那样"无事件循环就静默跳过"
+    （那正是 auto_reviews 表长期为空的根因）。有运行中的 loop → 后台任务；
+    否则（同步上下文/脚本/定时任务）→ 同步跑完，保证复盘一定发生。"""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_auto_review_sell(store, trade_id))
+    except RuntimeError:
+        # 无运行中的事件循环：同步执行到底，绝不跳过
+        try:
+            asyncio.run(_auto_review_sell(store, trade_id))
+        except Exception as e:
+            logger.error("同步自动复盘失败 %s: %s", trade_id, e)
 
 
 def _execute_buy(store: WatchlistStore, account: dict,
@@ -155,15 +165,16 @@ def _execute_sell(store: WatchlistStore, account: dict,
     commission = round(amount * COMMISSION_RATE, 2)
     net_proceeds = amount - commission
 
+    realized_pnl = round((exec_price - pos["avg_cost"]) * shares - commission, 2)
+
     trade_id = store.create_sim_trade(
         account_id=account["id"], ticker=ticker, side="sell",
         shares=shares, price=exec_price, amount=amount,
         execution_plan_id=plan_id, entry_id=entry_id,
         trade_type="exit", reasoning=reasoning,
         slippage_bps=slippage_bps,
+        realized_pnl=realized_pnl,
     )
-
-    realized_pnl = round((exec_price - pos["avg_cost"]) * shares - commission, 2)
 
     # B4: 用实际盈亏结算该 ticker 的投委会投票预测，让委员历史校准权重真正生效
     # （盈利→票判对；亏损→票判错。score_delta 借 record_outcome 的 is_correct 阈值语义：<2 判对）
@@ -213,8 +224,13 @@ def _recalc_account(store: WatchlistStore, account_id: str) -> None:
 
     sell_trades = [t for t in trades if t.get("side") == "sell"]
     if sell_trades:
-        winning = sum(1 for t in sell_trades
-                      if t.get("amount", 0) > t.get("shares", 1) * _find_avg_cost(trades, t["ticker"]))
+        # 用持久化的 realized_pnl 判定盈亏（比按均价反推更准）；旧数据无该字段时回退估算。
+        def _is_win(t):
+            rp = t.get("realized_pnl")
+            if rp is not None:
+                return rp > 0
+            return t.get("amount", 0) > t.get("shares", 1) * _find_avg_cost(trades, t["ticker"])
+        winning = sum(1 for t in sell_trades if _is_win(t))
         win_rate = round(winning / len(sell_trades) * 100, 2)
     else:
         win_rate = 0.0

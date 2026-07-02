@@ -107,3 +107,31 @@
 - ⚠️ 遗留 1：`get_event_loop().create_task()` 触发自动复盘仍脆弱 → 归入 **Phase 1.3** 根治（本就在计划内）。
 - ⚠️ 遗留 2：A 股 notice 方向性记录仍缺 shares/price，属"部分数据"非"虚构" → Phase 2 数据源增强处理。
 - 📌 发现：多处 API 测试因 auth fixture 漂移长期失败，掩盖真实回归信号 → 建议 Phase 3 顺带修复测试 auth 夹具。
+
+---
+
+### Phase 1 — 打通闭环 ✅ 完成 2026-07-02
+
+**重要审计校正**：Phase 1 精读代码后发现，审计报告中数项"业务漏洞"实为**已正确实现**，其"表为空"仅因**从未有卖出交易发生**（历史 sim_trades 全是买入），而非代码断裂：
+- **C-9 投委会 gating**：`committee.py:752-780` 的 rejected→`reject_execution`、approved_with_modifications→`apply_committee_modifications` **均已正确实现**；`_fallback_consensus:399-410` 可产出 rejected。DB 中 0 条 rejected 是真实的"委员多数通过"，非机制失效。
+- **H-13 催化剂→信号**：`decision_engine.py:833-865` L3 **已消费** `get_recently_judged_catalysts`，对持仓中催化剂落空标的 `forced` 强制纳入战术计划（止损/减仓）。已实现。
+- **C-10 约束前置于投委会**：确认存在，但属**可辩护的安全设计**（硬约束=不可谈判的安全底线）。改为投委会后置越权风险更高，暂不动，记入 Phase 2 评估。
+
+| # | 改动文件 | 验收方式 | 结果 |
+|---|---------|---------|------|
+| 1.1 | `store_schema`(+realized_pnl列)+`store_simtrading`+`trade_executor`(卖出结算持久化) | DB 迁移验证 + e2e | **PASS** 列已建；e2e 卖出 realized_pnl 落库 |
+| 1.2 | 端到端闭环走通（真实临时 DB） | 新 e2e `test_loop_e2e` | **PASS** 2/2 买入→卖出→pnl→复盘队列 |
+| 1.3 | `trade_executor._schedule_auto_review`（无 loop 同步跑，不再静默跳过） | 单测重写 + e2e | **PASS** 卖出必触发复盘 |
+| 1.6 | `scheduler.job_auto_review`（接入 `learn_preferences`，样本≥3 才跑） | 独立验收脚本 | **PASS** user_preferences 写入 4 项真实偏好 |
+| 1.7 | 催化剂→信号（已实现，验证确认） | 代码走查 | **已实现** L3 forced 纳入 |
+| — | `decision_engine` 7 处 `== market` → `normalize_market` 归一 | grep + 语法 | **PASS** 0 残留裸比较 |
+| — | `_recalc_account` win_rate 改用 realized_pnl（更准） | e2e | **PASS** 盈利 100%/亏损 0% |
+
+**回归验证**：改动模块单测全绿（trade_executor 13 + loop_e2e 2 + price_guard 3 + sec_pipeline 21 = 39）。
+全量套件 53 失败经 main 对照全部 pre-existing（API 测试 auth 夹具漂移：watchlist_api/decision_8b2/3/4/pipeline_health），本 Phase 未引入任何新回归；相比 Phase 0 前净减 8 个失败（修复 sec_pipeline 2 + trade_executor 未新增）。
+
+**阶段回顾（偏差与疏漏检查）**：
+- ✅ 核心目标达成：闭环端到端产出真实数据已用真实 DB e2e 证明（realized_pnl / win_rate / 待复盘队列 / user_preferences）。
+- ✅ 纠正了审计的过度判定：避免了对已正确实现模块的无谓"重写"，符合诚信与最小改动原则。
+- ⚠️ 遗留：`auto_reviews`/`layer_performance`/`experience_cards` 需 LLM 复盘实际运行才落数据（机制已通，等真实卖出+LLM 触发）→ Phase 2 用注入式验证补证。
+- ⚠️ 遗留：C-10 约束/投委会顺序的越权通道 → Phase 2 评估是否需要。

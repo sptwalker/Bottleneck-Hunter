@@ -117,7 +117,7 @@ class TestExecuteTrade:
 @patch("bottleneck_hunter.watchlist.constraint_validator.validate_execution_plan", _pass_validation)
 class TestSellTriggersAutoReview:
     def test_sell_triggers_auto_review(self):
-        """卖出成功后应触发 _auto_review_sell 的 asyncio task。"""
+        """卖出成功后应调度 _schedule_auto_review（改进 1.3：不再因无事件循环静默跳过）。"""
         store = _mock_store(
             position={"id": "pos1", "shares": 100, "avg_cost": 100.0},
             plan={
@@ -126,14 +126,11 @@ class TestSellTriggersAutoReview:
                 "result_json": {"reasoning": "take profit"},
             },
         )
-        mock_loop = MagicMock()
-        mock_loop.create_task = MagicMock()
-
-        with patch("asyncio.get_event_loop", return_value=mock_loop):
+        with patch("bottleneck_hunter.watchlist.trade_executor._schedule_auto_review") as sched:
             result = execute_trade(store, "plan1")
 
         assert result["side"] == "sell"
-        mock_loop.create_task.assert_called_once()
+        sched.assert_called_once()
 
     def test_buy_no_auto_review(self):
         """买入不触发自动复盘。"""
@@ -142,14 +139,11 @@ class TestSellTriggersAutoReview:
             "target_price": 150.0, "entry_id": "e1",
             "result_json": {"reasoning": "entry"},
         })
-        mock_loop = MagicMock()
-        mock_loop.create_task = MagicMock()
-
-        with patch("asyncio.get_event_loop", return_value=mock_loop):
+        with patch("bottleneck_hunter.watchlist.trade_executor._schedule_auto_review") as sched:
             result = execute_trade(store, "plan1")
 
         assert result["side"] == "buy"
-        mock_loop.create_task.assert_not_called()
+        sched.assert_not_called()
 
     def test_sell_error_no_auto_review(self):
         """卖出失败不触发复盘。"""
@@ -161,14 +155,11 @@ class TestSellTriggersAutoReview:
                 "result_json": {"reasoning": "exit"},
             },
         )
-        mock_loop = MagicMock()
-        mock_loop.create_task = MagicMock()
-
-        with patch("asyncio.get_event_loop", return_value=mock_loop):
+        with patch("bottleneck_hunter.watchlist.trade_executor._schedule_auto_review") as sched:
             result = execute_trade(store, "plan1")
 
         assert "error" in result
-        mock_loop.create_task.assert_not_called()
+        sched.assert_not_called()
 
 
 class TestAutoReviewSell:

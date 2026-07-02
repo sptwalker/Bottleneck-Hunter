@@ -877,4 +877,6 @@ MIGRATIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_reverse_market ON reverse_analyses(market, user_id)",
     # ── L1 宏观：快照记录变动率，兜底读库时不再丢失 change_pct ──
     "ALTER TABLE macro_snapshots ADD COLUMN change_pct REAL DEFAULT 0",
+    # ── Phase 1.1: sim_trades 持久化已实现盈亏（卖出结算），供绩效/回测/胜率真实计算 ──
+    "ALTER TABLE sim_trades ADD COLUMN realized_pnl REAL",
 ]
