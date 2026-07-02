@@ -378,9 +378,11 @@ async def _inject_market_news(store: WatchlistStore, market: str, market_data: d
                               llm, budget: BudgetTracker | None) -> None:
     """把市场/主题级近期新闻注入 market_data['news']（优先读库，未采集则实时兜底）。"""
     from bottleneck_hunter.watchlist.news_pipeline import fetch_market_news, market_sentinel
+    from bottleneck_hunter.watchlist.prompt_guard import sanitize_external_text
     _mnews = store.get_news(market_sentinel(market), limit=15)
     if _mnews:
-        market_data["news"] = [{"topic": n.get("llm_analysis", ""), "title": n.get("title", ""),
+        market_data["news"] = [{"topic": sanitize_external_text(n.get("llm_analysis", "")),
+                                "title": sanitize_external_text(n.get("title", "")),
                                 "date": n.get("date", ""), "source_name": n.get("source_name", ""),
                                 "sentiment": n.get("sentiment", "")} for n in _mnews]
     else:

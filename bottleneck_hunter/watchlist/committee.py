@@ -19,6 +19,7 @@ from typing import AsyncGenerator
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.prompt_guard import sanitize_list
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position
 
@@ -511,7 +512,8 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
             "positive_news": pos,
             "negative_news": neg,
             "put_call_ratio": pcr,
-            "recent_headlines": [n.get("title", "") for n in news[:5] if n.get("title")],
+            "recent_headlines": sanitize_list(
+                [n.get("title", "") for n in news[:5] if n.get("title")]),
         }
         # 只过滤真正缺失（None/空列表），保留合法 0 值（如中性情绪、零正面新闻），
         # 否则"零正面新闻"与"未采集"无法区分

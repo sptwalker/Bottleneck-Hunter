@@ -43,7 +43,22 @@ class BudgetTracker:
         return self._store.get_budget_limits()
 
     def can_spend(self, estimated_tokens: int = 3000, provider: str = "openai") -> bool:
-        """Check if an LLM call is within budget."""
+        """Check if an LLM call is within budget.
+
+        G-6 硬熔断：日累计≥100% 或 月累计≥100% 时【硬停】，不再仅靠 MINIMAL 软降级。
+        （软降级只在 90% 触发且仍允许部分调用；硬上限防止失控重试/误配高价模型烧穿预算。）
+        """
+        limits = self._limits()
+        daily_limit = limits.get("daily_limit_usd", 2.0)
+        monthly_limit = limits.get("monthly_limit_usd", 30.0)
+        daily_cost = self._store.get_daily_usage().get("cost", 0.0)
+        monthly_cost = self._store.get_monthly_usage().get("cost", 0.0)
+        if daily_limit > 0 and daily_cost >= daily_limit:
+            logger.warning("LLM 预算硬熔断：日累计 $%.4f ≥ 上限 $%.2f，拒绝调用", daily_cost, daily_limit)
+            return False
+        if monthly_limit > 0 and monthly_cost >= monthly_limit:
+            logger.warning("LLM 预算硬熔断：月累计 $%.4f ≥ 上限 $%.2f，拒绝调用", monthly_cost, monthly_limit)
+            return False
         mode = self.get_degradation_mode()
         if mode == DegradationMode.MINIMAL:
             return False
