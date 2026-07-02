@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 from bottleneck_hunter.auth.dependencies import get_current_user
 from bottleneck_hunter.llm_clients.factory import (
     PROVIDER_KEY_MAP,
+    PROVIDER_MODELS,
     create_llm,
     get_custom_provider,
     list_custom_provider_ids,
@@ -44,20 +45,6 @@ def _get_store(user: dict) -> WatchlistStore:
         raise HTTPException(500, "Store not initialized")
     return _store.for_user(user.get("sub", ""))
 
-
-PROVIDER_MODELS = {
-    "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-6",
-    "deepseek": "deepseek-chat",
-    "google": "gemini-2.5-flash",
-    "qwen": "qwen-plus",
-    "glm": "glm-4-flash",
-    "minimax": "MiniMax-Text-01",
-    "openrouter": "deepseek/deepseek-chat",
-    "siliconflow": "deepseek-ai/DeepSeek-V3",
-    "agnes": "agnes-2.0-flash",
-    "kimi": "moonshot-v1-8k",
-}
 
 PROVIDER_DISPLAY = {
     "openai": "OpenAI",

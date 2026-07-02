@@ -260,6 +260,67 @@ function buildTranscriptSection(transcript) {
   return sec('讨论过程', inner);
 }
 
+/* ── AI 投研圆桌会议纪要（Phase 4）───────────── */
+const RT_ROLES = { growth: '成长型投资者', value: '价值型投资者', risk: '风险分析师', chain: '产业链专家', host: '主持人' };
+function rtRole(id) { return RT_ROLES[id] || id || ''; }
+
+export function buildRoundtableReport(meeting) {
+  const m = meeting || {};
+  const participants = asArr(m.participants);
+  const ranking = asArr(m.final_ranking);
+  const transcript = asArr(m.transcript);
+  const tickers = ranking.map(r => r.ticker).filter(Boolean);
+
+  let html = `<div class="rpt-head"><h1>${esc(m.title || 'AI 投研圆桌会议纪要')}</h1>`
+    + `<div class="sub">圆桌会议纪要 · ${esc(fmtDate(m.created_at || new Date().toISOString()))}`
+    + (tickers.length ? ` · 标的：${tickers.map(esc).join('、')}` : '') + '</div></div>';
+
+  if (participants.length) {
+    html += sec('参会成员', tbl(['角色', '模型'],
+      participants.map(p => [esc(p.name || rtRole(p.role)), esc(p.model_name || p.model || '')])));
+  }
+
+  if (ranking.length) {
+    html += sec('最终排名', tbl(['#', '企业', 'Borda', '加权分', '支持', '反对', '理由'],
+      ranking.map((r, i) => [
+        r.rank || i + 1,
+        `<strong>${esc(r.name || '')}</strong>${r.ticker ? ` <span class="muted">${esc(r.ticker)}</span>` : ''}`,
+        esc(String(r.borda_points ?? '--')),
+        esc(String(r.weighted_score ?? '--')),
+        asArr(r.supporters).map(x => esc(rtRole(x))).join('、') || '—',
+        asArr(r.opposers).map(x => esc(rtRole(x))).join('、') || '—',
+        esc((r.reasoning || '').slice(0, 240)),
+      ])));
+  }
+
+  if (m.investment_thesis) html += sec('投资主线', para(m.investment_thesis));
+
+  const ag = asArr(m.key_agreements), dis = asArr(m.key_disagreements);
+  if (ag.length || dis.length) {
+    let inner = '';
+    if (ag.length) inner += '<h3>共识</h3>' + bullets(ag);
+    if (dis.length) inner += '<h3>分歧</h3>' + bullets(dis);
+    html += sec('共识与分歧', inner);
+  }
+  if (asArr(m.risk_warnings).length) html += sec('风险警示', bullets(m.risk_warnings));
+
+  if (transcript.length) {
+    const roundNames = { 0: '开场', 1: '独立提名', 2: '辩论与质疑', 3: '会议总结' };
+    let inner = '', lastRound = null;
+    for (const t of transcript) {
+      if (t.round_num !== lastRound) {
+        inner += `<h3>第 ${esc(String(t.round_num))} 轮 · ${esc(roundNames[t.round_num] || '')}</h3>`;
+        lastRound = t.round_num;
+      }
+      inner += `<div class="turn"><div class="turn-head"><span class="turn-name">${esc(t.participant_name || rtRole(t.role))}</span>`
+        + `<span class="muted">${esc(t.model_name || '')}</span></div>${para(t.content)}</div>`;
+    }
+    html += sec('讨论过程', inner);
+  }
+
+  return html;
+}
+
 /* ── 决策中心总结报告（L1-L4 + 投委会）─────────── */
 export function buildDecisionReport(data, market) {
   const d = data || {};

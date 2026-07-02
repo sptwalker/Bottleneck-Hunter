@@ -10,10 +10,9 @@ import hashlib
 import json
 import logging
 import re
-import uuid
 from datetime import datetime, timezone
+from urllib.parse import quote
 
-import httpx
 import yfinance as yf
 
 try:
@@ -95,9 +94,14 @@ def _fetch_yfinance_news(ticker: str, limit: int = 10) -> list[dict]:
 
 
 @with_retry(max_retries=3, base_delay=1.0)
-async def _fetch_rss_news(ticker: str, limit: int = 5) -> list[dict]:
-    """Fetch from Google Finance RSS (async)."""
-    url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+async def _fetch_rss_news(query: str, limit: int = 5, tag: str = "") -> list[dict]:
+    """Fetch from Google News RSS by free-text query (async).
+
+    query: 任意检索词（个股用 f"{ticker} stock"，主题用 "AI stocks" 等）。
+    tag:   用于返回项的 ticker 字段与去重 id；省略则用 query 本身。
+    """
+    tag = tag or query
+    url = f"https://news.google.com/rss/search?q={quote(query)}&hl=en-US&gl=US&ceid=US:en"
     client = get_http_client()
     resp = await client.get(url)
     if resp.status_code != 200:
@@ -116,10 +120,10 @@ async def _fetch_rss_news(ticker: str, limit: int = 5) -> list[dict]:
             continue
         pub = entry.get("published_parsed")
         date_str = datetime(*pub[:3], tzinfo=timezone.utc).strftime("%Y-%m-%d") if pub else ""
-        news_id = hashlib.md5(f"{ticker}:rss:{title}".encode()).hexdigest()[:12]
+        news_id = hashlib.md5(f"{tag}:rss:{title}".encode()).hexdigest()[:12]
         results.append({
             "id": news_id,
-            "ticker": ticker,
+            "ticker": tag,
             "date": date_str,
             "title": title,
             "source_url": entry.get("link", ""),
@@ -233,7 +237,7 @@ async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTrac
             articles = await asyncio.to_thread(_fetch_astock_news, ticker)
         else:
             articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
-            rss = await _fetch_rss_news(ticker)
+            rss = await _fetch_rss_news(f"{ticker} stock", tag=ticker)
             seen = {a["id"] for a in articles}
             for r in rss:
                 if r["id"] not in seen:
@@ -282,3 +286,116 @@ async def fetch_news_batch(
             logger.error("News pipeline error for %s: %s", ticker, e)
             results[ticker] = -1
     return results
+
+
+# ---------------------------------------------------------------------------
+# 市场/主题级新闻（供 L1 宏观决策感知大盘与热点事件）
+# ---------------------------------------------------------------------------
+
+# 每市场的主题检索词表：(RSS 查询词, 展示标签)。热点漂移时在此维护。
+_MARKET_NEWS_TOPICS: dict[str, list[tuple[str, str]]] = {
+    "us_stock": [
+        ("AI stocks", "AI"),
+        ("Federal Reserve rate decision", "美联储"),
+        ("stock market outlook", "大盘"),
+    ],
+    "a_stock": [
+        ("人工智能 股市", "AI"),
+        ("央行 货币政策", "央行"),
+        ("A股 大盘 走势", "大盘"),
+    ],
+    "hk_stock": [
+        ("Hong Kong stock market", "港股"),
+        ("China AI technology", "AI"),
+    ],
+}
+
+
+async def fetch_market_news(market: str = "us_stock", llm=None, budget: BudgetTracker | None = None,
+                            per_topic: int = 4) -> list[dict]:
+    """抓取市场/主题级近期新闻（RSS，免费），供 L1 宏观决策的 {market_news} 使用。
+
+    - 按 market 的主题词表并发抓 Google News RSS，按 id 去重。
+    - 有 llm+budget 时用 _summarize_with_llm 得整体市场情绪，附到每条。
+    - 任何失败均优雅降级：返回已拿到的部分或空列表，绝不让 L1 因新闻抓取而中断。
+    """
+    topics = _MARKET_NEWS_TOPICS.get(market, _MARKET_NEWS_TOPICS["us_stock"])
+    try:
+        fetched = await asyncio.gather(
+            *[_fetch_rss_news(q, limit=per_topic, tag=tag) for q, tag in topics],
+            return_exceptions=True,
+        )
+    except Exception as e:
+        logger.warning("市场新闻抓取失败: %s", e)
+        return []
+
+    items: list[dict] = []
+    seen: set[str] = set()
+    for group in fetched:
+        if isinstance(group, Exception) or not group:
+            continue
+        for r in group:
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            items.append({
+                "topic": r.get("ticker", ""),   # tag 落在 ticker 字段
+                "title": r.get("title", ""),
+                "date": r.get("date", ""),
+                "source_name": r.get("source_name", ""),
+            })
+
+    if not items:
+        return []
+
+    # 整体市场情绪（一次 LLM 调用，非逐条）
+    if llm and budget:
+        try:
+            analysis = await _summarize_with_llm("市场大盘", items, llm, budget)
+            sentiment = analysis.get("sentiment", "neutral")
+            for it in items:
+                it["sentiment"] = sentiment
+        except Exception as e:
+            logger.warning("市场新闻情感分析失败: %s", e)
+
+    return items
+
+
+# 借道 news_digest 表存市场级新闻的哨兵 ticker（个股查询皆精确匹配，永不误捞）
+_MARKET_SENTINELS = {
+    "us_stock": "__MARKET_US__",
+    "a_stock": "__MARKET_CN__",
+    "hk_stock": "__MARKET_HK__",
+}
+
+
+def market_sentinel(market: str) -> str:
+    return _MARKET_SENTINELS.get(market, "__MARKET_US__")
+
+
+async def refresh_market_news(store: WatchlistStore, market: str = "us_stock",
+                              llm=None, budget: BudgetTracker | None = None) -> int:
+    """抓市场/主题新闻并落库（借道 news_digest 哨兵 ticker），供 L1 读库。返回写入条数。"""
+    items = await fetch_market_news(market, llm, budget)
+    if not items:
+        return 0
+    sentinel = market_sentinel(market)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    articles = []
+    for it in items:
+        title = it.get("title", "")
+        if not title:
+            continue
+        articles.append({
+            "id": hashlib.md5(f"{sentinel}:{title}".encode()).hexdigest()[:12],
+            "ticker": sentinel,
+            "date": it.get("date") or today,
+            "title": title,
+            "summary": "",
+            "sentiment": it.get("sentiment", ""),
+            "sentiment_score": 0.0,
+            "source_url": "",
+            "source_name": it.get("source_name", ""),
+            "llm_analysis": it.get("topic", ""),  # 主题标签存这里
+        })
+    return store.save_news(articles) if articles else 0

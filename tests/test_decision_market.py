@@ -234,3 +234,23 @@ class TestSchedulerNoticeIntegration:
 
         mock_notice.assert_not_called()
         assert "notice" not in results
+
+
+# ---------------------------------------------------------------------------
+# decision_api._maybe_json —— JSON 字符串宽松解析
+# ---------------------------------------------------------------------------
+
+class TestMaybeJson:
+    def test_parses_json_string(self):
+        from bottleneck_hunter.web.decision_api import _maybe_json
+        assert _maybe_json('{"a": 1}') == {"a": 1}
+
+    def test_bad_json_returns_empty_dict(self):
+        from bottleneck_hunter.web.decision_api import _maybe_json
+        assert _maybe_json("not json") == {}
+
+    def test_non_string_passthrough(self):
+        from bottleneck_hunter.web.decision_api import _maybe_json
+        assert _maybe_json({"x": 2}) == {"x": 2}
+        assert _maybe_json([1, 2]) == [1, 2]
+        assert _maybe_json(None) is None

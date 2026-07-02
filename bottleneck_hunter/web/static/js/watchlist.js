@@ -15,6 +15,7 @@ const wlState = {
   entries: [],
   counts: { focus: 0, normal: 0, track: 0 },
   total: 0,
+  limits: { total: 24, focus: 6, normal: 6, track: 12 },
   budget: null,
   refreshing: false,
   refreshingIntel: false,
@@ -132,6 +133,7 @@ async function loadWatchlist() {
     wlState.entries = data.entries || [];
     wlState.counts = data.counts || { focus: 0, normal: 0, track: 0 };
     wlState.total = data.total || 0;
+    if (data.limits) wlState.limits = data.limits;
     render();
     checkDataHealth();
   } catch (e) {
@@ -219,7 +221,7 @@ function render() {
   }
 
   const countBadge = document.getElementById('wl-count-badge');
-  if (countBadge) countBadge.textContent = `${wlState.total} / 24`;
+  if (countBadge) countBadge.textContent = `${wlState.total} / ${wlState.limits.total}`;
 
   const emptyEl = document.getElementById('wl-empty');
   const tableView = document.getElementById('wl-table-view');
@@ -314,7 +316,7 @@ function renderTable() {
 }
 
 function renderCards() {
-  const tierLimits = { focus: 6, normal: 6, track: 12 };
+  const tierLimits = wlState.limits;
   for (const tier of ['focus', 'normal', 'track']) {
     const grid = document.getElementById(`wl-grid-${tier}`);
     const countEl = document.getElementById(`wl-tier-count-${tier}`);

@@ -51,6 +51,8 @@ async function initAuth() {
       window.appState.user = user;
       const nameEl = document.getElementById('user-display-name');
       if (nameEl) nameEl.textContent = user.display_name || user.username;
+      const avatarEl = document.getElementById('user-avatar');
+      if (avatarEl) avatarEl.textContent = (user.display_name || user.username || '?').charAt(0).toUpperCase();
     }
   } catch (e) {
     console.warn('Auth check failed:', e);

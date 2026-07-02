@@ -7,7 +7,6 @@ scarcity, irreplaceability, supply-demand gap, pricing power, tech barrier.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from bottleneck_hunter.chain.models import (
     BottleneckScore,
     ChainGraph,
 )
+from bottleneck_hunter.chain.json_utils import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -546,15 +546,7 @@ class BottleneckAnalyzer:
                             await self._on_progress(f"✗ 调用失败: {node_name}")
                         return None
 
-            text = response.content.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:])
-                if text.endswith("```"):
-                    text = text[:-3]
-                text = text.strip()
-
-            data = json.loads(text)
+            data = extract_json_object(response.content)
 
             scores = [
                 BottleneckScore(

@@ -51,7 +51,22 @@ class CreateInviteCodesRequest(BaseModel):
 
 class UpdateConfigRequest(BaseModel):
     open_registration: bool | None = None
-    default_watchlist_limit: int | None = None
+    default_watchlist_limit: int | None = Field(default=None, ge=1, le=500)
+    tier_focus_pct: float | None = Field(default=None, ge=0, le=1)
+    tier_normal_pct: float | None = Field(default=None, ge=0, le=1)
+
+
+class UpdateSmtpConfigRequest(BaseModel):
+    host: str | None = Field(default=None, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    user: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, max_length=512)  # 空/省略=保持原密码
+    sender: str | None = Field(default=None, max_length=255)
+    use_tls: bool | None = None
+
+
+class SmtpTestRequest(BaseModel):
+    to_email: str = Field(..., min_length=5, max_length=128)
 
 
 # ── 用户管理 ──────────────────────────────────────────
@@ -194,10 +209,20 @@ async def revoke_invite_code(code: str, user: dict = Depends(_require_admin)):
 
 @router.get("/config")
 async def get_config(user: dict = Depends(_require_admin)):
+    from bottleneck_hunter.watchlist.tier_limits import (
+        DEFAULT_TOTAL, DEFAULT_FOCUS_PCT, DEFAULT_NORMAL_PCT, derive_tier_caps,
+    )
     store = _auth()
+    total = int(store.get_config("default_watchlist_limit", str(DEFAULT_TOTAL)))
+    focus_pct = float(store.get_config("watchlist_tier_focus_pct", str(DEFAULT_FOCUS_PCT)))
+    normal_pct = float(store.get_config("watchlist_tier_normal_pct", str(DEFAULT_NORMAL_PCT)))
     return {
         "open_registration": store.get_config("open_registration", "0") == "1",
-        "default_watchlist_limit": int(store.get_config("default_watchlist_limit", "24")),
+        "default_watchlist_limit": total,
+        "tier_focus_pct": focus_pct,
+        "tier_normal_pct": normal_pct,
+        # 按默认上限预览三档容量，便于前端直观展示
+        "tier_caps_preview": derive_tier_caps(total, focus_pct, normal_pct),
     }
 
 
@@ -208,7 +233,72 @@ async def update_config(req: UpdateConfigRequest, user: dict = Depends(_require_
         store.set_config("open_registration", "1" if req.open_registration else "0")
     if req.default_watchlist_limit is not None:
         store.set_config("default_watchlist_limit", str(req.default_watchlist_limit))
+    # 比例：focus + normal 必须 < 1（给 track 留余量）
+    if req.tier_focus_pct is not None or req.tier_normal_pct is not None:
+        focus = req.tier_focus_pct if req.tier_focus_pct is not None else float(store.get_config("watchlist_tier_focus_pct", "0.25"))
+        normal = req.tier_normal_pct if req.tier_normal_pct is not None else float(store.get_config("watchlist_tier_normal_pct", "0.25"))
+        if focus + normal >= 1.0:
+            raise HTTPException(status_code=400, detail="重点 + 一般 比例之和必须小于 100%（需给跟踪档留余量）")
+        if req.tier_focus_pct is not None:
+            store.set_config("watchlist_tier_focus_pct", str(req.tier_focus_pct))
+        if req.tier_normal_pct is not None:
+            store.set_config("watchlist_tier_normal_pct", str(req.tier_normal_pct))
     return await get_config(user)
+
+
+# ── SMTP 邮件配置 ─────────────────────────────────────
+
+@router.get("/smtp-config")
+async def get_smtp_config(user: dict = Depends(_require_admin)):
+    """返回当前 SMTP 配置（不含密码明文，仅提示是否已设置及来源）。"""
+    from bottleneck_hunter.auth.email_sender import resolve_smtp_config
+    store = _auth()
+    cfg = resolve_smtp_config(store)
+    return {
+        "host": cfg["host"],
+        "port": cfg["port"],
+        "user": cfg["user"],
+        "sender": cfg["from"],
+        "use_tls": cfg["use_tls"],
+        "password_set": bool(cfg["password"]),
+        "configured": bool(cfg["host"]),
+        "source": cfg["source"],  # db=后台配置 / env=环境变量兜底
+    }
+
+
+@router.patch("/smtp-config")
+async def update_smtp_config(req: UpdateSmtpConfigRequest, user: dict = Depends(_require_admin)):
+    """保存 SMTP 配置到 system_config，密码 AES 加密。密码字段留空则保持原值。"""
+    from bottleneck_hunter.auth.crypto import encrypt
+    store = _auth()
+    if req.host is not None:
+        store.set_config("smtp_host", req.host.strip())
+    if req.port is not None:
+        store.set_config("smtp_port", str(req.port))
+    if req.user is not None:
+        store.set_config("smtp_user", req.user.strip())
+    if req.sender is not None:
+        store.set_config("smtp_from", req.sender.strip())
+    if req.use_tls is not None:
+        store.set_config("smtp_use_tls", "true" if req.use_tls else "false")
+    if req.password:  # 非空才更新；留空保持原密码
+        store.set_config("smtp_password_enc", encrypt(req.password))
+    return await get_smtp_config(user)
+
+
+@router.post("/smtp-test")
+async def test_smtp(req: SmtpTestRequest, user: dict = Depends(_require_admin)):
+    """用当前生效的 SMTP 配置发送一封测试邮件。"""
+    import asyncio
+    from bottleneck_hunter.auth.email_sender import resolve_smtp_config, send_test_email, smtp_configured
+    store = _auth()
+    cfg = resolve_smtp_config(store)
+    if not smtp_configured(cfg):
+        raise HTTPException(status_code=400, detail="SMTP 未配置，请先填写并保存服务器地址")
+    ok, err = await asyncio.to_thread(send_test_email, req.to_email, cfg)
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"测试邮件发送失败：{err}")
+    return {"ok": True, "message": f"测试邮件已发送至 {req.to_email}"}
 
 
 # ── 统计 ──────────────────────────────────────────────

@@ -538,6 +538,8 @@ import asyncio
 import json
 import time
 
+from bottleneck_hunter.chain.json_utils import extract_json_array
+
 _hot_scan_cache: dict[str, tuple[float, list[dict]]] = {}
 _HOT_SCAN_TTL = 1800  # 30 minutes
 
@@ -611,18 +613,8 @@ async def llm_recommend_hot_sectors(
         llm = create_llm(provider, model, temperature=0.3)
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
         resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30.0)
-        text = resp.content.strip()
 
-        # 解析 JSON — 剥离可能的 markdown code fence
-        if "```" in text:
-            import re
-            m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-            if m:
-                text = m.group(1).strip()
-
-        results = json.loads(text)
-        if not isinstance(results, list):
-            results = []
+        results = extract_json_array(resp.content) or []
 
         # 标准化字段
         clean = []

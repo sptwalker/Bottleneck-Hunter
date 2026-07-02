@@ -168,6 +168,7 @@ async def _review_single(
         "peer_comparison": context.get("peer_comparison", "暂无同行业对比数据"),
         "sentiment_data": context.get("sentiment_data", "暂无市场情绪数据"),
         "crowding_data": context.get("crowding_data", "暂无持仓集中度数据"),
+        "portfolio_risk": context.get("portfolio_risk", "暂无组合风险数据"),
     }
 
     prompt = prompt_template
@@ -573,12 +574,8 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
     except Exception:
         bg["peer_comparison"] = "暂无同业对比数据"
 
-    # 行业趋势（成长投资人）← 热点板块（best-effort）
-    try:
-        from bottleneck_hunter.chain.hot_sector import HotSectorDetector  # noqa
-        bg["sector_trends"] = "暂无行业趋势数据"  # 占位：热点板块需独立采集，后续接入
-    except Exception:
-        bg["sector_trends"] = "暂无行业趋势数据"
+    # 行业趋势（成长投资人）← 热点板块：占位，需独立采集，后续接入
+    bg["sector_trends"] = "暂无行业趋势数据"
 
     return bg
 
@@ -607,6 +604,14 @@ async def run_committee_review(
     active_markets = list(store.get_tickers_by_market().keys())
     market_ctx = _get_market_context_text(active_markets)
 
+    # B2: 组合级风险（HHI/相关性/VaR/CVaR/beta）——供风险委员与逆向委员判断真实分散度
+    try:
+        from bottleneck_hunter.watchlist.decision_engine import _portfolio_risk_summary
+        portfolio_risk = _portfolio_risk_summary(store, positions, account.get("total_equity", 100000))
+    except Exception as e:
+        logger.warning("投委会组合风险计算失败: %s", e)
+        portfolio_risk = {}
+
     context = {
         "market_context": market_ctx,
         "macro_summary": (macro.get("market_summary", "") if macro
@@ -619,6 +624,7 @@ async def run_committee_review(
                            "market_value": p.get("market_value", 0)}
                           for p in positions],
         },
+        "portfolio_risk": portfolio_risk or "暂无组合风险数据",
         "catalyst_data": [],
         "sector_trends": "暂无行业趋势数据",
         "valuation_data": {},

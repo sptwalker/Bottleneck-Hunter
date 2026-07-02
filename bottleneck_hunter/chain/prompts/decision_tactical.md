@@ -19,11 +19,13 @@
 每只股票附带以下 L2 层信息：
 - `l2_role`: core（核心持仓）/ tactical（战术持仓）/ watch（观察仓）— 来自 L2 组合策略
 - `l2_target_weight`: L2 建议的目标权重百分比
+- `chip_signals`: 筹码与估值锚（若有）—— `top_institutions`（机构持仓 Top）/ `institution_count`（持仓机构数）/ `rating_distribution`（分析师评级分布）/ `consensus_target_price`（一致目标价）/ `target_price_range`（目标价区间）
 
 **规则**：
 - 优先为 core 角色生成行动计划（buy/add/sell/reduce）
 - tactical 角色根据催化剂和时机生成操作建议
 - watch 角色仅生成观察建议（hold 或 wait_for_pullback），除非有紧急催化剂
+- **筹码/估值锚参照**：若现价已明显高于 `consensus_target_price`，买入需谨慎（估值透支）；机构大幅增减持、评级密集上调/下调是重要方向信号，勿凭空臆造目标价
 
 {stock_data}
 
@@ -39,6 +41,14 @@
 - **部分兑现(partial)**：谨慎评估，维持或小幅调整
 
 {catalyst_outcomes}
+
+## 投资论点失效告警
+
+以下持仓的投资论点已被判定失效(invalidated)或减弱(weakened)——买入逻辑受损。这是**强卖出信号**：
+- **invalidated**：核心逻辑已破，倾向 sell 清仓或大幅 reduce
+- **weakened**：逻辑减弱，倾向 reduce 减仓 + 收紧止损
+
+{thesis_alerts}
 
 ## 近期已执行交易
 

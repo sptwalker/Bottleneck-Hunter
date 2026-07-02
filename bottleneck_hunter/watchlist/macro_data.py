@@ -59,11 +59,21 @@ _US_INDICATORS = [
     ("us_10y_yield", "^TNX", "10Y 美债收益率"),
     ("dxy", "DX-Y.NYB", "美元指数"),
     ("sp500", "^GSPC", "标普500"),
+    ("nasdaq", "^IXIC", "纳斯达克综指"),
 ]
 
 _CN_INDICATORS = [
     ("cny_usd", "CNY=X", "人民币汇率"),
+    ("sse_index", "000001.SS", "上证综指"),
+    ("csi300", "000300.SS", "沪深300"),
 ]
+
+# 各市场用于填充"大盘指数"的真实指数键（区别于 VIX/汇率等宏观指标）
+MARKET_INDEX_KEYS: dict[str, list[str]] = {
+    "us_stock": ["sp500", "nasdaq"],
+    "a_stock": ["sse_index", "csi300"],
+    "hk_stock": ["sp500"],
+}
 
 
 async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = None) -> dict:

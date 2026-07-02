@@ -11,7 +11,7 @@ from typing import Optional
 
 import bcrypt as _bcrypt
 
-from .models import InviteCode, UserInDB, UserInfo
+from .models import InviteCode, UserInDB
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ class AuthStore:
                     id TEXT PRIMARY KEY,
                     username TEXT UNIQUE NOT NULL,
                     display_name TEXT DEFAULT '',
+                    email TEXT DEFAULT '',
                     password_hash TEXT NOT NULL,
                     role TEXT DEFAULT 'user',
                     is_active INTEGER DEFAULT 1,
@@ -82,7 +83,25 @@ class AuthStore:
                     created_at TEXT,
                     updated_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS email_verifications (
+                    id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    payload_json TEXT DEFAULT '{}',
+                    attempts INTEGER DEFAULT 0,
+                    expires_at TEXT,
+                    created_at TEXT
+                );
             """)
+        self._migrate()
+
+    def _migrate(self):
+        """幂等迁移：为旧库补充新增列。"""
+        with self._conn() as conn:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "email" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
 
     # ── 系统配置 ──────────────────────────────────────────
 
@@ -107,10 +126,12 @@ class AuthStore:
     # ── 用户 CRUD ─────────────────────────────────────────
 
     def _row_to_user(self, row: sqlite3.Row) -> UserInDB:
+        keys = row.keys()
         return UserInDB(
             id=row["id"],
             username=row["username"],
             display_name=row["display_name"] or "",
+            email=(row["email"] if "email" in keys else "") or "",
             password_hash=row["password_hash"],
             role=row["role"] or "user",
             is_active=bool(row["is_active"]),
@@ -141,19 +162,25 @@ class AuthStore:
             return row["cnt"] if row else 0
 
     def create_user(
-        self, username: str, password: str, role: str = "user",
+        self, username: str, password: str = "", role: str = "user",
         display_name: str = "", watchlist_limit: int = 24,
+        email: str = "", password_hash: str = "",
     ) -> UserInDB:
         user_id = uuid.uuid4().hex[:16]
-        pw_hash = _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+        pw_hash = password_hash or _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
         now = datetime.utcnow().isoformat()
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO users (id, username, display_name, password_hash, role, is_active, "
-                "watchlist_limit, created_at, settings_json) VALUES (?, ?, ?, ?, ?, 1, ?, ?, '{}')",
-                (user_id, username, display_name, pw_hash, role, watchlist_limit, now),
+                "INSERT INTO users (id, username, display_name, email, password_hash, role, is_active, "
+                "watchlist_limit, created_at, settings_json) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, '{}')",
+                (user_id, username, display_name, email, pw_hash, role, watchlist_limit, now),
             )
         return self.get_user_by_id(user_id)  # type: ignore[return-value]
+
+    @staticmethod
+    def hash_password(password: str) -> str:
+        """对外暴露的密码哈希（供两阶段注册在验证前预哈希）。"""
+        return _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
 
     def verify_password(self, user: UserInDB, password: str) -> bool:
         return _bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("utf-8"))
@@ -182,6 +209,81 @@ class AuthStore:
     def delete_user(self, user_id: str):
         with self._conn() as conn:
             conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    def get_user_by_email(self, email: str) -> Optional[UserInDB]:
+        if not email:
+            return None
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE email = ? COLLATE NOCASE", (email,)).fetchone()
+            return self._row_to_user(row) if row else None
+
+    def update_email(self, user_id: str, new_email: str):
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET email = ? WHERE id = ?", (new_email, user_id))
+
+    # ── 邮箱验证码 ────────────────────────────────────────
+
+    def create_verification(
+        self, email: str, code: str, purpose: str,
+        payload: dict | None = None, ttl_seconds: int = 600,
+    ) -> None:
+        """写入一条验证码记录（同 email+purpose 先清旧记录，保证只有最新一条有效）。"""
+        import json
+        from datetime import timedelta
+        now = datetime.utcnow()
+        expires = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        with self._conn() as conn:
+            conn.execute("DELETE FROM email_verifications WHERE email = ? AND purpose = ?", (email, purpose))
+            conn.execute(
+                "INSERT INTO email_verifications (id, email, code, purpose, payload_json, attempts, "
+                "expires_at, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+                (uuid.uuid4().hex[:16], email, code, purpose, json.dumps(payload or {}), expires, now.isoformat()),
+            )
+
+    def get_verification_age_seconds(self, email: str, purpose: str) -> float | None:
+        """返回最近一条验证码的存在秒数（用于重发冷却）。无记录返回 None。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT created_at FROM email_verifications WHERE email = ? AND purpose = ?",
+                (email, purpose),
+            ).fetchone()
+        if not row or not row["created_at"]:
+            return None
+        try:
+            return (datetime.utcnow() - datetime.fromisoformat(row["created_at"])).total_seconds()
+        except (ValueError, TypeError):
+            return None
+
+    def verify_code(self, email: str, purpose: str, code: str) -> tuple[bool, str, dict]:
+        """校验验证码。返回 (成功?, 错误信息, payload)。
+
+        成功即删除该记录；失败则 attempts+1（达 5 次上限后作废）。
+        """
+        import json
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM email_verifications WHERE email = ? AND purpose = ?",
+                (email, purpose),
+            ).fetchone()
+            if not row:
+                return False, "验证码不存在或已使用，请重新获取", {}
+            # 过期
+            try:
+                if datetime.utcnow() > datetime.fromisoformat(row["expires_at"]):
+                    conn.execute("DELETE FROM email_verifications WHERE id = ?", (row["id"],))
+                    return False, "验证码已过期，请重新获取", {}
+            except (ValueError, TypeError):
+                pass
+            # 尝试次数上限
+            if (row["attempts"] or 0) >= 5:
+                conn.execute("DELETE FROM email_verifications WHERE id = ?", (row["id"],))
+                return False, "尝试次数过多，请重新获取验证码", {}
+            if row["code"] != code:
+                conn.execute("UPDATE email_verifications SET attempts = attempts + 1 WHERE id = ?", (row["id"],))
+                return False, "验证码错误", {}
+            payload = json.loads(row["payload_json"] or "{}")
+            conn.execute("DELETE FROM email_verifications WHERE id = ?", (row["id"],))
+            return True, "", payload
 
     def list_active_user_ids(self) -> list[str]:
         """返回所有活跃用户 ID。"""

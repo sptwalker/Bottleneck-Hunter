@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 from datetime import datetime
 from typing import Optional
@@ -12,8 +13,8 @@ from typing import Optional
 from pathlib import Path
 
 from dotenv import dotenv_values, set_key
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -274,7 +275,6 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
 
     p2 = phase_cache.get_phase(req.analysis_id, 2)
     if not p2:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Phase 2 数据未找到")
 
     scorecards = [SupplierScorecard(**d) for d in p2["scorecards"]]
@@ -372,14 +372,12 @@ async def get_phase_data(analysis_id: str, phase_num: int, user: dict = Depends(
     """获取已缓存的 Phase 结果。"""
     data = phase_cache.get_phase(analysis_id, phase_num)
     if data is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"Phase {phase_num} 数据未找到")
     return data
 
 
 @router.get("/hot-sectors")
 async def hot_sectors(user: dict = Depends(get_current_user)):
-    import asyncio
     from bottleneck_hunter.chain.hot_sector import HotSectorDetector
 
     def _detect():
@@ -419,7 +417,6 @@ async def hot_sectors(user: dict = Depends(get_current_user)):
 @router.get("/hot-recommendations")
 async def hot_recommendations(user: dict = Depends(get_current_user)):
     """返回 top 5 推荐赛道（产业方向 + 终端产品），基于实时热门板块数据。"""
-    import asyncio
     from bottleneck_hunter.chain.hot_sector import HotSectorDetector
 
     def _recommend():
@@ -462,7 +459,6 @@ async def download_report(path: str, user: dict = Depends(get_current_user)):
     """Download a generated report file."""
     report_path = Path(path)
     if not report_path.exists() or not report_path.suffix == ".md":
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Report not found")
     return FileResponse(
         path=str(report_path),
@@ -487,7 +483,6 @@ async def get_history(analysis_id: str, user: dict = Depends(get_current_user)):
     store = _user_analysis_store(user)
     record = store.get(analysis_id)
     if not record:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Analysis not found")
     return record
 
@@ -498,7 +493,6 @@ async def delete_history(analysis_id: str, user: dict = Depends(get_current_user
     store = _user_analysis_store(user)
     deleted = store.delete(analysis_id)
     if not deleted:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Analysis not found")
     return {"ok": True}
 
@@ -516,10 +510,6 @@ async def update_phase_status(analysis_id: str, body: dict, user: dict = Depends
 @router.post("/history/{analysis_id}/restore")
 async def restore_history(analysis_id: str, user: dict = Depends(get_current_user)):
     """从历史记录恢复数据到 phase_cache，返回完整数据供前端渲染。"""
-    from fastapi import HTTPException
-    from fastapi.responses import JSONResponse
-    import math
-
     store = _user_analysis_store(user)
     record = store.get(analysis_id)
     if not record:
@@ -645,7 +635,6 @@ async def update_cross_validation(analysis_id: str, req: UpdateCvRequest, user: 
     store = _user_analysis_store(user)
     updated = store.update_cross_validations(analysis_id, req.cross_validations)
     if not updated:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Analysis not found")
     return {"ok": True}
 
@@ -663,7 +652,6 @@ async def update_suppliers(analysis_id: str, req: UpdateSuppliersRequest, user: 
         analysis_id, req.supplier_scorecards, req.cross_validations
     )
     if not updated:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Analysis not found")
     return {"ok": True}
 
@@ -707,7 +695,6 @@ async def ai_report(req: AiReportRequest, user: dict = Depends(get_current_user)
             }
             phase_cache.set_phase(req.analysis_id, 2, p2)
     if not p2 or not p2.get("scorecards"):
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Phase 2 数据未找到")
 
     report_key = req.chart_type if req.report_type == "chart_interp" else "comparison"

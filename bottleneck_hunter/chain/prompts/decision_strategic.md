@@ -22,6 +22,18 @@
 
 {account_status}
 
+## 组合风险指标（现有持仓）
+
+以下是当前组合的量化风险度量。**构建组合时必须据此控制风险**：
+- **concentration_hhi**：赫芬达尔集中度，>0.25 为过度集中，需分散
+- **max_single_weight_pct / max_sector_weight_pct**：最大单股/单板块权重，超约束需削减
+- **var_95 / cvar_95**：95% 在险价值 / 条件在险价值（美元），衡量尾部风险
+- **portfolio_beta**：组合相对大盘的系统性风险敞口
+- **high_correlation_pairs**：高相关持仓对（ρ>0.7），看似分散实则同涨同跌，是踩踏风险
+- **warnings**：已触发的风险预警，须在策略中回应
+
+{portfolio_risk}
+
 ## 历史复盘教训
 
 {lessons_learned}

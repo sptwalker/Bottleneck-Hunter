@@ -26,8 +26,8 @@ from bottleneck_hunter.auth.jwt_utils import get_cookie_name, verify_token
 from bottleneck_hunter.auth.migration import run_migration
 from bottleneck_hunter.auth.store import AuthStore
 from bottleneck_hunter.web.api import router
-from bottleneck_hunter.web.auth_api import router as auth_router, set_auth_store
-from bottleneck_hunter.web.watchlist_api import router as watchlist_router, set_store as wl_set_store
+from bottleneck_hunter.web.auth_api import router as auth_router, set_auth_store, set_wl_store as auth_set_wl_store
+from bottleneck_hunter.web.watchlist_api import router as watchlist_router, set_store as wl_set_store, set_auth_store as wl_set_auth_store
 from bottleneck_hunter.web.decision_api import router as decision_router, set_store as dc_set_store
 from bottleneck_hunter.web.trading_api import router as trading_router, set_store as st_set_store
 from bottleneck_hunter.web.user_api import router as user_router, set_auth_store as user_set_auth_store
@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI):
     # 认证初始化
     admin = _auth_store.ensure_default_admin()
     set_auth_store(_auth_store)
+    auth_set_wl_store(_wl_store)
     user_set_auth_store(_auth_store)
     admin_set_stores(_auth_store, _wl_store)
     cp_set_auth_store(_auth_store)
@@ -86,6 +87,7 @@ async def lifespan(app: FastAPI):
         run_migration(admin_user.id)
 
     wl_set_store(_wl_store)
+    wl_set_auth_store(_auth_store)
     dc_set_store(_wl_store)
     st_set_store(_wl_store)
     aic_set_store(_wl_store)

@@ -1,0 +1,30 @@
+# 版本控制 / 本地环境
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.ruff_cache
+
+# 运行时数据与密钥（通过挂卷注入，绝不打进镜像）
+data/
+output/
+.env
+*.db
+*.log
+
+# 前端依赖 / 构建产物 / 打包器
+node_modules
+dist
+build
+
+# 编辑器 / 工具
+.claude
+.idea
+.vscode
+docs
+tests

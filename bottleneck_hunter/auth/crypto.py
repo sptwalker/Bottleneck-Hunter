@@ -14,15 +14,28 @@ _NONCE_BYTES = 12
 
 
 def _get_key() -> bytes:
-    """从环境变量获取加密密钥，不存在则自动生成。"""
+    """获取加密密钥：环境变量 > 持久化文件 > 首次生成并写盘。
+
+    关键：无环境变量时必须**读回** data/.encryption_key，否则每次进程重启都会
+    生成新密钥，导致此前加密的数据（用户 API Key / SMTP 密码等）无法解密。
+    """
+    from pathlib import Path
+
     raw = os.environ.get(_ENV_KEY, "")
     if raw:
         return base64.urlsafe_b64decode(raw)
+
+    env_path = Path("data/.encryption_key")
+    if env_path.exists():
+        encoded = env_path.read_text(encoding="utf-8").strip()
+        if encoded:
+            os.environ[_ENV_KEY] = encoded  # 本进程内缓存
+            return base64.urlsafe_b64decode(encoded)
+
+    # 首次：生成并持久化
     key = AESGCM.generate_key(bit_length=256)
     encoded = base64.urlsafe_b64encode(key).decode()
     os.environ[_ENV_KEY] = encoded
-    from pathlib import Path
-    env_path = Path("data/.encryption_key")
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(encoded, encoding="utf-8")
     return key

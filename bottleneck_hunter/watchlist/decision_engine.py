@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncGenerator
@@ -85,8 +86,6 @@ def _merge_macro_results(results: list[dict]) -> dict:
     if len(results) == 1:
         return results[0]
 
-    from collections import Counter
-
     regimes = [r.get("regime", "sideways") for r in results]
     regime = Counter(regimes).most_common(1)[0][0]
 
@@ -105,6 +104,172 @@ def _merge_macro_results(results: list[dict]) -> dict:
         base["_divergence_warning"] = f"模型分歧: regime 判断不一致 ({regimes})"
 
     return base
+
+
+def _clamp_target_allocation(result: dict, bounds: dict) -> list[str]:
+    """把 L2 target_allocation 钳制到 L1 alloc_bounds 内，返回被钳制项的说明列表。
+
+    bounds 来自 get_allocation_bounds：equity_min/equity_max/max_single_pct/beta_limit。
+    这是确定性硬约束落地——避免 LLM 给出 equity 99%/单股 40% 后被下游原样放行。
+    """
+    ta = result.get("target_allocation")
+    if not isinstance(ta, dict) or not bounds:
+        return []
+    warnings: list[str] = []
+
+    eq = ta.get("equity_pct")
+    if isinstance(eq, (int, float)):
+        lo, hi = bounds.get("equity_min", 0), bounds.get("equity_max", 100)
+        if eq > hi:
+            ta["equity_pct"] = hi
+            warnings.append(f"equity_pct {eq}→{hi}（上限）")
+        elif eq < lo:
+            ta["equity_pct"] = lo
+            warnings.append(f"equity_pct {eq}→{lo}（下限）")
+
+    ms = ta.get("max_single_stock_pct")
+    cap = bounds.get("max_single_pct")
+    if isinstance(ms, (int, float)) and cap and ms > cap:
+        ta["max_single_stock_pct"] = cap
+        warnings.append(f"max_single_stock_pct {ms}→{cap}")
+
+    mb = ta.get("max_portfolio_beta")
+    blimit = bounds.get("beta_limit")
+    if isinstance(mb, (int, float)) and blimit and mb > blimit:
+        ta["max_portfolio_beta"] = blimit
+        warnings.append(f"max_portfolio_beta {mb}→{blimit}")
+
+    return warnings
+
+
+def _portfolio_risk_summary(store: WatchlistStore, positions: list[dict], total_equity: float) -> dict:
+    """计算组合风险摘要（HHI/VaR/CVaR/beta/最大单股·板块/高相关对/预警），供 L2 与投委会消费。
+
+    复用 risk_metrics.compute_portfolio_risk（与 /risk-dashboard 同一取数逻辑）。无持仓返回空摘要。
+    """
+    if not positions:
+        return {}
+    try:
+        from bottleneck_hunter.watchlist.risk_metrics import compute_portfolio_risk
+        price_histories = {}
+        for pos in positions:
+            tk = pos.get("ticker", "")
+            snaps = store.get_snapshots(tk, days=60)
+            prices = [s["close"] for s in reversed(snaps) if s.get("close")] if snaps else []
+            if prices:
+                price_histories[tk] = prices
+        m = compute_portfolio_risk(positions=positions, price_histories=price_histories,
+                                   total_equity=total_equity or 100000.0)
+        return {
+            "concentration_hhi": m.concentration_index,
+            "max_single_weight_pct": m.max_single_weight,
+            "max_sector_weight_pct": m.max_sector_weight,
+            "var_95": m.var_95,
+            "cvar_95": m.cvar_95,
+            "portfolio_beta": m.portfolio_beta,
+            "high_correlation_pairs": m.correlation_pairs,
+            "warnings": m.warnings,
+        }
+    except Exception as e:
+        logger.warning("组合风险摘要计算失败: %s", e)
+        return {}
+
+
+def _compute_deviation_drift(store: WatchlistStore, plan_rj: dict, account: dict,
+                             positions: list[dict], market: str) -> dict:
+    """确定性计算 L2 偏离度：实际 vs 目标（equity/cash/sector 权重），代替 LLM 心算。
+
+    返回 {equity_drift_pct, cash_drift_pct, sector_drift: [...], max_abs_drift_pct, rebalance_suggested}。
+    """
+    total_equity = account.get("total_equity", 100000) or 100000
+    cash = account.get("cash_balance", 100000)
+    pos_value = sum(p.get("market_value", 0) for p in positions)
+    actual_equity_pct = round(pos_value / total_equity * 100, 1)
+    actual_cash_pct = round(cash / total_equity * 100, 1)
+
+    ta = plan_rj.get("target_allocation", {}) if isinstance(plan_rj, dict) else {}
+    if not isinstance(ta, dict):
+        ta = {}
+    target_sector = plan_rj.get("sector_targets", {}) if isinstance(plan_rj, dict) else {}
+    if not isinstance(target_sector, dict):
+        target_sector = {}
+
+    target_equity = ta.get("equity_pct")
+    has_target = isinstance(target_equity, (int, float)) or bool(target_sector)
+
+    equity_drift = 0.0
+    cash_drift = 0.0
+    if isinstance(target_equity, (int, float)):
+        target_cash = ta.get("cash_pct", 100 - target_equity)
+        equity_drift = round(actual_equity_pct - target_equity, 1)
+        if isinstance(target_cash, (int, float)):
+            cash_drift = round(actual_cash_pct - target_cash, 1)
+    else:
+        target_equity = None
+        target_cash = ta.get("cash_pct")
+
+    # sector 实际权重（用观察池 sector 映射）
+    sector_map = {e["ticker"]: e.get("sector", "未分类") for e in store.list_all() if e.get("market") == market}
+    actual_sector: dict[str, float] = {}
+    for p in positions:
+        sec = sector_map.get(p.get("ticker", ""), "未分类")
+        actual_sector[sec] = actual_sector.get(sec, 0) + p.get("market_value", 0) / total_equity * 100
+
+    sector_drift = []
+    for sec in set(list(actual_sector.keys()) + list(target_sector.keys())):
+        act = round(actual_sector.get(sec, 0), 1)
+        tgt = target_sector.get(sec)
+        tgt = tgt.get("target_pct") if isinstance(tgt, dict) else tgt
+        if isinstance(tgt, (int, float)):
+            sector_drift.append({"sector": sec, "actual_pct": act, "target_pct": tgt,
+                                 "drift_pct": round(act - tgt, 1)})
+
+    drifts = [abs(d["drift_pct"]) for d in sector_drift]
+    if isinstance(target_equity, (int, float)):
+        drifts += [abs(equity_drift), abs(cash_drift)]
+    max_abs = max(drifts) if drifts else 0
+    return {
+        "actual_equity_pct": actual_equity_pct, "target_equity_pct": target_equity, "equity_drift_pct": equity_drift,
+        "actual_cash_pct": actual_cash_pct, "target_cash_pct": target_cash, "cash_drift_pct": cash_drift,
+        "sector_drift": sector_drift,
+        "max_abs_drift_pct": round(max_abs, 1),
+        # 有明确目标才做确定性判定；无目标(旧格式/缺失)返回 None → 交由 LLM 判断
+        "rebalance_suggested": (max_abs > 5) if has_target else None,
+    }
+
+
+def _chip_context(store: WatchlistStore, ticker: str) -> dict:
+    """B5: 汇总该股的筹码/估值锚信号——机构持仓 Top + 分析师评级分布 + 一致目标价（读库，零抓取）。
+
+    数据由 scheduler 定时采集入库；无数据则返回空 dict，L3 提示词按缺省处理。
+    """
+    out = {}
+    try:
+        holders = store.get_institutional_holders(ticker, limit=5)
+        if holders:
+            out["top_institutions"] = [{"name": h.get("holder_name", ""),
+                                        "pct_held": h.get("pct_held", 0)} for h in holders[:5]]
+            out["institution_count"] = len(store.get_institutional_holders(ticker, limit=50))
+    except Exception:
+        pass
+    try:
+        ratings = store.get_analyst_ratings(ticker, limit=20)
+        if ratings:
+            dist: dict[str, int] = {}
+            targets = []
+            for r in ratings:
+                rat = (r.get("rating", "") or "").strip().lower() or "unknown"
+                dist[rat] = dist.get(rat, 0) + 1
+                tp = r.get("target_price")
+                if isinstance(tp, (int, float)) and tp > 0:
+                    targets.append(tp)
+            out["rating_distribution"] = dist
+            if targets:
+                out["consensus_target_price"] = round(sum(targets) / len(targets), 2)
+                out["target_price_range"] = [min(targets), max(targets)]
+    except Exception:
+        pass
+    return out
 
 
 # ─────────────────────────────────────────────────────────
@@ -132,6 +297,15 @@ async def run_macro_strategy(
 
     try:
         market_data = await _collect_market_context(store, market)
+        # 注入市场/主题级近期新闻：优先读库（scheduler 定时采集），未采集则实时兜底
+        from bottleneck_hunter.watchlist.news_pipeline import fetch_market_news, market_sentinel
+        _mnews = store.get_news(market_sentinel(market), limit=15)
+        if _mnews:
+            market_data["news"] = [{"topic": n.get("llm_analysis", ""), "title": n.get("title", ""),
+                                    "date": n.get("date", ""), "source_name": n.get("source_name", ""),
+                                    "sentiment": n.get("sentiment", "")} for n in _mnews]
+        else:
+            market_data["news"] = await fetch_market_news(market, llm, budget)
         active_markets = market_data.get("markets", [])
         market_ctx = _get_market_context_text(active_markets)
         prompt_template = _load_prompt("decision_macro")
@@ -218,6 +392,15 @@ async def run_macro_check(
 
     try:
         market_data = await _collect_market_context(store, market)
+        # 注入市场/主题级近期新闻（优先读库，未采集则实时兜底）
+        from bottleneck_hunter.watchlist.news_pipeline import fetch_market_news, market_sentinel
+        _mnews = store.get_news(market_sentinel(market), limit=15)
+        if _mnews:
+            market_data["news"] = [{"topic": n.get("llm_analysis", ""), "title": n.get("title", ""),
+                                    "date": n.get("date", ""), "source_name": n.get("source_name", ""),
+                                    "sentiment": n.get("sentiment", "")} for n in _mnews]
+        else:
+            market_data["news"] = await fetch_market_news(market, llm, budget)
         active_markets = market_data.get("markets", [])
         market_ctx = _get_market_context_text(active_markets)
         created_at = current.get("created_at", "")
@@ -337,6 +520,9 @@ async def run_strategic_plan(
                       "positions": [{"ticker": p["ticker"], "weight_pct": p.get("weight_pct", 0),
                                      "unrealized_pnl": p.get("unrealized_pnl", 0)} for p in positions],
                   }, ensure_ascii=False))
+                  .replace("{portfolio_risk}", json.dumps(
+                      _portfolio_risk_summary(store, positions, account_status.get("total_equity", 100000)),
+                      ensure_ascii=False) or "暂无持仓风险数据")
                   .replace("{lessons_learned}", lessons or "暂无历史复盘数据")
                   .replace("{previous_strategic_plan}", json.dumps(
                       previous_plan.get("result_json", {}) if previous_plan else {},
@@ -353,6 +539,12 @@ async def run_strategic_plan(
             budget.record(provider, model, 8000, 3000, "strategic_plan")
 
         result = extract_json_object(response)
+        # A4: 确定性钳制 L2 目标配置到 L1 alloc_bounds（防止 LLM 给出越界仓位/beta 后被下游放行）
+        clamp_warnings = _clamp_target_allocation(result, alloc_bounds)
+        if clamp_warnings:
+            result["_clamp_warnings"] = clamp_warnings
+            for w in clamp_warnings:
+                yield _sse("decision_warning", layer="L2", message=f"⚠ L2 配置越界已钳制：{w}")
         plan_id = store.create_strategic_plan(macro["id"], result)
 
         # Phase 20D: 解析并保存三场景估值
@@ -437,8 +629,11 @@ async def run_deviation_check(
             })
 
         prompt_template = _load_prompt("decision_deviation_check")
+        # B7: 确定性计算偏离度，代替 LLM 心算；注入数值让 LLM 只做叙述与优先级
+        drift = _compute_deviation_drift(store, plan.get("result_json", {}), account, positions, market)
         prompt = (prompt_template
                   .replace("{strategic_plan}", json.dumps(plan.get("result_json", {}), ensure_ascii=False))
+                  .replace("{computed_drift}", json.dumps(drift, ensure_ascii=False))
                   .replace("{current_positions}", json.dumps({
                       "total_equity": account.get("total_equity", 100000),
                       "cash_balance": account.get("cash_balance", 100000),
@@ -454,13 +649,17 @@ async def run_deviation_check(
             budget.record(provider, model, 3000, 800, "deviation_check")
 
         result = extract_json_object(response)
-        rebalance_needed = result.get("rebalance_needed", False)
+        # rebalance_needed：有确定性判定时以 drift 为准；无明确目标(None)时退回 LLM
+        if drift["rebalance_suggested"] is None:
+            rebalance_needed = bool(result.get("rebalance_needed", False))
+        else:
+            rebalance_needed = bool(result.get("rebalance_needed", False)) or drift["rebalance_suggested"]
 
         yield _sse("decision_done", layer="L2", action="deviation_check",
                    rebalance_needed=rebalance_needed,
-                   deviation_pct=result.get("overall_deviation_pct", 0),
+                   deviation_pct=drift["max_abs_drift_pct"],
                    commentary=result.get("commentary", ""),
-                   message=f"L2 偏离检查完成：{'需要调仓' if rebalance_needed else '在容忍范围内'}")
+                   message=f"L2 偏离检查完成：{'需要调仓' if rebalance_needed else '在容忍范围内'}（最大偏离 {drift['max_abs_drift_pct']}%）")
 
     except Exception as e:
         logger.exception("L2 偏离检查失败")
@@ -549,6 +748,22 @@ async def run_tactical_plans(
         held_tickers = {p["ticker"] for p in store.get_sim_positions(
             store.get_sim_account().get("id")) if p.get("shares", 0) > 0}
         forced = (catalyst_outcome_tickers & held_tickers)
+
+        # B3: 论点失效(invalidated/weakened)且在持仓 → 强制纳入 L3 并注入告警（倾向 reduce/sell/收紧止损）
+        thesis_alerts = {}
+        for e in store.list_all():
+            if e.get("market") != market or e["ticker"] not in held_tickers:
+                continue
+            for th in store.get_theses_for_entry(e["id"], active_only=True):
+                st = th.get("status", "")
+                if st in ("invalidated", "weakened"):
+                    thesis_alerts.setdefault(e["ticker"], []).append({
+                        "thesis": th.get("thesis_title", ""),
+                        "status": st,
+                        "conviction": th.get("conviction", ""),
+                    })
+        thesis_forced = set(thesis_alerts.keys())
+        forced = forced | thesis_forced
         if forced:
             selected_tickers = selected_tickers | forced
 
@@ -585,6 +800,7 @@ async def run_tactical_plans(
                 "rsi_14": snap.get("rsi_14") if snap else None,
                 "sma_50": snap.get("sma_50") if snap else None,
                 "volume": snap.get("volume") if snap else None,
+                "chip_signals": _chip_context(store, ticker),  # B5: 机构持仓/评级/目标价
             })
 
         prompt_template = _load_prompt("decision_tactical")
@@ -602,6 +818,8 @@ async def run_tactical_plans(
                   .replace("{catalyst_timeline}", json.dumps(catalyst_by_ticker, ensure_ascii=False))
                   .replace("{catalyst_outcomes}",
                            json.dumps(outcome_by_ticker, ensure_ascii=False) if outcome_by_ticker else "暂无已判定催化剂")
+                  .replace("{thesis_alerts}",
+                           json.dumps(thesis_alerts, ensure_ascii=False) if thesis_alerts else "暂无失效投资论点")
                   .replace("{recent_trades}", recent_trades_text)
                   )
 
@@ -872,10 +1090,22 @@ async def run_execution_plans(
         # P0.6 动态约束：按 L1 风险偏好选择约束集
         from bottleneck_hunter.watchlist.constraint_validator import (
             validate_execution_plan, max_compliant_shares, get_constraints_for_appetite,
-            validate_portfolio_beta)
+            validate_portfolio_beta, validate_against_regime)
         macro = store.get_latest_macro_strategy()
+        macro_rj = (macro or {}).get("result_json", {}) if macro else {}
         risk_appetite = (macro or {}).get("risk_appetite", "")
+        regime = macro_rj.get("regime", "sideways")
+        confidence = macro_rj.get("regime_confidence", 5)
+        # B1: 统一约束真值源——用 L1 (regime×appetite×confidence) 的 alloc_bounds 收紧 appetite 级约束，
+        # 让"熊市防守单股 5%/beta 0.5"在 L4 硬校验真正生效（消除 REGIME_MAP vs REGIME_CONSTRAINTS 双真值源）
+        alloc_bounds = get_allocation_bounds(regime, risk_appetite, confidence)
         constraints = get_constraints_for_appetite(risk_appetite)
+        if alloc_bounds.get("max_single_pct"):
+            constraints["max_single_position_pct"] = min(
+                constraints.get("max_single_position_pct", 100), alloc_bounds["max_single_pct"])
+        if alloc_bounds.get("beta_limit"):
+            constraints["max_portfolio_beta"] = min(
+                constraints.get("max_portfolio_beta", 10), alloc_bounds["beta_limit"])
 
         # P2.1 构建 beta_map(从 company_profiles，缺失则降级)
         beta_map = {}
@@ -915,12 +1145,17 @@ async def run_execution_plans(
             ep.setdefault("market", market)
             ep.setdefault("sector", sector_map.get(ticker, ""))
 
-            # ── P0.1 前置约束校验 + P2.1 组合 beta 校验 ──
+            # ── P0.1 前置约束校验 + P2.1 组合 beta 校验 + B1 regime 仓位校验 ──
             def _full_validate(plan_ep):
                 vr = validate_execution_plan(plan_ep, account, positions, constraints)
                 br = validate_portfolio_beta(plan_ep, account, positions, beta_map, constraints)
                 if not br.valid:
                     vr.violations.extend(br.violations)
+                    vr.valid = False
+                # B1: 启用原死代码 validate_against_regime，让 regime 收紧的 equity 上限在 L4 真正生效
+                rr = validate_against_regime(plan_ep, account, positions, alloc_bounds)
+                if not rr.valid:
+                    vr.violations.extend(rr.violations)
                     vr.valid = False
                 return vr
 
@@ -994,9 +1229,8 @@ async def run_execution_plans(
 
         # P3.2 过度交易监控：近 7 天成交超阈值则告警
         try:
-            from datetime import timedelta as _td
             recent = store.get_sim_trades(limit=100)
-            cutoff = (datetime.now(timezone.utc) - _td(days=7)).isoformat()
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
             recent_count = sum(1 for t in recent if (t.get("created_at", "") or "") >= cutoff)
             if recent_count >= 15:
                 yield _sse("decision_warning", layer="L4",
@@ -1012,6 +1246,64 @@ async def run_execution_plans(
 # ─────────────────────────────────────────────────────────
 # 完整日常决策流程
 # ─────────────────────────────────────────────────────────
+
+
+async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGenerator[dict, None]:
+    """硬止损巡检：持仓现价跌破 L3 战术计划的 stop_loss 即生成卖出执行计划（绕过 LLM）。
+
+    这是买方风控闭环最不可缺的一环——两次 L3 生成之间持仓大幅下破止损位时，
+    系统应自动减仓而非等下一轮 LLM 决策。零 LLM 成本。
+    """
+    try:
+        account = store.get_sim_account()
+        positions = store.get_sim_positions(account.get("id"))
+    except Exception as e:
+        logger.warning("硬止损巡检读取持仓失败: %s", e)
+        return
+
+    triggered = 0
+    for pos in positions:
+        ticker = pos.get("ticker", "")
+        shares = pos.get("shares", 0)
+        if not ticker or shares <= 0:
+            continue
+        plan = store.get_latest_tactical_plan_for_ticker(ticker)
+        if not plan:
+            continue
+        exit_plan = plan.get("exit_plan") or {}
+        stop = exit_plan.get("stop_loss") or {}
+        stop_price = stop.get("price")
+        if not stop_price:
+            continue
+        snap = store.get_latest_snapshot(ticker)
+        close = snap.get("close") if snap else None
+        if not close or close > stop_price:
+            continue
+        # 已跌破止损位 → 生成清仓卖出执行计划（待投委会/确认）
+        try:
+            eid = store.create_execution_plan(
+                tactical_plan_id=plan.get("id", ""),
+                entry_id=pos.get("entry_id", ""),
+                ticker=ticker,
+                result_json={
+                    "action": "sell",
+                    "shares": shares,
+                    "target_price": close,
+                    "priority": 1,
+                    "reasoning": f"硬止损触发：现价 {close} 已跌破止损位 {stop_price}（自动风控，非 LLM 决策）",
+                    "_hard_stop": True,
+                },
+            )
+            triggered += 1
+            yield _sse("decision_warning", layer="risk_control", ticker=ticker,
+                       message=f"⚠ 硬止损触发 {ticker}：现价 {close} < 止损 {stop_price}，已生成清仓计划 {eid[:8]}")
+        except Exception as e:
+            logger.warning("硬止损生成卖出计划失败 %s: %s", ticker, e)
+
+    if triggered:
+        logger.info("硬止损巡检(%s): %d 只触发", market, triggered)
+
+
 
 async def run_daily_decision(
     store: WatchlistStore,
@@ -1043,6 +1335,14 @@ async def run_daily_decision(
             yield evt
     except Exception as e:
         logger.warning("论点检查失败: %s", e)
+
+    # Step 0.6: 硬止损巡检（现价跌破止损位即自动生成清仓计划，绕过 LLM）
+    if scope in ("l3l4", "full"):
+        try:
+            async for evt in _hard_stop_loss_sweep(store, market):
+                yield evt
+        except Exception as e:
+            logger.warning("硬止损巡检失败: %s", e)
 
     # Step 1: L1 宏观检查
     if scope in ("l1", "full"):
@@ -1090,18 +1390,26 @@ async def run_daily_decision(
             yield evt
 
     # Step 3.5: pre_l4 质量门控
+    l4_blocked = False
     if scope in ("l3l4", "full"):
         try:
             from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
             async for evt in run_quality_checks(store, "pre_l4"):
                 yield evt
+                if evt.get("event") == "quality_check_block":
+                    l4_blocked = True
         except Exception as e:
             logger.warning("pre_l4 质量门控失败: %s", e)
 
-    # Step 4: L4 执行方案
+    # Step 4: L4 执行方案（质量门 red 时阻断新建执行计划，避免在数据严重过期/超限下下单；
+    #          A1 硬止损已生成的卖出计划不受影响，仍进入投委会）
     if scope in ("l3l4", "full"):
-        async for evt in run_execution_plans(store, budget, market=market):
-            yield evt
+        if l4_blocked:
+            yield _sse("decision_warning", layer="L4",
+                       message="⛔ 质量门红灯，已阻断 L4 新建执行计划（数据过期/仓位超限），仅保留风控性卖出")
+        else:
+            async for evt in run_execution_plans(store, budget, market=market):
+                yield evt
 
     # Step 5: 投委会评审
     if scope in ("l3l4", "full"):
@@ -1170,12 +1478,25 @@ async def run_full_refresh(
 # ─────────────────────────────────────────────────────────
 
 async def _collect_market_context(store: WatchlistStore, market: str = "us_stock") -> dict:
-    """收集市场宏观数据（从观察池数据中聚合），并附带市场类型列表。"""
-    from bottleneck_hunter.watchlist.macro_data import fetch_macro_data
+    """收集市场宏观数据：真实大盘指数 + 观察池广度聚合，并附带市场类型列表。"""
+    from bottleneck_hunter.watchlist.macro_data import MARKET_INDEX_KEYS, fetch_macro_data
 
     by_market = store.get_tickers_by_market()
     tickers = by_market.get(market, [])
     active_markets = [market]
+
+    # 先取真实宏观（含真实大盘指数），保证即使观察池为空 L1 也有真实大盘输入
+    try:
+        macro = await fetch_macro_data(store, active_markets)
+    except Exception as e:
+        logger.warning("宏观数据采集失败，使用缓存: %s", e)
+        macro = {}
+        cached = store.get_latest_macro_snapshots()
+        for row in cached:
+            macro[row["indicator"]] = {"value": row["value"], "change_pct": 0.0, "label": row["indicator"]}
+
+    # 真实大盘指数（区别于 VIX/汇率等宏观指标）
+    real_indices = {k: macro[k] for k in MARKET_INDEX_KEYS.get(market, ["sp500"]) if k in macro}
 
     all_snapshots = []
     for ticker in tickers:
@@ -1184,7 +1505,7 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
             all_snapshots.append(snap)
 
     if not all_snapshots:
-        return {"indices": {}, "sectors": {}, "sentiment": {}, "macro": {},
+        return {"indices": dict(real_indices), "sectors": {}, "sentiment": {}, "macro": macro,
                 "news": [], "markets": active_markets}
 
     avg_change = sum(s.get("change_pct", 0) or 0 for s in all_snapshots) / max(len(all_snapshots), 1)
@@ -1215,20 +1536,14 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
             news_items.append({"ticker": ticker, "title": n.get("title", ""),
                                "sentiment": n.get("sentiment", "")})
 
-    try:
-        macro = await fetch_macro_data(store, active_markets)
-    except Exception as e:
-        logger.warning("宏观数据采集失败，使用缓存: %s", e)
-        macro = {}
-        cached = store.get_latest_macro_snapshots()
-        for row in cached:
-            macro[row["indicator"]] = {"value": row["value"], "change_pct": 0.0, "label": row["indicator"]}
-
     return {
         "indices": {
-            "watchlist_avg_change_pct": round(avg_change, 2),
-            "watchlist_avg_rsi": round(avg_rsi, 1),
-            "stocks_tracked": len(all_snapshots),
+            **real_indices,  # 真实大盘指数（标普/纳指 或 上证/沪深300）
+            "watchlist_breadth": {  # 观察池广度（自选股均值，明确区分于大盘）
+                "avg_change_pct": round(avg_change, 2),
+                "avg_rsi": round(avg_rsi, 1),
+                "stocks_tracked": len(all_snapshots),
+            },
         },
         "sectors": sectors,
         "sentiment": {
@@ -1307,7 +1622,6 @@ def _update_composite_scores(store: WatchlistStore, market: str = "us_stock") ->
 
             snap = store.get_latest_snapshot(ticker)
             if snap and snap.get("fetched_at"):
-                from datetime import datetime, timezone
                 try:
                     fetched = datetime.fromisoformat(snap["fetched_at"].replace("Z", "+00:00"))
                     age_hours = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600

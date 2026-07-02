@@ -38,19 +38,25 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     action = plan.get("action") or result_json.get("action", "")
     ticker = plan.get("ticker", "")
     shares = plan.get("shares") or result_json.get("shares", 0)
-    target_price = (plan.get("target_price")
-                    or result_json.get("target_price")
-                    or result_json.get("estimated_price", 0))
+    planned_price = (plan.get("target_price")
+                     or result_json.get("target_price")
+                     or result_json.get("estimated_price", 0))
 
-    if not action or not ticker or not shares or not target_price:
+    # 消除前视偏差：成交基准价用「下单确认时的最新市价」而非 L4 规划时 LLM 估的目标价，
+    # 否则 win_rate/收益率会被系统性美化并污染自进化回路。取不到快照才回退规划价。
+    snap = store.get_latest_snapshot(ticker)
+    exec_basis = (snap.get("close") if snap and snap.get("close") else None) or planned_price
+    # 注：result_json 的 limit_price/split_plan/execution_method 当前执行器未支持（死配置）。
+
+    if not action or not ticker or not shares or not exec_basis:
         return {"error": "执行计划缺少关键字段", "plan_id": plan_id}
 
     if action in ("buy", "add"):
-        result = _execute_buy(store, account, plan_id, ticker, shares, target_price,
+        result = _execute_buy(store, account, plan_id, ticker, shares, exec_basis,
                               plan.get("entry_id"), result_json.get("reasoning", ""),
                               market=market)
     elif action in ("sell", "reduce"):
-        result = _execute_sell(store, account, plan_id, ticker, shares, target_price,
+        result = _execute_sell(store, account, plan_id, ticker, shares, exec_basis,
                                plan.get("entry_id"), result_json.get("reasoning", ""),
                                market=market)
     else:
@@ -150,6 +156,16 @@ def _execute_sell(store: WatchlistStore, account: dict,
     )
 
     realized_pnl = round((exec_price - pos["avg_cost"]) * shares - commission, 2)
+
+    # B4: 用实际盈亏结算该 ticker 的投委会投票预测，让委员历史校准权重真正生效
+    # （盈利→票判对；亏损→票判错。score_delta 借 record_outcome 的 is_correct 阈值语义：<2 判对）
+    try:
+        won = realized_pnl > 0
+        store.record_outcome(ticker, "vote",
+                             outcome_value="win" if won else "loss",
+                             score_delta=0.0 if won else 3.0)
+    except Exception:
+        logger.debug("record_outcome(vote) failed for %s", ticker)
 
     remaining = pos["shares"] - shares
     if remaining <= 0:

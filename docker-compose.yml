@@ -1,0 +1,23 @@
+services:
+  bottleneck-hunter:
+    build: .
+    image: bottleneck-hunter:latest
+    container_name: bottleneck-hunter
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    volumes:
+      # SQLite 库 + 加密密钥 + JWT secret（丢失则已加密数据无法解密，务必持久化）
+      - ./data:/app/data
+      # 生成的 Markdown 报告
+      - ./output:/app/output
+      # 应用会写回 .env（保存 AI 配置），需可写挂载
+      - ./.env:/app/.env
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

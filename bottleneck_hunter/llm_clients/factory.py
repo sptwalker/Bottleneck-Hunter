@@ -30,6 +30,21 @@ PROVIDER_KEY_MAP: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
+# 各 provider 的默认模型（web API 展示 / 连通性测试用）
+PROVIDER_MODELS: dict[str, str] = {
+    "openai": "gpt-4o",
+    "anthropic": "claude-sonnet-4-6",
+    "deepseek": "deepseek-chat",
+    "google": "gemini-2.5-flash",
+    "qwen": "qwen-plus",
+    "glm": "glm-4-flash",
+    "minimax": "MiniMax-Text-01",
+    "openrouter": "deepseek/deepseek-chat",
+    "siliconflow": "deepseek-ai/DeepSeek-V3",
+    "agnes": "agnes-2.0-flash",
+    "kimi": "moonshot-v1-8k",
+}
+
 # ── 自定义 provider 运行时缓存 ──────────────────────────
 _CUSTOM_PROVIDERS: dict[str, dict] = {}
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import AsyncGenerator
 
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position
@@ -93,22 +94,12 @@ async def refresh_intelligence_one(
             return_exceptions=True,
         )
 
-        price_summary, news_summary, sec_summary, options_summary, earnings_summary, scorecard_summary = results
-
-        # 处理异常
+        keys = ("price", "news", "sec", "options", "earnings", "scorecard")
         for i, r in enumerate(results):
             if isinstance(r, Exception):
                 logger.warning("Aggregation failed for %s subsource %d: %s", ticker, i, r)
                 results[i] = {}
-
-        aggregated = {
-            "price": price_summary if not isinstance(price_summary, Exception) else {},
-            "news": news_summary if not isinstance(news_summary, Exception) else {},
-            "sec": sec_summary if not isinstance(sec_summary, Exception) else {},
-            "options": options_summary if not isinstance(options_summary, Exception) else {},
-            "earnings": earnings_summary if not isinstance(earnings_summary, Exception) else {},
-            "scorecard": scorecard_summary if not isinstance(scorecard_summary, Exception) else {},
-        }
+        aggregated = dict(zip(keys, results))
 
         # LLM 生成简报（可选）
         brief_text = ""
@@ -704,7 +695,6 @@ def _parse_strategy_response(response: str) -> dict:
             reason = content
 
             # 提取评分
-            import re
             match = re.search(r"(\d+)", content)
             if match:
                 conf_score = max(1, min(10, int(match.group(1))))

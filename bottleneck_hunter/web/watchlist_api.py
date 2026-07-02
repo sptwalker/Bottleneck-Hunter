@@ -26,11 +26,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["watchlist"])
 
 _store: WatchlistStore | None = None
+_auth_store = None
 
 
 def set_store(store: WatchlistStore) -> None:
     global _store
     _store = store
+
+
+def set_auth_store(auth_store) -> None:
+    """注入 AuthStore，用于解析用户观察池上限与全局分档比例配置。"""
+    global _auth_store
+    _auth_store = auth_store
 
 
 def _get_store() -> WatchlistStore:
@@ -39,9 +46,30 @@ def _get_store() -> WatchlistStore:
     return _store
 
 
+def _resolve_tier_caps(user_id: str) -> dict[str, int]:
+    """按「用户上限（无则全局默认） × 全局比例配置」推导该用户的分档容量。"""
+    from bottleneck_hunter.watchlist.tier_limits import derive_tier_caps, DEFAULT_TOTAL, DEFAULT_FOCUS_PCT, DEFAULT_NORMAL_PCT
+    if _auth_store is None:
+        return derive_tier_caps()
+    total = DEFAULT_TOTAL
+    try:
+        u = _auth_store.get_user_by_id(user_id)
+        if u is not None and getattr(u, "watchlist_limit", None):
+            total = int(u.watchlist_limit)
+        else:
+            total = int(_auth_store.get_config("default_watchlist_limit", str(DEFAULT_TOTAL)))
+        focus_pct = float(_auth_store.get_config("watchlist_tier_focus_pct", str(DEFAULT_FOCUS_PCT)))
+        normal_pct = float(_auth_store.get_config("watchlist_tier_normal_pct", str(DEFAULT_NORMAL_PCT)))
+    except Exception:
+        logger.warning("解析用户观察池上限失败，回退默认", exc_info=True)
+        return derive_tier_caps()
+    return derive_tier_caps(total, focus_pct, normal_pct)
+
+
 def _user_store(user: dict) -> WatchlistStore:
-    """返回绑定当前用户的 store 实例。"""
-    return _get_store().for_user(user["sub"])
+    """返回绑定当前用户的 store 实例（含该用户生效的分档容量）。"""
+    uid = user["sub"]
+    return _get_store().for_user(uid, tier_caps=_resolve_tier_caps(uid))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -173,7 +201,9 @@ async def list_watchlist(tier: str | None = None, user: dict = Depends(get_curre
     for e in entries:
         snap = store.get_latest_snapshot(e["ticker"])
         e["latest_snapshot"] = snap
-    return {"entries": entries, "counts": counts, "total": len(entries)}
+    caps = store._effective_tier_caps()
+    limits = {"total": sum(caps.values()), **caps}
+    return {"entries": entries, "counts": counts, "total": len(entries), "limits": limits}
 
 
 @router.post("")

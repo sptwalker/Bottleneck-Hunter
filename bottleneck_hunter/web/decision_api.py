@@ -10,12 +10,15 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 
+from dotenv import set_key
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.llm_clients.factory import PROVIDER_MODELS
 
 from bottleneck_hunter.auth.dependencies import get_current_user
 
@@ -40,6 +43,16 @@ def _get_store() -> WatchlistStore:
 def _user_store(user: dict) -> WatchlistStore:
     """返回绑定当前用户的 store 实例。"""
     return _get_store().for_user(user["sub"])
+
+
+def _maybe_json(v):
+    """若 v 是 JSON 字符串则解析，解析失败返回 {}；非字符串按原样返回。"""
+    if not isinstance(v, str):
+        return v
+    try:
+        return json.loads(v)
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 def _user_budget(user: dict):
@@ -549,13 +562,7 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
                         logger.debug("回退读取投委会评审失败", exc_info=True)
             tickers = rec.get("tickers_discussed", []) or []
             consensus = rec.get("result_json", {})
-            if isinstance(consensus, str):
-                try:
-                    import json as _json
-                    consensus = _json.loads(consensus)
-                except (ValueError, TypeError):
-                    consensus = {}
-            consensus = consensus or {}
+            consensus = _maybe_json(consensus) or {}
             committee_meta = {
                 "ticker": tickers[0] if tickers else "",
                 "verdict": rec.get("final_verdict", ""),
@@ -621,20 +628,6 @@ AI_CONFIG_POSITIONS = [
     {"key": "watchlist_uzi", "label": "深度分析(UZI)", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
 ]
 
-PROVIDER_MODELS = {
-    "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-6",
-    "deepseek": "deepseek-chat",
-    "google": "gemini-2.5-flash",
-    "qwen": "qwen-plus",
-    "glm": "glm-4-flash",
-    "minimax": "MiniMax-Text-01",
-    "openrouter": "deepseek/deepseek-chat",
-    "siliconflow": "deepseek-ai/DeepSeek-V3",
-    "agnes": "agnes-2.0-flash",
-    "kimi": "moonshot-v1-8k",
-}
-
 
 @router.get("/ai-config")
 async def get_ai_config(user: dict = Depends(get_current_user)):
@@ -693,9 +686,6 @@ class AIConfigSaveRequest(BaseModel):
 @router.post("/ai-config")
 async def save_ai_config(req: AIConfigSaveRequest, user: dict = Depends(get_current_user)):
     """保存 AI 模型配置到 .env"""
-    from pathlib import Path
-    from dotenv import set_key
-
     env_path = Path.cwd() / ".env"
     valid_keys = {pos["key"] for pos in AI_CONFIG_POSITIONS}
 
@@ -755,11 +745,7 @@ async def get_decision_trace(ticker: str, market: str = "us_stock", user: dict =
     macro = store.get_latest_macro_strategy()
     if macro:
         rj = macro.get("result_json") or {}
-        if isinstance(rj, str):
-            try:
-                rj = json.loads(rj)
-            except (json.JSONDecodeError, TypeError):
-                rj = {}
+        rj = _maybe_json(rj)
         layers.append({
             "level": "L1",
             "label": "宏观环境",
@@ -776,11 +762,7 @@ async def get_decision_trace(ticker: str, market: str = "us_stock", user: dict =
     strategic = store.get_latest_strategic_plan()
     if strategic:
         rj = strategic.get("result_json") or {}
-        if isinstance(rj, str):
-            try:
-                rj = json.loads(rj)
-            except (json.JSONDecodeError, TypeError):
-                rj = {}
+        rj = _maybe_json(rj)
         target_alloc = rj.get("target_allocation", [])
         ticker_alloc = None
         if isinstance(target_alloc, list):
@@ -817,11 +799,7 @@ async def get_decision_trace(ticker: str, market: str = "us_stock", user: dict =
     tactical = store.get_tactical_plan_for_ticker(ticker, today)
     if tactical:
         rj = tactical.get("result_json") or {}
-        if isinstance(rj, str):
-            try:
-                rj = json.loads(rj)
-            except (json.JSONDecodeError, TypeError):
-                rj = {}
+        rj = _maybe_json(rj)
         action = rj.get("action") or tactical.get("action", "hold")
         entry_plan = rj.get("entry_plan") or {}
         exit_plan = rj.get("exit_plan") or {}
@@ -853,11 +831,7 @@ async def get_decision_trace(ticker: str, market: str = "us_stock", user: dict =
     if ex_row:
         ex = dict(ex_row)
         rj = ex.get("result_json")
-        if isinstance(rj, str):
-            try:
-                rj = json.loads(rj)
-            except (json.JSONDecodeError, TypeError):
-                rj = {}
+        rj = _maybe_json(rj)
         rj = rj or {}
         action = ex.get("action", "hold")
         status = ex.get("status", "pending")

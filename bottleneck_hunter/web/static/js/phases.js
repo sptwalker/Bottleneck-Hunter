@@ -7,7 +7,7 @@ import { renderPhase1, renderPhase2Table, renderPhase3Table, renderPhase4Table, 
 import { onProvidersChange, getProviders } from './settings.js';
 import { state, logMsg, clearLog, getScoreColor, scoreNeedsDarkText, SCORE_COLORS, getMainModel, formatMarkdown } from './wizard-state.js';
 import { readSSEStream } from './sse.js';
-import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, MEETING_ROLES } from './ai-features.js';
+import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, exportMeeting, MEETING_ROLES } from './ai-features.js';
 import { openDrawer, closeDrawer } from './drawer.js';
 import { buildAnalysisTag } from './analysis-tag.js';
 import { showConfirm } from './utils/confirm.js';
@@ -1466,6 +1466,7 @@ export function initWizard() {
   // 圆桌会议按钮
   document.getElementById('btn-start-meeting')?.addEventListener('click', () => startMeeting());
   document.getElementById('btn-preflight')?.addEventListener('click', () => runPreflight());
+  document.getElementById('btn-export-meeting')?.addEventListener('click', () => exportMeeting());
 
   // 加载历史
   loadWizardHistory();

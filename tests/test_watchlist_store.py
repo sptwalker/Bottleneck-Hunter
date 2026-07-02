@@ -44,6 +44,27 @@ class TestWatchlistCRUD:
         with pytest.raises(ValueError, match="full"):
             store.add(_make_entry("OVERFLOW", "focus"))
 
+    def test_injected_tier_caps_scale_limits(self, store):
+        """for_user 注入的 tier_caps 应决定分档容量（去硬编码验证）。
+
+        上限 8 → 25%/25% → focus 2 / normal 2 / track 4。
+        """
+        from bottleneck_hunter.watchlist.tier_limits import derive_tier_caps
+        us = store.for_user("u_small", tier_caps=derive_tier_caps(8, 0.25, 0.25))
+        assert us._effective_tier_caps() == {"focus": 2, "normal": 2, "track": 4}
+        # focus 满 2 即拒（而非默认的 6）
+        us.add(_make_entry("A1", "focus"))
+        us.add(_make_entry("A2", "focus"))
+        with pytest.raises(ValueError, match="full"):
+            us.add(_make_entry("A3", "focus"))
+        # 总容量 8：填满后再加任何档都拒
+        for i in range(2):
+            us.add(_make_entry(f"N{i}", "normal"))
+        for i in range(4):
+            us.add(_make_entry(f"T{i}", "track"))
+        with pytest.raises(ValueError, match="full"):
+            us.add(_make_entry("OVER", "track"))
+
     def test_list_all_no_filter(self, store):
         """list_all() 不传 tier 返回全部条目，按 tier + composite_score 排序"""
         store.add(_make_entry("AAPL", "focus", composite_score=80))
@@ -200,3 +221,27 @@ class TestPipelineStatus:
         statuses = {s["pipeline_name"]: s["last_status"] for s in store.get_pipeline_statuses()}
         assert statuses["price"] == "ok"
         assert statuses["news"] == "fail"
+
+
+# ═════════════════════════════════════════════════════════
+# Catalysts — upcoming window
+# ═════════════════════════════════════════════════════════
+
+class TestUpcomingCatalysts:
+    def test_get_upcoming_honors_days_window(self, store):
+        """get_upcoming_catalysts(days=N) 只返回未来 N 天内的催化剂（回归：days 曾被 SQL 忽略）"""
+        from datetime import datetime, timedelta, timezone
+
+        entry_id = store.add(_make_entry("NVDA"))
+        today = datetime.now(timezone.utc)
+        near = (today + timedelta(days=3)).strftime("%Y-%m-%d")
+        far = (today + timedelta(days=60)).strftime("%Y-%m-%d")
+        store.create_catalyst(entry_id, "NVDA", "near event", expected_date=near)
+        store.create_catalyst(entry_id, "NVDA", "far event", expected_date=far)
+
+        titles_7 = {c["title"] for c in store.get_upcoming_catalysts(days=7)}
+        assert "near event" in titles_7
+        assert "far event" not in titles_7
+
+        titles_90 = {c["title"] for c in store.get_upcoming_catalysts(days=90)}
+        assert {"near event", "far event"} <= titles_90

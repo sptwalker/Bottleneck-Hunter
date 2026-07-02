@@ -263,9 +263,6 @@ def _load_prompt(name: str) -> str:
 class SupplierEvaluator:
     """Evaluate candidate suppliers using LLM."""
 
-    LLM_TIMEOUT = 120
-    MAX_CONCURRENCY = 4
-
     def __init__(
         self,
         llm: BaseChatModel,

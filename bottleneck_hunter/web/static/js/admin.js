@@ -95,11 +95,13 @@ function renderUsers(users) {
       ? '<span class="admin-badge admin-badge-frozen">已冻结</span>'
       : '<span class="admin-badge admin-badge-active">活跃</span>';
     const wlCount = u.watchlist_count ?? '—';
+    const wlLimit = u.watchlist_limit ?? 24;
+    const wlDisplay = `${wlCount} / ${wlLimit}`;
     const created = u.created_at ? u.created_at.slice(0, 10) : '—';
     const lastLogin = u.last_login_at ? u.last_login_at.slice(0, 10) : '从未';
 
     // 操作按钮
-    let actions = '';
+    let actions = `<button class="btn btn-xs admin-action-btn" onclick="window._adminEditLimit('${u.id}','${esc(u.username)}',${wlLimit})">设上限</button>`;
     const isSelf = u.id === window.appState?.user?.id;
     if (!isSelf) {
       if (frozen) {
@@ -109,7 +111,7 @@ function renderUsers(users) {
       }
       actions += `<button class="btn btn-xs admin-action-btn admin-action-danger" onclick="window._adminDelete('${u.id}','${esc(u.username)}')">删除</button>`;
     } else {
-      actions = '<span style="color:var(--muted);font-size:12px">当前用户</span>';
+      actions += '<span style="color:var(--muted);font-size:12px;margin-left:6px">（当前用户）</span>';
     }
 
     return `<tr class="${frozen ? 'admin-row-frozen' : ''}">
@@ -117,7 +119,7 @@ function renderUsers(users) {
       <td>${esc(u.display_name || '')}</td>
       <td>${roleBadge}</td>
       <td>${statusBadge}</td>
-      <td style="text-align:center">${wlCount}</td>
+      <td style="text-align:center">${wlDisplay}</td>
       <td>${created}<br><span style="font-size:11px;color:var(--muted)">最近: ${lastLogin}</span></td>
       <td class="admin-actions-cell">${actions}</td>
     </tr>`;
@@ -158,6 +160,22 @@ window._adminDelete = async (userId, username) => {
     if (!res.ok) { const d = await res.json(); throw new Error(d.detail || res.status); }
     loadUsers();
   } catch (err) { alert(`删除失败: ${err.message}`); }
+};
+
+window._adminEditLimit = async (userId, username, current) => {
+  const val = prompt(`设置用户 "${username}" 的观察池上限（股票数）：`, String(current ?? 24));
+  if (val === null) return;
+  const limit = parseInt(val, 10);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) { alert('请输入 1–500 之间的整数'); return; }
+  try {
+    const res = await fetch(`/api/admin/users/${userId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ watchlist_limit: limit }),
+    });
+    if (!res.ok) { const d = await res.json(); throw new Error(d.detail || res.status); }
+    loadUsers();
+  } catch (err) { alert(`设置失败: ${err.message}`); }
 };
 
 
@@ -286,15 +304,99 @@ async function loadConfig() {
     const limitInput = document.getElementById('admin-cfg-wl-limit');
     if (limitInput) limitInput.value = config.default_watchlist_limit || 24;
 
+    // 分档比例（后端存 0-1 小数，UI 用百分数）
+    const focusInput = document.getElementById('admin-cfg-focus-pct');
+    const normalInput = document.getElementById('admin-cfg-normal-pct');
+    if (focusInput) focusInput.value = Math.round((config.tier_focus_pct ?? 0.25) * 100);
+    if (normalInput) normalInput.value = Math.round((config.tier_normal_pct ?? 0.25) * 100);
+    updateTierPreview();
+    [limitInput, focusInput, normalInput].forEach(el => {
+      if (el && !el._previewBound) { el._previewBound = true; el.addEventListener('input', updateTierPreview); }
+    });
+
     // 保存按钮
     const saveBtn = document.getElementById('admin-cfg-save');
     if (saveBtn && !saveBtn._bound) {
       saveBtn._bound = true;
       saveBtn.addEventListener('click', saveConfig);
     }
+
+    // SMTP 配置
+    await loadSmtpConfig();
+    const smtpSave = document.getElementById('admin-smtp-save');
+    if (smtpSave && !smtpSave._bound) { smtpSave._bound = true; smtpSave.addEventListener('click', saveSmtpConfig); }
+    const smtpTest = document.getElementById('admin-smtp-test');
+    if (smtpTest && !smtpTest._bound) { smtpTest._bound = true; smtpTest.addEventListener('click', testSmtp); }
   } catch (err) {
     console.error('加载配置失败:', err);
   }
+}
+
+async function loadSmtpConfig() {
+  try {
+    const res = await fetch('/api/admin/smtp-config');
+    if (!res.ok) return;
+    const c = await res.json();
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    set('admin-smtp-host', c.host || '');
+    set('admin-smtp-port', c.port || 587);
+    set('admin-smtp-user', c.user || '');
+    set('admin-smtp-from', c.sender || '');
+    const tls = document.getElementById('admin-smtp-tls');
+    if (tls) tls.checked = c.use_tls !== false;
+    const pw = document.getElementById('admin-smtp-password');
+    if (pw) pw.placeholder = c.password_set ? '已设置（留空保持不变）' : '未设置';
+    const src = document.getElementById('admin-smtp-source');
+    if (src) {
+      src.textContent = c.configured
+        ? (c.source === 'db' ? '当前使用：后台配置' : '当前使用：环境变量 (.env) 兜底')
+        : '⚠ 尚未配置 SMTP，验证码将打印到服务器日志';
+    }
+  } catch (err) { console.error('加载 SMTP 配置失败:', err); }
+}
+
+async function saveSmtpConfig() {
+  const status = document.getElementById('admin-smtp-status');
+  const body = {
+    host: document.getElementById('admin-smtp-host')?.value.trim() || '',
+    port: parseInt(document.getElementById('admin-smtp-port')?.value || '587'),
+    user: document.getElementById('admin-smtp-user')?.value.trim() || '',
+    sender: document.getElementById('admin-smtp-from')?.value.trim() || '',
+    use_tls: document.getElementById('admin-smtp-tls')?.checked ?? true,
+  };
+  const pw = document.getElementById('admin-smtp-password')?.value || '';
+  if (pw) body.password = pw;  // 空则不改
+  try {
+    const res = await fetch('/api/admin/smtp-config', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!res.ok) { let d = `HTTP ${res.status}`; try { d = (await res.json()).detail || d; } catch { /* */ } throw new Error(d); }
+    const pwEl = document.getElementById('admin-smtp-password'); if (pwEl) pwEl.value = '';
+    setCfgStatus(status, '已保存', true);
+    loadSmtpConfig();
+  } catch (err) { setCfgStatus(status, `保存失败: ${err.message}`, false); }
+}
+
+async function testSmtp() {
+  const status = document.getElementById('admin-smtp-status');
+  const to = prompt('发送测试邮件到哪个邮箱？', document.getElementById('admin-smtp-user')?.value || '');
+  if (!to) return;
+  setCfgStatus(status, '发送中…', true);
+  try {
+    const res = await fetch('/api/admin/smtp-test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to_email: to.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    setCfgStatus(status, data.message || '测试邮件已发送', true);
+  } catch (err) { setCfgStatus(status, `测试失败: ${err.message}`, false); }
+}
+
+function setCfgStatus(el, msg, ok) {
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'admin-cfg-status ' + (ok ? 'success' : 'error');
+  if (ok) setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 4000);
 }
 
 function renderStats(stats) {
@@ -320,14 +422,41 @@ function renderStats(stats) {
   `;
 }
 
+// 与后端 tier_limits.derive_tier_caps 同款：由总数 + 比例推导三档（track 取剩余）
+function deriveTierCaps(total, focusPct, normalPct) {
+  total = Math.max(0, Math.floor(total || 0));
+  focusPct = Math.max(0, focusPct || 0);
+  normalPct = Math.max(0, normalPct || 0);
+  if (focusPct + normalPct > 1) { const s = 1 / (focusPct + normalPct); focusPct *= s; normalPct *= s; }
+  const focus = Math.min(total, Math.round(total * focusPct));
+  const normal = Math.min(total - focus, Math.round(total * normalPct));
+  return { focus, normal, track: total - focus - normal };
+}
+
+function updateTierPreview() {
+  const total = parseInt(document.getElementById('admin-cfg-wl-limit')?.value || '24');
+  const fp = parseFloat(document.getElementById('admin-cfg-focus-pct')?.value || '25') / 100;
+  const np = parseFloat(document.getElementById('admin-cfg-normal-pct')?.value || '25') / 100;
+  const el = document.getElementById('admin-cfg-tier-preview');
+  if (!el) return;
+  if (fp + np >= 1) { el.textContent = '⚠ 重点+一般 需 < 100%'; el.className = 'admin-cfg-status error'; return; }
+  const c = deriveTierCaps(total, fp, np);
+  el.textContent = `重点 ${c.focus} / 一般 ${c.normal} / 跟踪 ${c.track}`;
+  el.className = 'admin-cfg-status';
+}
+
 async function saveConfig() {
   const regToggle = document.getElementById('admin-cfg-registration');
   const limitInput = document.getElementById('admin-cfg-wl-limit');
+  const focusInput = document.getElementById('admin-cfg-focus-pct');
+  const normalInput = document.getElementById('admin-cfg-normal-pct');
   const statusEl = document.getElementById('admin-cfg-status');
 
   const body = {
     open_registration: regToggle?.checked ?? false,
     default_watchlist_limit: parseInt(limitInput?.value || '24'),
+    tier_focus_pct: parseFloat(focusInput?.value || '25') / 100,
+    tier_normal_pct: parseFloat(normalInput?.value || '25') / 100,
   };
 
   try {
@@ -336,7 +465,11 @@ async function saveConfig() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try { detail = (await res.json()).detail || detail; } catch { /* ignore */ }
+      throw new Error(detail);
+    }
     if (statusEl) {
       statusEl.textContent = '已保存';
       statusEl.className = 'admin-cfg-status success';

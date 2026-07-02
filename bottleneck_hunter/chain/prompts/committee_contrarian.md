@@ -33,6 +33,12 @@
 
 {crowding_data}
 
+## 组合风险指标（系统精确计算）
+
+`high_correlation_pairs`（ρ>0.7 的持仓对）是你判断"拥挤交易/伪分散"的核心依据——若多只高相关标的同时重仓，即便名义分散实则单一押注。同时关注 `concentration_hhi` 与 `max_sector_weight_pct`：
+
+{portfolio_risk}
+
 ## 评审要点
 
 1. **拥挤度**：目标股票是否是机构重仓股？共识度是否过高？

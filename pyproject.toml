@@ -50,6 +50,11 @@ dev = [
 [project.scripts]
 bottleneck-hunter = "bottleneck_hunter.cli:app"
 
+# 只打包 bottleneck_hunter*，避免 flat-layout 自动发现把顶层 tests/ 误当第二个包
+# （多个顶层包会导致干净环境下的构建失败）
+[tool.setuptools.packages.find]
+include = ["bottleneck_hunter*"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

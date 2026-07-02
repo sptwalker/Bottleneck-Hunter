@@ -27,6 +27,8 @@ def _mock_store(*, account=None, position=None, plan=None):
     store.create_sim_trade.return_value = "trade_123"
     store.get_sim_trades.return_value = []
     store.get_snapshots.return_value = []
+    # A2 起 execute_trade 会查最新市价；mock 返回 None → 回退到计划价，保持这些用例原语义
+    store.get_latest_snapshot.return_value = None
     # execute_trade 内部会调用 store.for_market(market)，需返回自身
     store.for_market.return_value = store
     return store

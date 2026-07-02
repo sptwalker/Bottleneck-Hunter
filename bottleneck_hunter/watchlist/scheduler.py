@@ -275,6 +275,14 @@ async def job_daily_scan(market: str = "us_stock") -> dict:
                 store.update_pipeline_status("news", last_status="error", last_error=str(e))
                 logger.error("News scan (%s/%s) failed: %s", market, label, e)
 
+            # 市场/主题级新闻（供 L1 宏观决策读库；失败不影响个股新闻结果）
+            try:
+                from bottleneck_hunter.watchlist.news_pipeline import refresh_market_news
+                mkt_n = await refresh_market_news(store, market, budget=budget)
+                logger.info("Market news (%s/%s): %d 条已落库", market, label, mkt_n)
+            except Exception as e:
+                logger.warning("Market news scan (%s/%s) failed: %s", market, label, e)
+
             # SEC + Options only for US stocks
             if market == "us_stock":
                 # SEC
@@ -361,8 +369,6 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
 
     如果传入 user_store，则只刷新该用户的数据；否则用全局 store。
     """
-    import json
-
     store = user_store or _wl_store
     budget = BudgetTracker(store) if store else None
 

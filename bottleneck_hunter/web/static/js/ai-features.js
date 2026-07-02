@@ -4,6 +4,7 @@
 
 import { state, logMsg, getMainModel, formatMarkdown } from './wizard-state.js';
 import { readSSEStream } from './sse.js';
+import { openReport, buildRoundtableReport } from './report-export.js';
 
 /* ── AI 投研圆桌会议 ──────────────────────── */
 
@@ -236,11 +237,26 @@ export function handleMeetingEvent(data) {
   if (data.result) {
     state.meetingResult = data.result;
     renderMeetingResult(data.result);
+    showMeetingExport();
     const statusEl = document.getElementById('meeting-status');
     if (statusEl) statusEl.textContent = '已完成';
     logMsg('圆桌会议完成', 'done');
     return;
   }
+}
+
+function showMeetingExport() {
+  const b = document.getElementById('btn-export-meeting');
+  if (b) b.style.display = '';
+}
+
+export function exportMeeting() {
+  const m = state.meetingResult;
+  if (!m || !(m.final_ranking && m.final_ranking.length)) { alert('暂无圆桌会议结果可导出'); return; }
+  const tk = (m.final_ranking || []).map(r => r.ticker).filter(Boolean).join('-');
+  const date = new Date().toISOString().slice(0, 10);
+  const fname = `圆桌会议纪要${tk ? '_' + tk : ''}_${date}.html`;
+  openReport('AI 投研圆桌会议纪要', fname, buildRoundtableReport(m));
 }
 
 function renderMeetingRoundDivider(roundNum, roundName) {
@@ -326,6 +342,7 @@ function renderMeetingResult(result) {
 
 export function restoreMeeting(meetingData) {
   if (!meetingData) return;
+  state.meetingResult = meetingData;
   const transcript = document.getElementById('meeting-transcript');
   const messages = document.getElementById('meeting-messages');
   if (transcript) transcript.style.display = 'block';
@@ -355,6 +372,7 @@ export function restoreMeeting(meetingData) {
   if (statusEl) statusEl.textContent = '已完成';
   const btn = document.getElementById('btn-start-meeting');
   if (btn) btn.textContent = '重新开会';
+  showMeetingExport();
 }
 
 /* ── AI 评点权重指纹 ──────────────────────── */

@@ -312,20 +312,7 @@ class ChainDecomposer:
                         await self._on_progress(f"✗ 调用失败: {parent_name}")
                     return []
 
-        text = response.content.strip()
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:])
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning(f"LLM returned invalid JSON for {parent_name} layer {depth}, attempting extraction")
-            return extract_json_array(text) or []
+        return extract_json_array(response.content) or []
 
     # ── 本地规则去重 ─────────────────────────────────────
 
@@ -418,16 +405,8 @@ class ChainDecomposer:
                 ),
                 timeout=self.LLM_TIMEOUT,
             )
-            text = response.content.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:])
-                if text.endswith("```"):
-                    text = text[:-3]
-                text = text.strip()
-
-            merge_groups = json.loads(text)
-            if not isinstance(merge_groups, list) or not merge_groups:
+            merge_groups = extract_json_array(response.content)
+            if not merge_groups:
                 return graph
 
             # 构建合并映射: old_name → keep_name

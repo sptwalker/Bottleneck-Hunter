@@ -3,7 +3,7 @@
 import json
 import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.budget import BudgetTracker
@@ -539,12 +539,19 @@ class TestDataCollection:
         s, _ = store
         from bottleneck_hunter.watchlist.decision_engine import _collect_market_context
 
-        ctx = await _collect_market_context(s)
+        # 去网络化：mock 真实宏观指数
+        fake_macro = {"sp500": {"value": 5500, "change_pct": 0.5, "label": "标普500"},
+                      "nasdaq": {"value": 18000, "change_pct": 1.0, "label": "纳指"}}
+        with patch("bottleneck_hunter.watchlist.macro_data.fetch_macro_data",
+                   new=AsyncMock(return_value=fake_macro)):
+            ctx = await _collect_market_context(s)
         assert "indices" in ctx
         assert "sectors" in ctx
         assert "sentiment" in ctx
-        assert ctx["indices"]["stocks_tracked"] == 1
-        assert ctx["indices"]["watchlist_avg_change_pct"] == 1.5
+        # 新契约：真实指数 + watchlist_breadth 子键（原自选股均值不再冒充大盘）
+        assert "sp500" in ctx["indices"]
+        assert ctx["indices"]["watchlist_breadth"]["stocks_tracked"] == 1
+        assert ctx["indices"]["watchlist_breadth"]["avg_change_pct"] == 1.5
 
     @pytest.mark.asyncio
     async def test_collect_market_context_empty(self, tmp_path):
@@ -552,8 +559,12 @@ class TestDataCollection:
         s = WatchlistStore(db)
         from bottleneck_hunter.watchlist.decision_engine import _collect_market_context
 
-        ctx = await _collect_market_context(s)
-        assert ctx["indices"] == {}
+        # 新契约：空观察池也应拿到真实大盘指数（不再返回空 indices）；无自选股则无 watchlist_breadth
+        fake_macro = {"sp500": {"value": 5500, "change_pct": 0.5, "label": "标普500"}}
+        with patch("bottleneck_hunter.watchlist.macro_data.fetch_macro_data",
+                   new=AsyncMock(return_value=fake_macro)):
+            ctx = await _collect_market_context(s)
+        assert ctx["indices"] == {"sp500": {"value": 5500, "change_pct": 0.5, "label": "标普500"}}
         assert ctx["sectors"] == {}
 
     def test_collect_watchlist_signals(self, store):

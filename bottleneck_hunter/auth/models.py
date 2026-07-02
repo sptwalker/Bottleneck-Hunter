@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -20,8 +19,28 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_一-鿿]+$")
     password: str = Field(..., min_length=8, max_length=128)
+    email: str = Field(..., min_length=5, max_length=128, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     display_name: str = Field(default="", max_length=64)
     invite_code: str = Field(default="", max_length=32)
+
+
+class VerifyRegistrationRequest(BaseModel):
+    email: str = Field(..., max_length=128)
+    code: str = Field(..., min_length=4, max_length=8)
+
+
+class ResendCodeRequest(BaseModel):
+    email: str = Field(..., max_length=128)
+    purpose: str = Field(default="register", pattern=r"^(register|change_email)$")
+
+
+class RequestEmailChangeRequest(BaseModel):
+    new_email: str = Field(..., min_length=5, max_length=128, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    password: str = Field(..., min_length=6, max_length=128)
+
+
+class ConfirmEmailChangeRequest(BaseModel):
+    code: str = Field(..., min_length=4, max_length=8)
 
 
 class ChangePasswordRequest(BaseModel):
@@ -38,6 +57,7 @@ class UserInfo(BaseModel):
     id: str
     username: str
     display_name: str = ""
+    email: str = ""
     role: str = "user"
     is_active: bool = True
     watchlist_limit: int = 24
