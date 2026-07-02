@@ -693,6 +693,8 @@ function handlePhase1Event(data) {
     setTriState('p1-tristate', 'p1TriState', 'restart');
     updateSidebarStatus();
     updateNav();
+    // 新建正向记录后，刷新反向分析列表使其归属该新记录（清掉上一条记录的列表）
+    if (window.reloadReverseList) window.reloadReverseList();
     _savePhaseStatus();
     _autoChainNext();
   }
@@ -1781,6 +1783,8 @@ async function loadWizardAnalysis(analysisId) {
 
     updateSidebarStatus();
     updateNav();
+    // 切换到该正向记录后，刷新为其专属的反向分析列表（每条记录独立）
+    if (window.reloadReverseList) window.reloadReverseList();
     logMsg('历史分析载入完成', 'done');
   } catch (err) {
     logMsg(`载入失败: ${err.message}`, 'error');

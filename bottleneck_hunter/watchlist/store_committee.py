@@ -91,8 +91,13 @@ class _CommitteeMixin:
                                 bottleneck_node: str = "", quality_score: float = 0.0,
                                 alpha_score: float = 0.0, final_score: float = 0.0,
                                 source: str = "llm", matched_analysis_id: str = "",
+                                owner_analysis_id: str = "",
                                 result_json: dict | None = None) -> str:
-        """落库一条反向分析结果。result_json 存完整 SupplierScorecard（前端详情据此渲染）。"""
+        """落库一条反向分析结果。result_json 存完整 SupplierScorecard（前端详情据此渲染）。
+
+        owner_analysis_id: 发起本次反向分析时用户所在的正向分析记录 id，使每条正向记录
+        拥有各自独立的反向分析列表（区别于语义不同、常为空的 matched_analysis_id）。
+        """
         rid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
@@ -100,11 +105,12 @@ class _CommitteeMixin:
                 f"""INSERT INTO reverse_analyses
                    (id, ticker, company_name, company_name_cn, sector, bottleneck_node,
                     quality_score, alpha_score, final_score, source, matched_analysis_id,
-                    result_json, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                    owner_analysis_id, result_json, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     rid, ticker, company_name, company_name_cn, sector, bottleneck_node,
                     quality_score, alpha_score, final_score, source, matched_analysis_id,
+                    owner_analysis_id,
                     json.dumps(result_json or {}, ensure_ascii=False, default=str),
                     _now_iso(), _now_iso(),
                 ) + self._user_insert_params() + self._market_insert_params(),
@@ -115,15 +121,25 @@ class _CommitteeMixin:
             conn.close()
 
 
-    def list_reverse_analyses(self, limit: int = 100) -> list[dict]:
-        """列表（不含 result_json，轻量）。按当前 user + market 过滤。"""
+    def list_reverse_analyses(self, limit: int = 100,
+                              owner_analysis_id: str | None = None) -> list[dict]:
+        """列表（不含 result_json，轻量）。按当前 user + market 过滤。
+
+        owner_analysis_id 非空时，仅返回归属该正向分析记录的反向分析（每条记录独立列表）。
+        为 None/空时回退旧行为（返回该 user+market 下全部），兼容后台/脚本直查。
+        """
         conn = self._connect()
         try:
-            q, p = self._filtered(
-                "SELECT id, ticker, company_name, company_name_cn, market, sector, "
-                "bottleneck_node, quality_score, alpha_score, final_score, source, "
-                "matched_analysis_id, created_at, updated_at FROM reverse_analyses"
-            )
+            cols = ("SELECT id, ticker, company_name, company_name_cn, market, sector, "
+                    "bottleneck_node, quality_score, alpha_score, final_score, source, "
+                    "matched_analysis_id, owner_analysis_id, created_at, updated_at "
+                    "FROM reverse_analyses")
+            if owner_analysis_id:
+                # owner 条件放进 base WHERE，_filtered 会以 AND 追加 user_id + market
+                q, p = self._filtered(cols + " WHERE owner_analysis_id = ?",
+                                      (owner_analysis_id,))
+            else:
+                q, p = self._filtered(cols)
             q += " ORDER BY created_at DESC LIMIT ?"
             p = p + (limit,)
             rows = conn.execute(q, p).fetchall()

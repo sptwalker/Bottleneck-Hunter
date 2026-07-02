@@ -12,6 +12,11 @@ function currentMarket() {
     || window.wizardState?.config?.market || 'us_stock';
 }
 
+// 当前所在的正向分析记录 id —— 反向分析归属于它，使每条记录有独立的反向分析列表。
+function currentAnalysisId() {
+  return window.wizardState?.analysisId || window.appState?.analysisId || '';
+}
+
 function _scoreColor(s) {
   if (s >= 7.5) return '#16a34a';
   if (s >= 5) return '#ca8a04';
@@ -27,8 +32,11 @@ function _esc(s) {
 
 async function loadReverseList() {
   const market = currentMarket();
+  const ownerId = currentAnalysisId();
   try {
-    const resp = await fetch(`/api/reverse/list?market=${encodeURIComponent(market)}`);
+    let url = `/api/reverse/list?market=${encodeURIComponent(market)}`;
+    if (ownerId) url += `&owner_analysis_id=${encodeURIComponent(ownerId)}`;
+    const resp = await fetch(url);
     if (!resp.ok) return;
     const data = await resp.json();
     renderReverseTable(data.records || [], {
@@ -62,8 +70,9 @@ async function runReverseAnalyze() {
 
   let ok = false;
   // 不传 provider/model：后端自动使用用户 AI 配置的「入围评估(pipeline_eval)」主模型
+  // owner_analysis_id：本次反向分析归属的正向分析记录，使列表按记录独立
   await readSSEStream('/api/reverse/analyze',
-    { ticker, market, language: 'zh' },
+    { ticker, market, language: 'zh', owner_analysis_id: currentAnalysisId() },
     {
       label: 'reverse-sse',
       onEvent: (data) => {
@@ -188,6 +197,9 @@ export function initReverse() {
 
   const mkt = document.getElementById('wiz-market');
   if (mkt) mkt.addEventListener('change', loadReverseList);
+
+  // 暴露刷新钩子：正向分析记录切换（新跑/加载历史）后调用，刷新为该记录专属的反向列表。
+  window.reloadReverseList = loadReverseList;
 
   loadReverseList();
 }

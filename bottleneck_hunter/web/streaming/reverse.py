@@ -218,6 +218,7 @@ async def stream_reverse_analysis(
     analysis_store=None,
     watchlist_store=None,
     user_id: str = "",
+    owner_analysis_id: str = "",
 ) -> AsyncGenerator[dict, None]:
     """反向分析单只标的，逐步 emit SSE 事件，最后 emit reverse_complete + 落库。"""
     ticker = (ticker or "").strip()
@@ -334,6 +335,7 @@ async def stream_reverse_analysis(
                 alpha_score=sc.alpha.alpha_score if sc.alpha else 0.0,
                 final_score=sc.final.final_score if sc.final else sc.overall_score,
                 source=source, matched_analysis_id=matched_id,
+                owner_analysis_id=owner_analysis_id,
                 result_json=_sanitize(sc.model_dump()),
             )
         except Exception:
@@ -342,4 +344,5 @@ async def stream_reverse_analysis(
     yield _sse("reverse_complete",
                scorecard=sc.model_dump(),
                meta={"id": record_id, "source": source, "market": resolved_market,
-                     "matched_analysis_id": matched_id, "bottleneck_node": bottleneck.node_name})
+                     "matched_analysis_id": matched_id, "owner_analysis_id": owner_analysis_id,
+                     "bottleneck_node": bottleneck.node_name})

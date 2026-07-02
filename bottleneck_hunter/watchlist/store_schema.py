@@ -868,6 +868,7 @@ MIGRATIONS: list[str] = [
         final_score     REAL DEFAULT 0,
         source          TEXT DEFAULT 'llm',
         matched_analysis_id TEXT DEFAULT '',
+        owner_analysis_id TEXT DEFAULT '',
         result_json     TEXT DEFAULT '{}',
         created_at      TEXT NOT NULL,
         updated_at      TEXT DEFAULT '',
@@ -881,4 +882,7 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE sim_trades ADD COLUMN realized_pnl REAL",
     # ── Phase 2.5: sim_account 记录历史权益峰值，供账户级回撤熔断 ──
     "ALTER TABLE sim_account ADD COLUMN peak_equity REAL DEFAULT 0",
+    # ── 反向分析归属：记录"从哪条正向分析记录发起"，使每条记录有独立的反向分析列表 ──
+    "ALTER TABLE reverse_analyses ADD COLUMN owner_analysis_id TEXT DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_reverse_owner ON reverse_analyses(owner_analysis_id, market, user_id)",
 ]

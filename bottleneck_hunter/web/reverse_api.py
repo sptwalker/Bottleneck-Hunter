@@ -47,6 +47,7 @@ class ReverseAnalyzeRequest(BaseModel):
     language: str = "zh"
     provider: str = ""
     model: str = ""
+    owner_analysis_id: str = ""
 
 
 class ValidationModelConfig(BaseModel):
@@ -74,7 +75,7 @@ async def reverse_analyze(request: Request, req: ReverseAnalyzeRequest,
             ticker=req.ticker, market=req.market, language=req.language,
             provider=req.provider, model=req.model,
             analysis_store=analysis_store, watchlist_store=wl_store,
-            user_id=user["sub"],
+            user_id=user["sub"], owner_analysis_id=req.owner_analysis_id,
         ):
             if await request.is_disconnected():
                 break
@@ -83,9 +84,11 @@ async def reverse_analyze(request: Request, req: ReverseAnalyzeRequest,
 
 
 @router.get("/list")
-async def reverse_list(market: str = "us_stock", user: dict = Depends(get_current_user)):
+async def reverse_list(market: str = "us_stock", owner_analysis_id: str = "",
+                       user: dict = Depends(get_current_user)):
     store = _user_store(user).for_market(market)
-    return {"records": _sanitize(store.list_reverse_analyses())}
+    return {"records": _sanitize(
+        store.list_reverse_analyses(owner_analysis_id=owner_analysis_id or None))}
 
 
 @router.post("/cross-analyze")
