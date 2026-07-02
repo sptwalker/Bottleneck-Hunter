@@ -241,6 +241,7 @@ def _recalc_account(store: WatchlistStore, account_id: str) -> None:
         total_return_pct=total_return_pct,
         total_trades=total_trades,
         win_rate=win_rate,
+        peak_equity=max(account.get("peak_equity", 0) or 0, total_equity),
     )
 
     if positions and total_equity > 0:

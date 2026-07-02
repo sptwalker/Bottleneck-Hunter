@@ -22,6 +22,49 @@ DEFAULT_CONSTRAINTS = {
     "max_portfolio_beta": 1.1,
 }
 
+# 账户级熔断阈值（组合层保护，独立于单股止损）。
+# 触发后禁止新开/加仓（只允许减仓/清仓），防止在急跌中继续加码。
+CIRCUIT_BREAKER = {
+    "max_daily_loss_pct": 8.0,     # 单日权益回撤 ≥8% → 熔断
+    "max_drawdown_pct": 20.0,      # 距峰值回撤 ≥20% → 熔断
+}
+
+
+def check_account_circuit_breaker(account: dict,
+                                  today_start_equity: float | None = None,
+                                  peak_equity: float | None = None,
+                                  cfg: dict | None = None) -> ValidationResult:
+    """账户级熔断检查：单日巨亏或深度回撤时，阻止新开/加仓。
+
+    返回 ValidationResult：valid=True 表示未熔断；valid=False 表示已熔断，
+    violations 说明触发原因。调用方（L4）在熔断时应只放行 sell/reduce 计划。
+    """
+    c = {**CIRCUIT_BREAKER, **(cfg or {})}
+    result = ValidationResult()
+    equity = account.get("total_equity") or account.get("current_capital") or 0
+    if not equity:
+        return result
+
+    # 单日亏损：需要当日开盘权益基准
+    if today_start_equity and today_start_equity > 0:
+        day_loss_pct = (today_start_equity - equity) / today_start_equity * 100
+        if day_loss_pct >= c["max_daily_loss_pct"]:
+            result.valid = False
+            result.violations.append(
+                f"账户熔断：单日回撤 {day_loss_pct:.1f}% ≥ {c['max_daily_loss_pct']}%，暂停新开/加仓")
+
+    # 深度回撤：距历史峰值
+    peak = peak_equity or account.get("peak_equity") or account.get("initial_capital") or equity
+    if peak and peak > 0:
+        dd_pct = (peak - equity) / peak * 100
+        if dd_pct >= c["max_drawdown_pct"]:
+            result.valid = False
+            result.violations.append(
+                f"账户熔断：距峰值回撤 {dd_pct:.1f}% ≥ {c['max_drawdown_pct']}%，暂停新开/加仓")
+
+    return result
+
+
 # P0.6 动态约束：按 L1 宏观风险偏好调整阈值
 # aggressive(进攻) / balanced(平衡) / defensive(防守)
 REGIME_CONSTRAINTS = {

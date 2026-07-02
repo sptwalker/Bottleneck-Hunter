@@ -137,6 +137,9 @@ class BottleneckReport(BaseModel):
     cr3_estimate: Optional[int] = Field(None, ge=0, le=100, description="LLM 估算的 CR3 市场集中度(%)")
     hhi_estimate: Optional[int] = Field(None, ge=0, le=10000, description="LLM 估算的 HHI 赫芬达尔指数")
     hhi_adjustments: list[str] = Field(default_factory=list, description="HHI 一致性校验的调整记录")
+    # 可投性统计（H-12）：让"高瓶颈但无可投标的"在报告层可见，而非只在评估日志里
+    total_supplier_count: int = Field(0, description="该瓶颈环节检索到的候选供应商总数")
+    investable_supplier_count: int = Field(0, description="其中通过可投性过滤（市值/毛利/成交额/上市时长）的数量")
 
     model_config = {"use_enum_values": True}
 

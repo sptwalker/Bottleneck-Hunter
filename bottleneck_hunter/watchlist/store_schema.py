@@ -879,4 +879,6 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE macro_snapshots ADD COLUMN change_pct REAL DEFAULT 0",
     # ── Phase 1.1: sim_trades 持久化已实现盈亏（卖出结算），供绩效/回测/胜率真实计算 ──
     "ALTER TABLE sim_trades ADD COLUMN realized_pnl REAL",
+    # ── Phase 2.5: sim_account 记录历史权益峰值，供账户级回撤熔断 ──
+    "ALTER TABLE sim_account ADD COLUMN peak_equity REAL DEFAULT 0",
 ]

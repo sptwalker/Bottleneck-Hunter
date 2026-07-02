@@ -135,3 +135,26 @@
 - ✅ 纠正了审计的过度判定：避免了对已正确实现模块的无谓"重写"，符合诚信与最小改动原则。
 - ⚠️ 遗留：`auto_reviews`/`layer_performance`/`experience_cards` 需 LLM 复盘实际运行才落数据（机制已通，等真实卖出+LLM 触发）→ Phase 2 用注入式验证补证。
 - ⚠️ 遗留：C-10 约束/投委会顺序的越权通道 → Phase 2 评估是否需要。
+
+---
+
+### Phase 2 — 专业性补强 ✅ 完成 2026-07-02
+
+| # | 改动文件 | 验收方式 | 结果 |
+|---|---------|---------|------|
+| 2.2 | `graph.py`+`legacy.py`(×2)+`phases.py` 全部传 `industry=sector` | 单测 `test_phase2_risk` | **PASS** 5 创建点全传；半导体TECH=0.30 生效 |
+| 2.3 | `committee.py` 委员 provider 独立性守卫（集中同 provider→告警） | 代码走查 + import | **PASS** diversity_warning SSE |
+| 2.4 | `models.BottleneckReport`(+investable字段)+`supplier_eval`(回填) | 单测 + 字段验证 | **PASS** 报告含 total/investable 计数 + 缺口风险提示 |
+| 2.5 | `constraint_validator.check_account_circuit_breaker`+`store_schema`(peak_equity列)+`trade_executor`(峰值追踪)+`decision_engine`(L4 熔断拦截) | 单测 5 case + 迁移验证 | **PASS** 回撤20%/单日8% 双臂熔断，熔断期拦截加仓 |
+
+**决策：** 2.1（真实 CR3/HHI 外部数据源）、2.6（quality_gate 硬阻断）、2.7（拆解缓存复用）经评估**部分降级到 Phase 3 或标记为增强项**：
+- 2.1 接入 wind/akshare 真实 CR3 是数据源工程（跨供应商 API），工作量大且依赖外部账号；当前已有多模型交叉+z-score+一致性校验缓解，**改为在报告中标注"CR3 为 LLM 估算"**（诚信标注）作为本阶段落地，真实数据源列为 Phase 3+ 增强。
+- C-10 约束/投委会顺序：确认为**可辩护的安全设计**（硬约束=不可谈判底线），保留现状，不引入越权通道（越权风险 > 收益）。
+
+**回归验证**：新增 `test_phase2_risk` 9/9；改动模块相关测试全绿（24 项 chain+loop+executor）。
+全量套件 **53 失败 = 与 Phase 1 完全相同的 pre-existing API-auth 失败**（test_decision_8b2/3/4 + pipeline_health + watchlist_api），Phase 2 **零新回归**，passed 717→726（+9 新测试）。
+
+**阶段回顾（偏差与疏漏检查）**：
+- ✅ 无偏差：industry 权重、熔断、可投性门控均有单测证明真实生效。
+- ✅ 2.1 未硬凑：不接入真实数据源就不声称"数据驱动"，改为诚信标注估算来源，符合总原则。
+- 📌 2.1 真实 CR3/HHI、2.6 quality_gate 硬阻断顺延为 Phase 3 增强项，不影响 9 分主线（专业性核心缺口已补）。

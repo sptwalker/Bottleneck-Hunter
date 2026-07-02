@@ -41,7 +41,7 @@ class _SimTradingMixin:
 
     def update_sim_account(self, **fields) -> bool:
         allowed = {"current_capital", "cash_balance", "total_equity", "total_return_pct",
-                   "total_trades", "win_rate", "name", "initial_capital"}
+                   "total_trades", "win_rate", "name", "initial_capital", "peak_equity"}
         parts, vals = [], []
         for k, v in fields.items():
             if k in allowed:

@@ -678,6 +678,18 @@ async def run_committee_review(
                    votes={role: r.get("vote", "abstain") for role, r in reviews1.items()},
                    message=f"{ticker} 第 1 轮独立评审完成")
 
+        # H-18 独立性守卫：委员若挤在同一 provider（如都降级到 kimi/glm），
+        # 交叉验证退化为"1 个模型算 N 次"，必须显式告警而非静默放行。
+        providers_used = [r.get("provider", "") for r in reviews1.values() if not r.get("error")]
+        distinct_providers = {p for p in providers_used if p}
+        if len(providers_used) >= 2 and len(distinct_providers) <= 1:
+            logger.warning("投委会独立性降级：%d 位委员均使用 provider=%s，交叉验证失去多样性",
+                           len(providers_used), next(iter(distinct_providers), "?"))
+            yield _sse("committee_diversity_warning", ticker=ticker,
+                       provider_count=len(distinct_providers), member_count=len(providers_used),
+                       message=f"⚠ {ticker} 投委会 {len(providers_used)} 位委员集中于 "
+                               f"{len(distinct_providers)} 个 provider，独立性下降（结论仅供参考）")
+
         # ── 第 2 轮：互相质疑，可改票（基于第 1 轮，需 ≥2 位有效委员才有意义）──
         valid1 = {ro: r for ro, r in reviews1.items() if not r.get("error")}
         reviews2: dict[str, dict] = dict(reviews1)

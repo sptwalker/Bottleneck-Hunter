@@ -563,6 +563,16 @@ class SupplierEvaluator:
                         f"✗ 可投性淘汰: {sup.name} — {'; '.join(result.reasons)}"
                     )
 
+        # H-12：把每个瓶颈环节的"候选总数/可投数"回填到 BottleneckReport，
+        # 让"高瓶颈度但 0 家可投"在最终报告可见，而非只在评估日志里一闪而过。
+        for bn in bottlenecks:
+            bn.total_supplier_count = len(supplier_map.get(bn.node_name, []))
+            bn.investable_supplier_count = len(filtered_map.get(bn.node_name, []))
+            if bn.total_supplier_count > 0 and bn.investable_supplier_count == 0:
+                bn.risks.append(
+                    f"⚠ 可投性缺口：该瓶颈环节 {bn.total_supplier_count} 家候选供应商全部未通过可投性门槛"
+                    "（市值/毛利/成交额/上市时长），瓶颈度虽高但当前无合格可投标的")
+
         if total_rejected > 0:
             remaining = total_suppliers - total_rejected
             if self._on_progress:

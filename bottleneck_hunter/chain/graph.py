@@ -198,7 +198,7 @@ async def run_screening(
         validation_models: List of {"provider", "model"} for cross-validation
     """
     decomposer = ChainDecomposer(llm=deep_llm, max_depth=max_depth, sector=sector, language=language)
-    analyzer = BottleneckAnalyzer(llms=[(deep_llm, "unknown", "unknown")], language=language)
+    analyzer = BottleneckAnalyzer(llms=[(deep_llm, "unknown", "unknown")], language=language, industry=sector)
     searcher = SupplierSearcher(
         market=market,
         max_market_cap_yi=max_market_cap_yi,

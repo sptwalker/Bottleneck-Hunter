@@ -115,7 +115,7 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
         bottleneck_llms = get_models_for_role("bottleneck")
         if not bottleneck_llms:
             bottleneck_llms = [(deep_llm, provider, model)]
-        analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=config.language)
+        analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=config.language, industry=config.sector)
 
         bn_queue = asyncio.Queue()
         bn_task = asyncio.create_task(
@@ -684,7 +684,7 @@ async def run_retry_bottleneck(
     yield _sse("step_start", step="bottleneck",
                message=f"正在使用 {provider}/{model} 补充分析 {len(failed_nodes)} 个失败节点...")
 
-    analyzer = BottleneckAnalyzer(llms=[(llm, provider, model)], language=language)
+    analyzer = BottleneckAnalyzer(llms=[(llm, provider, model)], language=language, industry=chain.sector)
     analyzer._failed_nodes = list(failed_nodes)
 
     queue = asyncio.Queue()

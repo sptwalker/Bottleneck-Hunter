@@ -1118,6 +1118,11 @@ async def run_execution_plans(
         market_ctx = _get_market_context_text(active_markets)
         account = store.get_sim_account()
         positions = store.get_sim_positions(account.get("id"))
+        # P2.5 账户级熔断：单日巨亏/深度回撤时，本轮只允许减仓，禁止新开/加仓
+        from bottleneck_hunter.watchlist.constraint_validator import check_account_circuit_breaker
+        _cb = check_account_circuit_breaker(account)
+        if not _cb.valid:
+            logger.warning("账户级熔断触发：%s", "; ".join(_cb.violations))
         feedback = store.get_rejection_patterns(limit=10)
         preferences = store.get_preferences()
 
@@ -1252,6 +1257,17 @@ async def run_execution_plans(
             if _is_recent_duplicate(ep.get("action", ""), ticker, recent_map):
                 logger.info("跳过近期已执行同向操作的 %s (%s)", ticker, ep.get("action"))
                 skipped += 1
+                continue
+            # P2.5 熔断期只放行减仓/清仓：新开/加仓计划直接拦截进"已拦截"区
+            if not _cb.valid and ep.get("action") in ("buy", "add"):
+                store.create_blocked_execution(
+                    tactical_plan_id=tactical_map.get(ticker, ""), entry_id=entry_map.get(ticker, ""),
+                    ticker=ticker, result_json=ep,
+                    reason="账户级熔断：" + "; ".join(_cb.violations),
+                    marker=store.BLOCK_MARKER_SYSTEM,
+                )
+                blocked += 1
+                logger.info("熔断拦截加仓计划 %s (%s)", ticker, ep.get("action"))
                 continue
             batch_tickers.add(ticker)
             entry_id = entry_map.get(ticker, "")
