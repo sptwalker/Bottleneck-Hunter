@@ -95,17 +95,18 @@ class WatchlistStore(
             return query, params
         col = f"{table}.user_id" if table else "user_id"
         upper = query.upper()
-        # G-4 安全护栏：本函数用字符串定位插入 user_id 过滤，对 UNION / 子查询 / HAVING
-        # 等复杂形态无法保证插到正确位置——静默错插=跨用户数据泄露。对这些形态【显式报错】
-        # （安全失败）而非放行，逼调用方改用带别名的 table= 参数或手写带 user_id 的查询。
-        if not table:  # 传了 table 别名的 JOIN 查询由调用方保证正确性，跳过护栏
-            if " UNION " in upper:
-                raise ValueError("_user_filter 不支持 UNION 查询，请手写带 user_id 过滤的 SQL")
-            if " HAVING " in upper:
-                raise ValueError("_user_filter 不支持 HAVING 查询，请手写带 user_id 过滤的 SQL")
-            # 子查询检测：SELECT 出现多于一次 → 存在嵌套，字符串插入不可靠
-            if upper.count("SELECT ") > 1:
-                raise ValueError("_user_filter 不支持含子查询的 SQL，请手写带 user_id 过滤或传 table= 别名")
+        # G-4 安全护栏：本函数用字符串定位插入 user_id 过滤（插到 ORDER BY/GROUP BY/LIMIT 之前）。
+        # 对无法保证插到正确位置的形态【显式报错】（安全失败）而非静默错插（=跨用户泄露）：
+        # - UNION：始终不安全（clause 只会作用于第一个 SELECT，第二个 SELECT 无过滤）。
+        # - HAVING 且无 GROUP BY：无安全插入点，clause 会追加到 HAVING 之后 → 报错。
+        #   （HAVING 前有 GROUP BY 时 clause 正确插入 WHERE 段，安全，不拦截。）
+        # - 子查询：字符串定位不可靠；带 table= 别名的 JOIN 由调用方保证，放宽。
+        if " UNION " in upper:
+            raise ValueError("_user_filter 不支持 UNION 查询，请手写带 user_id 过滤的 SQL")
+        if " HAVING " in upper and " GROUP BY " not in upper:
+            raise ValueError("_user_filter 不支持无 GROUP BY 的 HAVING 查询，请手写带 user_id 过滤的 SQL")
+        if not table and upper.count("SELECT ") > 1:
+            raise ValueError("_user_filter 不支持含子查询的 SQL，请手写带 user_id 过滤或传 table= 别名")
         has_where = " WHERE " in upper
         clause = f" AND {col} = ?" if has_where else f" WHERE {col} = ?"
         # 找到 ORDER BY / GROUP BY / LIMIT 中最早出现的关键字位置

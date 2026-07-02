@@ -75,10 +75,18 @@ class TestUserFilterGuard:
         with pytest.raises(ValueError, match="子查询"):
             store._user_filter("SELECT * FROM watchlist WHERE id IN (SELECT id FROM watchlist)")
 
-    def test_having_raises(self):
+    def test_having_without_groupby_raises(self):
         store = WatchlistStore(db_path=":memory:", user_id="u1")
         with pytest.raises(ValueError, match="HAVING"):
-            store._user_filter("SELECT ticker, COUNT(*) FROM watchlist GROUP BY ticker HAVING COUNT(*) > 1")
+            store._user_filter("SELECT ticker FROM watchlist HAVING COUNT(*) > 1")
+
+    def test_having_with_groupby_allowed(self):
+        # HAVING 前有 GROUP BY → clause 安全插入 WHERE 段，不应拦截（如 get_stale_tickers）
+        store = WatchlistStore(db_path=":memory:", user_id="u1")
+        q, p = store._user_filter(
+            "SELECT ticker FROM watchlist w WHERE w.is_active=1 GROUP BY ticker HAVING COUNT(*) > 1",
+            table="w")
+        assert "w.user_id = ?" in q
 
     def test_simple_query_ok(self):
         store = WatchlistStore(db_path=":memory:", user_id="u1")
