@@ -279,6 +279,13 @@ function updateNav() {
     const dot = step.querySelector('.wiz-step-dot');
     step.classList.remove('completed', 'active', 'pending', 'step-green', 'step-red', 'step-yellow');
 
+    // 选题(phase 0) 始终可点：任何时候都能返回起始页换课题。
+    if (p === 0) {
+      step.classList.add('completed');
+      dot.textContent = '✓';
+      return;
+    }
+
     const status = statusMap[p] || 'gray';
     if (p === state.currentPhase) {
       step.classList.add('active');
