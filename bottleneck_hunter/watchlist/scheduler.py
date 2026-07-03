@@ -27,22 +27,40 @@ _budget: BudgetTracker | None = None
 _auth_store = None  # AuthStore 实例，用于获取活跃用户列表
 
 
-def _get_active_user_stores() -> list[tuple[str, WatchlistStore, BudgetTracker]]:
-    """返回所有活跃用户的 (user_id, store, budget) 三元组。
+def _get_active_user_stores(category: str | None = None) -> list[tuple[str, WatchlistStore, BudgetTracker]]:
+    """返回活跃用户的 (user_id, store, budget) 三元组，供定时任务遍历。
 
-    定时任务遍历该列表，为每个用户独立执行数据管道。
+    category 非空时按自动更新配置门控：
+    - 全局总开关 auto_update_global_enabled='0' → 系统级停用，返回 []。
+    - 逐用户读 auto_update_config，master 或该 category 开关为 '0' 的用户被跳过。
+    category 为空时保持旧行为（不门控，兼容非分类调用）。
     """
     if not _wl_store:
         return []
+    # 全局 kill-switch（管理员级）
+    if category is not None:
+        try:
+            from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+            if not is_global_enabled(_auth_store):
+                logger.info("自动更新全局总开关关闭，跳过 category=%s", category)
+                return []
+        except Exception:
+            pass
     if not _auth_store:
         # 未配置认证时，用全局 store（兼容单用户模式）
-        return [("", _wl_store, _budget or BudgetTracker(_wl_store))]
+        store = _wl_store
+        if category is not None and not store.is_auto_update_enabled(category):
+            return []
+        return [("", store, _budget or BudgetTracker(store))]
     user_ids = _auth_store.list_active_user_ids()
     if not user_ids:
         return []
     result = []
     for uid in user_ids:
         user_store = _wl_store.for_user(uid)
+        if category is not None and not user_store.is_auto_update_enabled(category):
+            logger.debug("用户 %s 关闭了 %s 自动更新，跳过", uid[:8], category)
+            continue
         user_budget = BudgetTracker(user_store)
         result.append((uid, user_store, user_budget))
     return result
@@ -64,129 +82,35 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
 
     _scheduler = AsyncIOScheduler(timezone="UTC")
 
-    # === 美股定时任务 (America/New_York, 自动适应 EDT/EST) ===
-    # 盘前数据更新：美东 9:00（开盘前 30 分钟）
-    _scheduler.add_job(
-        job_price_update, CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
-        id="us_price_premarket", name="US pre-market price update",
-        kwargs={"market": "us_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 盘后数据更新：美东 16:30（收盘后 30 分钟）
-    _scheduler.add_job(
-        job_price_update, CronTrigger(hour=16, minute=30, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
-        id="us_price_postmarket", name="US post-market price update",
-        kwargs={"market": "us_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 日报扫描：美东 18:00
-    _scheduler.add_job(
-        job_daily_scan, CronTrigger(hour=18, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
-        id="us_daily_scan", name="US daily news/SEC/options scan",
-        kwargs={"market": "us_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
+    # 从全局时间表配置注册所有任务（无配置时回退默认时间）。触发时间可由管理员改后 reschedule。
+    from bottleneck_hunter.watchlist.schedule_config import get_global_schedule
+    schedule = get_global_schedule(auth_store)
+    for spec in _JOB_SPECS:
+        job_id, func, kw, _tz, _kind, name = spec
+        _scheduler.add_job(
+            func, _make_trigger(spec, schedule),
+            id=job_id, name=name, kwargs=(kw or None),
+            replace_existing=True, max_instances=1, coalesce=True,
+        )
 
-    # === A股定时任务 (Asia/Shanghai, UTC+8) ===
-    # 盘前数据更新：北京时间 9:00
-    _scheduler.add_job(
-        job_price_update, CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=_TZ_CN),
-        id="cn_price_premarket", name="A-stock pre-market price update",
-        kwargs={"market": "a_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 盘后数据更新：北京时间 16:00
-    _scheduler.add_job(
-        job_price_update, CronTrigger(hour=16, minute=0, day_of_week="mon-fri", timezone=_TZ_CN),
-        id="cn_price_postmarket", name="A-stock post-market price update",
-        kwargs={"market": "a_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 日报扫描：北京时间 18:00
-    _scheduler.add_job(
-        job_daily_scan, CronTrigger(hour=18, minute=0, day_of_week="mon-fri", timezone=_TZ_CN),
-        id="cn_daily_scan", name="A-stock daily news scan",
-        kwargs={"market": "a_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-
-    # === 美股决策自动化任务 (America/New_York) ===
-    # 宏观数据更新：美东 18:30（日报扫描后 30 分钟采集 VIX/美债/DXY 等）
-    _scheduler.add_job(
-        job_macro_update, CronTrigger(hour=18, minute=30, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
-        id="macro_update", name="Macro data update (VIX/Treasury/DXY)",
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 每日决策：美东 19:00（L1→L3→L4→投委会）
-    _scheduler.add_job(
-        job_daily_decision, CronTrigger(hour=19, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
-        id="us_daily_decision", name="Daily decision (L1→L4+committee)",
-        kwargs={"market": "us_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 催化剂扫描：美东 8:00
-    _scheduler.add_job(
-        job_catalyst_scan, CronTrigger(hour=8, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
-        id="us_catalyst_scan", name="Catalyst scan & expiry check",
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 每周策略刷新：美东周六 10:00（L1 全面生成 + L2 组合策略）
-    _scheduler.add_job(
-        job_weekly_strategy, CronTrigger(hour=10, minute=0, day_of_week="sat", timezone=_TZ_US_EASTERN),
-        id="us_weekly_strategy", name="Weekly macro strategy (L1+L2)",
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 自动复盘：美东 20:00（批量复盘未复盘的卖出交易）
-    _scheduler.add_job(
-        job_auto_review, CronTrigger(hour=20, minute=0, day_of_week="mon-fri", timezone=_TZ_US_EASTERN),
-        id="us_auto_review", name="Auto review unreviewed sells",
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-
-    # === A股决策自动化任务 (Asia/Shanghai) ===
-    # 每日决策：北京时间 18:30（cn_daily_scan 后 30 分钟）
-    _scheduler.add_job(
-        job_daily_decision, CronTrigger(hour=18, minute=30, day_of_week="mon-fri", timezone=_TZ_CN),
-        id="cn_daily_decision", name="A-stock daily decision (L1→L4+committee)",
-        kwargs={"market": "a_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 催化剂扫描：北京时间 8:00
-    _scheduler.add_job(
-        job_catalyst_scan, CronTrigger(hour=8, minute=0, day_of_week="mon-fri", timezone=_TZ_CN),
-        id="cn_catalyst_scan", name="A-stock catalyst scan & expiry",
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 每周策略刷新：北京时间周六 10:00
-    _scheduler.add_job(
-        job_weekly_strategy, CronTrigger(hour=10, minute=0, day_of_week="sat", timezone=_TZ_CN),
-        id="cn_weekly_strategy", name="A-stock weekly macro strategy (L1+L2)",
-        kwargs={"market": "a_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-    # 自动复盘：北京时间 20:15
-    _scheduler.add_job(
-        job_auto_review, CronTrigger(hour=20, minute=15, day_of_week="mon-fri", timezone=_TZ_CN),
-        id="cn_auto_review", name="A-stock auto review unreviewed sells",
-        kwargs={"market": "a_stock"},
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-
-    # === 机构持仓 & 分析师评级（每周六美东 11:00，仅美股） ===
-    _scheduler.add_job(
-        job_institutional_update, CronTrigger(hour=11, minute=0, day_of_week="sat", timezone=_TZ_US_EASTERN),
-        id="us_institutional_update", name="Weekly institutional holders & analyst ratings",
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-
-    _scheduler.add_job(
-        job_model_calibration, CronTrigger(hour=12, minute=0, day_of_week="sun", timezone=_TZ_US_EASTERN),
-        id="model_calibration", name="Weekly AI model accuracy calibration",
-        replace_existing=True, max_instances=1, coalesce=True,
-    )
-
-    logger.info("Watchlist scheduler configured with 17 jobs (6 data + 1 institutional + 1 macro + 8 decision + 1 calibration)")
+    logger.info("Watchlist scheduler configured with %d jobs (含陈旧兜底刷新 + 全量刷新，可配可开关)",
+                len(_JOB_SPECS))
     return _scheduler
+
+
+def reschedule_all_from_config() -> None:
+    """按最新全局时间表重排所有任务（管理员改时间后免重启生效）。"""
+    if not _scheduler:
+        return
+    from bottleneck_hunter.watchlist.schedule_config import get_global_schedule
+    schedule = get_global_schedule(_auth_store)
+    for spec in _JOB_SPECS:
+        job_id = spec[0]
+        try:
+            _scheduler.reschedule_job(job_id, trigger=_make_trigger(spec, schedule))
+        except Exception as e:
+            logger.warning("reschedule %s 失败: %s", job_id, e)
+    logger.info("已按最新配置重排 %d 个定时任务", len(_JOB_SPECS))
 
 
 def shutdown_scheduler() -> None:
@@ -206,7 +130,7 @@ def shutdown_scheduler() -> None:
 async def job_price_update(market: str = "us_stock") -> dict[str, str]:
     """Fetch prices for watchlist tickers of a specific market (multi-user)."""
     all_results: dict[str, str] = {}
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("watchlist_data"):
         try:
             from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
 
@@ -242,7 +166,7 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
 async def job_daily_scan(market: str = "us_stock") -> dict:
     """Daily scan: news (+ SEC/options for US), iterates all users."""
     all_results: dict[str, dict] = {}
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("watchlist_data"):
         try:
             by_market = store.get_tickers_by_market()
             tickers = by_market.get(market, [])
@@ -530,7 +454,7 @@ async def job_macro_update() -> None:
 
 async def job_daily_decision(market: str = "us_stock") -> None:
     """每日自动决策：运行完整 L1→L4→投委会流程（多用户）。"""
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("daily_decision"):
         try:
             by_market = store.get_tickers_by_market()
             tickers = by_market.get(market, [])
@@ -548,7 +472,7 @@ async def job_daily_decision(market: str = "us_stock") -> None:
 
 async def job_catalyst_scan() -> None:
     """催化剂扫描：清理过期 + 检测新催化剂（多用户）。"""
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("catalyst"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Catalyst scan (%s) starting", label)
@@ -563,7 +487,7 @@ async def job_catalyst_scan() -> None:
 
 async def job_weekly_strategy(market: str = "us_stock") -> None:
     """每周策略刷新：L1 宏观策略 + L2 组合策略（多用户）。"""
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("weekly_strategy"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Weekly strategy refresh (%s/%s) starting", market, label)
@@ -577,7 +501,7 @@ async def job_weekly_strategy(market: str = "us_stock") -> None:
 
 async def job_auto_review(market: str = "us_stock") -> None:
     """自动复盘：批量复盘未复盘的卖出交易（多用户）。"""
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("auto_review"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
             market_store = store.for_market(market)
@@ -606,7 +530,7 @@ async def job_auto_review(market: str = "us_stock") -> None:
             logger.error("Auto review (user=%s) failed: %s", uid[:8] if uid else "global", e)
 
     # P3.1 机会成本扫描（踏空/错误持有），与复盘同周期运行
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("auto_review"):
         try:
             from bottleneck_hunter.watchlist.trade_reviewer import scan_missed_opportunities
             async for evt in scan_missed_opportunities(store, market=market):
@@ -619,7 +543,7 @@ async def job_auto_review(market: str = "us_stock") -> None:
 
     # P1.6 用户偏好学习：从确认/拒绝历史归纳偏好写入 user_preferences，供 L4 参考。
     # 需累计足够样本才有意义（交易+反馈 ≥3），否则跳过避免噪声偏好。
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("auto_review"):
         try:
             from bottleneck_hunter.watchlist.preference_learner import learn_preferences
             sample = len(store.get_sim_trades(limit=50)) + len(store.get_rejection_patterns(limit=50))
@@ -635,7 +559,7 @@ async def job_auto_review(market: str = "us_stock") -> None:
 
 async def job_institutional_update() -> None:
     """每周更新美股机构持仓 & 分析师评级数据（多用户）。"""
-    for uid, store, budget in _get_active_user_stores():
+    for uid, store, budget in _get_active_user_stores("watchlist_data"):
         try:
             by_market = store.get_tickers_by_market()
             us_tickers = by_market.get("us_stock", [])
@@ -695,3 +619,139 @@ async def job_model_calibration() -> None:
                 logger.info("Model calibration (%s/%s): %d recalibrated", mkt, label, count)
         except Exception as e:
             logger.error("Model calibration (user=%s) failed: %s", uid[:8] if uid else "global", e)
+
+
+async def job_stale_refresh() -> None:
+    """陈旧兜底刷新：刷新每个用户超过其阈值(默认24h)未更新的观察池标的。
+
+    安全网——覆盖"当天定时任务没跑成/新加入/临时停用后恢复"的标的。
+    刷价 + 逐只刷情报与策略（受预算门控）。category=watchlist_data。
+    """
+    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+    from bottleneck_hunter.watchlist.strategy_engine import refresh_intelligence_one, refresh_strategy_one
+    for uid, store, budget in _get_active_user_stores("watchlist_data"):
+        try:
+            label = f"user={uid[:8]}" if uid else "global"
+            threshold = int(store.get_auto_update_config().get("stale_threshold_hours", "24") or 24)
+            stale = store.get_stale_tickers(max_age_hours=threshold)
+            if not stale:
+                continue
+            logger.info("Stale refresh (%s): %d 个标的超过 %dh 未更新", label, len(stale), threshold)
+            # 按市场分组刷价
+            by_market: dict[str, list[str]] = {}
+            for s in stale:
+                by_market.setdefault(s.get("market") or "us_stock", []).append(s["ticker"])
+            for market, tickers in by_market.items():
+                try:
+                    await fetch_price_batch(tickers, store, market=market)
+                except Exception as e:
+                    logger.warning("Stale 刷价失败 (%s/%s): %s", label, market, e)
+            # 逐只刷情报 + 策略（预算不足时静默跳过）
+            for s in stale:
+                if budget and not budget.can_spend():
+                    logger.info("Stale refresh (%s) 预算不足，停止情报/策略刷新", label)
+                    break
+                entry = store.get_by_ticker(s["ticker"])
+                if not entry:
+                    continue
+                try:
+                    await _drain_sse(refresh_intelligence_one(s["ticker"], entry["id"], store, budget))
+                    await _drain_sse(refresh_strategy_one(s["ticker"], entry["id"], store, budget))
+                except Exception as e:
+                    logger.warning("Stale 情报/策略刷新失败 %s: %s", s["ticker"], e)
+            store.update_pipeline_status(
+                "stale_refresh",
+                last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                last_status="success", stocks_processed=len(stale), stocks_total=len(stale),
+            )
+        except Exception as e:
+            logger.error("Stale refresh (user=%s) failed: %s", uid[:8] if uid else "global", e)
+
+
+async def job_full_refresh(market: str = "us_stock") -> None:
+    """周期性全量刷新：数据管道 → 宏观 → 完整决策 → 复盘，一条龙。
+
+    对应"周期性自动全量更新，刷新所有数据和决策环节"。category=full_refresh。
+    复用现有各 job 函数，串行执行保证顺序（先数据后决策）。
+    """
+    if not _get_active_user_stores("full_refresh"):
+        return  # 无启用用户 / 全局关闭
+    logger.info("Full refresh (%s) 开始：数据→宏观→决策→复盘", market)
+    try:
+        await job_price_update(market)
+        await job_daily_scan(market)
+        if market == "us_stock":
+            await job_macro_update()
+        await job_catalyst_scan()
+        # 完整决策（L1→L4+投委会）
+        from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
+        for uid, store, budget in _get_active_user_stores("full_refresh"):
+            try:
+                await _drain_sse(run_daily_decision(store, budget, scope="full", market=market))
+            except Exception as e:
+                logger.error("Full refresh 决策 (user=%s) failed: %s", uid[:8] if uid else "global", e)
+        await job_auto_review(market)
+        logger.info("Full refresh (%s) 完成", market)
+    except Exception as e:
+        logger.error("Full refresh (%s) failed: %s", market, e)
+
+
+# ---------------------------------------------------------------------------
+# 任务规格表（单一真值源）：id, func, kwargs, timezone, kind, name
+# init_scheduler 与 reschedule_all_from_config 都据此从时间表配置构建触发器。
+# 定义在文件末尾——此时所有 job 函数已定义。
+# kind: "daily"(mon-fri) | "weekly"(day_of_week 来自配置) | "interval"(interval_hours)
+# ---------------------------------------------------------------------------
+_JOB_SPECS = [
+    ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "US pre-market price update"),
+    ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "US post-market price update"),
+    ("us_daily_scan",          job_daily_scan,          {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "US daily news/SEC/options scan"),
+    ("cn_price_premarket",     job_price_update,        {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock pre-market price update"),
+    ("cn_price_postmarket",    job_price_update,        {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock post-market price update"),
+    ("cn_daily_scan",          job_daily_scan,          {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock daily news scan"),
+    ("macro_update",           job_macro_update,        {},                     _TZ_US_EASTERN, "daily",    "Macro data update (VIX/Treasury/DXY)"),
+    ("us_daily_decision",      job_daily_decision,      {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "Daily decision (L1-L4+committee)"),
+    ("us_catalyst_scan",       job_catalyst_scan,       {},                     _TZ_US_EASTERN, "daily",    "Catalyst scan & expiry check"),
+    ("us_weekly_strategy",     job_weekly_strategy,     {"market": "us_stock"}, _TZ_US_EASTERN, "weekly",   "Weekly macro strategy (L1+L2)"),
+    ("us_auto_review",         job_auto_review,         {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "Auto review unreviewed sells"),
+    ("cn_daily_decision",      job_daily_decision,      {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock daily decision (L1-L4+committee)"),
+    ("cn_catalyst_scan",       job_catalyst_scan,       {},                     _TZ_CN,         "daily",    "A-stock catalyst scan & expiry"),
+    ("cn_weekly_strategy",     job_weekly_strategy,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly macro strategy (L1+L2)"),
+    ("cn_auto_review",         job_auto_review,         {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock auto review unreviewed sells"),
+    ("us_institutional_update", job_institutional_update, {},                   _TZ_US_EASTERN, "weekly",   "Weekly institutional holders & analyst ratings"),
+    ("model_calibration",      job_model_calibration,   {},                     _TZ_US_EASTERN, "weekly",   "Weekly AI model accuracy calibration"),
+    ("stale_refresh",          job_stale_refresh,       {},                     None,           "interval", "Stale watchlist refresh (safety net)"),
+    ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_US_EASTERN, "weekly",   "US full refresh (data+decision)"),
+    ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
+]
+
+
+def _make_trigger(spec, schedule):
+    """按 spec 的 kind 和时间表配置构建 APScheduler 触发器。"""
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+    job_id, _func, _kw, tz, kind, _name = spec
+    s = schedule.get(job_id, {}) or {}
+    if kind == "interval":
+        return IntervalTrigger(hours=int(s.get("interval_hours", 6) or 6))
+    hour = int(s.get("hour", 0))
+    minute = int(s.get("minute", 0))
+    dow = s.get("day_of_week", "sat") if kind == "weekly" else "mon-fri"
+    return CronTrigger(day_of_week=dow, hour=hour, minute=minute, timezone=tz)
+
+
+def list_job_categories() -> dict[str, str]:
+    """job_id → 所属自动更新分类（供前端展示分组）。"""
+    return {
+        "us_price_premarket": "watchlist_data", "us_price_postmarket": "watchlist_data",
+        "us_daily_scan": "watchlist_data", "cn_price_premarket": "watchlist_data",
+        "cn_price_postmarket": "watchlist_data", "cn_daily_scan": "watchlist_data",
+        "macro_update": "watchlist_data", "us_institutional_update": "watchlist_data",
+        "us_daily_decision": "daily_decision", "cn_daily_decision": "daily_decision",
+        "us_catalyst_scan": "catalyst", "cn_catalyst_scan": "catalyst",
+        "us_weekly_strategy": "weekly_strategy", "cn_weekly_strategy": "weekly_strategy",
+        "us_auto_review": "auto_review", "cn_auto_review": "auto_review",
+        "stale_refresh": "watchlist_data",
+        "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
+        "model_calibration": "",
+    }

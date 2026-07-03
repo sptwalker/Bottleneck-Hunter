@@ -9,6 +9,7 @@ import { initWatchlist } from './watchlist.js';
 import { initDecision } from './decision.js';
 import { initSimTrading, ensureSimTradingLoaded } from './simtrading.js';
 import { initAIConfig } from './ai-config.js';
+import { initAutoUpdate } from './auto-update.js';
 import { initAdmin } from './admin.js';
 
 /* ── Global state ────────────────────────────────────── */
@@ -82,6 +83,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initDecision();
   initSimTrading();
   initAIConfig();
+  initAutoUpdate();
 
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {

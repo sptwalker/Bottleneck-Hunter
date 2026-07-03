@@ -498,6 +498,12 @@ async def confirm_execution(plan_id: str, user: dict = Depends(get_current_user)
     # execute_trade 返回 error 字段表示业务错误（约束不通过、现金不足等）
     if "error" in trade_result:
         return {"status": "error", "trade": trade_result, "message": trade_result["error"]}
+    # 成交成功 → 拉实时价重算持仓（实现"批准操作后实时更新持仓"）。失败静默降级不阻断返回。
+    try:
+        from bottleneck_hunter.watchlist.trade_executor import refresh_positions_live
+        await refresh_positions_live(store)
+    except Exception:
+        logger.warning("确认后实时刷新持仓失败 plan_id=%s", plan_id)
     return {"status": "confirmed", "trade": trade_result}
 
 

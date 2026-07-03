@@ -1185,6 +1185,39 @@
             </div>
           </div>
 
+          <!-- Section 5: 自动更新 -->
+          <div class="aic-card" id="auto-update-card">
+            <div class="aic-card-header">
+              <h3>自动更新</h3>
+              <span class="aic-hint">定时刷新观察池与决策系统。开关即时生效；时间表由管理员统一设定。</span>
+            </div>
+            <div class="au-master-row">
+              <label class="au-toggle">
+                <input type="checkbox" id="au-master"> <span>启用自动更新（总开关）</span>
+              </label>
+              <span class="au-save-status" id="au-save-status"></span>
+            </div>
+            <div class="au-categories" id="au-categories"></div>
+            <div class="au-threshold-row">
+              <label>陈旧刷新阈值（小时）：
+                <input type="number" id="au-stale-threshold" min="1" max="720" style="width:70px">
+              </label>
+              <span class="aic-hint">超过该时长未更新的观察池标的会被兜底刷新（默认 24h）</span>
+            </div>
+            <div id="au-admin-section" style="display:none">
+              <div class="aic-card-header" style="margin-top:16px">
+                <h4>全局时间表（管理员）</h4>
+                <span class="aic-hint">修改后立即生效，无需重启</span>
+              </div>
+              <label class="au-toggle">
+                <input type="checkbox" id="au-global-enabled"> <span>全局总开关（系统级）</span>
+              </label>
+              <div class="au-schedule-grid" id="au-schedule-grid"></div>
+              <button class="btn btn-sm btn-primary" id="au-save-schedule" style="margin-top:10px">保存时间表</button>
+              <span class="au-save-status" id="au-schedule-status"></span>
+            </div>
+          </div>
+
         </div><!-- /aic-sections -->
 
         <!-- 右侧栏：已配置模型总览 -->

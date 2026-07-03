@@ -45,6 +45,10 @@ from bottleneck_hunter.web.reverse_api import (
     router as reverse_router,
     set_store as reverse_set_store,
 )
+from bottleneck_hunter.web.settings_api import (
+    router as settings_router,
+    set_stores as settings_set_stores,
+)
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.scheduler import init_scheduler, shutdown_scheduler
 from bottleneck_hunter.watchlist.retry import close_http_client
@@ -92,6 +96,7 @@ async def lifespan(app: FastAPI):
     st_set_store(_wl_store)
     aic_set_store(_wl_store)
     reverse_set_store(_wl_store)
+    settings_set_stores(_wl_store, _auth_store)
     init_broadcaster()
     scheduler = init_scheduler(_wl_store, auth_store=_auth_store)
     if scheduler:
@@ -221,6 +226,7 @@ def create_app() -> FastAPI:
     app.include_router(custom_provider_router, prefix="/api/custom-providers")
     app.include_router(ai_config_router, prefix="/api/ai-config")
     app.include_router(reverse_router, prefix="/api/reverse")
+    app.include_router(settings_router, prefix="/api/settings")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

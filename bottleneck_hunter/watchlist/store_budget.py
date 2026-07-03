@@ -1,10 +1,23 @@
-"""WatchlistStore mixin：LLM 预算 / 预算配置 / 管道状态。"""
+"""WatchlistStore mixin：LLM 预算 / 预算配置 / 管道状态 / 自动更新配置。"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 from bottleneck_hunter.watchlist.store_base import _today
+
+
+# 自动更新配置默认值（用户未显式设置时的回退）。总开关 + 各分类开关默认全开，陈旧阈值 24h。
+AUTO_UPDATE_DEFAULTS: dict[str, str] = {
+    "master_enabled": "1",
+    "watchlist_data": "1",    # 行情/新闻/公告/期权/机构等数据管道
+    "daily_decision": "1",    # L1-L4 + 投委会日常决策
+    "weekly_strategy": "1",   # 周度 L1/L2 策略重生成
+    "auto_review": "1",       # 卖出复盘 + 机会成本 + 偏好学习
+    "catalyst": "1",          # 催化剂扫描与判定
+    "full_refresh": "1",      # 周期性全量刷新（数据+决策一条龙）
+    "stale_threshold_hours": "24",
+}
 
 
 class _BudgetMixin:
@@ -86,6 +99,43 @@ class _BudgetMixin:
             conn.commit()
         finally:
             conn.close()
+
+
+    # ── 自动更新配置（per-user，复合主键 key+user_id） ──────────────
+    def get_auto_update_config(self) -> dict[str, str]:
+        """返回当前用户的自动更新配置（合并默认值）。"""
+        conn = self._connect()
+        try:
+            q, p = self._user_filter("SELECT key, value FROM auto_update_config")
+            rows = conn.execute(q, p).fetchall()
+            cfg = dict(AUTO_UPDATE_DEFAULTS)
+            for r in rows:
+                if r["key"] in cfg:
+                    cfg[r["key"]] = r["value"]
+            return cfg
+        finally:
+            conn.close()
+
+    def set_auto_update_config(self, key: str, value: str) -> None:
+        """写入单个自动更新配置项（复合主键 key+user_id，per-user 隔离正确）。"""
+        if key not in AUTO_UPDATE_DEFAULTS:
+            return  # 只接受已知 key，避免脏数据
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO auto_update_config(key, value, user_id) VALUES (?, ?, ?)",
+                (key, str(value), getattr(self, "_user_id", "") or ""),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def is_auto_update_enabled(self, category: str) -> bool:
+        """当前用户是否启用某分类的自动更新（总开关 + 分类开关都为 '1' 才算开）。"""
+        cfg = self.get_auto_update_config()
+        if cfg.get("master_enabled", "1") != "1":
+            return False
+        return cfg.get(category, "1") == "1"
 
 
     def update_pipeline_status(self, name: str, **fields) -> None:

@@ -885,4 +885,11 @@ MIGRATIONS: list[str] = [
     # ── 反向分析归属：记录"从哪条正向分析记录发起"，使每条记录有独立的反向分析列表 ──
     "ALTER TABLE reverse_analyses ADD COLUMN owner_analysis_id TEXT DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_reverse_owner ON reverse_analyses(owner_analysis_id, market, user_id)",
+    # ── 自动更新配置：每用户"总开关+分类开关+陈旧阈值"。复合主键 (key,user_id) 保证 per-user 隔离 ──
+    """CREATE TABLE IF NOT EXISTS auto_update_config (
+        key     TEXT NOT NULL,
+        value   TEXT NOT NULL,
+        user_id TEXT DEFAULT '',
+        PRIMARY KEY (key, user_id)
+    )""",
 ]

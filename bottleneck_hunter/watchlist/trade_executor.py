@@ -16,6 +16,42 @@ logger = logging.getLogger(__name__)
 COMMISSION_RATE = 0.001
 
 
+async def refresh_positions_live(store: WatchlistStore) -> None:
+    """确认成交后：拉当前所有持仓的实时价 → 更新持仓市值/浮盈 → 重算账户权益。
+
+    实现"用户批准操作后实时更新持仓"。按持仓所属市场分组刷价；失败静默降级（不阻断确认返回）。
+    """
+    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+    account = store.get_sim_account()
+    positions = [p for p in store.get_sim_positions(account["id"]) if p.get("shares", 0) > 0]
+    if not positions:
+        return
+    by_market: dict[str, list[str]] = {}
+    for p in positions:
+        by_market.setdefault(p.get("market") or "us_stock", []).append(p["ticker"])
+    for market, tickers in by_market.items():
+        mstore = store.for_market(market)
+        try:
+            await fetch_price_batch(tickers, mstore, market=market)
+        except Exception as e:
+            logger.warning("确认后拉实时价失败 (%s): %s", market, e)
+            continue
+        # 用新快照价刷新该市场持仓的市值/浮盈
+        for p in mstore.get_sim_positions(account["id"]):
+            if p.get("shares", 0) <= 0:
+                continue
+            snap = mstore.get_latest_snapshot(p["ticker"])
+            px = snap.get("close") if snap and snap.get("close") else None
+            if not px:
+                continue
+            mstore.update_sim_position(
+                p["id"], current_price=px,
+                market_value=round(p["shares"] * px, 2),
+                unrealized_pnl=round(p["shares"] * (px - p["avg_cost"]), 2),
+            )
+    _recalc_account(store, account["id"])
+
+
 def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     """确认执行后的完整交易流程"""
     plan = store.get_execution_plan(plan_id)
