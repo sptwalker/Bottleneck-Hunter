@@ -292,6 +292,8 @@ class FinalScore(BaseModel):
     final_score: float = Field(ge=0, le=10, description="最终综合评分")
     quality_weight: float = Field(default=0.55, description="质量权重")
     alpha_weight: float = Field(default=0.45, description="预期差权重")
+    credibility: Optional[float] = Field(None, ge=0, le=10, description="事实核查可信度(FactCheck)")
+    quality_adjusted: Optional[float] = Field(None, ge=0, le=10, description="credibility调整后的quality")
 
 
 class SupplierScorecard(BaseModel):
@@ -314,6 +316,7 @@ class SupplierScorecard(BaseModel):
     smart_money: Optional[SmartMoneySignal] = Field(None, description="聪明钱信号")
     catalyst: Optional[CatalystTimeline] = Field(None, description="催化剂时间线")
     final: Optional[FinalScore] = Field(None, description="统一最终评分")
+    fact_check_recommendation: Optional[str] = Field(None, description="事实核查建议: PASS/REVIEW/REJECT")
 
     @model_serializer(mode="wrap")
     def _serialize_with_dimension_scores(self, handler):
