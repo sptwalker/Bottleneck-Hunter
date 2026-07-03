@@ -290,6 +290,16 @@
   text-align: center;
 }
 
+/* SMTP 文本字段（服务器/账号/密码/发件人）加宽，左对齐便于阅读长文本；端口保持窄。 */
+#admin-smtp-host,
+#admin-smtp-user,
+#admin-smtp-password,
+#admin-smtp-from {
+  width: 320px;
+  max-width: 60%;
+  text-align: left;
+}
+
 .admin-cfg-actions {
   display: flex;
   align-items: center;
