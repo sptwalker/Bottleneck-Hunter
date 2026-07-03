@@ -97,17 +97,20 @@ async def supplier_eval_step(state: dict, evaluator: SupplierEvaluator) -> dict:
         return {"error": str(e)}
 
 
-async def cross_validation_step(state: dict, validator: CrossValidator) -> dict:
-    """Step 5: Cross-validate top suppliers."""
+async def fact_check_step(state: dict) -> dict:
+    """Step 5: FactCheck gate (替代原 cross_validation)."""
+    from bottleneck_hunter.chain.fact_check import apply_fact_check_to_scorecards
+
     scorecards = state.get("supplier_scorecards", [])
+    bottleneck_reports = state.get("bottleneck_reports", [])
     if not scorecards:
-        return {"cross_validations": []}
+        return {"fact_check_reports": []}
 
     try:
-        reports = await validator.validate_all(scorecards)
-        return {"cross_validations": reports}
+        reports = apply_fact_check_to_scorecards(scorecards, bottleneck_reports)
+        return {"fact_check_reports": reports, "supplier_scorecards": scorecards}
     except Exception as e:
-        logger.exception("Cross-validation failed")
+        logger.exception("FactCheck failed")
         return {"error": str(e)}
 
 
@@ -142,10 +145,8 @@ def build_screening_graph(
     async def _supplier_eval(state: dict) -> dict:
         return await supplier_eval_step(state, evaluator)
 
-    async def _cross_validate(state: dict) -> dict:
-        if validator is None:
-            return {"cross_validations": []}
-        return await cross_validation_step(state, validator)
+    async def _fact_check(state: dict) -> dict:
+        return await fact_check_step(state)
 
     graph = StateGraph(dict)
 
@@ -153,16 +154,16 @@ def build_screening_graph(
     graph.add_node("bottleneck", _bottleneck)
     graph.add_node("supplier_search", _supplier_search)
     graph.add_node("supplier_eval", _supplier_eval)
-    graph.add_node("cross_validate", _cross_validate)
+    graph.add_node("fact_check", _fact_check)
 
     graph.set_entry_point("decompose")
 
-    # decompose → bottleneck → supplier_search → supplier_eval → cross_validate → END
+    # decompose → bottleneck → supplier_search → supplier_eval → fact_check → END
     graph.add_conditional_edges("decompose", _should_stop, {"continue": "bottleneck", "end": END})
     graph.add_conditional_edges("bottleneck", _should_stop, {"continue": "supplier_search", "end": END})
     graph.add_conditional_edges("supplier_search", _should_stop, {"continue": "supplier_eval", "end": END})
-    graph.add_conditional_edges("supplier_eval", _should_stop, {"continue": "cross_validate", "end": END})
-    graph.add_edge("cross_validate", END)
+    graph.add_conditional_edges("supplier_eval", _should_stop, {"continue": "fact_check", "end": END})
+    graph.add_edge("fact_check", END)
 
     return graph.compile()
 
@@ -234,24 +235,23 @@ async def run_screening(
     if final_state.get("error"):
         raise RuntimeError(f"Screening failed: {final_state['error']}")
 
-    # Determine top picks from cross-validation
+    # Determine top picks from fact_check gate
     top_picks = []
-    cross_validations = final_state.get("cross_validations", [])
-    for cv in cross_validations:
-        if cv.consensus_score >= 5:
-            top_picks.append(cv.ticker)
+    scorecards = final_state.get("supplier_scorecards", [])
 
-    # Fallback: if no cross-validation, pick from scorecards
-    if not top_picks:
-        for sc in final_state.get("supplier_scorecards", [])[:5]:
-            if sc.overall_score >= 5:
-                top_picks.append(sc.supplier.ticker)
+    # 过滤掉 REJECT,按 final_score 排序取 top 5
+    passed = [sc for sc in scorecards if sc.fact_check_recommendation != "REJECT"]
+    passed.sort(key=lambda sc: sc.final.final_score if sc.final else sc.overall_score, reverse=True)
+
+    for sc in passed[:5]:
+        if sc.overall_score >= 5:
+            top_picks.append(sc.supplier.ticker)
 
     return ScreeningResult(
         sector=sector,
         chain=final_state.get("chain"),
         bottleneck_reports=final_state.get("bottleneck_reports", []),
-        supplier_scorecards=final_state.get("supplier_scorecards", []),
-        cross_validations=cross_validations,
+        supplier_scorecards=scorecards,
+        cross_validations=[],  # 旧字段保留兼容,已废弃
         top_picks=top_picks,
     )

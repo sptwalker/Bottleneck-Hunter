@@ -519,6 +519,42 @@ def demo():
     logger.info("[demo] ✓ 所有自测通过")
 
 
+def apply_fact_check_to_scorecards(
+    scorecards: list["SupplierScorecard"],
+    bottleneck_reports: list["BottleneckReport"] | None = None,
+) -> list[FactCheckReport]:
+    """对一批 scorecard 批量运行 FactCheck,并就地调整其 overall_score。
+
+    Returns: FactCheckReport 列表(供 UI 展示)
+
+    副作用: 修改每个 scorecard 的:
+    - overall_score (用 credibility 调整)
+    - fact_check_recommendation (PASS/REVIEW/REJECT)
+    """
+    bn_map = {r.node_name: r for r in (bottleneck_reports or [])}
+    reports = []
+
+    for sc in scorecards:
+        bn_report = bn_map.get(sc.bottleneck_node)
+        report = check_scorecard(sc, bn_report)
+        reports.append(report)
+
+        # 应用 credibility 调整到 overall_score
+        # quality_adj = quality × (1 - 0.3×(1 - credibility/10))
+        penalty_factor = 1 - 0.3 * (1 - report.credibility / 10.0)
+        sc.overall_score = round(sc.overall_score * penalty_factor, 1)
+
+        # 标记 recommendation
+        sc.fact_check_recommendation = report.recommendation
+
+        logger.debug(
+            "FactCheck %s: credibility=%.1f, recommendation=%s, adjusted_quality=%.1f",
+            sc.supplier.ticker, report.credibility, report.recommendation, sc.overall_score,
+        )
+
+    return reports
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     demo()

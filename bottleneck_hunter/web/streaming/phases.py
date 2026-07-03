@@ -449,6 +449,15 @@ async def stream_phase2(
 
         bn_score_map = {r.node_name: r.overall_score for r in all_reports}
         AlphaScorer.score_all(scorecards, bn_score_map)
+
+        # ── 事实核查门(FactCheck Gate) ──
+        # 替代原 cross_validation 的多LLM再打分,改为确定性数据核查
+        # 0 LLM 调用,~0 延迟,产出 credibility + recommendation
+        # credibility 折进 quality(overall_score),REJECT 在后续 gate 拦截
+        from bottleneck_hunter.chain.fact_check import apply_fact_check_to_scorecards
+        fact_check_reports = apply_fact_check_to_scorecards(scorecards, all_reports)
+        logger.info("[streaming-factcheck] 完成 %d 家事实核查", len(fact_check_reports))
+
         FinalScorer.score_all(scorecards)
         yield _sse("step_done", step="catalyst", index=3, result=[])
     except Exception as e:
@@ -527,37 +536,35 @@ async def stream_phase4(
             return sc.final.final_score
         return sc.overall_score
     scorecards.sort(key=sort_key, reverse=True)
-    top_scorecards = scorecards[:top_n]
+
+    # 过滤掉 REJECT(事实核查硬门)
+    passed_scorecards = [sc for sc in scorecards if sc.fact_check_recommendation != "REJECT"]
+    top_scorecards = passed_scorecards[:top_n]
 
     if not top_scorecards:
-        yield _sse("error", step="cross_validate", message="没有可验证的公司")
+        yield _sse("error", step="fact_check_review", message="所有候选均被事实核查拦截(REJECT)")
         return
 
-    yield _sse("step_start", step="cross_validate", index=0,
-               message=f"正在对 top {len(top_scorecards)} 家公司进行交叉验证...")
+    yield _sse("step_start", step="fact_check_review", index=0,
+               message=f"正在汇总 top {len(top_scorecards)} 家的事实核查结果...")
 
-    try:
-        validator = CrossValidator(validation_models=validation_models, language=language)
-        validations = await validator.validate_all(top_scorecards)
-        yield _sse("step_done", step="cross_validate", index=0,
-                   result=[v.model_dump() for v in validations])
-    except Exception as e:
-        logger.exception("Phase4 cross-validation failed")
-        yield _sse("error", step="cross_validate", message=str(e))
-        return
-
+    # 事实核查结果已在 Phase 3 计算并存于 scorecard,这里只做展示汇总
     recommendations = []
-    for cv in validations:
-        sc = next((s for s in top_scorecards if s.supplier.ticker == cv.ticker), None)
+    for sc in top_scorecards:
+        rec_status = sc.fact_check_recommendation or "PASS"
         recommendations.append({
-            "ticker": cv.ticker, "name": cv.supplier_name,
-            "final_score": sc.final.final_score if sc and sc.final else sc.overall_score if sc else 0,
-            "consensus": cv.consensus_score,
-            "pass_fail": "pass" if cv.consensus_score >= 7.5 else ("concern" if cv.consensus_score >= 5 else "fail"),
+            "ticker": sc.supplier.ticker,
+            "name": sc.supplier.name,
+            "final_score": sc.final.final_score if sc and sc.final else sc.overall_score,
+            "credibility": sc.final.credibility if sc.final and sc.final.credibility is not None else 10.0,
+            "recommendation": rec_status,
+            "pass_fail": "pass" if rec_status == "PASS" else ("concern" if rec_status == "REVIEW" else "fail"),
         })
 
+    yield _sse("step_done", step="fact_check_review", index=0, result=recommendations)
+
     phase4_data = {
-        "validations": [v.model_dump() for v in validations],
+        "validations": [],  # 旧字段保留兼容,已废弃
         "recommendations": recommendations,
         "completed_phases": 4,
     }
