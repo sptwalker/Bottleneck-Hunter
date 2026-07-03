@@ -1793,6 +1793,16 @@ async function loadWizardAnalysis(analysisId) {
           updateTriggerBtn(key, true);
         }
       }
+      // 横向对比报告：有持久化则直接回显（后端已存，避免用户以为没存、每次重新生成）
+      const cmp = state.aiReports['comparison'];
+      if (cmp?.text) {
+        const rb = document.getElementById('wiz-report-body');
+        if (rb) rb.innerHTML = '<div class="md-body">' + formatMarkdown(cmp.text) + '</div>';
+        const gb = document.getElementById('wiz-gen-report');
+        if (gb) gb.textContent = '重新生成';
+        const rc = document.getElementById('wiz-ai-report');
+        if (rc) rc.style.display = '';
+      }
     }
 
     updateSidebarStatus();

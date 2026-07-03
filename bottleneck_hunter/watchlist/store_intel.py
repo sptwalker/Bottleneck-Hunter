@@ -349,18 +349,21 @@ class _IntelMixin:
         """Returns {entry_id: {signal, confidence, version, created_at}} for all entries."""
         conn = self._connect()
         try:
-            q, p = self._user_filter(
-                """SELECT entry_id, signal, confidence, version, created_at
+            # 子查询无法被 _user_filter 的字符串插入安全处理（会误插到内层 GROUP BY 前），
+            # 故此处显式对内/外两层 WHERE 都做 user_id 过滤，正确且安全。
+            uid = getattr(self, "_user_id", "")
+            cond = " AND user_id = ?" if uid else ""
+            params = (uid, uid) if uid else ()
+            q = f"""SELECT entry_id, signal, confidence, version, created_at
                    FROM strategy_records
-                   WHERE status = 'completed'
+                   WHERE status = 'completed'{cond}
                    AND (entry_id, version) IN (
                        SELECT entry_id, MAX(version)
                        FROM strategy_records
-                       WHERE status = 'completed'
+                       WHERE status = 'completed'{cond}
                        GROUP BY entry_id
                    )"""
-            )
-            rows = conn.execute(q, p).fetchall()
+            rows = conn.execute(q, params).fetchall()
             return {
                 r["entry_id"]: {
                     "signal": r["signal"],
