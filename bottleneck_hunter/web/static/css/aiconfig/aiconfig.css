@@ -895,7 +895,10 @@
 .au-threshold-row { display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap; font-size:13px; }
 .au-threshold-row input { padding:3px 6px; }
 .au-save-status { font-size:12px; color:var(--accent,#5470c6); }
-.au-schedule-grid { display:flex; flex-direction:column; gap:6px; margin-top:8px; max-height:280px; overflow-y:auto; }
-.au-sch-row { display:flex; align-items:center; gap:6px; font-size:12px; }
-.au-sch-name { flex:1; color:var(--muted,#888); font-family:monospace; }
+.au-schedule-grid { display:flex; flex-direction:column; gap:6px; margin-top:8px; max-height:340px; overflow-y:auto; }
+.au-sch-row { display:flex; align-items:center; gap:10px; font-size:12px; padding:6px 8px; border-bottom:1px solid var(--border,#eee); }
+.au-sch-name { flex:1; display:flex; flex-direction:column; gap:1px; min-width:0; }
+.au-sch-label { font-weight:600; color:var(--ink,#222); }
+.au-sch-desc { font-size:11px; color:var(--muted,#888); }
+.au-sch-fields { white-space:nowrap; color:var(--muted,#666); }
 .au-sch { padding:2px 5px; }

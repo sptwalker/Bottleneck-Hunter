@@ -63,7 +63,7 @@ class AutoUpdatePatch(BaseModel):
 
 @router.get("/auto-update")
 async def get_auto_update(user: dict = Depends(get_current_user)):
-    from bottleneck_hunter.watchlist.scheduler import get_job_statuses, list_job_categories
+    from bottleneck_hunter.watchlist.scheduler import get_job_statuses, list_job_categories, list_job_labels
     from bottleneck_hunter.watchlist.schedule_config import get_global_schedule, is_global_enabled
 
     store = _user_store(user)
@@ -79,6 +79,7 @@ async def get_auto_update(user: dict = Depends(get_current_user)):
         "pipelines": store.get_pipeline_statuses(),
         "global_enabled": is_global_enabled(_auth_store),   # 只读展示
         "global_schedule": get_global_schedule(_auth_store),  # 只读展示（用户看时间但不能改）
+        "job_labels": list_job_labels(),                      # 每项时间配置的中文说明
         "is_admin": user.get("role") == "admin",
     }
 
@@ -137,11 +138,12 @@ class SchedulePatch(BaseModel):
 @router.get("/schedule")
 async def get_schedule(admin: dict = Depends(require_admin)):
     from bottleneck_hunter.watchlist.schedule_config import get_global_schedule, is_global_enabled
-    from bottleneck_hunter.watchlist.scheduler import list_job_categories
+    from bottleneck_hunter.watchlist.scheduler import list_job_categories, list_job_labels
     return {
         "global_enabled": is_global_enabled(_auth_store),
         "schedule": get_global_schedule(_auth_store),
         "categories": list_job_categories(),
+        "job_labels": list_job_labels(),
     }
 
 

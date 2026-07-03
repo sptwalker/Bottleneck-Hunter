@@ -755,3 +755,33 @@ def list_job_categories() -> dict[str, str]:
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
     }
+
+
+def list_job_labels() -> dict[str, dict]:
+    """job_id → 中文说明（前端时间配置逐项显示）。含名称/触发时机/时区/频率。"""
+    return {
+        # 美股（美东时区，自动适应夏令时）
+        "us_price_premarket":  {"label": "美股·盘前行情更新",      "desc": "开盘前采集行情快照",           "tz": "美东", "freq": "工作日"},
+        "us_price_postmarket": {"label": "美股·盘后行情更新",      "desc": "收盘后更新行情与技术指标",     "tz": "美东", "freq": "工作日"},
+        "us_daily_scan":       {"label": "美股·日报扫描",          "desc": "新闻 / SEC 文件 / 期权异动",    "tz": "美东", "freq": "工作日"},
+        "macro_update":        {"label": "宏观数据更新",          "desc": "VIX / 美债 / 美元指数 / 北向资金", "tz": "美东", "freq": "工作日"},
+        "us_daily_decision":   {"label": "美股·日常决策",          "desc": "L1-L4 分层决策 + 投委会评审",   "tz": "美东", "freq": "工作日"},
+        "us_catalyst_scan":    {"label": "美股·催化剂扫描",        "desc": "检测/判定催化剂事件",           "tz": "美东", "freq": "工作日"},
+        "us_weekly_strategy":  {"label": "美股·每周策略重生成",    "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "美东", "freq": "每周"},
+        "us_auto_review":      {"label": "美股·自动复盘",          "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "美东", "freq": "工作日"},
+        "us_institutional_update": {"label": "机构持仓 & 分析师评级", "desc": "13F 机构持仓与评级（仅美股）", "tz": "美东", "freq": "每周"},
+        "model_calibration":   {"label": "AI 模型准确率校准",      "desc": "对比历史预测与实际，更新权重", "tz": "美东", "freq": "每周"},
+        # A股（北京时区）
+        "cn_price_premarket":  {"label": "A股·盘前行情更新",       "desc": "开盘前采集行情快照",           "tz": "北京", "freq": "工作日"},
+        "cn_price_postmarket": {"label": "A股·盘后行情更新",       "desc": "收盘后更新行情与技术指标",     "tz": "北京", "freq": "工作日"},
+        "cn_daily_scan":       {"label": "A股·日报扫描",           "desc": "新闻 / 公告",                   "tz": "北京", "freq": "工作日"},
+        "cn_daily_decision":   {"label": "A股·日常决策",           "desc": "L1-L4 分层决策 + 投委会评审",   "tz": "北京", "freq": "工作日"},
+        "cn_catalyst_scan":    {"label": "A股·催化剂扫描",         "desc": "检测/判定催化剂事件",           "tz": "北京", "freq": "工作日"},
+        "cn_weekly_strategy":  {"label": "A股·每周策略重生成",     "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "北京", "freq": "每周"},
+        "cn_auto_review":      {"label": "A股·自动复盘",           "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
+        # 新增
+        "stale_refresh":       {"label": "陈旧兜底刷新",           "desc": "刷新超过阈值未更新的观察池标的", "tz": "轮询", "freq": "每隔N小时"},
+        "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "美东", "freq": "每周"},
+        "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
+    }
+

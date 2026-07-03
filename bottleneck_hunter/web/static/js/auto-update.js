@@ -66,20 +66,26 @@ function renderScheduleEditor() {
   const ge = document.getElementById('au-global-enabled');
   if (ge) ge.checked = _state.global_enabled !== false;
   const sch = _state.global_schedule || {};
+  const labels = _state.job_labels || {};
   const grid = document.getElementById('au-schedule-grid');
   if (!grid) return;
   grid.innerHTML = Object.entries(sch).map(([jobId, t]) => {
+    const L = labels[jobId] || {};
+    const name = L.label || jobId;
+    const meta = [L.tz, L.freq].filter(Boolean).join(' · ');
+    const nameCell = `<span class="au-sch-name" title="${jobId}">
+        <span class="au-sch-label">${name}</span>
+        <span class="au-sch-desc">${L.desc || ''}${meta ? '（' + meta + '）' : ''}</span>
+      </span>`;
     if ('interval_hours' in t) {
-      return `<div class="au-sch-row"><span class="au-sch-name">${jobId}</span>
-        每 <input type="number" class="au-sch" data-job="${jobId}" data-field="interval_hours" value="${t.interval_hours}" min="1" max="168" style="width:56px"> 小时</div>`;
+      return `<div class="au-sch-row">${nameCell}
+        <span class="au-sch-fields">每 <input type="number" class="au-sch" data-job="${jobId}" data-field="interval_hours" value="${t.interval_hours}" min="1" max="168" style="width:56px"> 小时</span></div>`;
     }
     const dow = 'day_of_week' in t
-      ? `<input type="text" class="au-sch" data-job="${jobId}" data-field="day_of_week" value="${t.day_of_week}" style="width:56px" title="mon-fri/sat/sun">`
+      ? `<span title="周几运行：mon-fri/sat/sun">周 <input type="text" class="au-sch" data-job="${jobId}" data-field="day_of_week" value="${t.day_of_week}" style="width:56px"></span> `
       : '';
-    return `<div class="au-sch-row"><span class="au-sch-name">${jobId}</span>
-      ${dow}
-      <input type="number" class="au-sch" data-job="${jobId}" data-field="hour" value="${t.hour ?? 0}" min="0" max="23" style="width:48px">:
-      <input type="number" class="au-sch" data-job="${jobId}" data-field="minute" value="${t.minute ?? 0}" min="0" max="59" style="width:48px"></div>`;
+    return `<div class="au-sch-row">${nameCell}
+      <span class="au-sch-fields">${dow}<span title="触发时:分">时刻 <input type="number" class="au-sch" data-job="${jobId}" data-field="hour" value="${t.hour ?? 0}" min="0" max="23" style="width:48px">:<input type="number" class="au-sch" data-job="${jobId}" data-field="minute" value="${t.minute ?? 0}" min="0" max="59" style="width:48px"></span></span></div>`;
   }).join('');
 }
 
