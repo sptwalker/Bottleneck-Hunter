@@ -24,6 +24,7 @@ from ._common import (
     STEP_LABELS,
     MARKET_MAP,
     _sse,
+    _sanitize,
     _run_decompose_with_progress,
     _run_bottleneck_with_progress,
     _run_supplier_search_with_progress,
@@ -455,8 +456,10 @@ async def stream_phase2(
         yield _sse("step_done", step="catalyst", index=3, result=[], error=str(e))
 
     # ── 缓存 + 持久化 ──
+    # 清洗 NaN/Inf（多来自缺失财务数据的 float 字段）→ null，避免下游 JSON 序列化 500
+    # （如 phase3/score 读取本缓存后返回时曾报 nan 不合法）。
     phase2_data = {
-        "scorecards": [sc.model_dump() for sc in scorecards],
+        "scorecards": _sanitize([sc.model_dump() for sc in scorecards]),
         "config": {
             "per_layer_top_n": per_layer_top_n, "min_overall_score": min_overall_score,
             "max_shortlist_count": max_shortlist_count, "market": market,
@@ -469,7 +472,7 @@ async def stream_phase2(
 
     if store:
         try:
-            store.update_suppliers(analysis_id, [sc.model_dump() for sc in scorecards],
+            store.update_suppliers(analysis_id, _sanitize([sc.model_dump() for sc in scorecards]),
                                    max_market_cap_yi=max_market_cap_yi)
         except Exception:
             logger.exception("Phase2 保存失败")

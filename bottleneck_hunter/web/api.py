@@ -303,16 +303,19 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
         })
 
     scoring_cfg = {"quality_weight": w_q, "alpha_weight": w_a, "top_n": top_n}
-    phase3_data = {
+    # NaN/Inf（多来自缺失财务数据的 float 字段）会让 JSON 序列化 500。
+    # 与 SSE 各阶段一致，在返回/入库前统一清洗为 null（复用 _common._sanitize）。
+    from bottleneck_hunter.web.streaming._common import _sanitize
+    phase3_data = _sanitize({
         "ranked_results": ranked,
         "scoring_config": scoring_cfg,
-    }
+    })
     phase_cache.set_phase(req.analysis_id, 3, phase3_data)
 
     if store:
         try:
             store.update_suppliers(
-                req.analysis_id, [sc.model_dump() for sc in scorecards],
+                req.analysis_id, _sanitize([sc.model_dump() for sc in scorecards]),
                 scoring_config=scoring_cfg,
             )
             store.set_completed_phases(req.analysis_id, 3)

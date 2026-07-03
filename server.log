@@ -1,48 +1,48 @@
-2026-07-03 08:07:07 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
+2026-07-03 08:41:57 INFO bottleneck_hunter.dataflows.store | 分析数据库已就绪: data\analyses.db
 +-----------------------------------------------------------------------------+
 | BottleneckHunter Web UI                                                     |
 | http://127.0.0.1:8000                                                       |
 +-----------------------------------------------------------------------------+
-INFO:     Started server process [6880]
+INFO:     Started server process [34504]
 INFO:     Waiting for application startup.
-2026-07-03 08:07:07 INFO bottleneck_hunter.llm_clients.factory | 已注册自定义 provider: xiaomi_mimo (https://api.xiaomimimo.com/v1)
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
-2026-07-03 08:07:07 INFO bottleneck_hunter.watchlist.scheduler | Watchlist scheduler configured with 17 jobs (6 data + 1 institutional + 1 macro + 8 decision + 1 calibration)
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "US pre-market price update" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "US post-market price update" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "US daily news/SEC/options scan" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "A-stock pre-market price update" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "A-stock post-market price update" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "A-stock daily news scan" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "Macro data update (VIX/Treasury/DXY)" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "Daily decision (L1→L4+committee)" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "Catalyst scan & expiry check" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "Weekly macro strategy (L1+L2)" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "Auto review unreviewed sells" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "A-stock daily decision (L1→L4+committee)" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "A-stock catalyst scan & expiry" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "A-stock weekly macro strategy (L1+L2)" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "A-stock auto review unreviewed sells" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "Weekly institutional holders & analyst ratings" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Added job "Weekly AI model accuracy calibration" to job store "default"
-2026-07-03 08:07:07 INFO apscheduler.scheduler | Scheduler started
-2026-07-03 08:07:07 INFO bottleneck_hunter.web.app | Watchlist scheduler started
+2026-07-03 08:41:58 INFO bottleneck_hunter.llm_clients.factory | 已注册自定义 provider: xiaomi_mimo (https://api.xiaomimimo.com/v1)
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-03 08:41:58 INFO bottleneck_hunter.watchlist.scheduler | Watchlist scheduler configured with 17 jobs (6 data + 1 institutional + 1 macro + 8 decision + 1 calibration)
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "US pre-market price update" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "US post-market price update" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "US daily news/SEC/options scan" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "A-stock pre-market price update" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "A-stock post-market price update" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "A-stock daily news scan" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "Macro data update (VIX/Treasury/DXY)" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "Daily decision (L1→L4+committee)" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "Catalyst scan & expiry check" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "Weekly macro strategy (L1+L2)" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "Auto review unreviewed sells" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "A-stock daily decision (L1→L4+committee)" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "A-stock catalyst scan & expiry" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "A-stock weekly macro strategy (L1+L2)" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "A-stock auto review unreviewed sells" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "Weekly institutional holders & analyst ratings" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Added job "Weekly AI model accuracy calibration" to job store "default"
+2026-07-03 08:41:58 INFO apscheduler.scheduler | Scheduler started
+2026-07-03 08:41:58 INFO bottleneck_hunter.web.app | Watchlist scheduler started
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-INFO:     127.0.0.1:64526 - "GET /api/system/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59891 - "GET /api/system/logs HTTP/1.1" 200 OK
