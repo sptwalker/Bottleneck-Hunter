@@ -305,8 +305,6 @@ async def copy_ai_config_to_me(req: CopyAiConfigReq, user: dict = Depends(_requi
         )
         copied += 1
         roles.add(c["role_key"])
-        if c.get("slot_index", 0) == 0:
-            os.environ[f"DC_MODEL_{c['role_key'].upper()}"] = f"{c['provider']}:{c['model']}"
 
     # provider 可用性提示：管理员未配 key 的 provider（拷贝成功但运行时会失败）
     missing: list[str] = []

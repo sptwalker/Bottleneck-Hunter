@@ -129,7 +129,7 @@
               <div class="fg"><label>市场</label><select id="wiz-market"><option value="a_stock">A 股</option><option value="us_stock" selected>美股</option></select></div>
               <div class="fg"><label>产业方向</label><input type="text" id="wiz-sector" list="dl-sectors" placeholder="例: 低空经济" autocomplete="off"><datalist id="dl-sectors"></datalist></div>
               <div class="fg"><label>终端产品</label><input type="text" id="wiz-product" list="dl-products" placeholder="例: eVTOL飞行器" autocomplete="off"><datalist id="dl-products"></datalist></div>
-              <div class="fg"><label>主分析模型</label><select id="wiz-main-model"><option value="deepseek::deepseek-chat" selected>DeepSeek</option><option value="openai::gpt-5.5">GPT-5.5</option><option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option><option value="qwen::qwen-plus">Qwen Plus</option><option value="google::gemini-2.5-flash">Gemini Flash</option></select></div>
+              <div class="fg"><label>主分析模型</label><select id="wiz-main-model"><option value="" selected>跟随顶栏配置</option><option value="deepseek::deepseek-chat">DeepSeek</option><option value="openai::gpt-5.5">GPT-5.5</option><option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option><option value="qwen::qwen-plus">Qwen Plus</option><option value="google::gemini-2.5-flash">Gemini Flash</option></select></div>
               <button class="btn btn-primary" id="wiz-start-custom">开始分析</button>
             </div>
           </div>
@@ -139,7 +139,7 @@
             <h3>全自动分析</h3>
             <p class="start-card-desc">按当前各页面设置自动完成全部分析步骤（瓶颈分析 → 入围筛选 → 最终评分 → 交叉验证），全程无需手动干预。</p>
             <div class="custom-form">
-              <div class="fg"><label>主分析模型</label><select id="wiz-auto-model"><option value="deepseek::deepseek-chat" selected>DeepSeek</option><option value="openai::gpt-5.5">GPT-5.5</option><option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option><option value="qwen::qwen-plus">Qwen Plus</option><option value="google::gemini-2.5-flash">Gemini Flash</option></select></div>
+              <div class="fg"><label>主分析模型</label><select id="wiz-auto-model"><option value="" selected>跟随顶栏配置</option><option value="deepseek::deepseek-chat">DeepSeek</option><option value="openai::gpt-5.5">GPT-5.5</option><option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option><option value="qwen::qwen-plus">Qwen Plus</option><option value="google::gemini-2.5-flash">Gemini Flash</option></select></div>
               <button class="btn btn-success" id="wiz-auto-start">一键启动</button>
             </div>
           </div>
@@ -1284,7 +1284,8 @@
   <div class="fg"><label>产业方向</label><input type="text" id="ctx-sector"></div>
   <div class="fg"><label>终端产品</label><input type="text" id="ctx-product"></div>
   <div class="fg"><label>主分析模型</label><select id="ctx-model">
-    <option value="deepseek::deepseek-chat" selected>DeepSeek</option>
+    <option value="" selected>跟随顶栏配置</option>
+    <option value="deepseek::deepseek-chat">DeepSeek</option>
     <option value="openai::gpt-5.5">GPT-5.5</option>
     <option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option>
     <option value="qwen::qwen-plus">Qwen Plus</option>

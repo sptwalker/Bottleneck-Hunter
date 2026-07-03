@@ -978,57 +978,50 @@ export function renderPhase4Table(validations, recommendations, rankedResults) {
   const container = document.getElementById('wiz-p4-table');
   if (!container) return;
 
-  if (!validations || validations.length === 0) {
+  // Phase 4 已重构为 FactCheck Gate：数据在 recommendations（validations 字段已废弃、恒空）
+  const recs = (recommendations && recommendations.length) ? recommendations : [];
+  if (!recs.length) {
     container.innerHTML = '<p class="empty-text">暂无验证结果</p>';
     return;
   }
 
-  // 推荐加入观察池的判定
-  const sortedByConsensus = [...validations].sort((a, b) => (b.consensus_score || 0) - (a.consensus_score || 0));
-  const top3Consensus = new Set(sortedByConsensus.slice(0, 3).map(v => v.ticker));
-
-  const sortedByFinal = [...(rankedResults || [])].sort((a, b) => (b.final_score || 0) - (a.final_score || 0));
-  const top3Final = new Set(sortedByFinal.slice(0, 3).map(r => r.supplier?.ticker || r.ticker || ''));
-
-  function isRecommended(ticker, consensusScore) {
-    return top3Final.has(ticker) || top3Consensus.has(ticker) || (consensusScore > 5.5);
-  }
+  // 推荐加入观察池：推荐分 top3 或事实核查 PASS
+  const sortedByFinal = [...recs].sort((a, b) => (b.final_score || 0) - (a.final_score || 0));
+  const top3 = new Set(sortedByFinal.slice(0, 3).map(r => r.ticker));
+  const recLabel = { PASS: '通过', REVIEW: '存疑', REJECT: '否决' };
 
   let html = `<table class="data-table">
     <thead><tr>
-      <th>公司</th><th>共识分</th><th>结论</th>`;
+      <th>公司</th><th>推荐分</th><th>可信度</th><th>事实核查</th><th>观察池</th>
+    </tr></thead><tbody>`;
 
-  const modelNames = validations[0]?.validations?.map(v => v.model_name) || [];
-  modelNames.forEach(m => { html += `<th>${m.split('/').pop()}</th>`; });
-  html += '<th>观察池</th></tr></thead><tbody>';
-
-  validations.forEach(cv => {
-    const rec = recommendations.find(r => r.ticker === cv.ticker);
-    const badge = passBadge(rec?.pass_fail || 'concern');
-    const ranked = (rankedResults || []).find(r => (r.supplier?.ticker || r.ticker) === cv.ticker);
-    const companyName = cv.supplier_name || cv.ticker;
+  recs.forEach(rec => {
+    const ticker = rec.ticker || '';
+    const name = rec.name || rec.supplier_name || ticker;
+    const finalScore = rec.final_score || 0;
+    const cred = (rec.credibility != null) ? rec.credibility : null;
+    const badge = passBadge(rec.pass_fail || 'concern');
+    const recTxt = recLabel[rec.recommendation] || rec.recommendation || '';
+    const ranked = (rankedResults || []).find(r => (r.supplier?.ticker || r.ticker) === ticker);
     const sector = ranked?.supplier?.sector || '';
-    const score = ranked?.final_score || cv.consensus_score || 0;
-    const recommended = isRecommended(cv.ticker, cv.consensus_score);
+    const bottleneck = ranked?.bottleneck_node || '';
+    const recommended = top3.has(ticker) || rec.pass_fail === 'pass';
+    const analysisId = window.appState?.analysisId || '';
 
     html += `<tr>
-      <td class="col-name">${companyName}</td>
-      <td><span class="score-badge" style="background:${scoreColor(cv.consensus_score)}">${cv.consensus_score.toFixed(1)}</span></td>
-      <td>${badge}</td>`;
-    (cv.validations || []).forEach(v => {
-      html += `<td><span class="score-badge score-badge--sm" style="background:${scoreColor(v.score)}">${v.score.toFixed(1)}</span></td>`;
-    });
-    const bottleneck = ranked?.bottleneck_node || '';
-    const analysisId = window.appState?.analysisId || '';
-    html += `<td>
-      <button class="btn btn-sm wl-p4-add-btn ${recommended ? 'wl-p4-add-recommended' : 'wl-p4-add-normal'}"
-        data-ticker="${cv.ticker}"
-        data-name="${companyName}"
-        data-score="${score.toFixed(2)}"
-        data-sector="${sector}"
-        data-bottleneck="${bottleneck}"
-        data-analysis-id="${analysisId}">加入观察池</button>
-    </td></tr>`;
+      <td class="col-name">${name}</td>
+      <td><span class="score-badge" style="background:${scoreColor(finalScore)}">${finalScore.toFixed(1)}</span></td>
+      <td>${cred != null ? `<span class="score-badge score-badge--sm" style="background:${scoreColor(cred)}">${cred.toFixed(1)}</span>` : '—'}</td>
+      <td>${badge}${recTxt ? ` <span class="p4-rec-txt">${recTxt}</span>` : ''}</td>
+      <td>
+        <button class="btn btn-sm wl-p4-add-btn ${recommended ? 'wl-p4-add-recommended' : 'wl-p4-add-normal'}"
+          data-ticker="${ticker}"
+          data-name="${name}"
+          data-score="${finalScore.toFixed(2)}"
+          data-sector="${sector}"
+          data-bottleneck="${bottleneck}"
+          data-analysis-id="${analysisId}">加入观察池</button>
+      </td></tr>`;
   });
 
   html += '</tbody></table>';

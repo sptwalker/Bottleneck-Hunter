@@ -881,12 +881,20 @@ class FinalScorer:
         alpha = max(0.1, scorecard.alpha.alpha_score if scorecard.alpha else 0.1)
         raw = (quality ** w_q) * (alpha ** w_a)
         final = max(0.0, min(10.0, round(raw, 2)))
+
+        # 保留已有的 credibility 和 quality_adjusted（如果 FactCheck 已经设置）
+        existing_final = scorecard.final
+        credibility = existing_final.credibility if existing_final else None
+        quality_adjusted = existing_final.quality_adjusted if existing_final else None
+
         return FinalScore(
             quality_score=round(quality, 2),
             alpha_score=round(alpha, 2),
             final_score=final,
             quality_weight=w_q,
             alpha_weight=w_a,
+            credibility=credibility,
+            quality_adjusted=quality_adjusted,
         )
 
     @classmethod

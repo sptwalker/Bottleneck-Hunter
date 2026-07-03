@@ -76,7 +76,9 @@ export function clearLog() {
 /* ── 解析主分析模型 ──────────────────────── */
 export function getMainModel() {
   const sel = document.getElementById('wiz-main-model') || document.getElementById('wiz-p1-model');
-  const val = sel?.value || 'deepseek::deepseek-chat';
+  const val = sel?.value;
+  // 空值 = "跟随顶栏配置" → 发空 provider,后端走 get_llm_for_position(role) 用顶栏角色配置
+  if (!val) return { provider: '', model: '' };
   const [provider, model] = val.split('::');
   return { provider, model };
 }

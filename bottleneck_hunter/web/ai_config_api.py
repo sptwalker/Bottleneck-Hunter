@@ -104,22 +104,39 @@ async def get_roles(user: dict = Depends(get_current_user)):
             "slots": slots,
         })
 
-    providers = _build_providers_list()
+    providers = _build_providers_list(uid)
 
     return {"roles": roles, "available_providers": providers}
 
 
-def _build_providers_list() -> list[dict]:
+def _build_providers_list(user_id: str = "") -> list[dict]:
     providers = []
-    for pid, env_var in PROVIDER_KEY_MAP.items():
-        if not os.environ.get(env_var, "").strip():
-            continue
-        providers.append({
-            "id": pid,
-            "name": PROVIDER_DISPLAY.get(pid, pid),
-            "configured": True,
-            "default_model": PROVIDER_MODELS.get(pid, ""),
-        })
+    # 内置 provider: 复用持久化感知的 _build_providers_response(合并 .env + user_api_keys 加密存储),
+    # 使重启后仍能反映"已配置"状态(不再只看临时 os.environ)。
+    try:
+        from bottleneck_hunter.web.api import _build_providers_response
+        for p in _build_providers_response(user_id):
+            if p.get("is_url"):
+                continue  # 自定义端点在下方单独处理
+            if p.get("configured"):
+                providers.append({
+                    "id": p["id"],
+                    "name": p["name"],
+                    "configured": True,
+                    "default_model": PROVIDER_MODELS.get(p["id"], ""),
+                })
+    except Exception:
+        # 兜底: 退回读 os.environ
+        for pid, env_var in PROVIDER_KEY_MAP.items():
+            if not os.environ.get(env_var, "").strip():
+                continue
+            providers.append({
+                "id": pid,
+                "name": PROVIDER_DISPLAY.get(pid, pid),
+                "configured": True,
+                "default_model": PROVIDER_MODELS.get(pid, ""),
+            })
+
     for cp_id in list_custom_provider_ids():
         cp_info = get_custom_provider(cp_id)
         providers.append({
@@ -168,9 +185,6 @@ async def save_roles(req: RoleConfigSaveRequest, user: dict = Depends(get_curren
         )
         saved_keys.add(cfg.role_key)
 
-        if cfg.slot_index == 0:
-            os.environ[f"DC_MODEL_{cfg.role_key.upper()}"] = f"{cfg.provider}:{cfg.model}"
-
     return {"saved": len(req.configs), "roles": list(saved_keys)}
 
 
@@ -180,7 +194,7 @@ async def save_roles(req: RoleConfigSaveRequest, user: dict = Depends(get_curren
 @router.get("/providers")
 async def get_providers(user: dict = Depends(get_current_user)):
     """获取所有 Provider（含 Key 配置状态和自定义端点）。"""
-    return {"providers": _build_providers_list()}
+    return {"providers": _build_providers_list(user.get("sub", ""))}
 
 
 # ── POST /providers/keys ──
@@ -192,12 +206,10 @@ class ProviderKeySaveRequest(BaseModel):
 
 @router.post("/providers/keys")
 async def save_provider_keys(req: ProviderKeySaveRequest, user: dict = Depends(get_current_user)):
-    """保存 Provider API Key。"""
-    saved = 0
-    for env_var, value in req.settings.items():
-        if env_var in PROVIDER_KEY_MAP.values():
-            os.environ[env_var] = value
-            saved += 1
+    """保存 Provider API Key（持久化：用户级加密 + admin 写 .env，重启不丢）。"""
+    from bottleneck_hunter.web.api import persist_provider_keys
+
+    saved = persist_provider_keys(user, req.settings)
     return {"saved": saved}
 
 
@@ -490,11 +502,6 @@ async def apply_recommendations(user: dict = Depends(get_current_user)):
             role_group=role_def.group,
             user_id=uid,
         )
-
-        if rec["slot_index"] == 0:
-            os.environ[f"DC_MODEL_{rec['role_key'].upper()}"] = (
-                f"{rec['recommended_provider']}:{rec['recommended_model']}"
-            )
 
         applied += 1
 

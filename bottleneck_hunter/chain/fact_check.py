@@ -542,14 +542,33 @@ def apply_fact_check_to_scorecards(
         # 应用 credibility 调整到 overall_score
         # quality_adj = quality × (1 - 0.3×(1 - credibility/10))
         penalty_factor = 1 - 0.3 * (1 - report.credibility / 10.0)
-        sc.overall_score = round(sc.overall_score * penalty_factor, 1)
+        quality_adjusted = round(sc.overall_score * penalty_factor, 1)
+        sc.overall_score = quality_adjusted
 
         # 标记 recommendation
         sc.fact_check_recommendation = report.recommendation
 
+        # 填充 final 对象的 credibility 字段（如果 final 已存在，更新；否则创建临时对象）
+        # FinalScorer 会保留这些字段
+        if sc.final:
+            sc.final.credibility = round(report.credibility, 1)
+            sc.final.quality_adjusted = quality_adjusted
+        else:
+            # FinalScorer 还未运行，创建临时 FinalScore 占位
+            from bottleneck_hunter.chain.models import FinalScore
+            sc.final = FinalScore(
+                quality_score=0.0,
+                alpha_score=0.0,
+                final_score=0.0,
+                quality_weight=0.0,
+                alpha_weight=0.0,
+                credibility=round(report.credibility, 1),
+                quality_adjusted=quality_adjusted,
+            )
+
         logger.debug(
             "FactCheck %s: credibility=%.1f, recommendation=%s, adjusted_quality=%.1f",
-            sc.supplier.ticker, report.credibility, report.recommendation, sc.overall_score,
+            sc.supplier.ticker, report.credibility, report.recommendation, quality_adjusted,
         )
 
     return reports

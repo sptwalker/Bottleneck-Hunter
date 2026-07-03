@@ -592,19 +592,24 @@ async def restore_history(analysis_id: str, user: dict = Depends(get_current_use
 
     cross_validations = result.get("cross_validations", [])
     if cross_validations:
-        # ── Phase 4: 重建 recommendations ──
+        # ── Phase 4: 现为 FactCheck Gate，cross_validations 存的即 recommendations；兼容旧共识结构 ──
         recommendations = []
         for cv in cross_validations:
             ticker = cv.get("ticker", "")
             sc_match = next((s for s in scorecards if s.get("supplier", {}).get("ticker") == ticker), None)
-            final_score = (sc_match.get("final") or {}).get("final_score", 0) if sc_match else 0
-            consensus = cv.get("consensus_score", 0)
+            fc_final = (sc_match.get("final") or {}) if sc_match else {}
+            consensus = cv.get("consensus_score", 0)  # 仅旧结构有
+            pass_fail = cv.get("pass_fail") or (
+                "pass" if consensus >= 7.5 else ("concern" if consensus >= 5 else "fail"))
             recommendations.append({
-                "ticker": ticker, "name": cv.get("supplier_name", ""),
-                "final_score": final_score, "consensus": consensus,
-                "pass_fail": "pass" if consensus >= 7.5 else ("concern" if consensus >= 5 else "fail"),
+                "ticker": ticker,
+                "name": cv.get("name") or cv.get("supplier_name", ""),
+                "final_score": cv.get("final_score", fc_final.get("final_score", 0)),
+                "credibility": cv.get("credibility", fc_final.get("credibility")),
+                "recommendation": cv.get("recommendation", ""),
+                "pass_fail": pass_fail,
             })
-        phase4_data = {"validations": cross_validations, "recommendations": recommendations}
+        phase4_data = {"validations": [], "recommendations": recommendations}
         phase_cache.set_phase(analysis_id, 4, phase4_data)
         response["phases"]["4"] = phase4_data
 
@@ -1080,23 +1085,24 @@ class SaveSettingsRequest(BaseModel):
     settings: dict[str, str]
 
 
-@router.post("/settings")
-async def save_settings(req: SaveSettingsRequest, user: dict = Depends(get_current_user)):
-    """保存 API KEY。
+def persist_provider_keys(user: dict, settings: dict[str, str]) -> int:
+    """持久化 Provider API Key（单一真源）。
 
-    所有用户的 KEY 都保存到用户级加密存储。
-    admin 额外写入 .env 作为全局 fallback。
+    所有用户的 KEY 加密写入用户级存储（user_api_keys 表）；
+    admin 额外写入 .env + os.environ 作为全局 fallback（供分析流程 create_llm 读取）。
+
+    settings: {ENV_VAR: value}。返回成功保存的数量。
+    供 /api/settings 与 /api/ai-config/providers/keys 共用，避免临时 os.environ 双写。
     """
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
-    from bottleneck_hunter.llm_clients.factory import PROVIDER_KEY_MAP
 
     allowed_vars = {p["env_var"] for p in PROVIDER_REGISTRY}
-    # env_var → provider id 反查
     env_to_provider = {p["env_var"]: p["id"] for p in PROVIDER_REGISTRY}
     user_id = user.get("sub", "")
     is_admin = user.get("role") == "admin"
 
-    for key, value in req.settings.items():
+    saved = 0
+    for key, value in settings.items():
         if key not in allowed_vars:
             continue
         value = value.strip()
@@ -1105,24 +1111,33 @@ async def save_settings(req: SaveSettingsRequest, user: dict = Depends(get_curre
 
         provider_id = env_to_provider.get(key, "")
         if provider_id and user_id:
-            # 保存到用户级加密存储
             try:
                 from bottleneck_hunter.web.user_api import _store as _get_auth
                 store = _get_auth()
-                encrypted = encrypt(value)
-                hint = make_hint(value)
-                store.save_user_api_key(user_id, provider_id, encrypted, hint)
+                store.save_user_api_key(user_id, provider_id, encrypt(value), make_hint(value))
             except Exception as e:
                 logger.warning(f"保存用户 KEY 失败 ({provider_id}): {e}")
 
-        # admin 同时写入 .env 作为全局 fallback
+        # admin 写入 .env + os.environ 作为全局 fallback
         if is_admin:
             if not ENV_PATH.exists():
                 ENV_PATH.write_text("", encoding="utf-8")
             set_key(str(ENV_PATH), key, value)
             os.environ[key] = value
+        saved += 1
 
-    return {"ok": True, "providers": _build_providers_response(user_id)}
+    return saved
+
+
+@router.post("/settings")
+async def save_settings(req: SaveSettingsRequest, user: dict = Depends(get_current_user)):
+    """保存 API KEY。
+
+    所有用户的 KEY 都保存到用户级加密存储。
+    admin 额外写入 .env 作为全局 fallback。
+    """
+    persist_provider_keys(user, req.settings)
+    return {"ok": True, "providers": _build_providers_response(user.get("sub", ""))}
 
 
 # ── 测试 Provider 连通性 ────────────────────────────────

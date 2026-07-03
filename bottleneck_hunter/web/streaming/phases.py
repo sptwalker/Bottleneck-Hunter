@@ -572,7 +572,8 @@ async def stream_phase4(
 
     if store:
         try:
-            store.update_cross_validations(analysis_id, [v.model_dump() for v in validations])
+            # FactCheck 结果已在 Phase 3 保存到 scorecard，这里保存汇总的 recommendations
+            store.update_cross_validations(analysis_id, recommendations)
         except Exception:
             logger.exception("Phase4 保存失败")
 

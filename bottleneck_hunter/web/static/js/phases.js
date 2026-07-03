@@ -1145,8 +1145,8 @@ function handlePhase4Event(data, progress) {
     state.p4Error = false;
     if (data.completed_phases) state.config.completed_phases = data.completed_phases;
     renderPhase4Table(data.validations || [], data.recommendations || [], state.phase3?.ranked_results || []);
-    const vCount = (data.validations || []).length;
-    logMsg(`Phase 4 完成 — 验证 ${vCount} 家公司`, 'done');
+    const vCount = (data.recommendations || data.validations || []).length;
+    logMsg(`Phase 4 完成 — 交叉验证 ${vCount} 家公司`, 'done');
     progress.innerHTML = '<div class="progress-msg progress-done">交叉验证完成</div>';
     enableMeetingButton();
     updateSidebarStatus();
@@ -1769,11 +1769,12 @@ async function loadWizardAnalysis(analysisId) {
 
     // ── Phase 4 恢复 ──
     const p4 = data.phases?.['4'];
-    if (p4?.validations?.length) {
+    if (p4?.recommendations?.length || p4?.validations?.length) {
       state.phase4 = p4;
-      renderPhase4Table(p4.validations, p4.recommendations || [], state.phase3?.ranked_results || []);
+      renderPhase4Table(p4.validations || [], p4.recommendations || [], state.phase3?.ranked_results || []);
       enableMeetingButton();
-      logMsg(`Phase 4 已载入 — 验证 ${p4.validations.length} 家`, 'done');
+      const n = (p4.recommendations || p4.validations || []).length;
+      logMsg(`Phase 4 已载入 — 验证 ${n} 家`, 'done');
     }
 
     // ── 圆桌会议恢复 ──
@@ -1928,7 +1929,9 @@ async function refreshModelSelectors(fallbackProviderList) {
   }
   if (configured.length === 0) return;
 
-  const options = configured.map(p => {
+  // 首项"跟随顶栏配置"(value=''）→ 后端 get_llm_for_position(role) 走 AI 配置中心角色配置
+  const followOption = '<option value="">跟随顶栏配置</option>';
+  const options = followOption + configured.map(p => {
     const model = p.default_model || DEFAULT_MODELS[p.id] || '';
     const val = `${p.id}::${model}`;
     return `<option value="${val}">${_escapeHtml(p.name)}</option>`;
@@ -1939,8 +1942,11 @@ async function refreshModelSelectors(fallbackProviderList) {
     if (!sel) return;
     const prev = sel.value;
     sel.innerHTML = options;
-    if (sel.querySelector(`option[value="${prev}"]`)) {
+    // 保留用户之前的选择;无则默认"跟随顶栏配置"(空值)
+    if (prev && sel.querySelector(`option[value="${prev}"]`)) {
       sel.value = prev;
+    } else {
+      sel.value = '';
     }
   });
 

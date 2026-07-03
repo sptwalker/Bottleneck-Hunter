@@ -10,9 +10,7 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 
-from dotenv import set_key
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -637,138 +635,6 @@ async def get_scheduler_status(user: dict = Depends(get_current_user)):
     """返回决策自动调度任务的运行状态"""
     from bottleneck_hunter.watchlist.scheduler import get_job_statuses
     return {"jobs": get_job_statuses()}
-
-
-# ─────────────────────────────────────────────────────────
-# AI 模型配置
-# ─────────────────────────────────────────────────────────
-
-AI_CONFIG_POSITIONS = [
-    # ── 决策层级 ──
-    {"key": "L1_macro", "label": "L1 宏观策略", "group": "decision", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "L2_strategic", "label": "L2 组合策略", "group": "decision", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "L3_tactical", "label": "L3 战术计划", "group": "decision", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "L4_execution", "label": "L4 执行方案", "group": "decision", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    # ── 投资委员会 ──
-    {"key": "committee_risk", "label": "风险控制官", "group": "committee", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "committee_growth", "label": "成长投资人", "group": "committee", "default_provider": "qwen", "default_model": "qwen-plus"},
-    {"key": "committee_value", "label": "价值投资人", "group": "committee", "default_provider": "kimi", "default_model": "moonshot-v1-8k"},
-    {"key": "committee_contrarian", "label": "逆向投资人", "group": "committee", "default_provider": "glm", "default_model": "glm-4-flash"},
-    {"key": "committee_consensus", "label": "圆桌讨论/共识", "group": "committee", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    # ── 产业链管线 ──
-    {"key": "pipeline_decompose", "label": "产业链拆解", "group": "pipeline", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "pipeline_eval", "label": "供应商评估", "group": "pipeline", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "pipeline_cross_val", "label": "交叉验证", "group": "pipeline", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "pipeline_roundtable", "label": "圆桌讨论", "group": "pipeline", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    # ── 看板模块 ──
-    {"key": "watchlist_catalyst", "label": "催化剂监控", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "watchlist_strategy", "label": "策略引擎", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "watchlist_thesis", "label": "论点追踪", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "watchlist_trade_review", "label": "交易复盘", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "watchlist_tuning", "label": "参数调优", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-    {"key": "watchlist_uzi", "label": "深度分析(UZI)", "group": "watchlist", "default_provider": "deepseek", "default_model": "deepseek-chat"},
-]
-
-
-@router.get("/ai-config")
-async def get_ai_config(user: dict = Depends(get_current_user)):
-    """返回所有位置的当前 AI 模型配置 + 可用 provider 列表（含自定义）"""
-    from bottleneck_hunter.web.api import PROVIDER_REGISTRY
-    from bottleneck_hunter.llm_clients.factory import list_custom_provider_ids, get_custom_provider
-
-    positions = []
-    for pos in AI_CONFIG_POSITIONS:
-        env_key = f"DC_MODEL_{pos['key'].upper()}"
-        env_val = os.environ.get(env_key, "").strip()
-        configured_provider = ""
-        configured_model = ""
-        if env_val and ":" in env_val:
-            configured_provider, configured_model = env_val.split(":", 1)
-        positions.append({
-            "key": pos["key"],
-            "label": pos["label"],
-            "group": pos["group"],
-            "default_provider": pos["default_provider"],
-            "default_model": pos["default_model"],
-            "configured_provider": configured_provider,
-            "configured_model": configured_model,
-        })
-
-    available_providers = []
-    for p in PROVIDER_REGISTRY:
-        env_var = p["env_var"]
-        has_key = bool(os.environ.get(env_var, "").strip())
-        available_providers.append({
-            "id": p["id"],
-            "name": p["name"],
-            "configured": has_key,
-            "default_model": PROVIDER_MODELS.get(p["id"], ""),
-            "is_custom": False,
-        })
-
-    for cp_id in list_custom_provider_ids():
-        cp = get_custom_provider(cp_id)
-        if cp:
-            available_providers.append({
-                "id": cp_id,
-                "name": cp_id,
-                "configured": True,
-                "default_model": cp["default_model"],
-                "is_custom": True,
-            })
-
-    return {"positions": positions, "available_providers": available_providers}
-
-
-class AIConfigSaveRequest(BaseModel):
-    configs: dict[str, str]
-
-
-@router.post("/ai-config")
-async def save_ai_config(req: AIConfigSaveRequest, user: dict = Depends(get_current_user)):
-    """保存 AI 模型配置到 .env"""
-    env_path = Path.cwd() / ".env"
-    valid_keys = {pos["key"] for pos in AI_CONFIG_POSITIONS}
-
-    for key, value in req.configs.items():
-        if key not in valid_keys:
-            continue
-        env_key = f"DC_MODEL_{key.upper()}"
-        if value and ":" in value:
-            set_key(str(env_path), env_key, value)
-            os.environ[env_key] = value
-        else:
-            set_key(str(env_path), env_key, "")
-            os.environ.pop(env_key, None)
-
-    return {"status": "saved", "message": "AI 模型配置已保存"}
-
-
-class AIConfigTestRequest(BaseModel):
-    provider: str
-    model: str
-
-
-@router.post("/ai-config/test")
-async def test_ai_model(req: AIConfigTestRequest, user: dict = Depends(get_current_user)):
-    """测试单个 AI 模型连通性"""
-    from langchain_core.messages import HumanMessage
-    from bottleneck_hunter.llm_clients.factory import create_llm
-
-    try:
-        llm = create_llm(req.provider, req.model)
-        await asyncio.wait_for(
-            llm.ainvoke([HumanMessage(content="hi")]),
-            timeout=30,
-        )
-        return {"success": True, "provider": req.provider, "model": req.model}
-    except asyncio.TimeoutError:
-        return {"success": False, "error": "请求超时（30s）", "provider": req.provider, "model": req.model}
-    except Exception as e:
-        err_msg = str(e)
-        if len(err_msg) > 120:
-            err_msg = err_msg[:120] + "..."
-        return {"success": False, "error": err_msg, "provider": req.provider, "model": req.model}
 
 
 # ─────────────────────────────────────────────────────────
