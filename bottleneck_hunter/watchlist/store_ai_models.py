@@ -438,6 +438,68 @@ class _AIModelsMixin:
             return cur.rowcount
 
 
+    # ── provider_configs：内置/自定义 provider 的默认模型 + base_url + 显示名 覆盖（单一真源）──
+    def upsert_provider_config(self, provider_id: str, default_model: str = "",
+                               base_url: str = "", user_id: str | None = None,
+                               display_name: str = "") -> str:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        now = _now_iso()
+        with self._write_conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM provider_configs WHERE provider_id = ? AND user_id = ?",
+                (provider_id, uid),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE provider_configs SET default_model = ?, base_url = ?, display_name = ?, updated_at = ? WHERE id = ?",
+                    (default_model, base_url, display_name, now, existing["id"]),
+                )
+                return existing["id"]
+            rid = uuid.uuid4().hex[:16]
+            conn.execute(
+                """INSERT INTO provider_configs
+                   (id, user_id, provider_id, default_model, base_url, display_name, updated_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (rid, uid, provider_id, default_model, base_url, display_name, now),
+            )
+            return rid
+
+
+    def get_provider_config(self, provider_id: str, user_id: str | None = None) -> dict | None:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM provider_configs WHERE provider_id = ? AND user_id = ?",
+                (provider_id, uid),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+    def get_provider_configs(self, user_id: str | None = None) -> list[dict]:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM provider_configs WHERE user_id = ?", (uid,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+    def delete_provider_config(self, provider_id: str, user_id: str | None = None) -> bool:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        with self._write_conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM provider_configs WHERE provider_id = ? AND user_id = ?",
+                (provider_id, uid),
+            )
+            return cur.rowcount > 0
+
+
     def save_test_result(self, provider: str, model: str, test_type: str,
                          score: float, raw_result: str = "{}",
                          user_id: str | None = None) -> str:

@@ -6,30 +6,17 @@
 import { startScreening } from './pipeline.js';
 import { showView } from './app.js';
 
-const _BUILTIN_MODELS = {
-  openai: 'gpt-4o',
-  anthropic: 'claude-sonnet-4-6',
-  deepseek: 'deepseek-chat',
-  google: 'gemini-2.5-flash',
-  qwen: 'qwen-plus',
-  glm: 'glm-4-plus',
-  minimax: 'MiniMax-Text-01',
-  openrouter: 'deepseek/deepseek-chat',
-  siliconflow: 'deepseek-ai/DeepSeek-V3',
-  agnes: 'agnes-2.0-flash',
-  kimi: 'moonshot-v1-8k',
-};
-
-let DEFAULT_MODELS = { ..._BUILTIN_MODELS };
+// provider → 默认模型映射：一律来自 /api/ai-config/providers（单一真源），不写死
+let DEFAULT_MODELS = {};
 
 async function _mergeCustomProviders() {
   try {
-    const res = await fetch('/api/custom-providers');
+    const res = await fetch('/api/ai-config/providers');
     if (!res.ok) return;
     const data = await res.json();
-    DEFAULT_MODELS = { ..._BUILTIN_MODELS };
+    DEFAULT_MODELS = {};
     for (const p of (data.providers || [])) {
-      DEFAULT_MODELS[p.provider_id] = p.default_model || '';
+      DEFAULT_MODELS[p.id] = p.default_model || '';
     }
   } catch { /* silent */ }
 }

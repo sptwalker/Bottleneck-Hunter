@@ -17,7 +17,7 @@ class RoleDefinition:
     multi_model: bool = False
     max_slots: int = 1
     default_provider: str = "deepseek"
-    default_model: str = "deepseek-chat"
+    default_model: str = ""  # 留空：由 factory.resolve_provider_model 按 provider_configs→种子解析，不写死
     capability_weights: dict[str, float] = field(default_factory=dict)
     slot_labels: list[str] = field(default_factory=list)  # 多槽角色各槽的语义标签（配置界面显示）
 
@@ -89,13 +89,13 @@ _INIT_ROLES = [
                    default_provider="deepseek",
                    capability_weights=_COMMITTEE_WEIGHTS),
     RoleDefinition("committee_growth", "成长投资人", "committee",
-                   default_provider="qwen", default_model="qwen-plus",
+                   default_provider="qwen",
                    capability_weights=_COMMITTEE_WEIGHTS),
     RoleDefinition("committee_value", "价值投资人", "committee",
-                   default_provider="kimi", default_model="moonshot-v1-8k",
+                   default_provider="kimi",
                    capability_weights=_COMMITTEE_WEIGHTS),
     RoleDefinition("committee_contrarian", "逆向投资人", "committee",
-                   default_provider="glm", default_model="glm-4-flash",
+                   default_provider="glm",
                    capability_weights=_COMMITTEE_WEIGHTS),
     RoleDefinition("committee_consensus", "圆桌讨论/共识", "committee",
                    capability_weights=_COMMITTEE_WEIGHTS),

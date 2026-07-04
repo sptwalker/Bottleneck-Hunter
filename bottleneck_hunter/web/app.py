@@ -85,6 +85,13 @@ async def lifespan(app: FastAPI):
                 cp["provider_id"], cp["base_url"], api_key, cp["default_model"],
             )
 
+    # 加载全局 provider 覆盖（默认模型/base_url）到 factory 运行时缓存
+    try:
+        from bottleneck_hunter.llm_clients.factory import refresh_provider_overrides
+        refresh_provider_overrides()
+    except Exception:
+        pass
+
     # 数据迁移：将现有数据绑定到 admin 用户
     admin_user = admin or _auth_store.get_user_by_username("admin")
     if admin_user:

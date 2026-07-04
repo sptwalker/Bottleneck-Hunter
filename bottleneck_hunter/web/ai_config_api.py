@@ -21,6 +21,8 @@ from bottleneck_hunter.llm_clients.factory import (
     create_llm,
     get_custom_provider,
     list_custom_provider_ids,
+    register_provider_override,
+    resolve_provider_model,
 )
 from bottleneck_hunter.llm_clients.role_registry import (
     ROLE_REGISTRY,
@@ -99,51 +101,70 @@ async def get_roles(user: dict = Depends(get_current_user)):
             "multi_model": role_def.multi_model,
             "max_slots": role_def.max_slots,
             "default_provider": role_def.default_provider,
-            "default_model": role_def.default_model,
+            "default_model": role_def.default_model or resolve_provider_model(role_def.default_provider, uid),
             "slot_labels": role_def.slot_labels,
             "slots": slots,
         })
 
-    providers = _build_providers_list(uid)
+    providers = _build_providers_list(uid, include_unconfigured=True)
 
     return {"roles": roles, "available_providers": providers}
 
 
-def _build_providers_list(user_id: str = "") -> list[dict]:
+def _build_providers_list(user_id: str = "", include_unconfigured: bool = False) -> list[dict]:
+    """统一 provider 列表。include_unconfigured=True 时也返回未配置的内置 provider
+    （供配置中心统一管理）；默认只返回已配置的（供分析模型下拉）。"""
     providers = []
-    # 内置 provider: 复用持久化感知的 _build_providers_response(合并 .env + user_api_keys 加密存储),
-    # 使重启后仍能反映"已配置"状态(不再只看临时 os.environ)。
+    # 该用户的 provider 覆盖（base_url 展示用；default_model 由 resolve_provider_model 解析）
+    overrides: dict[str, dict] = {}
+    try:
+        if _store is not None:
+            for c in _store.for_user(user_id).get_provider_configs(user_id=user_id):
+                overrides[c["provider_id"]] = c
+    except Exception:
+        pass
+    # 内置 provider: 复用持久化感知的 _build_providers_response(合并 .env + user_api_keys 加密存储)。
     try:
         from bottleneck_hunter.web.api import _build_providers_response
         for p in _build_providers_response(user_id):
             if p.get("is_url"):
                 continue  # 自定义端点在下方单独处理
-            if p.get("configured"):
+            cfg = bool(p.get("configured"))
+            if cfg or include_unconfigured:
+                ov = overrides.get(p["id"], {})
                 providers.append({
                     "id": p["id"],
-                    "name": p["name"],
-                    "configured": True,
-                    "default_model": PROVIDER_MODELS.get(p["id"], ""),
+                    "name": ov.get("display_name") or p["name"],
+                    "configured": cfg,
+                    "is_builtin": True,
+                    "default_model": resolve_provider_model(p["id"], user_id),
+                    "base_url": ov.get("base_url", "") or "",
                 })
     except Exception:
         # 兜底: 退回读 os.environ
         for pid, env_var in PROVIDER_KEY_MAP.items():
-            if not os.environ.get(env_var, "").strip():
+            cfg = bool(os.environ.get(env_var, "").strip())
+            if not (cfg or include_unconfigured):
                 continue
+            ov = overrides.get(pid, {})
             providers.append({
                 "id": pid,
-                "name": PROVIDER_DISPLAY.get(pid, pid),
-                "configured": True,
-                "default_model": PROVIDER_MODELS.get(pid, ""),
+                "name": ov.get("display_name") or PROVIDER_DISPLAY.get(pid, pid),
+                "configured": cfg,
+                "is_builtin": True,
+                "default_model": resolve_provider_model(pid, user_id),
+                "base_url": ov.get("base_url", "") or "",
             })
 
     for cp_id in list_custom_provider_ids():
-        cp_info = get_custom_provider(cp_id)
+        cp_info = get_custom_provider(cp_id) or {}
         providers.append({
             "id": cp_id,
-            "name": cp_id,
+            "name": cp_info.get("display_name") or cp_id,
             "configured": True,
-            "default_model": cp_info.get("default_model", "") if cp_info else "",
+            "is_builtin": False,
+            "default_model": cp_info.get("default_model", ""),
+            "base_url": cp_info.get("base_url", ""),
         })
     return providers
 
@@ -211,6 +232,84 @@ async def save_provider_keys(req: ProviderKeySaveRequest, user: dict = Depends(g
 
     saved = persist_provider_keys(user, req.settings)
     return {"saved": saved}
+
+
+# ── Provider 默认模型/base_url 覆盖（单一真源）──
+
+
+class ProviderConfigRequest(BaseModel):
+    default_model: str = ""
+    base_url: str = ""
+    display_name: str = ""
+
+
+@router.put("/providers/{provider_id}/config")
+async def save_provider_config(provider_id: str, req: ProviderConfigRequest,
+                               user: dict = Depends(get_current_user)):
+    """保存内置/自定义 provider 的默认模型 + base_url + 显示名 覆盖（去除写死模型的单一真源）。"""
+    store = _get_store(user)
+    uid = user.get("sub", "")
+    dm, bu, dn = req.default_model.strip(), req.base_url.strip(), req.display_name.strip()
+    store.upsert_provider_config(provider_id, dm, bu, user_id=uid, display_name=dn)
+    # admin 的配置同时作为全局覆盖（runtime user_id='' 生效），并刷新工厂运行时缓存
+    if user.get("role") == "admin":
+        store.upsert_provider_config(provider_id, dm, bu, user_id="", display_name=dn)
+        register_provider_override(provider_id, dm, bu)
+    return {"saved": True, "provider_id": provider_id, "default_model": dm, "base_url": bu, "display_name": dn}
+
+
+@router.delete("/providers/{provider_id}/config")
+async def delete_provider_config(provider_id: str, user: dict = Depends(get_current_user)):
+    """清除某内置 provider 的模型/base_url/显示名覆盖（配合清 Key，使其回到未配置态）。"""
+    store = _get_store(user)
+    uid = user.get("sub", "")
+    store.delete_provider_config(provider_id, user_id=uid)
+    if user.get("role") == "admin":
+        store.delete_provider_config(provider_id, user_id="")
+        register_provider_override(provider_id, "", "")  # 空覆盖=回落种子
+    return {"deleted": True, "provider_id": provider_id}
+
+
+class TestOneRequest(BaseModel):
+    provider: str
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
+@router.post("/test/one")
+async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
+    """测试单个（可未保存）provider/model 配置连通性 —— 供编辑态测试按钮。"""
+    from langchain_core.messages import HumanMessage
+
+    uid = user.get("sub", "")
+    provider = req.provider.strip()
+    # Key 留空时用该用户已存的 Key（加密表），否则内置 provider 测试会因取不到 Key 而误报失败
+    api_key = req.api_key.strip()
+    if not api_key:
+        try:
+            from bottleneck_hunter.web.user_api import resolve_user_api_key
+            api_key = resolve_user_api_key(uid, provider) or ""
+        except Exception:
+            api_key = ""
+    model = req.model.strip() or resolve_provider_model(provider, uid)
+    if not model:
+        return {"ok": False, "error": "未指定模型（请填写模型名）"}
+    try:
+        llm = create_llm(provider, model,
+                         api_key=(api_key or None),
+                         base_url=(req.base_url.strip() or None),
+                         user_id=uid)
+        await asyncio.wait_for(
+            asyncio.to_thread(lambda: llm.invoke([HumanMessage(content="hi")])),
+            timeout=60,
+        )
+        return {"ok": True, "model": model}
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "请求超时（60s）"}
+    except Exception as e:
+        msg = str(e).strip() or e.__class__.__name__
+        return {"ok": False, "error": msg[:300]}
 
 
 # ── POST /test/connectivity ──

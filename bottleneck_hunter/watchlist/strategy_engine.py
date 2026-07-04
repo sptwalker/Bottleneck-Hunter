@@ -104,7 +104,7 @@ async def refresh_intelligence_one(
         # LLM 生成简报（可选）
         brief_text = ""
         key_signals = []
-        llm, _, _ = get_llm_for_position(position="watchlist_strategy")
+        llm, _sp_prov, _sp_model = get_llm_for_position(position="watchlist_strategy")
 
         if llm and budget and budget.can_spend(estimated_tokens=1500):
             yield _sse("stock_intel_progress", ticker=ticker, step="llm_brief",
@@ -306,7 +306,7 @@ SEC与内部交易：{json.dumps(aggregated["sec"], ensure_ascii=False)}
 
         # 记录消耗
         if budget:
-            budget.record("deepseek", "deepseek-chat", 800, 300, "intelligence_brief")
+            budget.record(_sp_prov or "unknown", _sp_model or "unknown", 800, 300, "intelligence_brief")
 
         # 解析
         parts = response.strip().split("---")
@@ -390,7 +390,7 @@ async def refresh_strategy_one(
 
     try:
         # 获取 LLM
-        llm, _, _ = get_llm_for_position(position="watchlist_strategy")
+        llm, _sg_prov, _sg_model = get_llm_for_position(position="watchlist_strategy")
         if not llm:
             # 诚信原则：无 LLM 时不生成 mock 策略冒充 completed（会流入 L3/决策链）。
             # 标记为 failed，前端与下游明确感知"策略不可用"而非"中性策略"。
@@ -416,7 +416,7 @@ async def refresh_strategy_one(
 
         # 记录消耗
         if budget:
-            budget.record("deepseek", "deepseek-chat", 2000, 1500, "strategy_generation")
+            budget.record(_sg_prov or "unknown", _sg_model or "unknown", 2000, 1500, "strategy_generation")
 
         # 解析响应
         yield _sse("stock_strategy_progress", ticker=ticker, step="parsing",

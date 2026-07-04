@@ -177,26 +177,26 @@ async function _populateRetryProviders() {
   });
 }
 
-const _RETRY_MODEL_MAP = {
-  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-5.5'],
-  anthropic: ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
-  deepseek: ['deepseek-chat', 'deepseek-reasoner'],
-  google: ['gemini-2.5-flash', 'gemini-2.5-pro'],
-  qwen: ['qwen-plus', 'qwen-max', 'qwen-turbo'],
-  glm: ['glm-4-plus', 'glm-4-flash'],
-  minimax: ['MiniMax-Text-01'],
-  openrouter: ['deepseek/deepseek-chat', 'google/gemini-2.5-flash'],
-  siliconflow: ['deepseek-ai/DeepSeek-V3'],
-  agnes: ['agnes-2.0-flash'],
-  kimi: ['moonshot-v1-8k'],
-};
+// 重试可选模型：来自 /api/ai-config/providers（单一真源），不写死
+let _retryModelsCache = null;
+async function _getRetryModels(provider) {
+  if (!_retryModelsCache) {
+    try {
+      const r = await fetch('/api/ai-config/providers');
+      const d = r.ok ? await r.json() : { providers: [] };
+      _retryModelsCache = {};
+      for (const p of (d.providers || [])) _retryModelsCache[p.id] = p.default_model ? [p.default_model] : [];
+    } catch { _retryModelsCache = {}; }
+  }
+  return _retryModelsCache[provider] || [];
+}
 
-function _updateRetryModelList(provider) {
+async function _updateRetryModelList(provider) {
   const modelSel = document.getElementById('bn-retry-model');
   const retryBtn = document.getElementById('btn-bn-retry');
   if (!modelSel) return;
   modelSel.innerHTML = '<option value="">选择模型</option>';
-  const models = _RETRY_MODEL_MAP[provider] || [];
+  const models = await _getRetryModels(provider);
   models.forEach(m => {
     const opt = document.createElement('option');
     opt.value = m; opt.textContent = m;
@@ -1499,7 +1499,7 @@ async function _doRefreshSuppliers() {
   const maxSuppliers = parseInt(document.getElementById('max-suppliers')?.value, 10) || cfg.max_suppliers || 20;
   const language = document.getElementById('language')?.value || cfg.language || 'zh';
   const provider = document.getElementById('llm-provider')?.value || cfg.provider || 'openai';
-  const model = document.getElementById('llm-model')?.value || cfg.model || 'gpt-5.5';
+  const model = document.getElementById('llm-model')?.value || cfg.model || '';
 
   if (_suppAbortController) _suppAbortController.abort();
   _suppAbortController = new AbortController();

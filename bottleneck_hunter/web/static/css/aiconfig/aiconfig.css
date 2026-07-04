@@ -18,6 +18,38 @@
   color: var(--fg);
 }
 
+/* ── 顶层页签（API KEY / 模型分配 / 自动更新） ── */
+.aic-main-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.aic-main-tab {
+  padding: 10px 20px;
+  border: none;
+  background: none;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.aic-main-tab:hover { color: var(--fg); }
+
+.aic-main-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.aic-tab-pane { display: none; }
+.aic-tab-pane.active { display: block; }
+
 .aic-layout {
   display: grid;
   grid-template-columns: 1fr 280px;
@@ -130,6 +162,14 @@
 .aic-provider-model {
   font-size: 11px;
   color: var(--muted);
+}
+
+/* 未配置的内置 provider：置灰、标「未配置」，仅可点「配置」 */
+.aic-provider-unconfigured { opacity: 0.62; }
+.aic-provider-unconfig-label {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
 }
 
 /* ── Sidebar: Configured Models ──────────────────────────── */
@@ -902,3 +942,43 @@
 .au-sch-desc { font-size:11px; color:var(--muted,#888); }
 .au-sch-fields { white-space:nowrap; color:var(--muted,#666); }
 .au-sch { padding:2px 5px; }
+
+/* ── 系统配置中心：模块页签 / 分组小标题 / 推荐分段 / 侧栏树 ── */
+.aic-module-tab {
+  padding: 8px 18px; border: none; background: none; font-size: 13px; font-weight: 500;
+  color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;
+  transition: color .15s, border-color .15s;
+}
+.aic-module-tab:hover { color: var(--fg); }
+.aic-module-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+.aic-group-section { margin-bottom: 14px; }
+.aic-group-heading {
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  padding: 4px 0 6px; margin-bottom: 6px; border-bottom: 1px dashed var(--border);
+}
+
+.aic-rec-module { margin-bottom: 16px; }
+.aic-rec-module-title {
+  font-size: 13px; font-weight: 700; color: var(--fg); margin-bottom: 8px;
+  padding-left: 8px; border-left: 3px solid var(--accent);
+}
+.aic-rec-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+
+.aic-tree { display: flex; flex-direction: column; gap: 10px; }
+.aic-tree-module {
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--bg);
+}
+.aic-tree-module-title { font-size: 12px; font-weight: 700; color: var(--fg); margin-bottom: 6px; }
+.aic-tree-role {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 3px 0 3px 10px; font-size: 12px; border-left: 2px solid var(--border);
+}
+.aic-tree-role-sub { padding-left: 22px; }
+.aic-tree-role-name { color: var(--muted); min-width: 92px; }
+.aic-tree-model {
+  font-family: var(--mono, monospace); font-size: 11px; padding: 1px 6px; border-radius: 4px;
+  background: oklch(0.55 0.15 250 / 0.10); color: var(--accent);
+}
+.aic-tree-model-default { background: var(--border); color: var(--muted); }
+.aic-tree-au { border-style: dashed; }

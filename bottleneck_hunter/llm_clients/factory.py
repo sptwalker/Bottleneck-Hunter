@@ -30,7 +30,7 @@ PROVIDER_KEY_MAP: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
-# 各 provider 的默认模型（web API 展示 / 连通性测试用）
+# 各 provider 的默认模型 —— 仅作首启种子/最终兜底；运行时一律经 resolve_provider_model 读取，可被 provider_configs 覆盖
 PROVIDER_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "anthropic": "claude-sonnet-4-6",
@@ -43,6 +43,19 @@ PROVIDER_MODELS: dict[str, str] = {
     "siliconflow": "deepseek-ai/DeepSeek-V3",
     "agnes": "agnes-2.0-flash",
     "kimi": "moonshot-v1-8k",
+}
+
+# 内置 OpenAI 兼容 provider 的官方端点 —— 种子；可被 provider_configs.base_url 覆盖。
+# openai/anthropic/google 走各自 SDK 默认端点，不在此表。
+_BUILTIN_BASE_URLS: dict[str, str] = {
+    "deepseek": "https://api.deepseek.com",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "glm": "https://open.bigmodel.cn/api/paas/v4",
+    "siliconflow": "https://api.siliconflow.cn/v1",
+    "agnes": "https://apihub.agnes-ai.com/v1",
+    "kimi": "https://api.moonshot.cn/v1",
+    "minimax": "https://api.minimax.chat/v1",
 }
 
 # ── 自定义 provider 运行时缓存 ──────────────────────────
@@ -74,6 +87,74 @@ def list_custom_provider_ids() -> list[str]:
     return list(_CUSTOM_PROVIDERS.keys())
 
 
+# ── provider 覆盖（全局/user_id='' 行的运行时缓存）+ 模型/base_url 解析 ──────────
+_PROVIDER_OVERRIDES: dict[str, dict] = {}  # {provider_id: {default_model, base_url}}
+
+
+def register_provider_override(provider_id: str, default_model: str = "", base_url: str = ""):
+    """写入/刷新单个 provider 的全局覆盖到运行时缓存（保存后调用）。"""
+    _PROVIDER_OVERRIDES[provider_id] = {"default_model": default_model or "", "base_url": base_url or ""}
+
+
+def refresh_provider_overrides():
+    """从 DB 加载全局(user_id='')provider_configs 到运行时缓存（应用启动时调用）。"""
+    try:
+        from bottleneck_hunter.watchlist.store import WatchlistStore
+        rows = WatchlistStore().get_provider_configs(user_id="")
+        _PROVIDER_OVERRIDES.clear()
+        for r in rows:
+            _PROVIDER_OVERRIDES[r["provider_id"]] = {
+                "default_model": r.get("default_model") or "",
+                "base_url": r.get("base_url") or "",
+            }
+        logger.info("已加载 %d 条 provider 覆盖配置", len(_PROVIDER_OVERRIDES))
+    except Exception as e:
+        logger.debug("加载 provider 覆盖失败: %s", e)
+
+
+def _load_provider_config_from_db(provider_id: str, user_id: str) -> dict | None:
+    try:
+        from bottleneck_hunter.watchlist.store import WatchlistStore
+        return WatchlistStore().get_provider_config(provider_id, user_id=user_id)
+    except Exception:
+        return None
+
+
+def resolve_provider_model(provider: str, user_id: str = "") -> str:
+    """解析某 provider 应使用的模型：用户覆盖 → 全局覆盖 → 自定义端点 → 种子常量。"""
+    provider = (provider or "").lower().strip()
+    if user_id:
+        cfg = _load_provider_config_from_db(provider, user_id)
+        if cfg and cfg.get("default_model"):
+            return cfg["default_model"]
+    ov = _PROVIDER_OVERRIDES.get(provider)
+    if ov and ov.get("default_model"):
+        return ov["default_model"]
+    custom = _CUSTOM_PROVIDERS.get(provider)
+    if custom and custom.get("default_model"):
+        return custom["default_model"]
+    return PROVIDER_MODELS.get(provider, "")
+
+
+def resolve_provider_base_url(provider: str, user_id: str = "") -> str | None:
+    """解析某 provider 的 base_url：用户覆盖 → 全局覆盖 → 自定义端点 → 内置官方端点种子。
+
+    返回 None 表示走该 provider 的 SDK 默认端点（openai/anthropic/google）。
+    """
+    provider = (provider or "").lower().strip()
+    if user_id:
+        cfg = _load_provider_config_from_db(provider, user_id)
+        if cfg and cfg.get("base_url"):
+            return cfg["base_url"]
+    ov = _PROVIDER_OVERRIDES.get(provider)
+    if ov and ov.get("base_url"):
+        return ov["base_url"]
+    custom = _CUSTOM_PROVIDERS.get(provider)
+    if custom and custom.get("base_url"):
+        return custom["base_url"]
+    return _BUILTIN_BASE_URLS.get(provider)
+
+
 def _resolve_key(provider: str, api_key: str | None = None) -> str | None:
     """解析 API KEY：优先用户传入 → 其次环境变量。"""
     if api_key:
@@ -87,107 +168,56 @@ def create_llm(
     model: str,
     api_key: str | None = None,
     base_url: str | None = None,
+    user_id: str = "",
     **kwargs,
 ) -> BaseChatModel:
     """Create a chat LLM instance for the given provider and model.
 
     Args:
         provider: LLM 服务商标识（内置或自定义）
-        model: 模型名称
+        model: 模型名称；留空则经 resolve_provider_model 解析（provider_configs → 种子）
         api_key: 用户级 API KEY（优先级高于 .env 全局 KEY）
-        base_url: 自定义 API 端点地址（优先级高于内置配置）
+        base_url: 显式端点（最高优先级）；否则经 resolve_provider_base_url 解析
+        user_id: 传入则优先用该用户的 provider_configs 覆盖
     """
     provider = provider.lower().strip()
     key = _resolve_key(provider, api_key)
-
-    if provider == "openai":
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, api_key=key, **kwargs)
+    if not key:
+        custom = _CUSTOM_PROVIDERS.get(provider)
+        if custom and custom.get("api_key"):
+            key = custom["api_key"]
+    if not model:
+        model = resolve_provider_model(provider, user_id)
+    resolved_base = base_url or resolve_provider_base_url(provider, user_id)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(
-            model=model,
-            api_key=key,
-            **kwargs,
-        )
-
-    if provider == "deepseek":
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model,
-            api_key=key,
-            base_url="https://api.deepseek.com",
-            **kwargs,
-        )
+        # anthropic SDK 支持自定义端点（base_url 覆盖时透传）
+        if resolved_base:
+            return ChatAnthropic(model=model, api_key=key, base_url=resolved_base, **kwargs)
+        return ChatAnthropic(model=model, api_key=key, **kwargs)
 
     if provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(
-            model=model,
-            google_api_key=key,
-            **kwargs,
-        )
+        return ChatGoogleGenerativeAI(model=model, google_api_key=key, **kwargs)
 
-    if provider == "openrouter":
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model,
-            api_key=key,
-            base_url="https://openrouter.ai/api/v1",
-            **kwargs,
-        )
-
-    # Generic OpenAI-compatible endpoint (内置)
-    if provider in ("qwen", "glm", "siliconflow", "agnes", "kimi", "minimax"):
-        base_urls = {
-            "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "glm": "https://open.bigmodel.cn/api/paas/v4",
-            "siliconflow": "https://api.siliconflow.cn/v1",
-            "agnes": "https://apihub.agnes-ai.com/v1",
-            "kimi": "https://api.moonshot.cn/v1",
-            "minimax": "https://api.minimax.chat/v1",
-        }
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model,
-            api_key=key,
-            base_url=base_urls[provider],
-            **kwargs,
-        )
-
-    # 自定义 provider（运行时缓存）
-    custom = _CUSTOM_PROVIDERS.get(provider)
-    if custom:
-        from langchain_openai import ChatOpenAI
-        final_key = key or custom.get("api_key") or "not-needed"
-        return ChatOpenAI(
-            model=model,
-            api_key=final_key,
-            base_url=custom["base_url"],
-            **kwargs,
-        )
-
-    # 显式传入 base_url 的兜底
-    if base_url:
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model,
-            api_key=key or "not-needed",
-            base_url=base_url,
-            **kwargs,
-        )
-
-    raise ValueError(f"不支持的 LLM provider: {provider}")
+    # 其余全部走 OpenAI 兼容：openai 官方端点(base_url=None) / 内置(deepseek/qwen/…) / 自定义 / 显式 base_url
+    from langchain_openai import ChatOpenAI
+    if provider == "openai" and not resolved_base:
+        return ChatOpenAI(model=model, api_key=key, **kwargs)
+    if not resolved_base:
+        raise ValueError(f"不支持的 LLM provider: {provider}（无 base_url，且非 openai/anthropic/google）")
+    return ChatOpenAI(model=model, api_key=key or "not-needed", base_url=resolved_base, **kwargs)
 
 
 # ── 统一 LLM 获取入口 ──────────────────────────────────
 
+# 应急回退顺序：(provider, env_var)。模型不写死，一律经 resolve_provider_model 解析。
 _FALLBACK_CHAIN = [
-    ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-    ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-    ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-    ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
+    ("qwen", "DASHSCOPE_API_KEY"),
+    ("kimi", "MOONSHOT_API_KEY"),
+    ("glm", "ZHIPU_API_KEY"),
 ]
 
 
@@ -235,25 +265,29 @@ def get_models_for_role(
         except Exception:
             pass
 
-    # 优先级3: 角色注册表默认值
+    # 优先级3: 角色注册表默认值（模型经解析器：role.default_model → provider_configs → 种子）
     try:
         from bottleneck_hunter.llm_clients.role_registry import get_role
         role_def = get_role(role_key)
         if role_def:
             env_key = PROVIDER_KEY_MAP.get(role_def.default_provider, "")
             if env_key and os.getenv(env_key):
-                try:
-                    return [(create_llm(role_def.default_provider, role_def.default_model,
-                                       temperature=temperature),
-                             role_def.default_provider, role_def.default_model)]
-                except Exception:
-                    pass
+                model = role_def.default_model or resolve_provider_model(role_def.default_provider)
+                if model:
+                    try:
+                        return [(create_llm(role_def.default_provider, model, temperature=temperature),
+                                 role_def.default_provider, model)]
+                    except Exception:
+                        pass
     except Exception:
         pass
 
-    # 优先级4: fallback 链
-    for provider, model, key_env in _FALLBACK_CHAIN:
+    # 优先级4: fallback 链（模型经解析器，不写死）
+    for provider, key_env in _FALLBACK_CHAIN:
         if os.getenv(key_env):
+            model = resolve_provider_model(provider)
+            if not model:
+                continue
             try:
                 return [(create_llm(provider, model, temperature=temperature), provider, model)]
             except Exception:
@@ -280,19 +314,17 @@ def get_llm_for_position(
                 return results[0]
 
         if provider_hint:
-            hint_defaults = {
-                "deepseek": ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-                "qwen": ("qwen", "qwen-plus", "DASHSCOPE_API_KEY"),
-                "kimi": ("kimi", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
-                "glm": ("glm", "glm-4-flash", "ZHIPU_API_KEY"),
-            }
-            cfg = hint_defaults.get(provider_hint)
-            if cfg and os.getenv(cfg[2]):
-                return create_llm(cfg[0], cfg[1], temperature=temperature), cfg[0], cfg[1]
+            env_key = PROVIDER_KEY_MAP.get(provider_hint, "")
+            if env_key and os.getenv(env_key):
+                model = resolve_provider_model(provider_hint)
+                if model:
+                    return create_llm(provider_hint, model, temperature=temperature), provider_hint, model
 
-        for provider, model, key_env in _FALLBACK_CHAIN:
+        for provider, key_env in _FALLBACK_CHAIN:
             if os.getenv(key_env):
-                return create_llm(provider, model, temperature=temperature), provider, model
+                model = resolve_provider_model(provider)
+                if model:
+                    return create_llm(provider, model, temperature=temperature), provider, model
     except Exception as e:
         logger.warning("get_llm_for_position 失败 (position=%s): %s", position, e)
     return None, "", ""

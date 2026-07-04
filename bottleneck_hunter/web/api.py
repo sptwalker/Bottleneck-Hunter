@@ -1106,10 +1106,26 @@ def persist_provider_keys(user: dict, settings: dict[str, str]) -> int:
         if key not in allowed_vars:
             continue
         value = value.strip()
+        provider_id = env_to_provider.get(key, "")
+
+        # 空值 = 清除该 provider 的 KEY（用户级加密表 + admin 全局 .env/os.environ）——供"删除内置 provider"使用
         if not value:
+            if provider_id and user_id:
+                try:
+                    from bottleneck_hunter.web.user_api import _store as _get_auth
+                    _get_auth().delete_user_api_key(user_id, provider_id)
+                except Exception as e:
+                    logger.warning(f"清除用户 KEY 失败 ({provider_id}): {e}")
+            if is_admin:
+                try:
+                    if ENV_PATH.exists():
+                        set_key(str(ENV_PATH), key, "")
+                    os.environ.pop(key, None)
+                except Exception as e:
+                    logger.warning(f"清除全局 KEY 失败 ({key}): {e}")
+            saved += 1
             continue
 
-        provider_id = env_to_provider.get(key, "")
         if provider_id and user_id:
             try:
                 from bottleneck_hunter.web.user_api import _store as _get_auth
@@ -1141,26 +1157,13 @@ async def save_settings(req: SaveSettingsRequest, user: dict = Depends(get_curre
 
 
 # ── 测试 Provider 连通性 ────────────────────────────────
-DEFAULT_TEST_MODELS = {
-    "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-6",
-    "deepseek": "deepseek-chat",
-    "google": "gemini-2.5-flash",
-    "qwen": "qwen-plus",
-    "glm": "glm-4-plus",
-    "minimax": "MiniMax-Text-01",
-    "openrouter": "deepseek/deepseek-chat",
-    "siliconflow": "deepseek-ai/DeepSeek-V3",
-    "agnes": "agnes-2.0-flash",
-    "kimi": "moonshot-v1-8k",
-}
 
 
 @router.post("/test-providers")
 async def test_providers(user: dict = Depends(get_current_user)):
     """测试所有已配置 Key 的 Provider 能否正常调用 LLM。"""
     from langchain_core.messages import HumanMessage
-    from bottleneck_hunter.llm_clients.factory import create_llm
+    from bottleneck_hunter.llm_clients.factory import create_llm, resolve_provider_model
 
     user_id = user.get("sub", "")
 
@@ -1180,7 +1183,7 @@ async def test_providers(user: dict = Depends(get_current_user)):
 
         if not user_key and not global_key:
             continue
-        model = DEFAULT_TEST_MODELS.get(p["id"], "")
+        model = resolve_provider_model(p["id"], user_id)
         if not model:
             continue
         configured.append({

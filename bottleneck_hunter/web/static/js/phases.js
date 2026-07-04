@@ -1887,21 +1887,7 @@ async function loadAllHistory() {
 }
 
 /* ── CV 模型列表 ──────────────────────────── */
-/* ── 动态模型选择器 ─────────────────────── */
-const DEFAULT_MODELS = {
-  openai: 'gpt-4o',
-  anthropic: 'claude-sonnet-4-6',
-  deepseek: 'deepseek-chat',
-  google: 'gemini-2.5-flash',
-  qwen: 'qwen-plus',
-  glm: 'glm-4-plus',
-  minimax: 'MiniMax-Text-01',
-  openrouter: 'deepseek/deepseek-chat',
-  siliconflow: 'deepseek-ai/DeepSeek-V3',
-  agnes: 'agnes-2.0-flash',
-  kimi: 'moonshot-v1-8k',
-};
-
+/* ── 动态模型选择器（模型一律来自 /api/ai-config/providers，不写死）─────────── */
 async function fetchConfiguredProviders() {
   try {
     const resp = await fetch('/api/ai-config/providers');
@@ -1932,7 +1918,7 @@ async function refreshModelSelectors(fallbackProviderList) {
   // 首项"跟随顶栏配置"(value=''）→ 后端 get_llm_for_position(role) 走 AI 配置中心角色配置
   const followOption = '<option value="">跟随顶栏配置</option>';
   const options = followOption + configured.map(p => {
-    const model = p.default_model || DEFAULT_MODELS[p.id] || '';
+    const model = p.default_model || '';
     const val = `${p.id}::${model}`;
     return `<option value="${val}">${_escapeHtml(p.name)}</option>`;
   }).join('');
@@ -1967,17 +1953,11 @@ function loadCvModels(configuredProviders) {
   if (configuredProviders && configuredProviders.length > 0) {
     models = configuredProviders.map(p => ({
       provider: p.id,
-      model: p.default_model || DEFAULT_MODELS[p.id] || '',
+      model: p.default_model || '',
       label: p.name,
     }));
   } else {
-    models = [
-      { provider: 'openai', model: 'gpt-4o', label: 'OpenAI' },
-      { provider: 'anthropic', model: 'claude-sonnet-4-6', label: 'Anthropic' },
-      { provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek' },
-      { provider: 'google', model: 'gemini-2.5-flash', label: 'Google' },
-      { provider: 'qwen', model: 'qwen-plus', label: 'Qwen' },
-    ];
+    models = [];  // 无已配置 provider 时不写死任何模型
   }
 
   container.innerHTML = models.map(m => `

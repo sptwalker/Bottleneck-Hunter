@@ -30,7 +30,7 @@
       <span class="nav-flow-sep">&laquo;&raquo;</span>
       <button class="nav-btn" data-view="simtrading" role="tab" aria-selected="false">模拟交易</button>
       <span class="nav-flow-sep">|</span>
-      <button class="nav-btn" data-view="aiconfig" role="tab" aria-selected="false">AI 配置</button>
+      <button class="nav-btn" data-view="aiconfig" role="tab" aria-selected="false">系统配置中心</button>
     </div>
     <button class="nav-btn nav-btn-icon nav-btn-admin" id="btn-admin" data-view="admin" title="用户管理中心" style="display:none">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -129,7 +129,7 @@
               <div class="fg"><label>市场</label><select id="wiz-market"><option value="a_stock">A 股</option><option value="us_stock" selected>美股</option></select></div>
               <div class="fg"><label>产业方向</label><input type="text" id="wiz-sector" list="dl-sectors" placeholder="例: 低空经济" autocomplete="off"><datalist id="dl-sectors"></datalist></div>
               <div class="fg"><label>终端产品</label><input type="text" id="wiz-product" list="dl-products" placeholder="例: eVTOL飞行器" autocomplete="off"><datalist id="dl-products"></datalist></div>
-              <div class="fg"><label>主分析模型</label><select id="wiz-main-model"><option value="" selected>跟随顶栏配置</option><option value="deepseek::deepseek-chat">DeepSeek</option><option value="openai::gpt-5.5">GPT-5.5</option><option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option><option value="qwen::qwen-plus">Qwen Plus</option><option value="google::gemini-2.5-flash">Gemini Flash</option></select></div>
+              <div class="fg"><label>主分析模型</label><select id="wiz-main-model"><option value="" selected>跟随顶栏配置</option></select></div>
               <button class="btn btn-primary" id="wiz-start-custom">开始分析</button>
             </div>
           </div>
@@ -139,7 +139,7 @@
             <h3>全自动分析</h3>
             <p class="start-card-desc">按当前各页面设置自动完成全部分析步骤（瓶颈分析 → 入围筛选 → 最终评分 → 交叉验证），全程无需手动干预。</p>
             <div class="custom-form">
-              <div class="fg"><label>主分析模型</label><select id="wiz-auto-model"><option value="" selected>跟随顶栏配置</option><option value="deepseek::deepseek-chat">DeepSeek</option><option value="openai::gpt-5.5">GPT-5.5</option><option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option><option value="qwen::qwen-plus">Qwen Plus</option><option value="google::gemini-2.5-flash">Gemini Flash</option></select></div>
+              <div class="fg"><label>主分析模型</label><select id="wiz-auto-model"><option value="" selected>跟随顶栏配置</option></select></div>
               <button class="btn btn-success" id="wiz-auto-start">一键启动</button>
             </div>
           </div>
@@ -1057,10 +1057,16 @@
     <!-- AI 配置 View -->
     <div id="view-aiconfig" class="view">
       <div class="aic-container">
-        <h2 class="aic-page-title">AI 配置中心</h2>
+        <h2 class="aic-page-title">系统配置中心</h2>
+        <div class="aic-main-tabs" role="tablist">
+          <button class="aic-main-tab active" data-tab="apikey" role="tab">API KEY 管理</button>
+          <button class="aic-main-tab" data-tab="assign" role="tab">AI 模型分配</button>
+          <button class="aic-main-tab" data-tab="autoupdate" role="tab">自动更新管理</button>
+        </div>
         <div class="aic-layout">
         <div class="aic-sections">
 
+          <div class="aic-tab-pane active" data-pane="apikey">
           <!-- Section 1: Provider 管理 -->
           <div class="aic-card">
             <div class="aic-card-header">
@@ -1108,6 +1114,7 @@
                 </div>
                 <div class="aic-form-actions">
                   <button class="btn btn-sm" id="aic-custom-cancel">取消</button>
+                  <button class="btn btn-sm" id="aic-custom-test">测试连通性</button>
                   <button class="btn btn-sm btn-primary" id="aic-custom-save">保存</button>
                 </div>
               </div>
@@ -1115,6 +1122,9 @@
             </div>
           </div>
 
+          </div><!-- /pane apikey -->
+
+          <div class="aic-tab-pane" data-pane="assign">
           <!-- Section 2: 综合测试 -->
           <div class="aic-card">
             <div class="aic-card-header">
@@ -1156,11 +1166,9 @@
               <span class="aic-hint">为各系统角色配置 AI 模型，未配置的使用默认值</span>
             </div>
             <div class="aic-group-tabs">
-              <button class="aic-group-tab active" data-group="decision">决策层级</button>
-              <button class="aic-group-tab" data-group="committee">投资委员会</button>
-              <button class="aic-group-tab" data-group="pipeline">产业链管线</button>
-              <button class="aic-group-tab" data-group="watchlist">看板模块</button>
-              <button class="aic-group-tab" data-group="bottleneck">瓶颈交叉评分</button>
+              <button class="aic-module-tab active" data-module="产业链分析">产业链分析</button>
+              <button class="aic-module-tab" data-module="观察池">观察池</button>
+              <button class="aic-module-tab" data-module="决策中心">决策中心</button>
             </div>
             <div class="aic-role-list" id="aic-matrix-list"></div>
             <div class="aic-matrix-actions">
@@ -1185,6 +1193,9 @@
             </div>
           </div>
 
+          </div><!-- /pane assign -->
+
+          <div class="aic-tab-pane" data-pane="autoupdate">
           <!-- Section 5: 自动更新 -->
           <div class="aic-card" id="auto-update-card">
             <div class="aic-card-header">
@@ -1218,12 +1229,14 @@
             </div>
           </div>
 
+        </div><!-- /pane autoupdate -->
+
         </div><!-- /aic-sections -->
 
         <!-- 右侧栏：已配置模型总览 -->
         <aside class="aic-sidebar" id="aic-sidebar">
           <div class="aic-sidebar-header">
-            <h3>已配置模型</h3>
+            <h3>已配置内容</h3>
             <span class="aic-sidebar-count" id="aic-sidebar-count"></span>
           </div>
           <div class="aic-sidebar-body" id="aic-sidebar-body">
@@ -1285,11 +1298,6 @@
   <div class="fg"><label>终端产品</label><input type="text" id="ctx-product"></div>
   <div class="fg"><label>主分析模型</label><select id="ctx-model">
     <option value="" selected>跟随顶栏配置</option>
-    <option value="deepseek::deepseek-chat">DeepSeek</option>
-    <option value="openai::gpt-5.5">GPT-5.5</option>
-    <option value="anthropic::claude-sonnet-4-6">Claude Sonnet</option>
-    <option value="qwen::qwen-plus">Qwen Plus</option>
-    <option value="google::gemini-2.5-flash">Gemini Flash</option>
   </select></div>
   <div class="ctx-menu-btns">
     <button class="btn btn-sm btn-secondary" id="ctx-cancel">取消</button>

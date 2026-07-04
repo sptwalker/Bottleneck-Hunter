@@ -27,6 +27,13 @@ const GROUP_LABELS = {
   bottleneck: '瓶颈交叉评分',
 };
 
+// 系统模块层级（流程顺序）—— 供分配页签(#4)/自动推荐(#5)/侧栏树(#6)统一排序
+const MODULE_TREE = [
+  { module: '产业链分析', groups: ['pipeline', 'bottleneck'] },
+  { module: '观察池',     groups: ['watchlist'] },
+  { module: '决策中心',   groups: ['decision', 'committee'] },
+];
+
 const DIMENSION_LABELS = {
   connectivity: '连通性',
   json_output: 'JSON',
@@ -55,7 +62,7 @@ let _providers = [];
 let _customProviders = [];
 let _testResults = [];
 let _recommendations = [];
-let _activeGroup = 'decision';
+let _activeModule = '产业链分析';
 
 /* ── Init ─────────────────────────────────────────────── */
 
@@ -67,6 +74,7 @@ export function initAIConfig() {
   loadTestResults();
   loadRecommendations();
   loadCustomProviders();
+  loadAutoUpdateSummary();
 
   // Provider actions
   container.querySelector('#aic-test-conn')?.addEventListener('click', testConnectivity);
@@ -75,6 +83,17 @@ export function initAIConfig() {
   container.querySelector('#aic-add-custom')?.addEventListener('click', showCustomForm);
   container.querySelector('#aic-custom-cancel')?.addEventListener('click', hideCustomForm);
   container.querySelector('#aic-custom-save')?.addEventListener('click', saveCustomProvider);
+  container.querySelector('#aic-custom-test')?.addEventListener('click', testFormConfig);
+
+  // Provider 编辑/删除：事件委托（避免内联 onclick 因名称含引号等被截断）
+  container.querySelector('#aic-provider-grid')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-aic-act]');
+    if (!btn) return;
+    const id = btn.dataset.pid;
+    const isCustom = btn.dataset.custom === '1';
+    if (btn.dataset.aicAct === 'edit') editProvider(id, isCustom);
+    else if (btn.dataset.aicAct === 'delete') deleteProvider(id, btn.dataset.name || id, isCustom);
+  });
 
   // Auto-generate ID from name
   container.querySelector('#aic-custom-name')?.addEventListener('input', (e) => {
@@ -104,13 +123,25 @@ export function initAIConfig() {
     hideRecommendModal();
   });
 
-  // Group tabs
-  container.querySelectorAll('.aic-group-tab').forEach(tab => {
+  // Module tabs（分配矩阵按系统模块）
+  container.querySelectorAll('.aic-module-tab').forEach(tab => {
     tab.addEventListener('click', () => {
-      container.querySelectorAll('.aic-group-tab').forEach(t => t.classList.remove('active'));
+      container.querySelectorAll('.aic-module-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      _activeGroup = tab.dataset.group;
-      renderMatrixForGroup(_activeGroup);
+      _activeModule = tab.dataset.module;
+      renderMatrixForModule(_activeModule);
+    });
+  });
+
+  // 顶层页签：API KEY 管理 / AI 模型分配 / 自动更新管理
+  container.querySelectorAll('.aic-main-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      container.querySelectorAll('.aic-main-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const pane = tab.dataset.tab;
+      container.querySelectorAll('.aic-tab-pane').forEach(p => {
+        p.classList.toggle('active', p.dataset.pane === pane);
+      });
     });
   });
 }
@@ -130,7 +161,7 @@ async function loadRoles() {
     _providers = data.available_providers || [];
     renderProviders();
     renderConfiguredModelSummary();
-    renderMatrixForGroup(_activeGroup);
+    renderMatrixForModule(_activeModule);
   } catch (e) {
     console.error('Failed to load roles:', e);
     renderSidebarError('网络错误');
@@ -182,25 +213,37 @@ function renderProviders() {
         .filter(cp => !apiIds.has(cp.provider_id))
         .map(cp => ({
           id: cp.provider_id, name: cp.display_name || cp.provider_id,
-          configured: true, default_model: cp.default_model || '',
+          configured: true, default_model: cp.default_model || '', is_builtin: false,
         })),
     ];
     const customIds = new Set(_customProviders.map(cp => cp.provider_id));
+    const customNames = new Map(_customProviders.map(cp => [cp.provider_id, cp.display_name || cp.provider_id]));
+    // 已配置在前（字母序），未配置的自动排到最后（字母序）
+    merged.sort((a, b) => {
+      const ac = a.configured !== false, bc = b.configured !== false;
+      if (ac !== bc) return ac ? -1 : 1;
+      return String(a.name || a.id).toLowerCase().localeCompare(String(b.name || b.id).toLowerCase());
+    });
 
     grid.innerHTML = merged.map(p => {
-      const isCustom = customIds.has(p.id);
+      // 内置/自定义判定优先用后端 is_builtin（不依赖 _customProviders 加载时序）；兜底用 customIds
+      const isCustom = (p.is_builtin === false) || (p.is_builtin === undefined && customIds.has(p.id));
+      const displayName = isCustom ? (customNames.get(p.id) || p.name) : p.name;
+      const configured = p.configured !== false;
 
       return `
-      <div class="aic-provider-item" data-pid="${escHtml(p.id)}">
+      <div class="aic-provider-item${configured ? '' : ' aic-provider-unconfigured'}" data-pid="${escHtml(p.id)}">
         <div class="aic-provider-row-top">
-          <span class="aic-provider-status aic-status-ok"></span>
+          <span class="aic-provider-status ${configured ? 'aic-status-ok' : 'aic-status-unknown'}"></span>
           <div class="aic-provider-info">
-            <span class="aic-provider-name">${escHtml(p.name)}</span>
-            ${p.default_model ? `<span class="aic-provider-model">${escHtml(p.default_model)}</span>` : ''}
+            <span class="aic-provider-name">${escHtml(displayName)}</span>
+            ${configured
+              ? (p.default_model ? `<span class="aic-provider-model">${escHtml(p.default_model)}</span>` : '')
+              : '<span class="aic-provider-unconfig-label">未配置</span>'}
           </div>
           <div class="aic-provider-actions-inline">
-            <button class="btn btn-xs" onclick="window._aicEditProvider('${escHtml(p.id)}', ${isCustom})">编辑</button>
-            <button class="btn btn-xs btn-danger" onclick="window._aicDeleteProvider('${escHtml(p.id)}', '${escHtml(p.name)}', ${isCustom})">删除</button>
+            <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(p.id)}" data-custom="${isCustom ? 1 : 0}">${configured ? '编辑' : '配置'}</button>
+            ${configured ? `<button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(p.id)}" data-name="${escHtml(displayName)}" data-custom="${isCustom ? 1 : 0}">删除</button>` : ''}
           </div>
         </div>
       </div>`;
@@ -239,135 +282,128 @@ window._aicDeleteCustom = deleteCustomProvider;
 window._aicEditProvider = editProvider;
 window._aicDeleteProvider = deleteProvider;
 
+let _autoUpdateCfg = null;
+
+async function loadAutoUpdateSummary() {
+  try {
+    const resp = await fetch('/api/settings/auto-update');
+    if (!resp.ok) return;
+    _autoUpdateCfg = await resp.json();
+    renderConfiguredModelSummary();
+  } catch { /* 忽略 */ }
+}
+
+function _autoUpdateSummaryHtml() {
+  if (!_autoUpdateCfg) return '';
+  const cfg = _autoUpdateCfg.config || {};
+  const labels = _autoUpdateCfg.category_labels || {};
+  const master = cfg.master_enabled === '1';
+  const cats = Object.keys(labels);
+  const onCats = cats.filter(c => cfg[c] === '1');
+  let html = `<div class="aic-tree-module aic-tree-au">`;
+  html += `<div class="aic-tree-module-title">自动更新设置</div>`;
+  html += `<div class="aic-tree-role"><span class="aic-tree-role-name">总开关</span>`;
+  html += `<span class="aic-tree-model ${master ? '' : 'aic-tree-model-default'}">${master ? '已启用' : '已关闭'}</span></div>`;
+  if (cats.length) {
+    html += `<div class="aic-tree-role"><span class="aic-tree-role-name">分类</span>`;
+    html += `<span class="aic-tree-model">${onCats.length}/${cats.length} 开启</span></div>`;
+    for (const c of cats) {
+      html += `<div class="aic-tree-role aic-tree-role-sub"><span class="aic-tree-role-name">${escHtml(labels[c] || c)}</span>`;
+      html += `<span class="aic-tree-model ${cfg[c] === '1' ? '' : 'aic-tree-model-default'}">${cfg[c] === '1' ? '开' : '关'}</span></div>`;
+    }
+  }
+  html += `<div class="aic-tree-role"><span class="aic-tree-role-name">陈旧阈值</span>`;
+  html += `<span class="aic-tree-model">${escHtml(String(cfg.stale_threshold_hours || '24'))}h</span></div>`;
+  html += `</div>`;
+  return html;
+}
+
 function renderConfiguredModelSummary() {
   const body = document.getElementById('aic-sidebar-body');
   const countEl = document.getElementById('aic-sidebar-count');
   if (!body) return;
 
-  const configured = _providers.filter(p => p.configured);
+  const rolesByGroup = {};
+  for (const r of _roles) (rolesByGroup[r.group] = rolesByGroup[r.group] || []).push(r);
 
-  // 按 provider 分组：provider -> { name, models: [{model, roles}] }
-  const providerMap = new Map();
-  for (const p of configured) {
-    providerMap.set(p.id, {
-      name: p.name || p.id,
-      defaultModel: p.default_model || '',
-      assignedRoles: [],
-    });
-  }
-
-  // 角色配置映射
-  for (const role of _roles) {
-    if (!role.slots || role.slots.length === 0) continue;
-    for (const slot of role.slots) {
-      const entry = providerMap.get(slot.provider);
-      if (entry) {
-        entry.assignedRoles.push({ model: slot.model, roleLabel: role.label, slotIndex: slot.slot_index });
-      }
-    }
-  }
-
-  // 统计
-  const totalModels = new Set();
-  const totalAssigned = _roles.filter(r => r.slots && r.slots.length > 0).length;
-  for (const [, info] of providerMap) {
-    if (info.defaultModel) totalModels.add(info.defaultModel);
-    for (const ar of info.assignedRoles) totalModels.add(ar.model);
-  }
-
-  if (countEl) countEl.textContent = `${configured.length} 个 Provider · ${totalModels.size} 个模型`;
-
-  if (configured.length === 0) {
-    body.innerHTML = '<div class="aic-sidebar-empty">未检测到已配置的 API</div>';
-    return;
-  }
-
-  let html = '';
-
-  for (const [pid, info] of providerMap) {
-    const rolesByModel = new Map();
-    for (const ar of info.assignedRoles) {
-      if (!rolesByModel.has(ar.model)) rolesByModel.set(ar.model, []);
-      rolesByModel.get(ar.model).push(ar.roleLabel);
-    }
-
-    html += `<div class="aic-sb-provider">`;
-    html += `<div class="aic-sb-provider-header">`;
-    html += `<span class="aic-sb-provider-dot ${info.assignedRoles.length > 0 ? 'aic-status-ok' : 'aic-status-unknown'}"></span>`;
-    html += `<span class="aic-sb-provider-name">${escHtml(info.name)}</span>`;
-    html += `</div>`;
-
-    if (rolesByModel.size > 0) {
-      for (const [model, roles] of rolesByModel) {
-        html += `<div class="aic-sb-model">`;
-        html += `<span class="aic-sb-model-name">${escHtml(model)}</span>`;
-        html += `<div class="aic-sb-roles">`;
-        for (const rl of roles) {
-          html += `<span class="aic-sb-role-tag">${escHtml(rl)}</span>`;
+  let assigned = 0;
+  const models = new Set();
+  let html = '<div class="aic-tree">';
+  for (const mod of MODULE_TREE) {
+    const groups = mod.groups.filter(g => (rolesByGroup[g] || []).length);
+    if (!groups.length) continue;
+    html += `<div class="aic-tree-module"><div class="aic-tree-module-title">${escHtml(mod.module)}</div>`;
+    for (const g of groups) {
+      for (const role of rolesByGroup[g]) {
+        const slots = role.slots || [];
+        if (slots.length) {
+          assigned++;
+          const ms = slots.map(s => `${s.provider}:${s.model}`);
+          ms.forEach(m => models.add(m));
+          html += `<div class="aic-tree-role"><span class="aic-tree-role-name">${escHtml(role.label)}</span>`;
+          html += ms.map(m => `<span class="aic-tree-model">${escHtml(m)}</span>`).join('');
+          html += `</div>`;
+        } else {
+          html += `<div class="aic-tree-role"><span class="aic-tree-role-name">${escHtml(role.label)}</span>`;
+          html += `<span class="aic-tree-model aic-tree-model-default">默认</span></div>`;
         }
-        html += `</div></div>`;
       }
-    } else if (info.defaultModel) {
-      html += `<div class="aic-sb-model aic-sb-model-idle">`;
-      html += `<span class="aic-sb-model-name">${escHtml(info.defaultModel)}</span>`;
-      html += `<span class="aic-sb-idle-label">可用 · 未分配</span>`;
-      html += `</div>`;
     }
-
     html += `</div>`;
   }
+  html += '</div>';
+  html += _autoUpdateSummaryHtml();
 
-  // 分配统计
-  const totalRoles = _roles.length;
-  html += `<div class="aic-sb-stats">`;
-  html += `<div class="aic-sb-stat"><span class="aic-sb-stat-num">${totalAssigned}</span><span class="aic-sb-stat-label">已分配角色</span></div>`;
-  html += `<div class="aic-sb-stat"><span class="aic-sb-stat-num">${totalRoles - totalAssigned}</span><span class="aic-sb-stat-label">使用默认</span></div>`;
-  html += `</div>`;
-
-  body.innerHTML = html;
+  body.innerHTML = html || '<div class="aic-sidebar-empty">暂无配置</div>';
+  if (countEl) countEl.textContent = `${assigned} 已分配 · ${models.size} 模型`;
 }
 
 function showCustomForm(editData, builtinMode) {
   const form = document.getElementById('aic-custom-form');
   if (!form) return;
 
-  const fieldsToToggle = ['aic-field-name', 'aic-field-id', 'aic-field-url', 'aic-field-model'];
+  const nameEl = document.getElementById('aic-custom-name');
+  const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
 
   if (builtinMode) {
-    fieldsToToggle.forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = 'none';
-    });
+    // 内置 provider：名称只读，模型 / base_url / Key 均可编辑；id 字段隐藏
+    show('aic-field-name', true); show('aic-field-id', false);
+    show('aic-field-url', true); show('aic-field-model', true);
     document.getElementById('aic-custom-edit-id').value = builtinMode.id;
+    nameEl.value = builtinMode.name || builtinMode.id;
+    nameEl.disabled = false;
+    document.getElementById('aic-custom-url').value = builtinMode.base_url || '';
+    document.getElementById('aic-custom-url').placeholder = '留空 = 官方默认端点';
+    document.getElementById('aic-custom-model').value = builtinMode.default_model || '';
     document.getElementById('aic-custom-key').value = '';
-    document.getElementById('aic-custom-key').placeholder = '输入新的 API Key';
+    document.getElementById('aic-custom-key').placeholder = '留空 = 保持现有 Key';
     form.dataset.builtinMode = builtinMode.id;
     form.dataset.builtinEnv = builtinMode.envKey;
   } else if (editData && typeof editData === 'object' && editData.provider_id) {
-    fieldsToToggle.forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = '';
-    });
+    show('aic-field-name', true); show('aic-field-id', true);
+    show('aic-field-url', true); show('aic-field-model', true);
     document.getElementById('aic-custom-edit-id').value = editData.provider_id;
-    document.getElementById('aic-custom-name').value = editData.display_name || '';
+    nameEl.value = editData.display_name || '';
+    nameEl.disabled = false;
     document.getElementById('aic-custom-id').value = editData.provider_id || '';
     document.getElementById('aic-custom-id').disabled = true;
     document.getElementById('aic-custom-url').value = editData.base_url || '';
+    document.getElementById('aic-custom-url').placeholder = '如：http://localhost:11434/v1';
     document.getElementById('aic-custom-key').value = '';
     document.getElementById('aic-custom-key').placeholder = editData.api_key_hint ? '已配置（留空保持不变）' : '可选';
     document.getElementById('aic-custom-model').value = editData.default_model || '';
     delete form.dataset.builtinMode;
     delete form.dataset.builtinEnv;
   } else {
-    fieldsToToggle.forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = '';
-    });
+    show('aic-field-name', true); show('aic-field-id', true);
+    show('aic-field-url', true); show('aic-field-model', true);
     document.getElementById('aic-custom-edit-id').value = '';
-    document.getElementById('aic-custom-name').value = '';
+    nameEl.value = '';
+    nameEl.disabled = false;
     document.getElementById('aic-custom-id').value = '';
     document.getElementById('aic-custom-id').disabled = false;
     document.getElementById('aic-custom-url').value = '';
+    document.getElementById('aic-custom-url').placeholder = '如：http://localhost:11434/v1';
     document.getElementById('aic-custom-key').value = '';
     document.getElementById('aic-custom-key').placeholder = '可选（如 Ollama 无需填写）';
     document.getElementById('aic-custom-model').value = '';
@@ -376,7 +412,7 @@ function showCustomForm(editData, builtinMode) {
   }
 
   form.style.display = 'block';
-  document.getElementById('aic-custom-key').focus();
+  document.getElementById('aic-custom-model').focus();
 }
 
 function hideCustomForm() {
@@ -387,6 +423,8 @@ function hideCustomForm() {
     delete form.dataset.builtinEnv;
   }
   document.getElementById('aic-custom-id').disabled = false;
+  const nameEl = document.getElementById('aic-custom-name');
+  if (nameEl) nameEl.disabled = false;
 }
 
 async function saveCustomProvider() {
@@ -395,24 +433,30 @@ async function saveCustomProvider() {
 
   if (builtinId) {
     const api_key = document.getElementById('aic-custom-key')?.value.trim();
-    if (!api_key) { alert('请输入 API Key'); return; }
-
+    const default_model = document.getElementById('aic-custom-model')?.value.trim() || '';
+    const base_url = document.getElementById('aic-custom-url')?.value.trim() || '';
+    const display_name = document.getElementById('aic-custom-name')?.value.trim() || '';
     const envKey = form.dataset.builtinEnv;
-    if (!envKey) return;
 
     try {
-      const resp = await fetch(`${API}/providers/keys`, {
-        method: 'POST',
+      // 1) 保存默认模型 + base_url + 显示名 覆盖（单一真源）
+      const cfgResp = await fetch(`${API}/providers/${builtinId}/config`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: { [envKey]: api_key } }),
+        body: JSON.stringify({ default_model, base_url, display_name }),
       });
-      if (resp.ok) {
-        hideCustomForm();
-        await loadRoles();
-        setStatus('aic-provider-status', 'API Key 已更新', 'ok');
-      } else {
-        alert('保存失败');
+      if (!cfgResp.ok) { alert('保存模型配置失败'); return; }
+      // 2) 仅当填了新 Key 才更新（留空=保持现有）
+      if (api_key && envKey) {
+        await fetch(`${API}/providers/keys`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ settings: { [envKey]: api_key } }),
+        });
       }
+      hideCustomForm();
+      await loadRoles();
+      setStatus('aic-provider-status', '已更新', 'ok');
     } catch (e) {
       alert('网络错误: ' + e.message);
     }
@@ -463,6 +507,38 @@ async function saveCustomProvider() {
   }
 }
 
+async function testFormConfig() {
+  const form = document.getElementById('aic-custom-form');
+  const builtinId = form?.dataset.builtinMode;
+  const btn = document.getElementById('aic-custom-test');
+  const provider = builtinId || document.getElementById('aic-custom-id')?.value.trim();
+  const model = document.getElementById('aic-custom-model')?.value.trim() || '';
+  const base_url = document.getElementById('aic-custom-url')?.value.trim() || '';
+  const api_key = document.getElementById('aic-custom-key')?.value.trim() || '';
+  if (!provider) { alert('请先填写 Provider'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = '测试中...'; }
+  try {
+    const resp = await fetch(`${API}/test/one`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, model, base_url, api_key }),
+    });
+    let data = {};
+    try { data = await resp.json(); } catch { /* 非 JSON */ }
+    if (!resp.ok) {
+      const detail = (data && (data.detail || data.error)) || '';
+      alert(`测试请求失败 (HTTP ${resp.status})${detail ? '：' + (typeof detail === 'string' ? detail : JSON.stringify(detail)) : '；请确认已登录并刷新页面'}`);
+      return;
+    }
+    if (data.ok) alert(`连接成功！\n模型: ${data.model || model}`);
+    else alert(`连接失败：${data.error || '未返回错误信息'}`);
+  } catch (e) {
+    alert('测试失败: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '测试连通性'; }
+  }
+}
+
 async function testCustomProvider(id, btn) {
   if (btn) { btn.disabled = true; btn.textContent = '...'; }
   try {
@@ -495,12 +571,14 @@ function editProvider(id, isCustom) {
   } else {
     const envKey = PROVIDER_KEY_NAMES[id];
     if (!envKey) { alert('未知 Provider'); return; }
-    showCustomForm(null, { id, envKey });
+    const p = _providers.find(x => x.id === id) || {};
+    showCustomForm(null, { id, envKey, name: p.name || id, default_model: p.default_model || '', base_url: p.base_url || '' });
   }
 }
 
 async function deleteProvider(id, name, isCustom) {
-  if (isCustom) {
+  // 防御：只要不是已知内置 provider（无 env key 映射），一律按自定义端点删除，避免 deleteBuiltinProvider 静默 no-op
+  if (isCustom || !PROVIDER_KEY_NAMES[id]) {
     await deleteCustomProvider(id, name);
   } else {
     await deleteBuiltinProvider(id, name);
@@ -525,23 +603,21 @@ async function deleteCustomProvider(id, name) {
 }
 
 async function deleteBuiltinProvider(id, name) {
-  if (!confirm(`确定清除「${name}」的 API Key？\n清除后该 Provider 将不可用。`)) return;
+  if (!confirm(`确定删除「${name}」？\n将清除其 API Key 与模型/端点/名称配置，回到「未配置」状态（内置 Provider 可随时重新配置）。`)) return;
 
   const envKey = PROVIDER_KEY_NAMES[id];
   if (!envKey) return;
 
   try {
-    const resp = await fetch(`${API}/providers/keys`, {
+    // 清 Key + 清 provider_configs 覆盖 → 完全回到未配置，与自定义端点删除后一致（不再出现在已配置列表）
+    await fetch(`${API}/providers/keys`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ settings: { [envKey]: '' } }),
     });
-    if (resp.ok) {
-      await loadRoles();
-      setStatus('aic-provider-status', `${name} 已移除`, 'ok');
-    } else {
-      alert('操作失败');
-    }
+    await fetch(`${API}/providers/${id}/config`, { method: 'DELETE' });
+    await loadRoles();
+    setStatus('aic-provider-status', `${name} 已删除`, 'ok');
   } catch (e) {
     alert('网络错误: ' + e.message);
   }
@@ -708,31 +784,23 @@ function renderTestResults() {
 
 /* ── Section 3: Model Assignment Matrix ──────────────── */
 
-function renderMatrixForGroup(group) {
+function renderMatrixForModule(moduleName) {
   const listEl = document.getElementById('aic-matrix-list');
   if (!listEl) return;
-
-  const groupRoles = _roles.filter(r => r.group === group);
-  if (groupRoles.length === 0) {
-    listEl.innerHTML = '<div style="padding:16px;color:var(--muted);text-align:center">该分组暂无角色</div>';
-    return;
-  }
+  const mod = MODULE_TREE.find(m => m.module === moduleName) || MODULE_TREE[0];
 
   const providerOptions = _providers
     .filter(p => p.configured)
     .map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)}${p.default_model ? ` (${p.default_model})` : ''}</option>`)
     .join('');
 
-  listEl.innerHTML = groupRoles.map(role => {
+  const roleItemHtml = (role) => {
     const slotsHtml = [];
     const numSlots = role.multi_model ? role.max_slots : 1;
-
     for (let i = 0; i < numSlots; i++) {
       const existing = (role.slots || []).find(s => s.slot_index === i);
       const slotLabel = role.multi_model ? ((role.slot_labels && role.slot_labels[i]) || `模型 ${i + 1}`) : '';
-      const selectedProvider = existing?.provider || '';
       const selectedModel = existing?.model || '';
-
       slotsHtml.push(`
         <div class="aic-slot" data-role="${escHtml(role.key)}" data-slot="${i}">
           ${slotLabel ? `<span class="aic-slot-label">${slotLabel}</span>` : ''}
@@ -746,26 +814,33 @@ function renderMatrixForGroup(group) {
         </div>
       `);
     }
-
-    const multiBadge = role.multi_model
-      ? `<span class="aic-role-multi-badge">多模型 (最多${role.max_slots})</span>`
-      : '';
-
+    const multiBadge = role.multi_model ? `<span class="aic-role-multi-badge">多模型 (最多${role.max_slots})</span>` : '';
     return `
       <div class="aic-role-item">
         <span class="aic-role-label">${escHtml(role.label)} ${multiBadge}</span>
         <div class="aic-role-slots">${slotsHtml.join('')}</div>
-      </div>
-    `;
-  }).join('');
+      </div>`;
+  };
 
-  // Set selected provider values
-  groupRoles.forEach(role => {
-    (role.slots || []).forEach(slot => {
-      const sel = listEl.querySelector(`select.aic-slot-provider[data-role="${role.key}"][data-slot="${slot.slot_index}"]`);
-      if (sel) sel.value = slot.provider;
+  let html = '';
+  for (const g of mod.groups) {
+    const groupRoles = _roles.filter(r => r.group === g);
+    if (!groupRoles.length) continue;
+    html += `<div class="aic-group-section"><div class="aic-group-heading">${escHtml(GROUP_LABELS[g] || g)}</div>`;
+    html += groupRoles.map(roleItemHtml).join('');
+    html += `</div>`;
+  }
+  listEl.innerHTML = html || '<div style="padding:16px;color:var(--muted);text-align:center">该模块暂无角色</div>';
+
+  // 回填已选 provider
+  for (const g of mod.groups) {
+    _roles.filter(r => r.group === g).forEach(role => {
+      (role.slots || []).forEach(slot => {
+        const sel = listEl.querySelector(`select.aic-slot-provider[data-role="${role.key}"][data-slot="${slot.slot_index}"]`);
+        if (sel) sel.value = slot.provider;
+      });
     });
-  });
+  }
 }
 
 async function saveMatrixConfig() {
@@ -865,15 +940,15 @@ function renderRecommendations() {
     return;
   }
 
-  grid.innerHTML = _recommendations.map(rec => {
+  const groupOf = {};
+  for (const r of _roles) groupOf[r.key] = r.group;
+
+  const cardHtml = (rec) => {
     const role = _roles.find(r => r.key === rec.role_key);
     const currentSlot = (role?.slots || []).find(s => s.slot_index === rec.slot_index);
-    const currentText = currentSlot
-      ? `${currentSlot.provider}:${currentSlot.model}`
-      : '未配置';
+    const currentText = currentSlot ? `${currentSlot.provider}:${currentSlot.model}` : '未配置';
     const recText = `${rec.provider}:${rec.model}`;
     const isSame = currentText === recText;
-
     return `
       <div class="aic-rec-card">
         <div class="aic-rec-card-header">
@@ -884,9 +959,26 @@ function renderRecommendations() {
         <div class="aic-rec-vs">
           ${isSame ? '与当前配置一致' : `当前: ${escHtml(currentText)} <span class="aic-vs-arrow">&rarr;</span> ${escHtml(recText)}`}
         </div>
-      </div>
-    `;
-  }).join('');
+      </div>`;
+  };
+
+  let html = '';
+  const known = new Set();
+  for (const mod of MODULE_TREE) {
+    mod.groups.forEach(g => known.add(g));
+    const recs = _recommendations
+      .filter(rec => mod.groups.includes(groupOf[rec.role_key]))
+      .sort((a, b) => (mod.groups.indexOf(groupOf[a.role_key]) - mod.groups.indexOf(groupOf[b.role_key])));
+    if (!recs.length) continue;
+    html += `<div class="aic-rec-module"><div class="aic-rec-module-title">${escHtml(mod.module)}</div>`;
+    html += `<div class="aic-rec-cards">${recs.map(cardHtml).join('')}</div></div>`;
+  }
+  const rest = _recommendations.filter(rec => !known.has(groupOf[rec.role_key]));
+  if (rest.length) {
+    html += `<div class="aic-rec-module"><div class="aic-rec-module-title">其它</div>`;
+    html += `<div class="aic-rec-cards">${rest.map(cardHtml).join('')}</div></div>`;
+  }
+  grid.innerHTML = html;
 }
 
 /* ── Utilities ────────────────────────────────────────── */

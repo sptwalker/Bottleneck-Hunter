@@ -892,4 +892,17 @@ MIGRATIONS: list[str] = [
         user_id TEXT DEFAULT '',
         PRIMARY KEY (key, user_id)
     )""",
+    # ── Provider 模型/base_url 用户级覆盖（单一真源）：内置与自定义 provider 的默认模型可编辑，去除全系统写死模型 ──
+    """CREATE TABLE IF NOT EXISTS provider_configs (
+        id            TEXT PRIMARY KEY,
+        user_id       TEXT DEFAULT '',
+        provider_id   TEXT NOT NULL,
+        default_model TEXT DEFAULT '',
+        base_url      TEXT DEFAULT '',
+        display_name  TEXT DEFAULT '',
+        updated_at    TEXT,
+        UNIQUE(provider_id, user_id)
+    )""",
+    # 老库补列：内置 provider 也可编辑显示名称，与自定义端点一致
+    "ALTER TABLE provider_configs ADD COLUMN display_name TEXT DEFAULT ''",
 ]
