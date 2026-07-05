@@ -40,6 +40,7 @@ from bottleneck_hunter.web.custom_provider_api import (
 from bottleneck_hunter.web.ai_config_api import (
     router as ai_config_router,
     set_store as aic_set_store,
+    set_auth_store as aic_set_auth_store,
 )
 from bottleneck_hunter.web.reverse_api import (
     router as reverse_router,
@@ -69,7 +70,22 @@ async def lifespan(app: FastAPI):
     admin_set_stores(_auth_store, _wl_store)
     cp_set_auth_store(_auth_store)
 
-    # 加载自定义 provider 到 factory 运行时缓存
+    # 数据迁移：将现有数据绑定到 admin 用户（需先解析 admin，供内置 provider 迁移取其加密 Key）
+    admin_user = admin or _auth_store.get_user_by_username("admin")
+    if admin_user:
+        run_migration(admin_user.id)
+
+    # 统一 Provider 管理：把已配置 Key 的内置 provider 迁入 custom_providers 表（唯一真源，幂等）
+    try:
+        from bottleneck_hunter.web.provider_migration import migrate_builtin_providers_to_custom
+        migrate_builtin_providers_to_custom(
+            _auth_store, _wl_store,
+            admin_user_id=(admin_user.id if admin_user else ""),
+        )
+    except Exception as e:
+        logging.getLogger(__name__).warning("内置 provider 统一迁移失败: %s", e)
+
+    # 加载全部 provider（含迁移来的原内置）到 factory 运行时缓存
     from bottleneck_hunter.llm_clients.factory import register_custom_provider
     for cp in _auth_store.list_custom_providers():
         detail = _auth_store.get_custom_provider(cp["provider_id"])
@@ -92,16 +108,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # 数据迁移：将现有数据绑定到 admin 用户
-    admin_user = admin or _auth_store.get_user_by_username("admin")
-    if admin_user:
-        run_migration(admin_user.id)
-
     wl_set_store(_wl_store)
     wl_set_auth_store(_auth_store)
     dc_set_store(_wl_store)
     st_set_store(_wl_store)
     aic_set_store(_wl_store)
+    aic_set_auth_store(_auth_store)
     reverse_set_store(_wl_store)
     settings_set_stores(_wl_store, _auth_store)
     init_broadcaster()

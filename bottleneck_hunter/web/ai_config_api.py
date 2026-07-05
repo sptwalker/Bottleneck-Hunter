@@ -16,12 +16,9 @@ from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.auth.dependencies import get_current_user
 from bottleneck_hunter.llm_clients.factory import (
-    PROVIDER_KEY_MAP,
-    PROVIDER_MODELS,
     create_llm,
     get_custom_provider,
     list_custom_provider_ids,
-    register_provider_override,
     resolve_provider_model,
 )
 from bottleneck_hunter.llm_clients.role_registry import (
@@ -35,11 +32,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ai-config"])
 
 _store: WatchlistStore | None = None
+_auth_store = None  # AuthStore：custom_providers 唯一真源
 
 
 def set_store(store: WatchlistStore) -> None:
     global _store
     _store = store
+
+
+def set_auth_store(store) -> None:
+    global _auth_store
+    _auth_store = store
 
 
 def _get_store(user: dict) -> WatchlistStore:
@@ -48,19 +51,6 @@ def _get_store(user: dict) -> WatchlistStore:
     return _store.for_user(user.get("sub", ""))
 
 
-PROVIDER_DISPLAY = {
-    "openai": "OpenAI",
-    "anthropic": "Anthropic",
-    "deepseek": "DeepSeek",
-    "google": "Google",
-    "qwen": "Qwen (通义)",
-    "glm": "GLM (智谱)",
-    "minimax": "MiniMax",
-    "openrouter": "OpenRouter",
-    "siliconflow": "SiliconFlow",
-    "agnes": "Agnes AI",
-    "kimi": "Kimi (月之暗面)",
-}
 
 
 # ── GET /roles ──
@@ -106,65 +96,37 @@ async def get_roles(user: dict = Depends(get_current_user)):
             "slots": slots,
         })
 
-    providers = _build_providers_list(uid, include_unconfigured=True)
+    providers = _build_providers_list(uid)
 
     return {"roles": roles, "available_providers": providers}
 
 
 def _build_providers_list(user_id: str = "", include_unconfigured: bool = False) -> list[dict]:
-    """统一 provider 列表。include_unconfigured=True 时也返回未配置的内置 provider
-    （供配置中心统一管理）；默认只返回已配置的（供分析模型下拉）。"""
-    providers = []
-    # 该用户的 provider 覆盖（base_url 展示用；default_model 由 resolve_provider_model 解析）
-    overrides: dict[str, dict] = {}
-    try:
-        if _store is not None:
-            for c in _store.for_user(user_id).get_provider_configs(user_id=user_id):
-                overrides[c["provider_id"]] = c
-    except Exception:
-        pass
-    # 内置 provider: 复用持久化感知的 _build_providers_response(合并 .env + user_api_keys 加密存储)。
-    try:
-        from bottleneck_hunter.web.api import _build_providers_response
-        for p in _build_providers_response(user_id):
-            if p.get("is_url"):
-                continue  # 自定义端点在下方单独处理
-            cfg = bool(p.get("configured"))
-            if cfg or include_unconfigured:
-                ov = overrides.get(p["id"], {})
-                providers.append({
-                    "id": p["id"],
-                    "name": ov.get("display_name") or p["name"],
-                    "configured": cfg,
-                    "is_builtin": True,
-                    "default_model": resolve_provider_model(p["id"], user_id),
-                    "base_url": ov.get("base_url", "") or "",
-                })
-    except Exception:
-        # 兜底: 退回读 os.environ
-        for pid, env_var in PROVIDER_KEY_MAP.items():
-            cfg = bool(os.environ.get(env_var, "").strip())
-            if not (cfg or include_unconfigured):
-                continue
-            ov = overrides.get(pid, {})
-            providers.append({
-                "id": pid,
-                "name": ov.get("display_name") or PROVIDER_DISPLAY.get(pid, pid),
-                "configured": cfg,
-                "is_builtin": True,
-                "default_model": resolve_provider_model(pid, user_id),
-                "base_url": ov.get("base_url", "") or "",
-            })
+    """统一 provider 列表：唯一真源为 custom_providers 表（原内置已迁入）。
 
-    for cp_id in list_custom_provider_ids():
-        cp_info = get_custom_provider(cp_id) or {}
+    每个 provider 均可编辑/删除/测试，不再区分内置/自定义。
+    include_unconfigured 参数保留仅为兼容旧调用签名，现无实际分支（表中即为已配置）。
+    """
+    providers = []
+    if _auth_store is None:
+        return providers
+    try:
+        rows = _auth_store.list_custom_providers()
+    except Exception:
+        return providers
+
+    for cp in rows:
+        if cp.get("is_active") == 0:
+            continue
+        pid = cp["provider_id"]
         providers.append({
-            "id": cp_id,
-            "name": cp_info.get("display_name") or cp_id,
+            "id": pid,
+            "name": cp.get("display_name") or pid,
             "configured": True,
             "is_builtin": False,
-            "default_model": cp_info.get("default_model", ""),
-            "base_url": cp_info.get("base_url", ""),
+            "default_model": cp.get("default_model", "") or "",
+            "base_url": cp.get("base_url", "") or "",
+            "key_hint": cp.get("api_key_hint", "") or "",
         })
     return providers
 
@@ -214,60 +176,12 @@ async def save_roles(req: RoleConfigSaveRequest, user: dict = Depends(get_curren
 
 @router.get("/providers")
 async def get_providers(user: dict = Depends(get_current_user)):
-    """获取所有 Provider（含 Key 配置状态和自定义端点）。"""
+    """获取所有 Provider（统一真源 custom_providers）。"""
     return {"providers": _build_providers_list(user.get("sub", ""))}
 
 
-# ── POST /providers/keys ──
-
-
-class ProviderKeySaveRequest(BaseModel):
-    settings: dict[str, str]
-
-
-@router.post("/providers/keys")
-async def save_provider_keys(req: ProviderKeySaveRequest, user: dict = Depends(get_current_user)):
-    """保存 Provider API Key（持久化：用户级加密 + admin 写 .env，重启不丢）。"""
-    from bottleneck_hunter.web.api import persist_provider_keys
-
-    saved = persist_provider_keys(user, req.settings)
-    return {"saved": saved}
-
-
-# ── Provider 默认模型/base_url 覆盖（单一真源）──
-
-
-class ProviderConfigRequest(BaseModel):
-    default_model: str = ""
-    base_url: str = ""
-    display_name: str = ""
-
-
-@router.put("/providers/{provider_id}/config")
-async def save_provider_config(provider_id: str, req: ProviderConfigRequest,
-                               user: dict = Depends(get_current_user)):
-    """保存内置/自定义 provider 的默认模型 + base_url + 显示名 覆盖（去除写死模型的单一真源）。"""
-    store = _get_store(user)
-    uid = user.get("sub", "")
-    dm, bu, dn = req.default_model.strip(), req.base_url.strip(), req.display_name.strip()
-    store.upsert_provider_config(provider_id, dm, bu, user_id=uid, display_name=dn)
-    # admin 的配置同时作为全局覆盖（runtime user_id='' 生效），并刷新工厂运行时缓存
-    if user.get("role") == "admin":
-        store.upsert_provider_config(provider_id, dm, bu, user_id="", display_name=dn)
-        register_provider_override(provider_id, dm, bu)
-    return {"saved": True, "provider_id": provider_id, "default_model": dm, "base_url": bu, "display_name": dn}
-
-
-@router.delete("/providers/{provider_id}/config")
-async def delete_provider_config(provider_id: str, user: dict = Depends(get_current_user)):
-    """清除某内置 provider 的模型/base_url/显示名覆盖（配合清 Key，使其回到未配置态）。"""
-    store = _get_store(user)
-    uid = user.get("sub", "")
-    store.delete_provider_config(provider_id, user_id=uid)
-    if user.get("role") == "admin":
-        store.delete_provider_config(provider_id, user_id="")
-        register_provider_override(provider_id, "", "")  # 空覆盖=回落种子
-    return {"deleted": True, "provider_id": provider_id}
+# 说明：Provider 的增删改（Key/模型/base_url/显示名）统一走 /api/custom-providers，
+# 原 POST /providers/keys、PUT/DELETE /providers/{id}/config 已废弃删除（单轨化）。
 
 
 class TestOneRequest(BaseModel):
@@ -315,19 +229,22 @@ async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
 # ── POST /test/connectivity ──
 
 
+def _configured_provider_models() -> list[tuple[str, str]]:
+    """列出所有已配置 provider 及其默认模型（统一真源 custom_providers 运行时缓存）。"""
+    configured: list[tuple[str, str]] = []
+    for cp_id in list_custom_provider_ids():
+        cp_info = get_custom_provider(cp_id)
+        cp_model = cp_info.get("default_model", "") if cp_info else ""
+        configured.append((cp_id, cp_model or cp_id))
+    return configured
+
+
 @router.post("/test/connectivity")
 async def test_connectivity(user: dict = Depends(get_current_user)):
     """测试所有已配置 Provider 的连通性。"""
     from bottleneck_hunter.web.model_tester import test_connectivity as _test
 
-    configured = []
-    for pid, env_var in PROVIDER_KEY_MAP.items():
-        if os.environ.get(env_var, "").strip():
-            configured.append((pid, PROVIDER_MODELS.get(pid, "")))
-    for cp_id in list_custom_provider_ids():
-        cp_info = get_custom_provider(cp_id)
-        cp_model = cp_info.get("default_model", "") if cp_info else ""
-        configured.append((cp_id, cp_model or cp_id))
+    configured = _configured_provider_models()
 
     async def _run_one(provider, model):
         try:
@@ -349,17 +266,7 @@ async def test_comprehensive(request: Request, user: dict = Depends(get_current_
     store = _get_store(user)
     uid = user.get("sub", "")
 
-    configured = []
-    for pid, env_var in PROVIDER_KEY_MAP.items():
-        if os.environ.get(env_var, "").strip():
-            configured.append((pid, PROVIDER_MODELS.get(pid, "")))
-    for cp_id in list_custom_provider_ids():
-        cp_info = get_custom_provider(cp_id)
-        cp_model = cp_info.get("default_model", "") if cp_info else ""
-        if cp_model:
-            configured.append((cp_id, cp_model))
-
-    configured = [(p, m) for p, m in configured if m]
+    configured = [(p, m) for p, m in _configured_provider_models() if m]
 
     async def _stream():
         from bottleneck_hunter.web.model_tester import (

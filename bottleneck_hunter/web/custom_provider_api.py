@@ -38,20 +38,19 @@ def _store():
 
 
 _PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
-_BUILTIN_IDS = set(PROVIDER_KEY_MAP.keys())
 
 
 class CustomProviderRequest(BaseModel):
     provider_id: str = Field(..., min_length=2, max_length=32)
     display_name: str = Field(..., min_length=1, max_length=64)
-    base_url: str = Field(..., min_length=8, max_length=512)
+    base_url: str = Field(default="", max_length=512)  # 允许空：openai/anthropic/google 走 SDK 默认端点
     api_key: str = Field(default="", max_length=512)
     default_model: str = Field(..., min_length=1, max_length=128)
 
 
 @router.get("")
 async def list_providers(user: dict = Depends(get_current_user)):
-    """列出所有自定义 provider。"""
+    """列出所有 provider（统一真源 custom_providers）。"""
     store = _store()
     providers = store.list_custom_providers()
     return {"providers": providers}
@@ -59,14 +58,12 @@ async def list_providers(user: dict = Depends(get_current_user)):
 
 @router.post("")
 async def create_provider(req: CustomProviderRequest, user: dict = Depends(get_current_user)):
-    """添加自定义 OpenAI 兼容 provider。"""
+    """添加 provider（OpenAI 兼容或原内置同构）。"""
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
 
     pid = req.provider_id.lower().strip()
     if not _PROVIDER_ID_RE.match(pid):
         raise HTTPException(status_code=400, detail="provider_id 格式无效（小写字母开头，仅含字母/数字/下划线/连字符）")
-    if pid in _BUILTIN_IDS:
-        raise HTTPException(status_code=400, detail=f"与内置 provider 冲突: {pid}")
 
     encrypted = encrypt(req.api_key) if req.api_key else ""
     hint = make_hint(req.api_key) if req.api_key else ""
@@ -120,15 +117,58 @@ async def update_provider(provider_id: str, req: CustomProviderRequest, user: di
 
 @router.delete("/{provider_id}")
 async def delete_provider(provider_id: str, user: dict = Depends(get_current_user)):
-    """删除自定义 provider。"""
+    """删除 provider（统一真源）。
+
+    若该 id 是原内置 provider（在 PROVIDER_KEY_MAP 中），同步清除其 .env/os.environ 全局 Key、
+    该用户加密 Key 与 provider_configs 覆盖，保证删干净——重启后不会被迁移逻辑复活。
+    """
     store = _store()
     removed = store.delete_custom_provider(provider_id)
     if not removed:
-        raise HTTPException(status_code=404, detail="未找到该自定义 provider")
+        raise HTTPException(status_code=404, detail="未找到该 provider")
 
     unregister_custom_provider(provider_id)
-    logger.info("自定义 provider 已删除: %s", provider_id)
+
+    # 若为原内置 provider，彻底清理遗留全局/用户级 Key 与覆盖配置（否则启动迁移会重新建卡片）
+    if provider_id in PROVIDER_KEY_MAP:
+        _purge_builtin_residue(provider_id, user.get("sub", ""))
+
+    logger.info("provider 已删除: %s", provider_id)
     return {"ok": True}
+
+
+def _purge_builtin_residue(provider_id: str, user_id: str) -> None:
+    """清除原内置 provider 的 .env/os.environ Key、用户加密 Key、provider_configs 覆盖。"""
+    import os
+    from pathlib import Path
+
+    from dotenv import set_key
+
+    env_var = PROVIDER_KEY_MAP.get(provider_id, "")
+    # 1) .env + os.environ 全局 Key
+    if env_var:
+        try:
+            env_path = Path.cwd() / ".env"
+            if env_path.exists():
+                set_key(str(env_path), env_var, "")
+        except Exception as e:
+            logger.warning("清除 .env Key 失败 (%s): %s", env_var, e)
+        os.environ.pop(env_var, None)
+    # 2) 用户加密 Key
+    if user_id:
+        try:
+            _store().delete_user_api_key(user_id, provider_id)
+        except Exception as e:
+            logger.debug("清除用户 Key 失败 (%s): %s", provider_id, e)
+    # 3) provider_configs 覆盖（全局 + 用户级）
+    try:
+        from bottleneck_hunter.watchlist.store import WatchlistStore
+        wl = WatchlistStore()
+        wl.delete_provider_config(provider_id, user_id="")
+        if user_id:
+            wl.delete_provider_config(provider_id, user_id=user_id)
+    except Exception as e:
+        logger.debug("清除 provider_configs 覆盖失败 (%s): %s", provider_id, e)
 
 
 @router.post("/{provider_id}/test")

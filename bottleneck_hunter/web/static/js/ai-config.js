@@ -5,20 +5,6 @@
 
 const API = '/api/ai-config';
 
-const PROVIDER_KEY_NAMES = {
-  openai: 'OPENAI_API_KEY',
-  anthropic: 'ANTHROPIC_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  google: 'GOOGLE_API_KEY',
-  qwen: 'DASHSCOPE_API_KEY',
-  glm: 'GLM_API_KEY',
-  minimax: 'MINIMAX_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  siliconflow: 'SILICONFLOW_API_KEY',
-  agnes: 'AGNES_API_KEY',
-  kimi: 'MOONSHOT_API_KEY',
-};
-
 const GROUP_LABELS = {
   decision: '决策层级',
   committee: '投资委员会',
@@ -80,7 +66,7 @@ export function initAIConfig() {
   container.querySelector('#aic-test-conn')?.addEventListener('click', testConnectivity);
 
   // Custom endpoint actions
-  container.querySelector('#aic-add-custom')?.addEventListener('click', showCustomForm);
+  container.querySelector('#aic-add-custom')?.addEventListener('click', () => showCustomForm());
   container.querySelector('#aic-custom-cancel')?.addEventListener('click', hideCustomForm);
   container.querySelector('#aic-custom-save')?.addEventListener('click', saveCustomProvider);
   container.querySelector('#aic-custom-test')?.addEventListener('click', testFormConfig);
@@ -206,44 +192,31 @@ function renderProviders() {
   if (!grid) return;
 
   try {
-    const apiIds = new Set(_providers.map(p => p.id));
-    const merged = [
-      ..._providers,
-      ..._customProviders
-        .filter(cp => !apiIds.has(cp.provider_id))
-        .map(cp => ({
-          id: cp.provider_id, name: cp.display_name || cp.provider_id,
-          configured: true, default_model: cp.default_model || '', is_builtin: false,
-        })),
-    ];
-    const customIds = new Set(_customProviders.map(cp => cp.provider_id));
-    const customNames = new Map(_customProviders.map(cp => [cp.provider_id, cp.display_name || cp.provider_id]));
-    // 已配置在前（字母序），未配置的自动排到最后（字母序）
-    merged.sort((a, b) => {
-      const ac = a.configured !== false, bc = b.configured !== false;
-      if (ac !== bc) return ac ? -1 : 1;
-      return String(a.name || a.id).toLowerCase().localeCompare(String(b.name || b.id).toLowerCase());
-    });
+    // 统一真源：custom_providers 表（原内置已迁入）。全部卡片一律可编辑 + 可删除。
+    const list = [..._customProviders].sort((a, b) =>
+      String(a.display_name || a.provider_id).toLowerCase()
+        .localeCompare(String(b.display_name || b.provider_id).toLowerCase()));
 
-    grid.innerHTML = merged.map(p => {
-      // 内置/自定义判定优先用后端 is_builtin（不依赖 _customProviders 加载时序）；兜底用 customIds
-      const isCustom = (p.is_builtin === false) || (p.is_builtin === undefined && customIds.has(p.id));
-      const displayName = isCustom ? (customNames.get(p.id) || p.name) : p.name;
-      const configured = p.configured !== false;
+    if (!list.length) {
+      grid.innerHTML = '<div class="aic-provider-empty">暂无 Provider，点击下方「+ 添加 Provider」配置。</div>';
+      return;
+    }
 
+    grid.innerHTML = list.map(cp => {
+      const id = cp.provider_id;
+      const displayName = cp.display_name || id;
+      const model = cp.default_model || '';
       return `
-      <div class="aic-provider-item${configured ? '' : ' aic-provider-unconfigured'}" data-pid="${escHtml(p.id)}">
+      <div class="aic-provider-item" data-pid="${escHtml(id)}">
         <div class="aic-provider-row-top">
-          <span class="aic-provider-status ${configured ? 'aic-status-ok' : 'aic-status-unknown'}"></span>
+          <span class="aic-provider-status aic-status-ok"></span>
           <div class="aic-provider-info">
             <span class="aic-provider-name">${escHtml(displayName)}</span>
-            ${configured
-              ? (p.default_model ? `<span class="aic-provider-model">${escHtml(p.default_model)}</span>` : '')
-              : '<span class="aic-provider-unconfig-label">未配置</span>'}
+            ${model ? `<span class="aic-provider-model">${escHtml(model)}</span>` : ''}
           </div>
           <div class="aic-provider-actions-inline">
-            <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(p.id)}" data-custom="${isCustom ? 1 : 0}">${configured ? '编辑' : '配置'}</button>
-            ${configured ? `<button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(p.id)}" data-name="${escHtml(displayName)}" data-custom="${isCustom ? 1 : 0}">删除</button>` : ''}
+            <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">编辑</button>
+            <button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-custom="1">删除</button>
           </div>
         </div>
       </div>`;
@@ -358,28 +331,15 @@ function renderConfiguredModelSummary() {
   if (countEl) countEl.textContent = `${assigned} 已分配 · ${models.size} 模型`;
 }
 
-function showCustomForm(editData, builtinMode) {
+function showCustomForm(editData) {
   const form = document.getElementById('aic-custom-form');
   if (!form) return;
 
   const nameEl = document.getElementById('aic-custom-name');
   const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
 
-  if (builtinMode) {
-    // 内置 provider：名称只读，模型 / base_url / Key 均可编辑；id 字段隐藏
-    show('aic-field-name', true); show('aic-field-id', false);
-    show('aic-field-url', true); show('aic-field-model', true);
-    document.getElementById('aic-custom-edit-id').value = builtinMode.id;
-    nameEl.value = builtinMode.name || builtinMode.id;
-    nameEl.disabled = false;
-    document.getElementById('aic-custom-url').value = builtinMode.base_url || '';
-    document.getElementById('aic-custom-url').placeholder = '留空 = 官方默认端点';
-    document.getElementById('aic-custom-model').value = builtinMode.default_model || '';
-    document.getElementById('aic-custom-key').value = '';
-    document.getElementById('aic-custom-key').placeholder = '留空 = 保持现有 Key';
-    form.dataset.builtinMode = builtinMode.id;
-    form.dataset.builtinEnv = builtinMode.envKey;
-  } else if (editData && typeof editData === 'object' && editData.provider_id) {
+  if (editData && typeof editData === 'object' && editData.provider_id) {
+    // 编辑现有 provider：id 只读，其余可改
     show('aic-field-name', true); show('aic-field-id', true);
     show('aic-field-url', true); show('aic-field-model', true);
     document.getElementById('aic-custom-edit-id').value = editData.provider_id;
@@ -388,13 +348,12 @@ function showCustomForm(editData, builtinMode) {
     document.getElementById('aic-custom-id').value = editData.provider_id || '';
     document.getElementById('aic-custom-id').disabled = true;
     document.getElementById('aic-custom-url').value = editData.base_url || '';
-    document.getElementById('aic-custom-url').placeholder = '如：http://localhost:11434/v1';
+    document.getElementById('aic-custom-url').placeholder = '留空 = 官方默认端点（openai/anthropic/google）';
     document.getElementById('aic-custom-key').value = '';
     document.getElementById('aic-custom-key').placeholder = editData.api_key_hint ? '已配置（留空保持不变）' : '可选';
     document.getElementById('aic-custom-model').value = editData.default_model || '';
-    delete form.dataset.builtinMode;
-    delete form.dataset.builtinEnv;
   } else {
+    // 新增 provider
     show('aic-field-name', true); show('aic-field-id', true);
     show('aic-field-url', true); show('aic-field-model', true);
     document.getElementById('aic-custom-edit-id').value = '';
@@ -403,12 +362,10 @@ function showCustomForm(editData, builtinMode) {
     document.getElementById('aic-custom-id').value = '';
     document.getElementById('aic-custom-id').disabled = false;
     document.getElementById('aic-custom-url').value = '';
-    document.getElementById('aic-custom-url').placeholder = '如：http://localhost:11434/v1';
+    document.getElementById('aic-custom-url').placeholder = '如：http://localhost:11434/v1（OpenAI 兼容留空走默认）';
     document.getElementById('aic-custom-key').value = '';
     document.getElementById('aic-custom-key').placeholder = '可选（如 Ollama 无需填写）';
     document.getElementById('aic-custom-model').value = '';
-    delete form.dataset.builtinMode;
-    delete form.dataset.builtinEnv;
   }
 
   form.style.display = 'block';
@@ -419,8 +376,6 @@ function hideCustomForm() {
   const form = document.getElementById('aic-custom-form');
   if (form) {
     form.style.display = 'none';
-    delete form.dataset.builtinMode;
-    delete form.dataset.builtinEnv;
   }
   document.getElementById('aic-custom-id').disabled = false;
   const nameEl = document.getElementById('aic-custom-name');
@@ -428,41 +383,6 @@ function hideCustomForm() {
 }
 
 async function saveCustomProvider() {
-  const form = document.getElementById('aic-custom-form');
-  const builtinId = form?.dataset.builtinMode;
-
-  if (builtinId) {
-    const api_key = document.getElementById('aic-custom-key')?.value.trim();
-    const default_model = document.getElementById('aic-custom-model')?.value.trim() || '';
-    const base_url = document.getElementById('aic-custom-url')?.value.trim() || '';
-    const display_name = document.getElementById('aic-custom-name')?.value.trim() || '';
-    const envKey = form.dataset.builtinEnv;
-
-    try {
-      // 1) 保存默认模型 + base_url + 显示名 覆盖（单一真源）
-      const cfgResp = await fetch(`${API}/providers/${builtinId}/config`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ default_model, base_url, display_name }),
-      });
-      if (!cfgResp.ok) { alert('保存模型配置失败'); return; }
-      // 2) 仅当填了新 Key 才更新（留空=保持现有）
-      if (api_key && envKey) {
-        await fetch(`${API}/providers/keys`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ settings: { [envKey]: api_key } }),
-        });
-      }
-      hideCustomForm();
-      await loadRoles();
-      setStatus('aic-provider-status', '已更新', 'ok');
-    } catch (e) {
-      alert('网络错误: ' + e.message);
-    }
-    return;
-  }
-
   const editId = document.getElementById('aic-custom-edit-id')?.value;
   const display_name = document.getElementById('aic-custom-name')?.value.trim();
   const provider_id = document.getElementById('aic-custom-id')?.value.trim();
@@ -472,10 +392,14 @@ async function saveCustomProvider() {
 
   if (!display_name) { alert('请输入显示名称'); return; }
   if (!provider_id) { alert('请输入标识符 ID'); return; }
-  if (!base_url) { alert('请输入 API 地址'); return; }
   if (!default_model) { alert('请输入默认模型'); return; }
+  // base_url 可留空：openai/anthropic/google 走各自 SDK 官方端点；其余 OpenAI 兼容必须填
+  if (!base_url && !['openai', 'anthropic', 'google'].includes(provider_id)) {
+    alert('请输入 API 地址（仅 openai/anthropic/google 可留空走官方端点）');
+    return;
+  }
 
-  const body = { provider_id, display_name, base_url, default_model, api_key: api_key || '' };
+  const body = { provider_id, display_name, base_url: base_url || '', default_model, api_key: api_key || '' };
 
   try {
     let resp;
@@ -497,7 +421,7 @@ async function saveCustomProvider() {
       hideCustomForm();
       await loadCustomProviders();
       await loadRoles();
-      setStatus('aic-provider-status', editId ? '端点已更新' : '端点已添加', 'ok');
+      setStatus('aic-provider-status', editId ? 'Provider 已更新' : 'Provider 已添加', 'ok');
     } else {
       const err = await resp.json().catch(() => ({}));
       alert(err.detail || '保存失败');
@@ -508,10 +432,8 @@ async function saveCustomProvider() {
 }
 
 async function testFormConfig() {
-  const form = document.getElementById('aic-custom-form');
-  const builtinId = form?.dataset.builtinMode;
   const btn = document.getElementById('aic-custom-test');
-  const provider = builtinId || document.getElementById('aic-custom-id')?.value.trim();
+  const provider = document.getElementById('aic-custom-id')?.value.trim();
   const model = document.getElementById('aic-custom-model')?.value.trim() || '';
   const base_url = document.getElementById('aic-custom-url')?.value.trim() || '';
   const api_key = document.getElementById('aic-custom-key')?.value.trim() || '';
@@ -565,59 +487,27 @@ function editCustomProvider(id) {
   showCustomForm(p);
 }
 
-function editProvider(id, isCustom) {
-  if (isCustom) {
-    editCustomProvider(id);
-  } else {
-    const envKey = PROVIDER_KEY_NAMES[id];
-    if (!envKey) { alert('未知 Provider'); return; }
-    const p = _providers.find(x => x.id === id) || {};
-    showCustomForm(null, { id, envKey, name: p.name || id, default_model: p.default_model || '', base_url: p.base_url || '' });
-  }
+// 统一真源后，所有 Provider 皆为 custom_providers 行，编辑/删除单轨（isCustom 参数保留兼容调用点）
+function editProvider(id) {
+  editCustomProvider(id);
 }
 
-async function deleteProvider(id, name, isCustom) {
-  // 防御：只要不是已知内置 provider（无 env key 映射），一律按自定义端点删除，避免 deleteBuiltinProvider 静默 no-op
-  if (isCustom || !PROVIDER_KEY_NAMES[id]) {
-    await deleteCustomProvider(id, name);
-  } else {
-    await deleteBuiltinProvider(id, name);
-  }
+async function deleteProvider(id, name) {
+  await deleteCustomProvider(id, name);
 }
 
 async function deleteCustomProvider(id, name) {
-  if (!confirm(`确定删除自定义端点「${name}」？\n删除后使用该端点的模型配置将失效。`)) return;
+  if (!confirm(`确定删除「${name}」？\n将清除其 API Key 与模型/端点/名称配置，使用该 Provider 的角色分配将失效。`)) return;
 
   try {
     const resp = await fetch(`${CUSTOM_API}/${id}`, { method: 'DELETE' });
     if (resp.ok) {
       await loadCustomProviders();
       await loadRoles();
-      setStatus('aic-provider-status', '端点已删除', 'ok');
+      setStatus('aic-provider-status', 'Provider 已删除', 'ok');
     } else {
       alert('删除失败');
     }
-  } catch (e) {
-    alert('网络错误: ' + e.message);
-  }
-}
-
-async function deleteBuiltinProvider(id, name) {
-  if (!confirm(`确定删除「${name}」？\n将清除其 API Key 与模型/端点/名称配置，回到「未配置」状态（内置 Provider 可随时重新配置）。`)) return;
-
-  const envKey = PROVIDER_KEY_NAMES[id];
-  if (!envKey) return;
-
-  try {
-    // 清 Key + 清 provider_configs 覆盖 → 完全回到未配置，与自定义端点删除后一致（不再出现在已配置列表）
-    await fetch(`${API}/providers/keys`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: { [envKey]: '' } }),
-    });
-    await fetch(`${API}/providers/${id}/config`, { method: 'DELETE' });
-    await loadRoles();
-    setStatus('aic-provider-status', `${name} 已删除`, 'ok');
   } catch (e) {
     alert('网络错误: ' + e.message);
   }

@@ -1067,26 +1067,20 @@
         <div class="aic-sections">
 
           <div class="aic-tab-pane active" data-pane="apikey">
-          <!-- Section 1: Provider 管理 -->
+          <!-- Section 1: Provider 管理（统一：所有 Provider 可添加/编辑/删除） -->
           <div class="aic-card">
             <div class="aic-card-header">
               <h3>Provider 管理</h3>
-              <span class="aic-hint">管理所有 LLM Provider，点击编辑配置 API Key</span>
+              <span class="aic-hint">统一管理所有 LLM Provider（OpenAI 兼容端点、官方 SDK），全部可编辑、可删除</span>
             </div>
             <div class="aic-provider-actions" style="margin-bottom:12px">
+              <button class="btn btn-sm btn-primary" id="aic-add-custom">+ 添加 Provider</button>
               <button class="btn btn-sm" id="aic-test-conn">测试连通性</button>
               <span class="aic-save-status" id="aic-provider-status"></span>
             </div>
             <div class="aic-provider-grid" id="aic-provider-grid"></div>
 
-            <!-- 自定义端点 -->
             <div class="aic-custom-section">
-              <div class="aic-custom-header">
-                <h4>自定义 API 端点</h4>
-                <span class="aic-hint">添加 OpenAI 兼容的自定义 API（如 Ollama、代理服务、企业内网 API）</span>
-                <button class="btn btn-sm btn-primary" id="aic-add-custom">+ 添加端点</button>
-              </div>
-
               <!-- 添加/编辑表单 -->
               <div class="aic-custom-form" id="aic-custom-form" style="display:none">
                 <input type="hidden" id="aic-custom-edit-id" value="">
@@ -1101,7 +1095,7 @@
                   </div>
                   <div class="aic-form-field" id="aic-field-url">
                     <label>API 地址</label>
-                    <input type="text" id="aic-custom-url" placeholder="如：http://localhost:11434/v1" maxlength="512">
+                    <input type="text" id="aic-custom-url" placeholder="OpenAI 兼容端点；openai/anthropic/google 可留空走官方" maxlength="512">
                   </div>
                   <div class="aic-form-field">
                     <label>API Key</label>

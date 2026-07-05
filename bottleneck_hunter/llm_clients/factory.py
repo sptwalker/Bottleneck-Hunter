@@ -181,11 +181,15 @@ def create_llm(
         user_id: 传入则优先用该用户的 provider_configs 覆盖
     """
     provider = provider.lower().strip()
-    key = _resolve_key(provider, api_key)
+    # Key 优先级：显式传入 > 统一 provider 缓存（含迁移来的原内置）> env 兜底（CLI 无 UI 时）。
+    # 缓存优先于 env，保证在 UI 里改 Key 后立即生效、不被旧的 .env 值盖住。
+    key = api_key
     if not key:
         custom = _CUSTOM_PROVIDERS.get(provider)
         if custom and custom.get("api_key"):
             key = custom["api_key"]
+    if not key:
+        key = _resolve_key(provider, None)
     if not model:
         model = resolve_provider_model(provider, user_id)
     resolved_base = base_url or resolve_provider_base_url(provider, user_id)
