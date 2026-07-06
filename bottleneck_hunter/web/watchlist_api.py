@@ -210,7 +210,14 @@ async def list_watchlist(tier: str | None = None, user: dict = Depends(get_curre
 async def add_to_watchlist(req: AddToWatchlistRequest, user: dict = Depends(get_current_user)):
     store = _user_store(user)
     try:
-        entry_id = store.add(req.model_dump())
+        data = req.model_dump()
+        # 行业统一为细中文：用 company_profile 的 industry 映射，避免存入粗英文 "Technology"
+        prof = store.get_company_profile(data.get("ticker", "")) or {}
+        from bottleneck_hunter.watchlist.industry_zh import to_zh_sector
+        zh = to_zh_sector(data.get("sector", ""), prof.get("industry", ""), prof.get("sector", ""))
+        if zh:
+            data["sector"] = zh
+        entry_id = store.add(data)
         return {"id": entry_id, "status": "added"}
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))

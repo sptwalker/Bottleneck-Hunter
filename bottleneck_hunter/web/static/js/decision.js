@@ -1437,6 +1437,35 @@ function _consultBubbleEl(m) {
   return div;
 }
 
+// 时效分割抬头：自动更新跨天时插入，标注日期/时间 + 即时核心市场数据，便于识别历史信息时间
+function _consultDividerEl(snap) {
+  const div = document.createElement('div');
+  div.className = 'dc-consult-divider';
+  const d = new Date(Date.parse(snap.ts || '') || Date.now());
+  const pad = (n) => String(n).padStart(2, '0');
+  const when = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  // 即时核心市场数据：从 indices/sentiment/macro 精简取几项（名称+值+涨跌）
+  const pick = [];
+  const take = (obj, n) => Object.entries(obj || {})
+    .filter(([k]) => k !== 'watchlist_breadth')
+    .slice(0, n)
+    .forEach(([k, v]) => {
+      if (!v || typeof v !== 'object') return;
+      const label = v.label || k;
+      const val = v.value != null ? v.value : '';
+      const chg = v.change_pct != null ? `${v.change_pct > 0 ? '+' : ''}${v.change_pct}%` : '';
+      pick.push(`${escDC(label)} ${escDC(String(val))}${chg ? ` (${escDC(chg)})` : ''}`);
+    });
+  take(snap.indices, 2);
+  take(snap.sentiment, 1);
+  take(snap.macro, 2);
+  const st = snap.strategy || {};
+  const regime = st.regime ? ` · L1:${escDC(st.regime)}` : '';
+  div.innerHTML = `<span class="dc-divider-time">🕒 ${escDC(when)}</span>`
+    + `<span class="dc-divider-data">${pick.join(' · ')}${regime}</span>`;
+  return div;
+}
+
 function _createStreamBubble(role, round) {
   const log = document.getElementById('dc-consult-log');
   const div = _consultBubbleEl({ type: 'analyst', role, round, content: '' });
@@ -1496,13 +1525,29 @@ function renderConsultLog(transcript) {
   if (!log) return;
   log.innerHTML = '';
   const cutoff = Date.now() - 14 * 864e5;
-  const conv = transcript.filter(m => ['user', 'analyst', 'summary', 'system'].includes(m.type));
+  const DAY = 864e5;
+  // 时间线纳入 snapshot（用于跨天分割）+ 对话消息
+  const items = transcript.filter(m => ['user', 'analyst', 'summary', 'system', 'snapshot'].includes(m.type));
   const folded = [], live = [];
-  for (const m of conv) {
+  for (const m of items) {
     const ts = Date.parse(m.ts || '') || 0;
     if ((m.type === 'user' || m.type === 'analyst') && ts && ts < cutoff) folded.push(m);
     else live.push(m);
   }
+  // 渲染一段时间线：snapshot 仅在与上一渲染项跨天(>1天)时作为“时效分割抬头”出现，否则跳过（顶部快照区已展示当前）
+  const renderSeq = (container, seq) => {
+    let prevTs = 0;
+    for (const m of seq) {
+      const ts = Date.parse(m.ts || '') || 0;
+      if (m.type === 'snapshot') {
+        if (prevTs && ts && (ts - prevTs) > DAY) container.appendChild(_consultDividerEl(m));
+        if (ts) prevTs = ts;
+        continue;
+      }
+      container.appendChild(_consultBubbleEl(m));
+      if (ts) prevTs = ts;
+    }
+  };
   if (folded.length) {
     const det = document.createElement('details');
     const sum = document.createElement('summary');
@@ -1511,13 +1556,24 @@ function renderConsultLog(transcript) {
     folded.forEach(m => det.appendChild(_consultBubbleEl(m)));
     log.appendChild(det);
   }
-  live.forEach(m => log.appendChild(_consultBubbleEl(m)));
+  renderSeq(log, live);
   log.scrollTop = log.scrollHeight;
 }
 
 function handleConsultEvent(data) {
   const evt = data.event || '';
-  if (evt === 'snapshot') { renderConsultSnapshot(data); return; }
+  if (evt === 'snapshot') {
+    renderConsultSnapshot(data);
+    // 实时自动更新：与上次快照跨天(>1天) → 在日志插入时效分割抬头，便于识别历史时间
+    const prev = dcConsult.lastSnapTs ? (Date.parse(dcConsult.lastSnapTs) || 0) : 0;
+    const cur = Date.parse(data.ts || '') || 0;
+    if (prev && cur && (cur - prev) > 864e5) {
+      const log = document.getElementById('dc-consult-log');
+      if (log) { log.appendChild(_consultDividerEl(data)); log.scrollTop = log.scrollHeight; }
+    }
+    if (data.ts) dcConsult.lastSnapTs = data.ts;
+    return;
+  }
   if (evt === 'system') { appendConsultBubble({ type: 'system', content: data.content }); return; }
   if (evt === 'error') { appendConsultBubble({ type: 'system', content: '⚠ ' + (data.message || '出错') }); return; }
   if (evt === 'chunk') {
@@ -1550,6 +1606,7 @@ async function openConsultDrawer() {
   if (!drawer) return;
   dcConsult.market = dcState.market;
   dcConsult.bubbles = {};
+  dcConsult.lastSnapTs = '';
   drawer.style.display = '';
   const mkLabel = document.getElementById('dc-consult-market');
   if (mkLabel) mkLabel.textContent = '· ' + marketLabel(dcConsult.market);
@@ -1565,7 +1622,7 @@ async function openConsultDrawer() {
     if (session && Array.isArray(session.transcript_json) && session.transcript_json.length) {
       transcript = session.transcript_json;
       const snaps = transcript.filter(m => m.type === 'snapshot');
-      if (snaps.length) renderConsultSnapshot(snaps[snaps.length - 1]);
+      if (snaps.length) { renderConsultSnapshot(snaps[snaps.length - 1]); dcConsult.lastSnapTs = snaps[snaps.length - 1].ts || ''; }
       renderConsultLog(transcript);
     }
   } catch (e) { /* 无历史，继续走 open 生成 */ }

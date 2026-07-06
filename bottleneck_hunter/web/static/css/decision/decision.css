@@ -1989,6 +1989,16 @@
   align-self: center; background: var(--bg); color: var(--muted);
   font-size: 11.5px; padding: 4px 10px;
 }
+/* 时效分割抬头：自动更新跨天时标注日期/时间 + 即时核心市场数据 */
+.dc-consult-divider {
+  align-self: stretch; max-width: 100%;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px;
+  margin: 10px 0 4px; padding: 6px 10px;
+  border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border);
+  background: rgba(59,130,246,.06);
+}
+.dc-divider-time { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+.dc-divider-data { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .dc-consult-footer {
   display: flex; gap: 8px; padding: 12px 20px;
   border-top: 1px solid var(--border); background: var(--surface);

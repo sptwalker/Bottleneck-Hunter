@@ -143,7 +143,25 @@ class _WatchlistMixin:
                     "SELECT * FROM watchlist ORDER BY tier, composite_score DESC, tier_rank ASC"
                 )
                 rows = conn.execute(q, p).fetchall()
-            return [dict(r) for r in rows]
+            entries = [dict(r) for r in rows]
+            # 行业统一为细中文：已是中文的保留；英文/粗名(如 "Technology") 用 company_profiles.industry 映射
+            # （focus/normal 入库未带 sector，且 yfinance sector 偏粗英文——统一显示细中文）
+            from bottleneck_hunter.watchlist.industry_zh import to_zh_sector
+            tickers = [e["ticker"] for e in entries]
+            profs: dict[str, dict] = {}
+            if tickers:
+                ph = ",".join("?" * len(tickers))
+                pq = f"SELECT ticker, sector, industry FROM company_profiles WHERE ticker IN ({ph})"
+                pp: tuple = tuple(tickers)
+                if self._user_id:
+                    pq += " AND user_id = ?"
+                    pp = pp + (self._user_id,)
+                profs = {r["ticker"]: {"sector": r["sector"] or "", "industry": r["industry"] or ""}
+                         for r in conn.execute(pq, pp).fetchall()}
+            for e in entries:
+                pf = profs.get(e["ticker"], {})
+                e["sector"] = to_zh_sector(e.get("sector", ""), pf.get("industry", ""), pf.get("sector", ""))
+            return entries
         finally:
             conn.close()
 
