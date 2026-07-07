@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from bottleneck_hunter.auth.dependencies import get_current_user
+from bottleneck_hunter.auth.dependencies import get_current_user, require_admin
 from bottleneck_hunter.llm_clients.factory import (
     PROVIDER_KEY_MAP,
     create_llm,
@@ -57,8 +57,8 @@ async def list_providers(user: dict = Depends(get_current_user)):
 
 
 @router.post("")
-async def create_provider(req: CustomProviderRequest, user: dict = Depends(get_current_user)):
-    """添加 provider（OpenAI 兼容或原内置同构）。"""
+async def create_provider(req: CustomProviderRequest, user: dict = Depends(require_admin)):
+    """添加 provider（OpenAI 兼容或原内置同构）。仅管理员——custom_providers 为全平台共享配置。"""
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
 
     pid = req.provider_id.lower().strip()
@@ -81,8 +81,8 @@ async def create_provider(req: CustomProviderRequest, user: dict = Depends(get_c
 
 
 @router.put("/{provider_id}")
-async def update_provider(provider_id: str, req: CustomProviderRequest, user: dict = Depends(get_current_user)):
-    """更新自定义 provider。"""
+async def update_provider(provider_id: str, req: CustomProviderRequest, user: dict = Depends(require_admin)):
+    """更新自定义 provider。仅管理员——base_url 可覆盖，普通用户改动会劫持全平台 LLM 流量。"""
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
 
     store = _store()
@@ -116,8 +116,8 @@ async def update_provider(provider_id: str, req: CustomProviderRequest, user: di
 
 
 @router.delete("/{provider_id}")
-async def delete_provider(provider_id: str, user: dict = Depends(get_current_user)):
-    """删除 provider（统一真源）。
+async def delete_provider(provider_id: str, user: dict = Depends(require_admin)):
+    """删除 provider（统一真源）。仅管理员——删除影响全平台。
 
     若该 id 是原内置 provider（在 PROVIDER_KEY_MAP 中），同步清除其 .env/os.environ 全局 Key、
     该用户加密 Key 与 provider_configs 覆盖，保证删干净——重启后不会被迁移逻辑复活。

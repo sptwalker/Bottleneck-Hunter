@@ -175,3 +175,34 @@
   letter-spacing: 1px;
   line-height: 1;
 }
+
+/* ============================================================
+   新手必读 CTA — 左上角（品牌名右侧）醒目文字+图标+强呼吸
+   ============================================================ */
+.guide-cta {
+  margin-left: 12px;         /* 位于 header-brand 内，紧随品牌名，居界面左上角 */
+  padding: 0 14px;
+  height: 32px;
+  border-radius: 16px;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: .5px;
+  background: linear-gradient(135deg, oklch(0.62 0.20 25), oklch(0.68 0.19 45));
+  box-shadow: 0 0 0 0 oklch(0.62 0.20 25 / 0.6);
+  animation: guide-flash 1.15s ease-in-out infinite;
+}
+.guide-cta:hover {
+  filter: brightness(1.08);
+  animation-play-state: paused;
+}
+.guide-cta .guide-cta-text { font-size: var(--fs-sm); }
+.guide-cta svg { width: 16px; height: 16px; stroke-width: 2.4; }
+
+@keyframes guide-flash {
+  0%, 100% { transform: scale(1);     box-shadow: 0 0 0 0    oklch(0.62 0.20 25 / 0.7); opacity: 1; }
+  50%      { transform: scale(1.09);  box-shadow: 0 0 0 11px oklch(0.62 0.20 25 / 0);   opacity: .82; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guide-cta { animation: none; }
+}

@@ -61,6 +61,7 @@ export function initAIConfig() {
   loadRecommendations();
   loadCustomProviders();
   loadAutoUpdateSummary();
+  loadPaidSources();
 
   // Provider actions
   container.querySelector('#aic-test-conn')?.addEventListener('click', testConnectivity);
@@ -958,3 +959,136 @@ function hideRecommendModal() {
   const modal = document.getElementById('aic-recommend-modal');
   if (modal) modal.style.display = 'none';
 }
+
+/* ── 付费数据源 ─────────────────────────────────────── */
+
+const DS_API = '/api/data-sources';
+let _paidSources = [];
+
+async function loadPaidSources() {
+  const grid = document.getElementById('paid-source-grid');
+  if (!grid) return;
+  try {
+    const resp = await fetch(`${DS_API}/catalog`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    _paidSources = data.sources || [];
+    renderPaidSources();
+  } catch (e) {
+    grid.innerHTML = `<p class="aic-hint">加载失败：${escHtml(e.message)}</p>`;
+  }
+}
+
+function renderPaidSources() {
+  const grid = document.getElementById('paid-source-grid');
+  if (!grid) return;
+  grid.innerHTML = _paidSources.map(s => {
+    const dot = s.configured ? 'aic-status-ok' : 'aic-status-unknown';
+    const site = s.site ? `<a href="${escHtml(s.site)}" target="_blank" rel="noopener" class="aic-hint" style="margin-left:6px">官网↗</a>` : '';
+    const hint = s.key_hint ? `已存：${escHtml(s.key_hint)}` : (s.testable ? '未配置' : '仅存凭证');
+    const customUrl = s.id === 'custom'
+      ? `<input class="aic-provider-input" data-ds-url="${escHtml(s.id)}" placeholder="探测 URL（用 {KEY} 占位）" value="${escHtml(s.base_url_saved || '')}" style="margin-bottom:6px">`
+      : '';
+    const testBtn = s.testable
+      ? `<button class="btn btn-xs" data-ds-act="test" data-ds-id="${escHtml(s.id)}">测试</button>`
+      : `<button class="btn btn-xs" disabled title="无公开自助 API">不可测</button>`;
+    const delBtn = s.configured
+      ? `<button class="btn btn-xs btn-danger" data-ds-act="del" data-ds-id="${escHtml(s.id)}">删除</button>` : '';
+    return `<div class="aic-provider-item" data-ds-card="${escHtml(s.id)}">
+      <div class="aic-provider-row-top">
+        <span class="aic-provider-status ${dot}"></span>
+        <div class="aic-provider-info">
+          <span class="aic-provider-name">${escHtml(s.name)}${site}</span>
+          <span class="aic-provider-model">${escHtml(s.note || '')}</span>
+        </div>
+      </div>
+      <div class="aic-provider-row-bottom" style="flex-direction:column;align-items:stretch;gap:6px">
+        ${customUrl}
+        <input class="aic-provider-input" type="password" data-ds-key="${escHtml(s.id)}" placeholder="API Key" autocomplete="off">
+        <div style="display:flex;gap:6px;align-items:center">
+          <button class="btn btn-xs btn-primary" data-ds-act="save" data-ds-id="${escHtml(s.id)}">保存</button>
+          ${testBtn}${delBtn}
+          <span class="aic-provider-model" data-ds-status="${escHtml(s.id)}">${hint}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function _dsStatus(id, msg, type) {
+  const el = document.querySelector(`[data-ds-status="${id}"]`);
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = type === 'ok' ? 'oklch(0.72 0.19 142)'
+    : type === 'fail' ? 'oklch(0.63 0.24 25)' : 'var(--muted)';
+}
+
+function _dsCardVals(id) {
+  const grid = document.getElementById('paid-source-grid');
+  const key = grid.querySelector(`[data-ds-key="${id}"]`)?.value?.trim() || '';
+  const url = grid.querySelector(`[data-ds-url="${id}"]`)?.value?.trim() || '';
+  return { key, url };
+}
+
+async function _dsSave(id, btn) {
+  const { key, url } = _dsCardVals(id);
+  if (!key) { _dsStatus(id, '请先填写 API Key', 'fail'); return; }
+  btn.disabled = true;
+  try {
+    const resp = await fetch(`${DS_API}/${encodeURIComponent(id)}/key`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: key, base_url: url }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.detail || '保存失败');
+    _dsStatus(id, `已保存：${data.key_hint || ''}`, 'ok');
+    await loadPaidSources();
+  } catch (e) {
+    _dsStatus(id, e.message, 'fail');
+  } finally { btn.disabled = false; }
+}
+
+async function _dsTest(id, btn) {
+  const { key, url } = _dsCardVals(id);
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '测试中...';
+  _dsStatus(id, '测试中...', 'info');
+  try {
+    const resp = await fetch(`${DS_API}/test`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_id: id, api_key: key, base_url: url }),
+    });
+    const data = await resp.json();
+    const dot = document.querySelector(`[data-ds-card="${id}"] .aic-provider-status`);
+    if (data.ok) {
+      _dsStatus(id, '✓ ' + (data.msg || '连通成功'), 'ok');
+      if (dot) dot.className = 'aic-provider-status aic-status-ok';
+    } else {
+      _dsStatus(id, '✕ ' + (data.msg || '连通失败'), 'fail');
+      if (dot) dot.className = 'aic-provider-status aic-status-fail';
+    }
+  } catch (e) {
+    _dsStatus(id, '✕ ' + e.message, 'fail');
+  } finally { btn.disabled = false; btn.textContent = old; }
+}
+
+async function _dsDelete(id, btn) {
+  if (!confirm(`删除该数据源已保存的 API Key？`)) return;
+  btn.disabled = true;
+  try {
+    await fetch(`${DS_API}/${encodeURIComponent(id)}/key`, { method: 'DELETE' });
+    await loadPaidSources();
+  } catch (e) {
+    _dsStatus(id, e.message, 'fail');
+  } finally { btn.disabled = false; }
+}
+
+// 事件委托：保存/测试/删除
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('#paid-source-grid button[data-ds-act]');
+  if (!btn) return;
+  const id = btn.dataset.dsId;
+  const act = btn.dataset.dsAct;
+  if (act === 'save') _dsSave(id, btn);
+  else if (act === 'test') _dsTest(id, btn);
+  else if (act === 'del') _dsDelete(id, btn);
+});

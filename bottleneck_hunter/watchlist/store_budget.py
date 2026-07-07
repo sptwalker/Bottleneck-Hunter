@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from bottleneck_hunter.watchlist.store_base import _today
+from bottleneck_hunter.watchlist.store_base import _now_iso, _today
+
+
+def _days_ago(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=max(0, days - 1))).strftime("%Y-%m-%d")
 
 
 # 自动更新配置默认值（用户未显式设置时的回退）。总开关 + 各分类开关默认全开，陈旧阈值 24h。
@@ -168,6 +172,65 @@ class _BudgetMixin:
         try:
             q, p = self._user_filter("SELECT * FROM pipeline_status")
             rows = conn.execute(q, p).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+    # ── DataHub 数据源用量统计（全局表，不经 _user_filter） ──
+
+    def record_ds_call(self, source: str, capability: str, market: str, ok: bool,
+                       latency_ms: float = 0.0, rows: int = 0, last_error: str = "") -> None:
+        """记一次数据源调用，按 日期×源×能力×市场 UPSERT 累加。失败只 debug 不抛。"""
+        try:
+            with self._write_conn() as conn:
+                conn.execute(
+                    """INSERT INTO datasource_stats
+                       (date, source, capability, market, calls, ok, fail, latency_sum, rows, last_error, updated_at)
+                       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(date, source, capability, market) DO UPDATE SET
+                         calls = calls + 1,
+                         ok = ok + excluded.ok,
+                         fail = fail + excluded.fail,
+                         latency_sum = latency_sum + excluded.latency_sum,
+                         rows = rows + excluded.rows,
+                         last_error = CASE WHEN excluded.last_error != '' THEN excluded.last_error ELSE datasource_stats.last_error END,
+                         updated_at = excluded.updated_at""",
+                    (_today(), source, capability, market,
+                     1 if ok else 0, 0 if ok else 1, float(latency_ms), int(rows),
+                     last_error[:200], _now_iso()),
+                )
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).debug("record_ds_call 失败: %s", e)
+
+    def get_ds_stats(self, days: int = 7) -> list[dict]:
+        """最近 days 天的明细行（按日期倒序）。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM datasource_stats WHERE date >= ? ORDER BY date DESC, source",
+                (_days_ago(days),),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_ds_stats_by_source(self, days: int = 7) -> list[dict]:
+        """按源聚合最近 days 天：总调用/成功/失败/成功率/均延迟/行数。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT source,
+                          SUM(calls) AS calls, SUM(ok) AS ok, SUM(fail) AS fail,
+                          SUM(rows) AS rows,
+                          CASE WHEN SUM(calls) > 0 THEN ROUND(100.0 * SUM(ok) / SUM(calls), 1) ELSE 0 END AS ok_rate,
+                          CASE WHEN SUM(ok) > 0 THEN ROUND(SUM(latency_sum) / SUM(ok), 1) ELSE 0 END AS avg_latency_ms,
+                          MAX(date) AS last_date
+                   FROM datasource_stats WHERE date >= ?
+                   GROUP BY source ORDER BY calls DESC""",
+                (_days_ago(days),),
+            ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()

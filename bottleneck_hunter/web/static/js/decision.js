@@ -1461,8 +1461,9 @@ function _consultDividerEl(snap) {
   take(snap.macro, 2);
   const st = snap.strategy || {};
   const regime = st.regime ? ` · L1:${escDC(st.regime)}` : '';
-  div.innerHTML = `<span class="dc-divider-time">🕒 ${escDC(when)}</span>`
-    + `<span class="dc-divider-data">${pick.join(' · ')}${regime}</span>`;
+  const dataLine = (pick.length || regime)
+    ? `<div class="dc-divider-data">${pick.join(' · ')}${regime}</div>` : '';
+  div.innerHTML = `<div class="dc-divider-time">${'&lt;'.repeat(7)} 🕒 ${escDC(when)} ${'&gt;'.repeat(8)}</div>${dataLine}`;
   return div;
 }
 
@@ -1479,7 +1480,13 @@ function _createStreamBubble(role, round) {
 function appendConsultBubble(m) {
   const log = document.getElementById('dc-consult-log');
   if (!log) return;
+  const now = Date.now();
+  // 实时发送时若距上一条交互 >1 天，先插日期分割线
+  if (m.type === 'user' && dcConsult.lastMsgTs && (now - dcConsult.lastMsgTs) > 864e5) {
+    log.appendChild(_consultDividerEl({ ts: new Date().toISOString() }));
+  }
   log.appendChild(_consultBubbleEl(m));
+  if (m.type === 'user' || m.type === 'analyst') dcConsult.lastMsgTs = now;
   log.scrollTop = log.scrollHeight;
 }
 
@@ -1507,17 +1514,31 @@ function renderConsultSnapshot(snap) {
   if (st.regime || st.market_summary) {
     push('当前L1策略', `${escDC(st.regime || '')} / ${escDC(st.risk_appetite || '')} — ${escDC(st.market_summary || '')}`);
   }
-  const news = snap.news || [];
-  if (news.length) push('新闻', `${news.length} 条 · ${escDC((news[0] && (news[0].title || news[0].topic)) || '')}…`);
-  const wl = snap.watchlist || [];
-  if (wl.length) push('观察池', `${wl.length} 只 · ` + wl.slice(0, 12).map(w => escDC(w.ticker)).join(' ') + (wl.length > 12 ? ' …' : ''));
   const pos = snap.positions;
   if (Array.isArray(pos)) {
     push('持仓', pos.length
       ? pos.map(p => `${escDC(p.ticker)}${p.pnl_pct != null ? ` <span style="color:${p.pnl_pct >= 0 ? 'var(--up,#16a34a)' : 'var(--down,#dc2626)'}">${p.pnl_pct > 0 ? '+' : ''}${p.pnl_pct}%</span>` : ''}`).join(' · ')
       : '空仓');
   }
-  el.innerHTML = rows.join('') || '<div class="dc-snap-row">（暂无数据快照）</div>';
+  // 观察池数据已按需去除；新闻置于最后，展开显示中文摘要
+  const news = snap.news || [];
+  let newsHtml = '';
+  if (news.length) {
+    const items = news.map(n => {
+      const title = escDC(n.title || '');
+      const summary = escDC(n.summary || n.topic || '');   // topic=llm_analysis（中文分析/摘要）
+      const meta = [n.date, n.source_name].filter(Boolean).map(escDC).join(' · ');
+      return '<div class="dc-snap-news-item">'
+        + (title ? `<div class="dc-snap-news-title">${title}</div>` : '')
+        + (summary ? `<div class="dc-snap-news-summary">${summary}</div>` : '')
+        + (meta ? `<div class="dc-snap-news-meta">${meta}</div>` : '')
+        + '</div>';
+    }).join('');
+    newsHtml = '<details class="dc-snap-news" open>'
+      + `<summary><span class="dc-snap-label">新闻</span> ${news.length} 条（点击展开/收起摘要）</summary>`
+      + items + '</details>';
+  }
+  el.innerHTML = (rows.join('') + newsHtml) || '<div class="dc-snap-row">（暂无数据快照）</div>';
 }
 
 function renderConsultLog(transcript) {
@@ -1539,14 +1560,18 @@ function renderConsultLog(transcript) {
     let prevTs = 0;
     for (const m of seq) {
       const ts = Date.parse(m.ts || '') || 0;
+      const crossed = prevTs && ts && (ts - prevTs) > DAY;
       if (m.type === 'snapshot') {
-        if (prevTs && ts && (ts - prevTs) > DAY) container.appendChild(_consultDividerEl(m));
+        if (crossed) container.appendChild(_consultDividerEl(m));
         if (ts) prevTs = ts;
         continue;
       }
+      // 任意两条交互消息间隔 >1 天：插入日期/时间分割线
+      if (crossed) container.appendChild(_consultDividerEl({ ts: m.ts }));
       container.appendChild(_consultBubbleEl(m));
       if (ts) prevTs = ts;
     }
+    if (prevTs) dcConsult.lastMsgTs = prevTs;  // 供实时发送判定是否跨天
   };
   if (folded.length) {
     const det = document.createElement('details');
@@ -1607,6 +1632,7 @@ async function openConsultDrawer() {
   dcConsult.market = dcState.market;
   dcConsult.bubbles = {};
   dcConsult.lastSnapTs = '';
+  dcConsult.lastMsgTs = 0;
   drawer.style.display = '';
   const mkLabel = document.getElementById('dc-consult-market');
   if (mkLabel) mkLabel.textContent = '· ' + marketLabel(dcConsult.market);

@@ -163,6 +163,11 @@ async def delete_user(user_id: str, user: dict = Depends(_require_admin)):
         logger.warning(f"清理用户 analysis 数据失败: {e}")
 
     store.delete_all_user_api_keys(user_id)
+    try:
+        for ds in store.get_data_source_keys(user_id):
+            store.delete_data_source_key(user_id, ds["source_id"])
+    except Exception as e:
+        logger.debug("清理用户数据源 Key 失败: %s", e)
     store.delete_user(user_id)
     logger.info(f"管理员删除用户 {target.username}")
     return {"ok": True}

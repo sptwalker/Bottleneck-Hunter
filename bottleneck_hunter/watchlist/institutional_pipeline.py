@@ -98,14 +98,17 @@ async def fetch_institutional_holders(
     """
     async with _get_sem():
         try:
-            holders = await asyncio.to_thread(
-                _fetch_institutional_holders_sync, ticker
-            )
-            if holders:
-                store.save_institutional_holders(ticker, holders)
-                logger.info("机构持仓保存成功: %s (%d 条)", ticker, len(holders))
-                return "ok"
-            return "no_data"
+            from bottleneck_hunter.data_provider.hub import CAP_INSTITUTIONAL, get_hub
+            async with get_hub().track("yfinance", CAP_INSTITUTIONAL, "us_stock") as _sink:
+                holders = await asyncio.to_thread(
+                    _fetch_institutional_holders_sync, ticker
+                )
+                if holders:
+                    store.save_institutional_holders(ticker, holders)
+                    logger.info("机构持仓保存成功: %s (%d 条)", ticker, len(holders))
+                    _sink["rows"] = len(holders)
+                    return "ok"
+                return "no_data"
         except Exception as e:
             logger.error("机构持仓管道错误 %s: %s", ticker, e)
             return f"error: {e}"
@@ -195,14 +198,17 @@ async def fetch_analyst_ratings(
     """
     async with _get_sem():
         try:
-            ratings = await asyncio.to_thread(
-                _fetch_analyst_ratings_sync, ticker
-            )
-            if ratings:
-                store.save_analyst_ratings(ticker, ratings)
-                logger.info("分析师评级保存成功: %s (%d 条)", ticker, len(ratings))
-                return "ok"
-            return "no_data"
+            from bottleneck_hunter.data_provider.hub import CAP_INSTITUTIONAL, get_hub
+            async with get_hub().track("yfinance", CAP_INSTITUTIONAL, "us_stock") as _sink:
+                ratings = await asyncio.to_thread(
+                    _fetch_analyst_ratings_sync, ticker
+                )
+                if ratings:
+                    store.save_analyst_ratings(ticker, ratings)
+                    logger.info("分析师评级保存成功: %s (%d 条)", ticker, len(ratings))
+                    _sink["rows"] = len(ratings)
+                    return "ok"
+                return "no_data"
         except Exception as e:
             logger.error("分析师评级管道错误 %s: %s", ticker, e)
             return f"error: {e}"

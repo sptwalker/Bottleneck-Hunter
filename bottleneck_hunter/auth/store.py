@@ -83,6 +83,18 @@ class AuthStore:
                     created_at TEXT,
                     updated_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS data_source_keys (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    base_url TEXT DEFAULT '',
+                    encrypted_key TEXT NOT NULL,
+                    key_hint TEXT DEFAULT '',
+                    is_active INTEGER DEFAULT 1,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    UNIQUE(user_id, source_id)
+                );
                 CREATE TABLE IF NOT EXISTS email_verifications (
                     id TEXT PRIMARY KEY,
                     email TEXT NOT NULL,
@@ -424,6 +436,79 @@ class AuthStore:
         with self._conn() as conn:
             cur = conn.execute("DELETE FROM user_api_keys WHERE user_id = ?", (user_id,))
             return cur.rowcount
+
+    # ── 付费数据源 Key（按 user 隔离） ────────────────────
+
+    def save_data_source_key(self, user_id: str, source_id: str, base_url: str,
+                             encrypted_key: str, key_hint: str) -> str:
+        """保存或更新用户的付费数据源 API KEY（已加密）。base_url 供自定义源。返回 record id。"""
+        now = datetime.utcnow().isoformat()
+        record_id = uuid.uuid4().hex[:16]
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM data_source_keys WHERE user_id = ? AND source_id = ?",
+                (user_id, source_id),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE data_source_keys SET base_url = ?, encrypted_key = ?, key_hint = ?, "
+                    "updated_at = ? WHERE user_id = ? AND source_id = ?",
+                    (base_url, encrypted_key, key_hint, now, user_id, source_id),
+                )
+                return existing["id"]
+            conn.execute(
+                "INSERT INTO data_source_keys (id, user_id, source_id, base_url, encrypted_key, "
+                "key_hint, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (record_id, user_id, source_id, base_url, encrypted_key, key_hint, now, now),
+            )
+            return record_id
+
+    def get_data_source_keys(self, user_id: str) -> list[dict]:
+        """返回用户所有数据源配置（不含明文，只有 hint + base_url）。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT source_id, key_hint, base_url, created_at, updated_at "
+                "FROM data_source_keys WHERE user_id = ? ORDER BY source_id",
+                (user_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_data_source_key_encrypted(self, user_id: str, source_id: str) -> str | None:
+        """返回指定数据源的加密 KEY（用于解密后传给 fetcher）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT encrypted_key FROM data_source_keys WHERE user_id = ? AND source_id = ?",
+                (user_id, source_id),
+            ).fetchone()
+            return row["encrypted_key"] if row else None
+
+    def get_data_source_base_url(self, user_id: str, source_id: str) -> str:
+        """返回指定数据源的 base_url（自定义源用）；无则空串。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT base_url FROM data_source_keys WHERE user_id = ? AND source_id = ?",
+                (user_id, source_id),
+            ).fetchone()
+            return (row["base_url"] if row else "") or ""
+
+    def delete_data_source_key(self, user_id: str, source_id: str) -> bool:
+        """删除用户某数据源的 KEY。返回是否有删除。"""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM data_source_keys WHERE user_id = ? AND source_id = ?",
+                (user_id, source_id),
+            )
+            return cur.rowcount > 0
+
+    def any_data_source_key_encrypted(self, source_id: str) -> str | None:
+        """任取一个配置了该数据源的加密 KEY（供无 user 上下文的后台采集兜底）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT encrypted_key FROM data_source_keys WHERE source_id = ? "
+                "AND encrypted_key != '' ORDER BY updated_at DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            return row["encrypted_key"] if row else None
 
     # ── 自定义 Provider ───────────────────────────────────
 

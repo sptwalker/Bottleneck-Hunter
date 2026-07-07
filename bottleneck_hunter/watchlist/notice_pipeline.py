@@ -102,15 +102,18 @@ def _fetch_notices_sync(ticker: str, limit: int = 15) -> list[dict]:
 async def _fetch_one(ticker: str, store: WatchlistStore) -> dict:
     """异步获取单只 A 股的公告并存储。"""
     async with _get_sem():
-        filings = await asyncio.to_thread(_fetch_notices_sync, ticker)
-        if not filings:
-            return {"filings": 0, "trades": 0}
+        from bottleneck_hunter.data_provider.hub import CAP_NOTICE, get_hub
+        async with get_hub().track("akshare", CAP_NOTICE, "a_stock") as _sink:
+            filings = await asyncio.to_thread(_fetch_notices_sync, ticker)
+            if not filings:
+                return {"filings": 0, "trades": 0}
 
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        for f in filings:
-            f["fetched_at"] = now_iso
+            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for f in filings:
+                f["fetched_at"] = now_iso
 
-        fcount = store.save_filings(filings)
+            fcount = store.save_filings(filings)
+            _sink["rows"] = fcount
 
         insider_filings = [f for f in filings if f.get("is_insider_trade")]
         trades = []

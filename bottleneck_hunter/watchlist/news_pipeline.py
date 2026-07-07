@@ -227,6 +227,53 @@ async def _summarize_with_llm(ticker: str, articles: list[dict], llm, budget: Bu
         return {"summary": "", "sentiment": "neutral", "sentiment_score": 0.0}
 
 
+_MARKET_ITEMS_PROMPT = """你是金融新闻编辑。请分析下列市场新闻标题，返回严格 JSON：
+1. sentiment：整体情绪，取值 positive / negative / neutral
+2. summaries：与输入等长的数组，每个元素是对应序号标题的一句**中文**摘要（≤40字，保留主体/事件/方向；输入若为英文或其它外文，请翻译成中文）
+
+新闻标题：
+{headlines}
+
+严格按以下 JSON 回复：
+{{"sentiment": "neutral", "summaries": ["中文摘要1", "中文摘要2"]}}"""
+
+
+async def _summarize_market_items(items: list[dict], llm, budget: BudgetTracker) -> dict:
+    """一次 LLM 调用：整体情绪 + 逐条中文摘要（按输入顺序对齐）。失败优雅降级为空。"""
+    if not items or llm is None or budget is None:
+        return {"sentiment": "neutral", "summaries": []}
+    if budget.get_degradation_mode() == DegradationMode.MINIMAL:
+        return {"sentiment": "neutral", "summaries": []}
+
+    subset = items[:15]
+    headlines = "\n".join(f"{i + 1}. {it.get('title', '')}" for i, it in enumerate(subset))
+    prompt = _MARKET_ITEMS_PROMPT.format(headlines=headlines)
+    try:
+        from langchain_core.messages import HumanMessage
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        text = response.content.strip()
+        if "```" in text:
+            text = text.split("```")[1].strip()
+            if text.startswith("json"):
+                text = text[4:].strip()
+        result = json.loads(text)
+        budget.record(
+            provider=getattr(llm, "_llm_type", "unknown"),
+            model=getattr(llm, "model_name", "unknown"),
+            input_tokens=len(prompt) // 4,
+            output_tokens=len(response.content) // 4,
+            task_type="market_news_summary",
+        )
+        sums = result.get("summaries", [])
+        return {
+            "sentiment": result.get("sentiment", "neutral"),
+            "summaries": [str(x) for x in sums] if isinstance(sums, list) else [],
+        }
+    except Exception as e:
+        logger.warning("市场新闻批量中文摘要失败: %s", e)
+        return {"sentiment": "neutral", "summaries": []}
+
+
 # ---------------------------------------------------------------------------
 # Batch pipeline
 # ---------------------------------------------------------------------------
@@ -272,15 +319,19 @@ async def fetch_news_batch(
         return {}
     results = {}
     for ticker in tickers:
+        src = "akshare" if market == "a_stock" else "yfinance"
         try:
-            if llm and budget:
-                count = await _fetch_one(ticker, store, llm, budget, market=market)
-            else:
-                if market == "a_stock":
-                    articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+            from bottleneck_hunter.data_provider.hub import CAP_NEWS, get_hub
+            async with get_hub().track(src, CAP_NEWS, market) as _sink:
+                if llm and budget:
+                    count = await _fetch_one(ticker, store, llm, budget, market=market)
                 else:
-                    articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
-                count = store.save_news(articles) if articles else 0
+                    if market == "a_stock":
+                        articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+                    else:
+                        articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
+                    count = store.save_news(articles) if articles else 0
+                _sink["rows"] = max(count, 0)
             results[ticker] = count
         except Exception as e:
             logger.error("News pipeline error for %s: %s", ticker, e)
@@ -348,15 +399,18 @@ async def fetch_market_news(market: str = "us_stock", llm=None, budget: BudgetTr
     if not items:
         return []
 
-    # 整体市场情绪（一次 LLM 调用，非逐条）
+    # 整体情绪 + 逐条中文摘要（一次 LLM 调用）
     if llm and budget:
         try:
-            analysis = await _summarize_with_llm("市场大盘", items, llm, budget)
-            sentiment = analysis.get("sentiment", "neutral")
-            for it in items:
+            enriched = await _summarize_market_items(items, llm, budget)
+            sentiment = enriched.get("sentiment", "neutral")
+            summaries = enriched.get("summaries", [])
+            for i, it in enumerate(items):
                 it["sentiment"] = sentiment
+                if i < len(summaries) and summaries[i]:
+                    it["summary"] = summaries[i]
         except Exception as e:
-            logger.warning("市场新闻情感分析失败: %s", e)
+            logger.warning("市场新闻分析失败: %s", e)
 
     return items
 
@@ -391,7 +445,7 @@ async def refresh_market_news(store: WatchlistStore, market: str = "us_stock",
             "ticker": sentinel,
             "date": it.get("date") or today,
             "title": title,
-            "summary": "",
+            "summary": it.get("summary", ""),
             "sentiment": it.get("sentiment", ""),
             "sentiment_score": 0.0,
             "source_url": "",

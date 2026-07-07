@@ -602,6 +602,68 @@ async def job_institutional_update() -> None:
             logger.error("Institutional update (user=%s) failed: %s", uid[:8] if uid else "global", e)
 
 
+async def job_earnings_update(market: str = "us_stock") -> None:
+    """周度更新财报数据（经 DataHub：FMP 美股含一致预期 / Tushare A股），填 earnings_reports。"""
+    for uid, store, budget in _get_active_user_stores("watchlist_data"):
+        try:
+            by_market = store.get_tickers_by_market()
+            tickers = by_market.get(market, [])
+            if not tickers:
+                continue
+            label = f"user={uid[:8]}" if uid else "global"
+            logger.info("Earnings update (%s/%s) starting for %d tickers", market, label, len(tickers))
+            store.update_pipeline_status("earnings", last_status="running", stocks_total=len(tickers))
+
+            from bottleneck_hunter.watchlist.earnings_pipeline import fetch_earnings_batch
+            results = await fetch_earnings_batch(tickers, store, market=market, user_id=uid)
+            ok = sum(1 for v in results.values() if v == "ok")
+            total = len(tickers)
+            status = "success" if ok == total else ("partial" if ok > 0 else "error")
+            store.update_pipeline_status(
+                "earnings",
+                last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                last_status=status,
+                last_error="" if ok == total else f"earnings: {ok}/{total}",
+                stocks_processed=ok, stocks_total=total,
+            )
+            logger.info("Earnings update (%s/%s) done: %d/%d", market, label, ok, total)
+        except Exception as e:
+            logger.error("Earnings update (user=%s) failed: %s", uid[:8] if uid else "global", e)
+
+
+async def job_datasource_report() -> None:
+    """每日数据源健康巡检：对已配置的 testable 付费源做连通探测，落 pipeline_status(ds_health:*)。"""
+    if not _wl_store:
+        return
+    import asyncio as _asyncio
+
+    from bottleneck_hunter.data_provider.data_source_catalog import (
+        get_catalog,
+        probe_source,
+        resolve_data_source_key,
+    )
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for src in get_catalog():
+        sid = src["id"]
+        if not src.get("testable"):
+            continue
+        name = f"ds_health:{sid}"
+        key = resolve_data_source_key(sid)
+        if not key:
+            _wl_store.update_pipeline_status(name, last_status="idle",
+                                             last_error="未配置 Key", last_run_at=now_iso)
+            continue
+        try:
+            ok, msg = await _asyncio.to_thread(probe_source, sid, key, "")
+            _wl_store.update_pipeline_status(
+                name, last_status="success" if ok else "error",
+                last_error="" if ok else msg[:200], last_run_at=now_iso)
+        except Exception as e:
+            _wl_store.update_pipeline_status(name, last_status="error",
+                                             last_error=str(e)[:200], last_run_at=now_iso)
+    logger.info("Data-source health check completed")
+
+
 async def job_model_calibration() -> None:
     """周度 AI 模型准确率校准。"""
     if not _wl_store:
@@ -719,6 +781,9 @@ _JOB_SPECS = [
     ("cn_weekly_strategy",     job_weekly_strategy,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly macro strategy (L1+L2)"),
     ("cn_auto_review",         job_auto_review,         {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock auto review unreviewed sells"),
     ("us_institutional_update", job_institutional_update, {},                   _TZ_US_EASTERN, "weekly",   "Weekly institutional holders & analyst ratings"),
+    ("us_earnings_update",     job_earnings_update,     {"market": "us_stock"}, _TZ_US_EASTERN, "weekly",   "Weekly earnings update (FMP, incl. consensus)"),
+    ("cn_earnings_update",     job_earnings_update,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly earnings update (Tushare)"),
+    ("datasource_report",      job_datasource_report,   {},                     _TZ_US_EASTERN, "daily",    "Data source health check & usage report"),
     ("model_calibration",      job_model_calibration,   {},                     _TZ_US_EASTERN, "weekly",   "Weekly AI model accuracy calibration"),
     ("stale_refresh",          job_stale_refresh,       {},                     None,           "interval", "Stale watchlist refresh (safety net)"),
     ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_US_EASTERN, "weekly",   "US full refresh (data+decision)"),
@@ -747,6 +812,8 @@ def list_job_categories() -> dict[str, str]:
         "us_daily_scan": "watchlist_data", "cn_price_premarket": "watchlist_data",
         "cn_price_postmarket": "watchlist_data", "cn_daily_scan": "watchlist_data",
         "macro_update": "watchlist_data", "us_institutional_update": "watchlist_data",
+        "us_earnings_update": "watchlist_data", "cn_earnings_update": "watchlist_data",
+        "datasource_report": "",
         "us_daily_decision": "daily_decision", "cn_daily_decision": "daily_decision",
         "us_catalyst_scan": "catalyst", "cn_catalyst_scan": "catalyst",
         "us_weekly_strategy": "weekly_strategy", "cn_weekly_strategy": "weekly_strategy",
@@ -770,6 +837,9 @@ def list_job_labels() -> dict[str, dict]:
         "us_weekly_strategy":  {"label": "美股·每周策略重生成",    "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "美东", "freq": "每周"},
         "us_auto_review":      {"label": "美股·自动复盘",          "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "美东", "freq": "工作日"},
         "us_institutional_update": {"label": "机构持仓 & 分析师评级", "desc": "13F 机构持仓与评级（仅美股）", "tz": "美东", "freq": "每周"},
+        "us_earnings_update":  {"label": "美股·财报更新",          "desc": "FMP 财报（含机构一致预期）",   "tz": "美东", "freq": "每周"},
+        "cn_earnings_update":  {"label": "A股·财报更新",           "desc": "Tushare 业绩快报/预告",        "tz": "北京", "freq": "每周"},
+        "datasource_report":   {"label": "数据源健康巡检",        "desc": "付费源连通探测 + 用量汇总",     "tz": "美东", "freq": "工作日"},
         "model_calibration":   {"label": "AI 模型准确率校准",      "desc": "对比历史预测与实际，更新权重", "tz": "美东", "freq": "每周"},
         # A股（北京时区）
         "cn_price_premarket":  {"label": "A股·盘前行情更新",       "desc": "开盘前采集行情快照",           "tz": "北京", "freq": "工作日"},

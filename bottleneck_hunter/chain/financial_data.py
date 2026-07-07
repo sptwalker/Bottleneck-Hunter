@@ -154,8 +154,8 @@ def _code_to_tencent(code: str) -> str:
     return f"sz{code}"
 
 
-def _fetch_tencent_pe_mcap(code_6: str) -> tuple[float | None, float | None]:
-    """从腾讯行情获取实时 PE 和总市值(亿)。失败返回 (None, None)。"""
+def _fetch_tencent_pe_mcap(code_6: str) -> tuple[float | None, float | None, float | None]:
+    """从腾讯行情获取实时 PE、总市值(亿)、现价。失败返回 (None, None, None)。"""
     symbol = _code_to_tencent(code_6)
     url = f"http://qt.gtimg.cn/q={symbol}"
     req = urllib.request.Request(url, headers=_TENCENT_HEADERS)
@@ -163,7 +163,7 @@ def _fetch_tencent_pe_mcap(code_6: str) -> tuple[float | None, float | None]:
         resp = urllib.request.urlopen(req, timeout=10)
         text = resp.read().decode("gbk", errors="replace")
     except Exception:
-        return None, None
+        return None, None, None
 
     for line in text.strip().split(";"):
         line = line.strip()
@@ -178,11 +178,31 @@ def _fetch_tencent_pe_mcap(code_6: str) -> tuple[float | None, float | None]:
         try:
             pe = float(fields[39]) if fields[39] else None
             total_mcap = round(float(fields[45]), 2) if fields[45] else None
+            price = float(fields[3]) if fields[3] else None
         except (ValueError, IndexError):
-            return None, None
-        return pe, total_mcap
+            return None, None, None
+        return pe, total_mcap, price
 
-    return None, None
+    return None, None, None
+
+
+def _fetch_astock_consensus(code_6: str) -> tuple[float | None, int | None]:
+    """同花顺机构盈利预测 → (最近预测年度一致预期EPS均值, 预测机构家数)。失败返回 (None, None)。"""
+    try:
+        df = ak.stock_profit_forecast_ths(symbol=code_6, indicator="预测年报每股收益")
+    except Exception:
+        return None, None
+    if df is None or df.empty:
+        return None, None
+    # 列: 年度 / 预测机构家数 / 最小值 / 均值 / 最大值 / 行业平均值
+    mean_col = [c for c in df.columns if c == "均值"]  # 精确匹配，避开"行业平均值"子串
+    inst_col = [c for c in df.columns if "机构" in c]
+    if not mean_col:
+        return None, None
+    row = df.iloc[0]  # 最近预测年度 = 前瞻一致预期
+    eps = _safe_float(row[mean_col[0]])
+    n_inst = _safe_int(row[inst_col[0]]) if inst_col else None
+    return eps, n_inst
 
 
 # ---------------------------------------------------------------------------
@@ -312,13 +332,17 @@ def _fetch_astock_financial(code_6: str) -> FinancialSnapshot:
     except Exception as e:
         logger.debug(f"AKShare 日线数据获取失败 ({code_6}): {e}")
 
-    # 4) 实时行情 → PE（腾讯行情 API）
+    # 4) 一致预期 — 同花顺机构盈利预测（真·一致预期EPS）+ 腾讯现价 → forward PE
+    #    旧逻辑用腾讯实时 TTM PE 冒充一致预期，已废弃。无预测覆盖时留空（不回退假数据）。
     try:
-        pe, _ = _fetch_tencent_pe_mcap(code_6)
-        if pe is not None and pe > 0:
-            snap.consensus_pe = pe
+        eps_cons, _n_inst = _fetch_astock_consensus(code_6)
+        _pe, _mcap, price = _fetch_tencent_pe_mcap(code_6)
+        if eps_cons is not None and eps_cons > 0:
+            snap.consensus_eps = eps_cons
+            if price is not None and price > 0:
+                snap.consensus_pe = round(price / eps_cons, 2)
     except Exception as e:
-        logger.debug(f"腾讯行情 PE 获取失败 ({code_6}): {e}")
+        logger.debug(f"A股一致预期获取失败 ({code_6}): {e}")
 
     return snap
 

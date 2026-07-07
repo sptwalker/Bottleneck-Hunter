@@ -277,7 +277,7 @@ function updateNav() {
   nav.querySelectorAll('.wiz-step').forEach(step => {
     const p = parseInt(step.dataset.phase);
     const dot = step.querySelector('.wiz-step-dot');
-    step.classList.remove('completed', 'active', 'pending', 'step-green', 'step-red', 'step-yellow');
+    step.classList.remove('completed', 'active', 'pending', 'step-green', 'step-red', 'step-yellow', 'running');
 
     // 选题(phase 0) 始终可点：任何时候都能返回起始页换课题。
     if (p === 0) {
@@ -289,6 +289,7 @@ function updateNav() {
     const status = statusMap[p] || 'gray';
     if (p === state.currentPhase) {
       step.classList.add('active');
+      if (state.running) step.classList.add('running');   // 运行中：当前步骤斑马纹动画
       if (status === 'green') { step.classList.add('step-green'); dot.textContent = '✓'; }
       else if (status === 'red') { step.classList.add('step-red'); dot.textContent = '!'; }
       else { dot.textContent = p; }

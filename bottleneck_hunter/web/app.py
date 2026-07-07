@@ -37,6 +37,14 @@ from bottleneck_hunter.web.custom_provider_api import (
     router as custom_provider_router,
     set_auth_store as cp_set_auth_store,
 )
+from bottleneck_hunter.web.data_source_api import (
+    router as data_source_router,
+    set_auth_store as ds_set_auth_store,
+)
+from bottleneck_hunter.web.data_report_api import (
+    router as data_report_router,
+    set_stores as data_report_set_stores,
+)
 from bottleneck_hunter.web.ai_config_api import (
     router as ai_config_router,
     set_store as aic_set_store,
@@ -69,6 +77,7 @@ async def lifespan(app: FastAPI):
     user_set_auth_store(_auth_store)
     admin_set_stores(_auth_store, _wl_store)
     cp_set_auth_store(_auth_store)
+    ds_set_auth_store(_auth_store)
 
     # 数据迁移：将现有数据绑定到 admin 用户（需先解析 admin，供内置 provider 迁移取其加密 Key）
     admin_user = admin or _auth_store.get_user_by_username("admin")
@@ -116,6 +125,9 @@ async def lifespan(app: FastAPI):
     aic_set_auth_store(_auth_store)
     reverse_set_store(_wl_store)
     settings_set_stores(_wl_store, _auth_store)
+    data_report_set_stores(_wl_store, _auth_store)
+    from bottleneck_hunter.data_provider.hub import set_stats_store
+    set_stats_store(_wl_store)
     init_broadcaster()
     scheduler = init_scheduler(_wl_store, auth_store=_auth_store)
     if scheduler:
@@ -243,6 +255,8 @@ def create_app() -> FastAPI:
     app.include_router(admin_router, prefix="/api/admin")
     app.include_router(syslog_router, prefix="/api/system")
     app.include_router(custom_provider_router, prefix="/api/custom-providers")
+    app.include_router(data_source_router, prefix="/api/data-sources")
+    app.include_router(data_report_router, prefix="/api/data-report")
     app.include_router(ai_config_router, prefix="/api/ai-config")
     app.include_router(reverse_router, prefix="/api/reverse")
     app.include_router(settings_router, prefix="/api/settings")

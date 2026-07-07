@@ -252,16 +252,23 @@ async def track_smart_money(supplier: SupplierInfo) -> Optional[SmartMoneySignal
     """为单个供应商获取聪明钱信号。"""
     async with _SEMAPHORE:
         try:
+            from bottleneck_hunter.data_provider.hub import CAP_SMARTMONEY, get_hub
             if supplier.market == MarketRegion.A_STOCK:
                 code = _extract_astock_code(supplier.ticker)
                 if not code:
                     return None
-                return await asyncio.to_thread(_track_astock, code)
+                async with get_hub().track("akshare", CAP_SMARTMONEY, "a_stock") as _sink:
+                    sig = await asyncio.to_thread(_track_astock, code)
+                    _sink["rows"] = 1 if sig else 0
+                    return sig
             elif supplier.market == MarketRegion.US_STOCK:
                 ticker = supplier.ticker.split(".")[0].strip()
                 if not ticker:
                     return None
-                return await asyncio.to_thread(_track_us_stock, ticker)
+                async with get_hub().track("yfinance", CAP_SMARTMONEY, "us_stock") as _sink:
+                    sig = await asyncio.to_thread(_track_us_stock, ticker)
+                    _sink["rows"] = 1 if sig else 0
+                    return sig
             else:
                 return None
         except Exception as e:

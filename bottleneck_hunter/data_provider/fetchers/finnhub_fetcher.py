@@ -30,6 +30,14 @@ class FinnhubFetcher(BaseFetcher):
     def _ensure_api_key(self) -> str:
         if self._api_key:
             return self._api_key
+        # 优先从「付费数据源」配置读（DB，按用户/全局），再回退 env —— 兑现界面配置生效
+        try:
+            from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
+            self._api_key = resolve_data_source_key("finnhub")
+        except Exception:  # noqa: BLE001
+            self._api_key = ""
+        if self._api_key:
+            return self._api_key
         self._api_key = os.environ.get("FINNHUB_API_KEY", "")
         if not self._api_key and not self._key_checked:
             try:
@@ -40,7 +48,7 @@ class FinnhubFetcher(BaseFetcher):
                 pass
             self._key_checked = True
         if not self._api_key and not self._key_checked:
-            logger.info("finnhub: FINNHUB_API_KEY 未配置，数据源不可用")
+            logger.info("finnhub: 未配置 API Key（付费数据源/env 均无），数据源不可用")
         return self._api_key
 
     def _get_client(self):

@@ -22,3 +22,8 @@ test_screenshot*.png
 test_hot_scan*.png
 dc_*.png
 screenshot_dc_*.png
+
+# 运行时产物 / 临时文件（勿入库）
+*.log
+*.rar
+test_results.txt

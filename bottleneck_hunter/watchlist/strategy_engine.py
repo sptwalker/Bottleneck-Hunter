@@ -238,8 +238,11 @@ async def _aggregate_earnings(ticker: str, store: WatchlistStore) -> dict:
 
     return {
         "latest_date": latest.get("report_date", ""),
+        "eps_actual": latest.get("eps_actual"),
+        "eps_estimate": latest.get("eps_estimate"),  # 真·一致预期EPS（DataHub 已填，此前漏取）
         "eps_surprise_pct": latest.get("eps_surprise_pct"),
         "revenue_actual": latest.get("revenue_actual"),
+        "revenue_estimate": latest.get("revenue_estimate"),
         "guidance": latest.get("guidance", ""),
     }
 

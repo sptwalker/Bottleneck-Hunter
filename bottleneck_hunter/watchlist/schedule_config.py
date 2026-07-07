@@ -28,6 +28,9 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "us_weekly_strategy":     {"day_of_week": "sat", "hour": 10, "minute": 0},
     "us_auto_review":         {"hour": 20, "minute": 0},
     "us_institutional_update": {"day_of_week": "sat", "hour": 11, "minute": 0},
+    "us_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
+    "cn_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
+    "datasource_report":      {"hour": 7, "minute": 30},
     "model_calibration":      {"day_of_week": "sun", "hour": 12, "minute": 0},
     # A股（Asia/Shanghai）
     "cn_price_premarket":     {"hour": 9,  "minute": 0},

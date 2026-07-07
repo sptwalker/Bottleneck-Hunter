@@ -360,27 +360,30 @@ async def _parse_insider_trades_from_filings(cik: str, ticker: str, filings: lis
 async def _fetch_one(ticker: str, store: WatchlistStore) -> dict:
     """Fetch SEC data for one ticker."""
     async with _get_sem():
-        cik = await _get_cik(ticker)
-        if not cik:
-            return {"filings": 0, "trades": 0}
+        from bottleneck_hunter.data_provider.hub import CAP_SEC, get_hub
+        async with get_hub().track("sec_edgar", CAP_SEC, "us_stock") as _sink:
+            cik = await _get_cik(ticker)
+            if not cik:
+                return {"filings": 0, "trades": 0}
 
-        filings = await _fetch_filings(cik, ["4", "4/A", "8-K", "10-Q", "10-K"], limit=15)
-        if not filings:
-            return {"filings": 0, "trades": 0}
+            filings = await _fetch_filings(cik, ["4", "4/A", "8-K", "10-Q", "10-K"], limit=15)
+            if not filings:
+                return {"filings": 0, "trades": 0}
 
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        filing_dicts = [
-            {**f, "ticker": ticker, "fetched_at": now_iso}
-            for f in filings
-        ]
-        fcount = store.save_filings(filing_dicts)
+            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            filing_dicts = [
+                {**f, "ticker": ticker, "fetched_at": now_iso}
+                for f in filings
+            ]
+            fcount = store.save_filings(filing_dicts)
 
-        trades = await _parse_insider_trades_from_filings(cik, ticker, filings)
-        for t in trades:
-            t["fetched_at"] = now_iso
-        tcount = store.save_insider_trades(trades)
+            trades = await _parse_insider_trades_from_filings(cik, ticker, filings)
+            for t in trades:
+                t["fetched_at"] = now_iso
+            tcount = store.save_insider_trades(trades)
 
-        return {"filings": fcount, "trades": tcount}
+            _sink["rows"] = fcount + tcount
+            return {"filings": fcount, "trades": tcount}
 
 
 async def fetch_sec_batch(tickers: list[str], store: WatchlistStore) -> dict[str, dict]:

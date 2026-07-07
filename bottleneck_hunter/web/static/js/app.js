@@ -10,6 +10,7 @@ import { initDecision } from './decision.js';
 import { initSimTrading, ensureSimTradingLoaded } from './simtrading.js';
 import { initAIConfig } from './ai-config.js';
 import { initAutoUpdate } from './auto-update.js';
+import { initDataReport } from './data-report.js';
 import { initAdmin } from './admin.js';
 
 /* ── Global state ────────────────────────────────────── */
@@ -69,10 +70,75 @@ async function initAuth() {
   }
 }
 
+/* ── 新用户必读 · 使用指南 ───────────────────────────── */
+function initGuide() {
+  const btn = document.getElementById('btn-guide');
+  const modal = document.getElementById('guide-modal');
+  const body = document.getElementById('guide-modal-body');
+  if (!btn || !modal || !body) return;
+
+  let loaded = false;
+  const close = () => { modal.style.display = 'none'; };
+
+  const render = (md) => {
+    body.innerHTML = (typeof marked !== 'undefined')
+      ? marked.parse(md || '')
+      : `<pre style="white-space:pre-wrap">${(md || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</pre>`;
+  };
+
+  btn.addEventListener('click', async () => {
+    modal.style.display = 'flex';
+    // admin 才显示"上传替换"
+    const uploadBtn = document.getElementById('guide-upload-btn');
+    if (uploadBtn) uploadBtn.style.display = window.appState?.user?.role === 'admin' ? '' : 'none';
+    if (loaded) return;
+    body.innerHTML = '加载中…';
+    try {
+      const resp = await fetch('/api/settings/guide');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      render(data.markdown);
+      loaded = true;
+    } catch (e) {
+      body.innerHTML = `<p class="st-empty-hint">指南加载失败：${e.message}</p>`;
+    }
+  });
+
+  // admin 上传 markdown 覆盖新手必读
+  const uploadBtn = document.getElementById('guide-upload-btn');
+  const uploadInput = document.getElementById('guide-upload-input');
+  uploadBtn?.addEventListener('click', () => uploadInput?.click());
+  uploadInput?.addEventListener('change', async () => {
+    const file = uploadInput.files?.[0];
+    if (!file) return;
+    try {
+      const markdown = await file.text();
+      const resp = await fetch('/api/settings/guide', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ markdown }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      render(markdown);       // 立即预览新内容
+      loaded = true;
+      alert('新手必读已更新');
+    } catch (e) {
+      alert(`上传失败：${e.message}`);
+    } finally {
+      uploadInput.value = '';
+    }
+  });
+
+  document.getElementById('guide-modal-close')?.addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && modal.style.display !== 'none') close(); });
+}
+
 /* ── Bootstrap ───────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
   initAuth();
   initAdmin();
+  initGuide();
   initChartFullscreen();
   initChainTabs();
   initWizChainTabs();
@@ -84,6 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSimTrading();
   initAIConfig();
   initAutoUpdate();
+  initDataReport();
 
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {

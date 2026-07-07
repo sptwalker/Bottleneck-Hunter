@@ -1935,20 +1935,55 @@
 
 /* ── L1 宏观咨询抽屉 ─────────────────────────────── */
 .dc-consult-panel {
+  width: 1600px;              /* 加宽一倍（基础 drawer 800px），左右两栏 */
+  max-width: 96vw;
   display: flex;
   flex-direction: column;
   overflow: hidden;           /* 覆盖 .drawer-panel 的 overflow-y:auto，改为内部各区自滚 */
 }
-.dc-consult-snapshot {
-  padding: 12px 24px;
-  border-bottom: 1px solid var(--border);
-  max-height: 34vh;
+.dc-consult-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+.dc-consult-left {            /* 左栏：宏观信息，整栏自滚 */
+  width: 42%;
+  min-width: 300px;
+  max-width: 560px;
   overflow-y: auto;
-  font-size: 12.5px;
+  border-right: 1px solid var(--border);
   background: var(--bg);
+}
+.dc-consult-right {          /* 右栏：交互内容 + 输入框 */
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.dc-consult-snapshot {
+  padding: 14px 20px;
+  font-size: 12.5px;
+}
+@media (max-width: 1000px) {  /* 窄屏回退为上下堆叠 */
+  .dc-consult-body { flex-direction: column; }
+  .dc-consult-left {
+    width: auto; max-width: none; max-height: 34vh;
+    border-right: none; border-bottom: 1px solid var(--border);
+  }
 }
 .dc-consult-snapshot .dc-snap-row { margin-bottom: 6px; line-height: 1.55; }
 .dc-consult-snapshot .dc-snap-label { font-weight: 700; color: var(--muted); margin-right: 6px; }
+.dc-snap-news { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.dc-snap-news > summary { cursor: pointer; list-style: none; margin-bottom: 6px; }
+.dc-snap-news > summary::-webkit-details-marker { display: none; }
+.dc-snap-news > summary::before { content: '▸ '; color: var(--muted); }
+.dc-snap-news[open] > summary::before { content: '▾ '; }
+.dc-snap-news-item { padding: 7px 0; border-top: 1px dashed var(--border); }
+.dc-snap-news-item:first-of-type { border-top: none; }
+.dc-snap-news-title { font-weight: 600; font-size: 12px; line-height: 1.5; margin-bottom: 3px; color: var(--ink); }
+.dc-snap-news-summary { font-size: 11.5px; color: var(--text, #374151); line-height: 1.6; }
+.dc-snap-news-meta { font-size: 10.5px; color: var(--muted); opacity: .85; margin-top: 3px; }
 .dc-consult-log {
   flex: 1;
   overflow-y: auto;
@@ -1989,16 +2024,19 @@
   align-self: center; background: var(--bg); color: var(--muted);
   font-size: 11.5px; padding: 4px 10px;
 }
-/* 时效分割抬头：自动更新跨天时标注日期/时间 + 即时核心市场数据 */
+/* 时效分割抬头：跨天日期/时间（居中 + 箭头强调，淡红底白字，加强分割对比） */
 .dc-consult-divider {
   align-self: stretch; max-width: 100%;
-  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px;
-  margin: 10px 0 4px; padding: 6px 10px;
-  border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border);
-  background: rgba(59,130,246,.06);
+  display: flex; flex-direction: column; align-items: center;
+  gap: 3px; text-align: center;
+  margin: 14px 0 8px; padding: 7px 12px;
+  background: #ee5a5a;                 /* 淡红底 */
+  color: #fff;                          /* 白字 */
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.12);
 }
-.dc-divider-time { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; }
-.dc-divider-data { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dc-divider-time { font-size: 12.5px; font-weight: 700; color: #fff; letter-spacing: .5px; white-space: nowrap; }
+.dc-divider-data { font-size: 11px; color: rgba(255,255,255,.92); font-variant-numeric: tabular-nums; }
 .dc-consult-footer {
   display: flex; gap: 8px; padding: 12px 20px;
   border-top: 1px solid var(--border); background: var(--surface);

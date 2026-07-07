@@ -383,6 +383,7 @@ async def _inject_market_news(store: WatchlistStore, market: str, market_data: d
     if _mnews:
         market_data["news"] = [{"topic": sanitize_external_text(n.get("llm_analysis", "")),
                                 "title": sanitize_external_text(n.get("title", "")),
+                                "summary": sanitize_external_text(n.get("summary", "")),
                                 "date": n.get("date", ""), "source_name": n.get("source_name", ""),
                                 "sentiment": n.get("sentiment", "")} for n in _mnews]
     else:

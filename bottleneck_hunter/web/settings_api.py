@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -36,6 +37,38 @@ def _user_store(user: dict) -> WatchlistStore:
     if _store is None:
         raise HTTPException(status_code=500, detail="Store 未初始化")
     return _store.for_user(user.get("sub", ""))
+
+
+_DOCS_DIR = Path(__file__).resolve().parents[2] / "docs"
+_GUIDE_FILE = _DOCS_DIR / "新用户使用指南V2.1.md"  # 规范文件：GET 读它，admin 上传覆盖它
+
+
+@router.get("/guide")
+async def get_user_guide(user: dict = Depends(get_current_user)):
+    """新手必读 · 使用指南：返回规范指南 markdown 原文（前端用 marked 渲染）。
+
+    优先读 V2.1 规范文件；不存在时回退 docs 下最新的「新用户使用指南*.md」。
+    """
+    if _GUIDE_FILE.exists():
+        return {"markdown": _GUIDE_FILE.read_text(encoding="utf-8"), "title": _GUIDE_FILE.stem}
+    matches = list(_DOCS_DIR.glob("新用户使用指南*.md"))
+    if not matches:
+        raise HTTPException(status_code=404, detail="使用指南文件不存在")
+    latest = max(matches, key=lambda p: p.stat().st_mtime)
+    return {"markdown": latest.read_text(encoding="utf-8"), "title": latest.stem}
+
+
+class GuideUpload(BaseModel):
+    markdown: str = Field(..., min_length=1, max_length=500_000)
+
+
+@router.post("/guide")
+async def upload_user_guide(req: GuideUpload, user: dict = Depends(require_admin)):
+    """（管理员）上传 markdown 覆盖新手必读内容，写入规范文件 V2.1。"""
+    _DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    _GUIDE_FILE.write_text(req.markdown, encoding="utf-8")
+    logger.info("新手必读指南已被管理员 %s 更新（%d 字）", user.get("username", "?"), len(req.markdown))
+    return {"ok": True, "title": _GUIDE_FILE.stem}
 
 
 # 分类展示标签
