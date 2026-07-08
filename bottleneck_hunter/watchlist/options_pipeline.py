@@ -95,14 +95,13 @@ def _analyze_options_chain(ticker: str) -> dict | None:
 async def _fetch_one(ticker: str, store: WatchlistStore) -> str:
     async with _get_sem():
         try:
+            # DataHub 多源：polygon(付费,priority0) → yfinance(免费兜底)，按额度/熔断自动换源
             from bottleneck_hunter.data_provider.hub import CAP_OPTIONS, get_hub
-            async with get_hub().track("yfinance", CAP_OPTIONS, "us_stock") as _sink:
-                result = await asyncio.to_thread(_analyze_options_chain, ticker)
-                if result:
-                    store.save_options([result])
-                    _sink["rows"] = 1
-                    return "ok"
-                return "no_data"
+            result = await get_hub().fetch(CAP_OPTIONS, ticker, "us_stock", "")
+            if result:
+                store.save_options([result])
+                return "ok"
+            return "no_data"
         except Exception as e:
             logger.error("Options pipeline error for %s: %s", ticker, e)
             return f"error: {e}"

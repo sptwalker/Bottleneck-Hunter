@@ -109,9 +109,12 @@ class DataHub:
         self._states[provider.name] = _ProviderState(provider)
 
     def _candidates(self, capability: str, market: str) -> list[_ProviderState]:
-        cands = [st for st in self._states.values()
-                 if st.provider.supports(capability, market) and not st.is_circuit_open]
-        return sorted(cands, key=lambda s: s.provider.priority)
+        """健康(支持+未熔断)候选 → 交调度器：丢超额、按能力质量梯队分档、档内均衡轮换。"""
+        from bottleneck_hunter.data_provider import scheduler
+        healthy = {st.provider.name: st for st in self._states.values()
+                   if st.provider.supports(capability, market) and not st.is_circuit_open}
+        pairs = [(name, scheduler.cap_prio(st.provider, capability)) for name, st in healthy.items()]
+        return [healthy[name] for name in scheduler.order(pairs)]
 
     async def fetch(self, capability: str, ticker: str, market: str, user_id: str = "") -> dict | None:
         """全托管取数：首个成功的 provider 即返回（去重取单源），全程记账。"""
@@ -120,6 +123,8 @@ class DataHub:
 
         for st in self._candidates(capability, market):
             src = st.provider.name
+            from bottleneck_hunter.data_provider import scheduler
+            scheduler.note_call(src)  # 记一次调用（均衡负载 + 额度阀共用；空返回也算消耗）
             t0 = time.time()
             try:
                 data = await st.provider.fetch(capability, ticker, market, user_id)

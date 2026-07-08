@@ -70,13 +70,14 @@ class FetcherManager:
                      fetcher.name, fetcher.priority, fetcher.supported_markets)
 
     def _get_fetchers_for(self, market: str) -> list[_FetcherState]:
-        """按优先级排序，返回支持指定市场且未熔断的 fetcher。"""
-        candidates = [
-            s for s in self._states.values()
+        """返回支持指定市场、未熔断、未超额度的 fetcher；同一选择器做质量梯队+档内均衡。"""
+        from bottleneck_hunter.data_provider import scheduler
+        healthy = {
+            s.fetcher.name: s for s in self._states.values()
             if s.fetcher.supports(market) and not s.is_circuit_open
-        ]
-        candidates.sort(key=lambda s: s.fetcher.priority)
-        return candidates
+        }
+        pairs = [(name, s.fetcher.priority) for name, s in healthy.items()]
+        return [healthy[name] for name in scheduler.order(pairs)]
 
     async def fetch_daily(self, ticker: str, market: str, days: int = 180) -> pd.DataFrame | None:
         """按优先级逐个尝试获取日K线，成功即返回。"""
@@ -87,6 +88,8 @@ class FetcherManager:
 
         last_err = None
         for state in candidates:
+            from bottleneck_hunter.data_provider import scheduler
+            scheduler.note_call(state.fetcher.name)  # 均衡负载 + 额度阀记账
             try:
                 df = await state.fetcher.fetch_daily(ticker, days)
                 if df is not None and not df.empty:
@@ -116,6 +119,8 @@ class FetcherManager:
 
         last_err = None
         for state in candidates:
+            from bottleneck_hunter.data_provider import scheduler
+            scheduler.note_call(state.fetcher.name)  # 均衡负载 + 额度阀记账
             try:
                 quote = await state.fetcher.fetch_realtime(ticker)
                 if quote is not None:

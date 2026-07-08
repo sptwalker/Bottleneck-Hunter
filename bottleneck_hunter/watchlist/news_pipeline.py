@@ -291,6 +291,18 @@ async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTrac
                     articles.append(r)
                     seen.add(r["id"])
 
+        # 并入 DataHub 多源 keyed 新闻（finnhub/tiingo/fmp/av 按质量梯队+额度均衡；无 key 返 None）
+        try:
+            from bottleneck_hunter.data_provider.hub import CAP_NEWS, get_hub
+            hubrec = await get_hub().fetch(CAP_NEWS, ticker, market, "")
+            seen = {a["id"] for a in articles}
+            for a in (hubrec or {}).get("articles", []):
+                if a.get("id") and a["id"] not in seen:
+                    articles.append(a)
+                    seen.add(a["id"])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("DataHub 多源新闻并入跳过 (%s): %s", ticker, e)
+
         if not articles:
             return 0
 

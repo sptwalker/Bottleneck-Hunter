@@ -54,6 +54,19 @@ def test_priority_routing_picks_lowest_priority_number():
     assert p1.calls == 0               # 首个成功即返回，不调 p1（去重取单源）
 
 
+def test_intra_tier_balancing_across_same_priority():
+    """同 priority 两源 → 连续 fetch 命中轮换均衡（A,B,A,B），分摊免费额度。"""
+    import bottleneck_hunter.data_provider.scheduler as sch
+    sch._reset_for_test()
+    sch.set_store(None)
+    a = FakeProvider("balA", 0, "ok")
+    b = FakeProvider("balB", 0, "ok")
+    h, _ = _hub(a, b)
+    hits = [asyncio.run(h.fetch("earnings", "T", "us_stock"))["src"] for _ in range(4)]
+    assert hits == ["balA", "balB", "balA", "balB"], hits
+    assert a.calls == 2 and b.calls == 2   # 负载均分，非集中单源
+
+
 def test_degradation_falls_through_on_failure():
     p0 = FakeProvider("p0", 0, "raise")
     p1 = FakeProvider("p1", 1, "ok")

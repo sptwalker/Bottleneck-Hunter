@@ -460,8 +460,33 @@ def _extract_astock_code(ticker: str) -> Optional[str]:
     return None
 
 
-async def fetch_financial_snapshot(supplier: SupplierInfo) -> Optional[FinancialSnapshot]:
-    """为单个供应商拉取财务快照。失败返回 None。"""
+def _overlay_hub_financials(base: FinancialSnapshot, rec: dict) -> None:
+    """把 hub 多源深财务/真一致预期覆盖到免费基线（仅覆盖非空字段，保留基线的量价/IPO）。"""
+    for field in ("revenue_yi", "revenue_yoy_pct", "net_profit_yi", "net_profit_yoy_pct",
+                  "gross_margin_pct", "roe_pct", "debt_ratio_pct", "cashflow_per_share",
+                  "consensus_eps", "consensus_pe", "analyst_rating", "analyst_report_count",
+                  "report_date"):
+        val = rec.get(field)
+        if val is not None and val != "":
+            setattr(base, field, val)
+    qs = rec.get("quarters") or []
+    if qs:
+        pts = [QuarterlyDataPoint(**{k: q.get(k) for k in (
+            "report_date", "revenue_yi", "net_profit_yi", "gross_margin_pct",
+            "roe_pct", "revenue_yoy_pct", "net_profit_yoy_pct") if q.get(k) is not None}) for q in qs]
+        if pts:
+            base.trend = _compute_trend(pts)
+    src = rec.get("data_source")
+    if src and src not in (base.data_source or ""):
+        base.data_source = f"{base.data_source}+{src}" if base.data_source else src
+
+
+async def fetch_financial_snapshot(supplier: SupplierInfo, user_id: str = "") -> Optional[FinancialSnapshot]:
+    """为单个供应商拉取财务快照。失败返回 None。
+
+    免费直连做基线（含量价/IPO/A股一致预期），再用 DataHub 多源（FMP/Tiingo/AV/Tushare）
+    覆盖深财务/真一致预期——无 key 时 provider 立即返 None（不发请求），有 key 才生效。
+    """
     async with _SEMAPHORE:
         try:
             if supplier.market == MarketRegion.A_STOCK:
@@ -469,14 +494,26 @@ async def fetch_financial_snapshot(supplier: SupplierInfo) -> Optional[Financial
                 if not code:
                     logger.debug(f"无法提取 A 股代码: {supplier.ticker}")
                     return None
-                return await asyncio.to_thread(_fetch_astock_financial, code)
+                base = await asyncio.to_thread(_fetch_astock_financial, code)
+                tk, market = code, "a_stock"
             elif supplier.market == MarketRegion.US_STOCK:
-                ticker = supplier.ticker.split(".")[0].strip()
-                if not ticker:
+                tk = supplier.ticker.split(".")[0].strip()
+                if not tk:
                     return None
-                return await asyncio.to_thread(_fetch_us_financial, ticker)
+                base = await asyncio.to_thread(_fetch_us_financial, tk)
+                market = "us_stock"
             else:
                 return None
+
+            try:
+                from bottleneck_hunter.data_provider.hub import CAP_FINANCIALS, get_hub
+                rec = await get_hub().fetch(CAP_FINANCIALS, tk, market, user_id)
+                if rec:
+                    _overlay_hub_financials(base, rec)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"DataHub 深财务覆盖跳过 ({supplier.ticker}): {e}")
+
+            return base
         except Exception as e:
             logger.warning(f"财务数据拉取异常 ({supplier.name}/{supplier.ticker}): {e}")
             return None

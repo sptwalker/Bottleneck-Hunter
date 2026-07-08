@@ -128,6 +128,8 @@ async def lifespan(app: FastAPI):
     data_report_set_stores(_wl_store, _auth_store)
     from bottleneck_hunter.data_provider.hub import set_stats_store
     set_stats_store(_wl_store)
+    from bottleneck_hunter.data_provider.scheduler import set_store as ds_set_store
+    ds_set_store(_wl_store)  # 供调度器 per-day 额度阀查 datasource_stats
     init_broadcaster()
     scheduler = init_scheduler(_wl_store, auth_store=_auth_store)
     if scheduler:
