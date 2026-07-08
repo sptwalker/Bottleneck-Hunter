@@ -25,6 +25,7 @@ from bottleneck_hunter.watchlist.decision_engine import (
 )
 from bottleneck_hunter.watchlist.models import DegradationMode
 from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.watchlist.store_base import normalize_market
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +211,7 @@ def _portfolio_context(store: WatchlistStore, market: str) -> tuple[list, list]:
     """观察池个股清单 + 当前持仓，供分析师做 position-aware 解读。持仓采集失败回退空列表。"""
     watchlist: list = []
     for e in store.list_all():
-        if e.get("market") != market:
+        if normalize_market(e.get("market")) != normalize_market(market):
             continue
         snap = store.get_latest_snapshot(e["ticker"]) or {}
         watchlist.append({

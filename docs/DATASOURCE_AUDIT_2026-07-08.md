@@ -92,3 +92,27 @@
 - 前端：观察池 stale 逐行标记、provenance 数据来源芯片统一、配置页 3-state 健康灯 + 近7日调用数（需后端补 health/usage 下发）
 - pre-existing 假数据/硬编码：fact_check PE 分位/PEG、trap-detector 无检索返"无法判定"、performance 无风险利率按市场、L2 缺概率不落 EV、committee 行业趋势输入
 - test_scheduler 14-jobs / shutdown（scheduler 内部，与数据源无关）
+
+---
+
+# 附：A股/美股 市场隔离审计与整改（6+1 维审计 + 对抗验证）
+
+**结论**：取数层隔离干净（provider/fetcher 单市场硬门控，逐供应商按 market 取数）。串用集中在决策上下文与代码归一化，已全部整改。
+
+## 已整改
+1. **决策层市场规则串用**（decision_engine run_strategic/tactical/execution_plans）：`_get_market_context_text(全部持仓市场)` → `[market]`，单市场决策不再混入他市场交易规则（涨跌停/T+1/做空/止损）。
+2. **模型校准跨市场混算**（model_calibrator + store_ai_models.get_model_accuracy）：加 market 过滤，近期准确率/calibration_weight 按市场同口径。
+3. **美股类别股 ticker 被 A股式截断**（financial_data/smart_money/meeting_data 4 处）：US 用 `.`→`-`（BRK.B→BRK-B）而非 `split(".")[0]`。
+4. **A股 L1 宏观夹带美股股指**（macro_data）：拆全球因子(vix/us_10y/dxy 各市场)与美股股指(sp500/nasdaq 仅美股)，A股宏观不再含美股大盘。
+5. **normalize_market a/cn→cn_stock**（store_base）：改归一到 canonical `a_stock`，避免 A股 entry 被孤立于所有 A股逻辑。
+6. **裸 market 比较绕过归一化**（decision_engine:871 / macro_consultation:213）：统一包 `normalize_market()`。
+7. **圆桌会议用主 market 覆盖全部供应商**（meeting/meeting_data）：改按每票 `supplier.market` 逐票路由，混合分析下 A股票不再被当美股走 yfinance。
+8. **北交所 .BJ 被当深市**（_to_ts_code/_code_to_tencent）：加 4/8开头及 920 段 → .BJ/bj。
+9. **期权硬编码 us_stock 无护栏**（options_pipeline）：纯数字码(A股/港股)直接跳过。
+10. **MARKET_MAP 兜底 A_STOCK 与签名默认 us_stock 矛盾**（phases/legacy 4处）：统一 us_stock。
+11. **Phase1→2 市场恢复单向补丁**（phases）：改无条件以 Phase1 缓存市场为准（双向）。
+
+## 未改（诚实结论）
+- **hk_stock**：MarketRegion 枚举无 HK、前端无创建路径、无数据源 → 港股在本系统**名义不支持**，pipeline 的 `else=美股` 分支对 HK 的误处理是不可达路径，不加防御代码。若未来真接港股，需补 MarketRegion.HK_STOCK + HK 数据源 + 各 else 三分支。
+
+**验证**：新增 test_market_isolation.py（4 用例锁北交所/normalize/类别股）；A股宏观实测已剔除 sp500/nasdaq；93 相关测试全绿（仅预存 scheduler job 数测试失败，与市场无关）。

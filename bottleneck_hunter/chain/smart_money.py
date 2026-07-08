@@ -262,7 +262,7 @@ async def track_smart_money(supplier: SupplierInfo) -> Optional[SmartMoneySignal
                     _sink["rows"] = 1 if sig else 0
                     return sig
             elif supplier.market == MarketRegion.US_STOCK:
-                ticker = supplier.ticker.split(".")[0].strip()
+                ticker = supplier.ticker.replace(".", "-").strip()  # 美股类别股 BRK.B→BRK-B，勿去后缀
                 if not ticker:
                     return None
                 async with get_hub().track("yfinance", CAP_SMARTMONEY, "us_stock") as _sink:

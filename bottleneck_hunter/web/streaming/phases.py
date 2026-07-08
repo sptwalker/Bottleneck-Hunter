@@ -225,12 +225,14 @@ async def stream_phase2(
         yield _sse("error", step="init", message=f"LLM 初始化失败: {e}")
         return
 
-    market_enum = MARKET_MAP.get(market, MarketRegion.A_STOCK)
     p1_config = p1.get("config", {})
-    if market == "us_stock" and p1_config.get("market") and p1_config["market"] != "us_stock":
+    # Phase1 的 market 是该分析的权威值（Phase2 是同一分析的延续）：只要 Phase1 存了就以它为准，
+    # 双向消除 Phase2 入参与 Phase1 不符导致的用错市场跑 Phase1 供应商集。
+    if p1_config.get("market"):
+        if p1_config["market"] != market:
+            logger.info("[stream-phase2] 以 Phase1 缓存市场为准: %s (入参 %s)", p1_config["market"], market)
         market = p1_config["market"]
-        market_enum = MARKET_MAP.get(market, MarketRegion.A_STOCK)
-        logger.info("[stream-phase2] 从 Phase 1 缓存恢复市场参数: %s", market)
+    market_enum = MARKET_MAP.get(market, MarketRegion.US_STOCK)  # 兜底与函数签名默认(us_stock)一致
     if max_market_cap_yi == 200 and p1_config.get("max_market_cap_yi") is not None:
         max_market_cap_yi = p1_config["max_market_cap_yi"]
     chain = ChainGraph(**p1["chain"])

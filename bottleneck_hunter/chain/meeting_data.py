@@ -30,12 +30,14 @@ class MeetingDataFetcher:
     """会前数据预取器。"""
 
     async def fetch_all(
-        self, tickers: list[str], market: str
+        self, ticker_markets: dict[str, str]
     ) -> dict[str, dict]:
-        tasks = [self._fetch_one(t, market) for t in tickers]
+        """按每个 ticker 自己的 market 逐票取数（避免混合分析下 A股票被当美股）。"""
+        items = list(ticker_markets.items())
+        tasks = [self._fetch_one(t, m) for t, m in items]
         done = await asyncio.gather(*tasks, return_exceptions=True)
         results = {}
-        for ticker, result in zip(tickers, done):
+        for (ticker, _m), result in zip(items, done):
             if isinstance(result, Exception):
                 logger.warning(f"预取数据失败 ({ticker}): {result}")
                 results[ticker] = {}
@@ -53,7 +55,7 @@ class MeetingDataFetcher:
                     data["news"] = await asyncio.to_thread(self._fetch_a_news, code)
                     data["analyst"] = await asyncio.to_thread(self._fetch_a_analyst, code)
             else:
-                tk = ticker.split(".")[0].strip()
+                tk = ticker.replace(".", "-").strip()  # 美股类别股 BRK.B→BRK-B，勿去后缀
                 if tk:
                     data["price"] = await asyncio.to_thread(self._fetch_us_price, tk)
                     data["news"] = await asyncio.to_thread(self._fetch_us_news, tk)

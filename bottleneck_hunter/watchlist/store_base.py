@@ -20,8 +20,10 @@ def _today() -> str:
 
 # 规范市场枚举。历史数据曾出现裸 "us"，与 "us_stock" 无法跨表关联（导致 composite_score=0、
 # scenario_valuations 写入静默失败）。所有写入路径统一经此归一化。
-_MARKET_ALIASES = {"us": "us_stock", "usa": "us_stock", "cn": "cn_stock",
-                   "a": "cn_stock", "hk": "hk_stock"}
+# 注意：A股 canonical 是 "a_stock"（全系统 MarketRegion.A_STOCK / scheduler cn_* job / fetcher 均用它），
+# 故 "a"/"cn" 必须归一到 "a_stock"，不能是 "cn_stock"（后者无任何消费方，会把 A股 entry 孤立于所有 A股逻辑）。
+_MARKET_ALIASES = {"us": "us_stock", "usa": "us_stock", "cn": "a_stock",
+                   "a": "a_stock", "hk": "hk_stock"}
 
 
 def normalize_market(market: str | None) -> str:

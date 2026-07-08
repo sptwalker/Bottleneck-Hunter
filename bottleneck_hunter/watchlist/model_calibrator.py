@@ -85,7 +85,7 @@ class ModelCalibrator:
     ) -> float | None:
         """计算近 N 天的准确率。"""
         records = self._store.get_model_accuracy(
-            provider, model, role_context=role_context, limit=200,
+            provider, model, role_context=role_context, limit=200, market=market,
         )
         if not records:
             return None

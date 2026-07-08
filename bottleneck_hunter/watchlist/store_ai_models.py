@@ -60,7 +60,7 @@ class _AIModelsMixin:
 
     def get_model_accuracy(self, provider: str, model: str,
                            role_context: str | None = None,
-                           limit: int = 100) -> list[dict]:
+                           limit: int = 100, market: str = "") -> list[dict]:
         conn = self._connect()
         try:
             q = "SELECT * FROM model_accuracy WHERE model_provider = ? AND model_name = ?"
@@ -68,6 +68,9 @@ class _AIModelsMixin:
             if role_context is not None:
                 q += " AND role_context = ?"
                 p = p + (role_context,)
+            if market:
+                q += " AND market = ?"   # 按市场过滤，避免近期准确率跨市场混算污染校准
+                p = p + (market,)
             q += " ORDER BY prediction_date DESC LIMIT ?"
             p = p + (limit,)
             q, p = self._user_filter(q, p)

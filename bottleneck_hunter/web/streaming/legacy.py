@@ -37,7 +37,7 @@ from ._common import (
 async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
     """Execute the pipeline step by step, yielding SSE events."""
 
-    market = MARKET_MAP.get(config.market, MarketRegion.A_STOCK)
+    market = MARKET_MAP.get(config.market, MarketRegion.US_STOCK)  # 兜底与签名默认(us_stock)一致
 
     try:
         deep_llm = create_llm(config.provider, config.model)
@@ -493,7 +493,7 @@ async def run_refresh_suppliers(
     """独立重新运行供应商搜索+评估，返回 SSE 事件流。"""
     from bottleneck_hunter.chain.models import BottleneckReport
 
-    market = MARKET_MAP.get(market_str, MarketRegion.A_STOCK)
+    market = MARKET_MAP.get(market_str, MarketRegion.US_STOCK)  # 兜底与签名默认(us_stock)一致
 
     try:
         reports = [BottleneckReport(**d) for d in bottleneck_dicts]

@@ -54,10 +54,14 @@ def _fetch_northbound_flow() -> dict | None:
 
 
 # 宏观指标定义：(显示名, yfinance 代码, 市场标签)
-_US_INDICATORS = [
+# 全球风险因子：VIX/美债/美元指数——各市场都合理参考（人民币/资本流动/联储外溢）
+_GLOBAL_INDICATORS = [
     ("vix", "^VIX", "VIX 恐慌指数"),
     ("us_10y_yield", "^TNX", "10Y 美债收益率"),
     ("dxy", "DX-Y.NYB", "美元指数"),
+]
+# 美股专属股指：仅美股市场纳入，避免 sp500/nasdaq 污染 A股/港股宏观口径
+_US_INDICATORS = [
     ("sp500", "^GSPC", "标普500"),
     ("nasdaq", "^IXIC", "纳斯达克综指"),
 ]
@@ -94,7 +98,9 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
     if markets is None:
         markets = ["us_stock"]
 
-    indicators = list(_US_INDICATORS)
+    indicators = list(_GLOBAL_INDICATORS)  # 全球风险因子各市场都取
+    if "us_stock" in markets:
+        indicators.extend(_US_INDICATORS)   # 美股股指仅美股纳入
     if "a_stock" in markets:
         indicators.extend(_CN_INDICATORS)
     if "hk_stock" in markets:

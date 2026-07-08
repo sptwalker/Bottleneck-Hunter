@@ -93,6 +93,10 @@ def _analyze_options_chain(ticker: str) -> dict | None:
 
 
 async def _fetch_one(ticker: str, store: WatchlistStore) -> str:
+    # 期权仅美股有效：纯数字代码(A股6位/港股5位)直接跳过，把"期权仅美股"这条约束落到代码而非调用方纪律
+    code = ticker.split(".")[0].strip()
+    if code.isdigit():
+        return "no_data"
     async with _get_sem():
         try:
             # DataHub 多源：polygon(付费,priority0) → yfinance(免费兜底)，按额度/熔断自动换源

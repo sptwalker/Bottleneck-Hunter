@@ -592,8 +592,7 @@ async def run_strategic_plan(
 
     try:
         watchlist_signals = _collect_watchlist_signals(store, market)
-        active_markets = list(store.get_tickers_by_market().keys())
-        market_ctx = _get_market_context_text(active_markets)
+        market_ctx = _get_market_context_text([market])  # 单市场：仅本市场规则，避免混入他市场交易规则
         account_status = store.get_sim_account()
         positions = store.get_sim_positions(account_status.get("id"))
         previous_plan = store.get_latest_strategic_plan()
@@ -819,8 +818,7 @@ async def run_tactical_plans(
 
     try:
         watchlist_signals = _collect_watchlist_signals(store, market)
-        active_markets = list(store.get_tickers_by_market().keys())
-        market_ctx = _get_market_context_text(active_markets)
+        market_ctx = _get_market_context_text([market])  # 单市场：仅本市场规则，避免混入他市场交易规则
         catalysts = store.get_upcoming_catalysts(days=30)
         catalyst_by_ticker = {}
         for c in catalysts:
@@ -870,7 +868,7 @@ async def run_tactical_plans(
         # B3: 论点失效(invalidated/weakened)且在持仓 → 强制纳入 L3 并注入告警（倾向 reduce/sell/收紧止损）
         thesis_alerts = {}
         for e in store.list_all():
-            if e.get("market") != market or e["ticker"] not in held_tickers:
+            if normalize_market(e.get("market")) != normalize_market(market) or e["ticker"] not in held_tickers:
                 continue
             for th in store.get_theses_for_entry(e["id"], active_only=True):
                 st = th.get("status", "")
@@ -1117,8 +1115,7 @@ async def run_execution_plans(
         return
 
     try:
-        active_markets = list(store.get_tickers_by_market().keys())
-        market_ctx = _get_market_context_text(active_markets)
+        market_ctx = _get_market_context_text([market])  # 单市场：仅本市场规则，避免混入他市场交易规则
         account = store.get_sim_account()
         positions = store.get_sim_positions(account.get("id"))
         # P2.5 账户级熔断：单日巨亏/深度回撤时，本轮只允许减仓，禁止新开/加仓

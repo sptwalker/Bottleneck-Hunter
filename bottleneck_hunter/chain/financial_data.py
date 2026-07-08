@@ -151,6 +151,8 @@ def _code_to_tencent(code: str) -> str:
     code = code.strip()
     if code.startswith("6"):
         return f"sh{code}"
+    if code[:1] in ("4", "8") or code.startswith("920"):  # 北交所
+        return f"bj{code}"
     return f"sz{code}"
 
 
@@ -497,7 +499,7 @@ async def fetch_financial_snapshot(supplier: SupplierInfo, user_id: str = "") ->
                 base = await asyncio.to_thread(_fetch_astock_financial, code)
                 tk, market = code, "a_stock"
             elif supplier.market == MarketRegion.US_STOCK:
-                tk = supplier.ticker.split(".")[0].strip()
+                tk = supplier.ticker.replace(".", "-").strip()  # 美股类别股 BRK.B→BRK-B（yfinance 约定），勿去后缀
                 if not tk:
                     return None
                 base = await asyncio.to_thread(_fetch_us_financial, tk)
@@ -625,7 +627,7 @@ async def fetch_kline(ticker: str, market: str = "us_stock") -> list[dict]:
                 return []
             return await asyncio.to_thread(_fetch_astock_kline, code)
         else:
-            t = ticker.split(".")[0].strip()
+            t = ticker.replace(".", "-").strip()  # 美股类别股 BRK.B→BRK-B，勿去后缀
             if not t:
                 return []
             return await asyncio.to_thread(_fetch_us_kline, t)

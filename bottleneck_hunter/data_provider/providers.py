@@ -644,12 +644,16 @@ class YfinanceOptionsProvider:
 
 
 def _to_ts_code(ticker: str) -> str:
-    """A股 ticker → Tushare ts_code。'600000'→'600000.SH'，'000001'→'000001.SZ'；已带后缀则原样。"""
+    """A股 ticker → Tushare ts_code。'600000'→'600000.SH'，'000001'→'000001.SZ'，北交所→.BJ；已带后缀则原样。"""
     t = ticker.strip().upper()
     if "." in t:
         return t
     if len(t) == 6 and t.isdigit():
-        return f"{t}.SH" if t[0] == "6" else f"{t}.SZ"
+        if t[0] == "6":
+            return f"{t}.SH"
+        if t[0] in ("4", "8") or t.startswith("920"):  # 北交所
+            return f"{t}.BJ"
+        return f"{t}.SZ"
     return ""
 
 

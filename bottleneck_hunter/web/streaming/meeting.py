@@ -91,7 +91,12 @@ async def stream_roundtable(
         fetcher = MeetingDataFetcher()
         tickers = [sc.supplier.ticker for sc in scorecards if sc.supplier.ticker]
         name_map = {sc.supplier.ticker: sc.supplier.name for sc in scorecards if sc.supplier.ticker}
-        all_data = await fetcher.fetch_all(tickers, market)
+        # 按每个供应商自己的 market 取数（混合/all 分析下 A股票不再被当美股走 yfinance）
+        ticker_markets = {
+            sc.supplier.ticker: (getattr(sc.supplier.market, "value", sc.supplier.market) or market)
+            for sc in scorecards if sc.supplier.ticker
+        }
+        all_data = await fetcher.fetch_all(ticker_markets)
         market_data_text = fetcher.format_for_briefing(all_data, name_map)
         fetched_count = sum(1 for v in all_data.values() if v)
         yield _sse("meeting_status", message=f"市场数据预取完成（{fetched_count}/{len(tickers)} 家）")
