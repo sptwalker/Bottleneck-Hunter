@@ -979,13 +979,21 @@ async function loadPaidSources() {
   }
 }
 
+// 各外部源在 DataHub 里实际服务的能力（与 providers.py 能力矩阵对齐），让用户知道"配这个源补哪块"
+const DS_SERVES = {
+  fmp: '财报/一致预期 · 深财务 · 新闻', finnhub: '财报 · 新闻', tushare: 'A股财报',
+  alphavantage: '深财务 · 财报 · 新闻', tiingo: '新闻 · 深财务',
+  polygon: '期权（需 Polygon 付费 Options 订阅，否则回退 yfinance）', custom: '自定义',
+};
+
 function renderPaidSources() {
   const grid = document.getElementById('paid-source-grid');
   if (!grid) return;
   grid.innerHTML = _paidSources.map(s => {
     const dot = s.configured ? 'aic-status-ok' : 'aic-status-unknown';
     const site = s.site ? `<a href="${escHtml(s.site)}" target="_blank" rel="noopener" class="aic-hint" style="margin-left:6px">官网↗</a>` : '';
-    const hint = s.key_hint ? `已存：${escHtml(s.key_hint)}` : (s.testable ? '未配置' : '仅存凭证');
+    const hint = s.key_hint ? `已存凭证：${escHtml(s.key_hint)}（未验证）` : (s.testable ? '未配置' : '仅存凭证');
+    const serves = DS_SERVES[s.id] ? `<span class="aic-hint" style="display:block;margin-top:2px">服务能力：${DS_SERVES[s.id]}</span>` : '';
     const customUrl = s.id === 'custom'
       ? `<input class="aic-provider-input" data-ds-url="${escHtml(s.id)}" placeholder="探测 URL（用 {KEY} 占位）" value="${escHtml(s.base_url_saved || '')}" style="margin-bottom:6px">`
       : '';
@@ -1000,6 +1008,7 @@ function renderPaidSources() {
         <div class="aic-provider-info">
           <span class="aic-provider-name">${escHtml(s.name)}${site}</span>
           <span class="aic-provider-model">${escHtml(s.note || '')}</span>
+          ${serves}
         </div>
       </div>
       <div class="aic-provider-row-bottom" style="flex-direction:column;align-items:stretch;gap:6px">

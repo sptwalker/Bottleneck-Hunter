@@ -90,14 +90,18 @@ def _probe_tiingo(key: str, base_url: str = "") -> tuple[bool, str]:
 
 
 def _probe_polygon(key: str, base_url: str = "") -> tuple[bool, str]:
-    r = requests.get(f"https://api.polygon.io/v3/reference/tickers?apiKey={key}&limit=1",
+    # Polygon 在本系统仅用于期权(CAP_OPTIONS) → 探测真实使用的期权快照端点，
+    # 避免用免费 /reference/tickers 测出假绿灯（期权需付费 Options 订阅）。
+    r = requests.get(f"https://api.polygon.io/v3/snapshot/options/AAPL?limit=1&apiKey={key}",
                      timeout=_TIMEOUT, headers=_UA)
-    if r.status_code in (401, 403):
+    if r.status_code == 401:
         return False, "认证失败：API Key 无效"
+    if r.status_code == 403:
+        return False, "Key 有效，但期权快照需 Polygon 付费 Options 订阅（当前无权限，系统将回退 yfinance）"
     r.raise_for_status()
     data = r.json()
-    if data.get("status") in ("OK", "DELAYED"):
-        return True, "连通成功（Polygon.io）"
+    if data.get("status") in ("OK", "DELAYED") or data.get("results") is not None:
+        return True, "连通成功（期权快照可用）"
     return False, _clip(str(data.get("error") or "响应异常"))
 
 

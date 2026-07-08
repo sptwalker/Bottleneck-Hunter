@@ -15,7 +15,6 @@ from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_sou
 from bottleneck_hunter.data_provider.hub import (
     CAP_EARNINGS,
     CAP_FINANCIALS,
-    CAP_INSIDER,
     CAP_NEWS,
     CAP_OPTIONS,
 )
@@ -34,9 +33,9 @@ def _get_json(url: str, headers: dict | None = None):
 
 
 def _get_json_soft(url: str, headers: dict | None = None):
-    """付费档端点用：402/403(计划未含)返回 None，不抛→不触发熔断/换源浪费。其它错误照抛。"""
+    """付费/限流端点用：402/403(计划未含)、429(限流)返回 None，不抛→不误触熔断/浪费换源。其它错误照抛。"""
     r = requests.get(url, timeout=_TIMEOUT, headers=headers or _UA)
-    if r.status_code in (402, 403):
+    if r.status_code in (402, 403, 429):
         return None
     r.raise_for_status()
     return r.json()
@@ -91,13 +90,13 @@ def _surprise_pct(actual, est) -> float | None:
 
 
 class FMPProvider:
-    """Financial Modeling Prep — 美股 earnings/深财务/新闻/内部人（含一致预期）。质量首选。"""
+    """Financial Modeling Prep — 美股 earnings/深财务/新闻（含一致预期）。质量首选。"""
     name = "fmp"
     priority = 0
-    cap_priority = {CAP_NEWS: 1, CAP_INSIDER: 1}  # earnings/financials 仍 0（质量最高）
+    cap_priority = {CAP_NEWS: 1}  # earnings/financials 仍 0（质量最高）
 
     def capabilities(self) -> set[str]:
-        return {CAP_EARNINGS, CAP_FINANCIALS, CAP_NEWS, CAP_INSIDER}
+        return {CAP_EARNINGS, CAP_FINANCIALS, CAP_NEWS}
 
     def markets(self) -> set[str]:
         return {"us_stock"}
@@ -113,7 +112,6 @@ class FMPProvider:
             CAP_EARNINGS: self._fetch_earnings_sync,
             CAP_FINANCIALS: self._fetch_financials_sync,
             CAP_NEWS: self._fetch_news_sync,
-            CAP_INSIDER: self._fetch_insider_sync,
         }.get(capability)
         if fn is None:
             return None
@@ -196,12 +194,6 @@ class FMPProvider:
             })
         return {"articles": arts} if arts else None
 
-    def _fetch_insider_sync(self, ticker: str, key: str) -> dict | None:
-        rows = _get_json_soft(f"{_FMP}/insider-trading/search?symbol={ticker}&limit=20&apikey={key}")  # 付费档
-        if not isinstance(rows, list) or not rows:
-            return None
-        return {"ticker": ticker, "source": "fmp", "trades": rows}
-
     def _fetch_earnings_sync(self, ticker: str, key: str) -> dict | None:
         # /stable/earnings 一次返回 实际值+一致预期（epsActual/epsEstimated/revenueActual/revenueEstimated）
         url = f"https://financialmodelingprep.com/stable/earnings?symbol={ticker}&apikey={key}"
@@ -214,7 +206,7 @@ class FMPProvider:
         published = [x for x in rows if x.get("epsActual") is not None]
         rec = (published or rows)[0]
         eps_a, eps_e = rec.get("epsActual"), rec.get("epsEstimated")
-        rev_a, rev_e = rec.get("revenueActual"), rec.get("revenueEstimated")
+        rev_a, rev_e = _f(rec.get("revenueActual"), 1e-8), _f(rec.get("revenueEstimated"), 1e-8)  # USD→亿，对齐 revenue_yi
         date = rec.get("date", "")
         return {
             "ticker": ticker,
@@ -279,21 +271,21 @@ class TushareProvider:
             "eps_actual": row.get("diluted_eps"),
             "eps_estimate": None,   # 免费档无一致预期
             "eps_surprise_pct": None,
-            "revenue_actual": row.get("revenue"),
+            "revenue_actual": _f(row.get("revenue"), 1e-8),  # 元→亿，对齐 revenue_yi
             "revenue_estimate": None,
             "guidance": "",
         }
 
 
 class FinnhubProvider:
-    """Finnhub — 美股 earnings/news/insider（免费 60/分）。"""
+    """Finnhub — 美股 earnings/news（免费 60/分）。"""
     name = "finnhub"
     priority = 1
-    cap_priority = {CAP_NEWS: 0, CAP_INSIDER: 0}
+    cap_priority = {CAP_NEWS: 0}
     _BASE = "https://finnhub.io/api/v1"
 
     def capabilities(self) -> set[str]:
-        return {CAP_EARNINGS, CAP_NEWS, CAP_INSIDER}
+        return {CAP_EARNINGS, CAP_NEWS}
 
     def markets(self) -> set[str]:
         return {"us_stock"}
@@ -305,11 +297,11 @@ class FinnhubProvider:
         key = resolve_data_source_key("finnhub", user_id)
         if not key:
             return None
-        fn = {CAP_EARNINGS: self._earnings, CAP_NEWS: self._news, CAP_INSIDER: self._insider}.get(capability)
+        fn = {CAP_EARNINGS: self._earnings, CAP_NEWS: self._news}.get(capability)
         return await asyncio.to_thread(fn, ticker, key) if fn else None
 
     def _earnings(self, ticker: str, key: str) -> dict | None:
-        rows = _get_json(f"{self._BASE}/stock/earnings?symbol={ticker}&token={key}")
+        rows = _get_json_soft(f"{self._BASE}/stock/earnings?symbol={ticker}&token={key}")
         if not isinstance(rows, list) or not rows:
             return None
         rec = rows[0]  # 最近一期
@@ -326,7 +318,7 @@ class FinnhubProvider:
         import datetime as _dt
         to = _dt.date.today()
         frm = to - _dt.timedelta(days=14)
-        rows = _get_json(f"{self._BASE}/company-news?symbol={ticker}&from={frm}&to={to}&token={key}")
+        rows = _get_json_soft(f"{self._BASE}/company-news?symbol={ticker}&from={frm}&to={to}&token={key}")
         if not isinstance(rows, list) or not rows:
             return None
         arts = []
@@ -342,11 +334,6 @@ class FinnhubProvider:
                 "source_url": n.get("url", ""), "source_name": n.get("source", "Finnhub"),
             })
         return {"articles": arts} if arts else None
-
-    def _insider(self, ticker: str, key: str) -> dict | None:
-        data = _get_json(f"{self._BASE}/stock/insider-transactions?symbol={ticker}&token={key}")
-        rows = data.get("data") if isinstance(data, dict) else None
-        return {"ticker": ticker, "source": "finnhub", "trades": rows} if rows else None
 
 
 class AlphaVantageProvider:
@@ -374,7 +361,7 @@ class AlphaVantageProvider:
 
     def _financials(self, ticker: str, key: str) -> dict | None:
         # OVERVIEW 一次拿 TTM 概览（免费省额度）；限流时返回含 Note/Information 字段
-        ov = _get_json(f"{self._BASE}?function=OVERVIEW&symbol={ticker}&apikey={key}")
+        ov = _get_json_soft(f"{self._BASE}?function=OVERVIEW&symbol={ticker}&apikey={key}")
         if not isinstance(ov, dict) or ov.get("Note") or ov.get("Information") or not ov.get("Symbol"):
             return None
         roe = _f(ov.get("ReturnOnEquityTTM"))
@@ -389,15 +376,15 @@ class AlphaVantageProvider:
             "roe_pct": round(roe * 100, 2) if roe is not None else None,
             "debt_ratio_pct": None,
             "cashflow_per_share": None,
-            "consensus_eps": _f(ov.get("EPS")),
-            "consensus_pe": _f(ov.get("ForwardPE")) or _f(ov.get("PERatio")),
+            "consensus_eps": None,  # OVERVIEW.EPS 是 trailing TTM，非前瞻一致预期，不冒充（避免覆写 yfinance forward）
+            "consensus_pe": _f(ov.get("ForwardPE")),  # 只取前瞻 PE；trailing PERatio 一律留空
             "analyst_rating": None,
             "analyst_report_count": None,
             "quarters": [],
         }
 
     def _earnings(self, ticker: str, key: str) -> dict | None:
-        d = _get_json(f"{self._BASE}?function=EARNINGS&symbol={ticker}&apikey={key}")
+        d = _get_json_soft(f"{self._BASE}?function=EARNINGS&symbol={ticker}&apikey={key}")
         q = (d or {}).get("quarterlyEarnings") if isinstance(d, dict) else None
         if not q:
             return None
@@ -412,7 +399,7 @@ class AlphaVantageProvider:
         }
 
     def _news(self, ticker: str, key: str) -> dict | None:
-        d = _get_json(f"{self._BASE}?function=NEWS_SENTIMENT&tickers={ticker}&limit=15&apikey={key}")
+        d = _get_json_soft(f"{self._BASE}?function=NEWS_SENTIMENT&tickers={ticker}&limit=15&apikey={key}")
         feed = (d or {}).get("feed") if isinstance(d, dict) else None
         if not feed:
             return None
@@ -487,7 +474,7 @@ class TiingoProvider:
             "net_profit_yi": None, "net_profit_yoy_pct": None,
             "gross_margin_pct": None, "roe_pct": None, "debt_ratio_pct": None,
             "cashflow_per_share": None,
-            "consensus_eps": None, "consensus_pe": _f(d0.get("peRatio")),
+            "consensus_eps": None, "consensus_pe": None,  # Tiingo daily 的 peRatio 是 trailing，不冒充一致预期
             "analyst_rating": None, "analyst_report_count": None, "quarters": [],
         }
 
@@ -553,6 +540,88 @@ class PolygonProvider:
         }
 
 
+_YJBB_CACHE: dict[str, object] = {}
+
+
+def _latest_yjbb():
+    """返回 (报告期'YYYY-MM-DD', df)：最近一个有数据的季度业绩报表。模块级按季度缓存。失败 (None,None)。"""
+    try:
+        import akshare as ak
+    except ImportError:
+        return None, None
+    from datetime import date
+    today = date.today().isoformat()
+    cands = sorted(
+        (f"{yy}-{md}" for yy in (date.today().year, date.today().year - 1)
+         for md in ("12-31", "09-30", "06-30", "03-31") if f"{yy}-{md}" <= today),
+        reverse=True,
+    )
+    for c in cands[:5]:
+        d = c.replace("-", "")
+        if d in _YJBB_CACHE:
+            return c, _YJBB_CACHE[d]
+        try:
+            df = ak.stock_yjbb_em(date=d)
+            if df is not None and not df.empty:
+                _YJBB_CACHE[d] = df
+                return c, df
+        except Exception:  # noqa: BLE001
+            continue
+    return None, None
+
+
+class AkshareEarningsProvider:
+    """akshare 业绩报表 — A股 earnings 免费兜底（仅实际值 eps/营收，无机构一致预期）。
+
+    排在付费 Tushare(priority 0) 之后，保证无 token 用户 A股 earnings 也不为空。
+    stock_yjbb_em 一次返回全市场，按季度缓存，批量取数时各 ticker 复用同一份。
+    """
+    name = "akshare"
+    priority = 1
+
+    def capabilities(self) -> set[str]:
+        return {CAP_EARNINGS}
+
+    def markets(self) -> set[str]:
+        return {"a_stock"}
+
+    def supports(self, capability: str, market: str) -> bool:
+        return capability in self.capabilities() and market in self.markets()
+
+    async def fetch(self, capability, ticker, market, user_id="") -> dict | None:
+        if capability != CAP_EARNINGS:
+            return None
+        return await asyncio.to_thread(self._fetch_sync, ticker)
+
+    def _fetch_sync(self, ticker: str) -> dict | None:
+        code = "".join(ch for ch in ticker if ch.isdigit())[:6]
+        if len(code) != 6:
+            return None
+        report_date, df = _latest_yjbb()
+        if df is None:
+            return None
+        code_col = next((c for c in df.columns if "股票代码" in c), None)
+        eps_col = next((c for c in df.columns if "每股收益" in c), None)
+        rev_col = next((c for c in df.columns if "营业总收入" in c), None)
+        if not code_col:
+            return None
+        row = df[df[code_col] == code]
+        if row.empty:
+            return None
+        r = row.iloc[0]
+        return {
+            "ticker": ticker,
+            "report_date": report_date,
+            "fiscal_quarter": _quarter_from_date(report_date),
+            "eps_actual": _f(r[eps_col]) if eps_col else None,
+            "eps_estimate": None,          # A股免费无机构一致预期（诚实边界）
+            "eps_surprise_pct": None,
+            "revenue_actual": _f(r[rev_col], 1e-8) if rev_col else None,  # 元→亿
+            "revenue_estimate": None,
+            "guidance": "",
+        }
+
+
 class YfinanceOptionsProvider:
     """yfinance 期权兜底 — 复用 options_pipeline 分析逻辑（免费，无 key）。"""
     name = "yfinance"
@@ -586,7 +655,7 @@ def _to_ts_code(ticker: str) -> str:
 
 def build_providers() -> list:
     return [
-        FMPProvider(), FinnhubProvider(), TushareProvider(),
+        FMPProvider(), FinnhubProvider(), TushareProvider(), AkshareEarningsProvider(),
         AlphaVantageProvider(), TiingoProvider(), PolygonProvider(),
         YfinanceOptionsProvider(),
     ]

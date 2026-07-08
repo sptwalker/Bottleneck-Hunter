@@ -128,7 +128,12 @@ def order(cands: list[tuple[str, int]]) -> list[str]:
 
     丢弃超额源 → priority 升序分档 → 档内 recent_load 升序（均衡轮换）。
     """
-    live = [(name, prio) for name, prio in cands if not is_over_quota(name)]
+    live = []
+    for name, prio in cands:
+        if is_over_quota(name):
+            logger.debug("数据源 %s 达免费额度上限，本次跳过换源", name)
+            continue
+        live.append((name, prio))
     live.sort(key=lambda np: (np[1], recent_load(np[0])))
     return [name for name, _ in live]
 

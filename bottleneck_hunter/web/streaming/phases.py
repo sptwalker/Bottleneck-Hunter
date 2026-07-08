@@ -292,7 +292,7 @@ async def stream_phase2(
         all_suppliers = [s for sl in supplier_map.values() for s in sl]
         if all_suppliers:
             yield _sse("step_start", step="financial_fetch", index=1, message=STEP_LABELS["financial_fetch"])
-            fin_task = fetch_batch(all_suppliers)
+            fin_task = fetch_batch(all_suppliers, getattr(store, "_user_id", ""))
             sm_task = smart_money_batch(all_suppliers)
             (financial_map, fin_failed), (smart_money_map, sm_failed) = await asyncio.gather(fin_task, sm_task)
             failed_tickers = list(set(fin_failed + sm_failed))

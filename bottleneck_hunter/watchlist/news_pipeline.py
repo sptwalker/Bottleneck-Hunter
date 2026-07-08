@@ -294,7 +294,8 @@ async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTrac
         # 并入 DataHub 多源 keyed 新闻（finnhub/tiingo/fmp/av 按质量梯队+额度均衡；无 key 返 None）
         try:
             from bottleneck_hunter.data_provider.hub import CAP_NEWS, get_hub
-            hubrec = await get_hub().fetch(CAP_NEWS, ticker, market, "")
+            uid = getattr(store, "_user_id", "")  # 用本用户自己的 key，避免跨用户借用
+            hubrec = await get_hub().fetch(CAP_NEWS, ticker, market, uid)
             seen = {a["id"] for a in articles}
             for a in (hubrec or {}).get("articles", []):
                 if a.get("id") and a["id"] not in seen:

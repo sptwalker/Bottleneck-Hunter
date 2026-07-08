@@ -38,10 +38,11 @@ def _wl():
     return _store
 
 
-# capability → 有真实来源的市场（供覆盖矩阵展示；免费源 quote/daily + 各直连管线 + 付费 earnings）
+# capability → 直连管线/免费源覆盖的市场（基线；hub provider 能力在 overview 里动态合并叠加）
 _COVERAGE = {
     "quote": ["us_stock", "a_stock"], "daily": ["us_stock", "a_stock"],
-    "earnings": ["us_stock", "a_stock"], "news": ["us_stock", "a_stock"],
+    "earnings": ["us_stock", "a_stock"], "financials": ["us_stock", "a_stock"],
+    "news": ["us_stock", "a_stock"],
     "sec": ["us_stock"], "institutional": ["us_stock"], "options": ["us_stock"],
     "notice": ["a_stock"], "smartmoney": ["us_stock", "a_stock"],
 }
@@ -82,9 +83,15 @@ async def overview(user: dict = Depends(get_current_user)):
         hub = get_hub().get_status()
     except Exception:  # noqa: BLE001
         hub = []
-    # 5) 覆盖矩阵
-    coverage = [{"capability": cap, "markets": {m: (m in mks) for m in _ALL_MARKETS}}
-                for cap, mks in _COVERAGE.items()]
+    # 5) 覆盖矩阵：基线（直连管线/免费源）+ hub provider 实际能力动态合并（insider 为死能力，暂不展示）
+    cov = {cap: set(mks) for cap, mks in _COVERAGE.items()}
+    for row in hub:
+        for cap in row.get("capabilities", []):
+            if cap == "insider":
+                continue
+            cov.setdefault(cap, set()).update(row.get("markets", []))
+    coverage = [{"capability": cap, "markets": {m: (m in cov[cap]) for m in _ALL_MARKETS}}
+                for cap in sorted(cov)]
 
     return {
         "sources": sources,

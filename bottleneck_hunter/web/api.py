@@ -124,6 +124,7 @@ async def refresh_suppliers(req: RefreshSuppliersRequest, user: dict = Depends(g
         async for event in run_refresh_suppliers(
             req.bottleneck_reports, req.market, req.max_market_cap_yi,
             req.max_suppliers, req.language, req.provider, req.model,
+            user.get("sub", ""),
         ):
             yield event
 
@@ -166,7 +167,7 @@ async def refetch_data(req: RefetchDataRequest, user: dict = Depends(get_current
     suppliers = [SupplierInfo(name=t, ticker=t, market=region, sector="", description="") for t in req.tickers]
 
     (financial_map, fin_failed), (sm_map, sm_failed) = await asyncio.gather(
-        fetch_batch(suppliers), smart_money_batch(suppliers))
+        fetch_batch(suppliers, user.get("sub", "")), smart_money_batch(suppliers))
 
     return {
         "financial": {k: v.model_dump() for k, v in financial_map.items()},

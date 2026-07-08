@@ -108,11 +108,25 @@ class DataHub:
     def register(self, provider: CapabilityProvider) -> None:
         self._states[provider.name] = _ProviderState(provider)
 
-    def _candidates(self, capability: str, market: str) -> list[_ProviderState]:
-        """健康(支持+未熔断)候选 → 交调度器：丢超额、按能力质量梯队分档、档内均衡轮换。"""
+    def _candidates(self, capability: str, market: str, user_id: str = "") -> list[_ProviderState]:
+        """健康(支持+未熔断+有key)候选 → 调度器：丢超额、按能力质量梯队分档、档内均衡轮换。
+
+        无 key 的 keyed 源在此就排除，避免其被 note_call/记账污染额度阀与健康统计。
+        """
         from bottleneck_hunter.data_provider import scheduler
-        healthy = {st.provider.name: st for st in self._states.values()
-                   if st.provider.supports(capability, market) and not st.is_circuit_open}
+        from bottleneck_hunter.data_provider.data_source_catalog import (
+            _CATALOG_BY_ID,
+            resolve_data_source_key,
+        )
+        healthy = {}
+        for st in self._states.values():
+            p = st.provider
+            if not p.supports(capability, market) or st.is_circuit_open:
+                continue
+            # keyed 源（在数据源目录里）无 key → 不进候选（零网络、零记账）；免费源(akshare/yfinance)恒可用
+            if p.name in _CATALOG_BY_ID and not resolve_data_source_key(p.name, user_id):
+                continue
+            healthy[p.name] = st
         pairs = [(name, scheduler.cap_prio(st.provider, capability)) for name, st in healthy.items()]
         return [healthy[name] for name in scheduler.order(pairs)]
 
@@ -121,7 +135,7 @@ class DataHub:
         if capability in _MANAGER_CAPS:
             return await self._fetch_via_manager(capability, ticker, market)
 
-        for st in self._candidates(capability, market):
+        for st in self._candidates(capability, market, user_id):
             src = st.provider.name
             from bottleneck_hunter.data_provider import scheduler
             scheduler.note_call(src)  # 记一次调用（均衡负载 + 额度阀共用；空返回也算消耗）
@@ -168,28 +182,27 @@ class DataHub:
 
     @contextlib.asynccontextmanager
     async def track(self, source: str, capability: str, market: str):
-        """半托管：包住 pipeline 自己的取数调用，仅记账+熔断状态；异常 re-raise（不改原行为）。
+        """半托管：包住 pipeline 自己的取数调用，仅记账；异常 re-raise（不改原行为）。
+
+        **不触碰 CapabilityProvider 的熔断计数** —— 半托管直连管线与全托管 provider 若同名
+        （如 "yfinance" 既是 track 源又是期权 provider），共享 _ProviderState 会互相复位/误开熔断。
+        故 track 只写 datasource_stats，熔断由各能力的全托管路径独立管理。
 
         用法：
             async with get_hub().track("yfinance", CAP_NEWS, market) as sink:
                 data = 真实取数(...)
                 sink["rows"] = len(data)
         """
-        st = self._states.get(source)
         sink: dict = {"rows": 0}
         t0 = time.time()
         try:
             yield sink
             dt = (time.time() - t0) * 1000
-            if st:
-                st.record_success()
             _record(source, capability, market, True, dt, int(sink.get("rows", 0)))
         except _NON_RETRIABLE as e:
             _record(source, capability, market, False, (time.time() - t0) * 1000, 0, str(e))
             raise
         except Exception as e:  # noqa: BLE001
-            if st:
-                st.record_failure()
             _record(source, capability, market, False, (time.time() - t0) * 1000, 0, str(e))
             raise
 

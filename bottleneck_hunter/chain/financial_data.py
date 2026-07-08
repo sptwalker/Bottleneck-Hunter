@@ -519,23 +519,26 @@ async def fetch_financial_snapshot(supplier: SupplierInfo, user_id: str = "") ->
             return None
 
 
-async def fetch_batch(suppliers: list[SupplierInfo]) -> tuple[dict[str, FinancialSnapshot], list[str]]:
-    """批量拉取。返回 ({ticker: FinancialSnapshot}, [failed_tickers])，失败的自动重试一次。"""
+async def fetch_batch(suppliers: list[SupplierInfo], user_id: str = "") -> tuple[dict[str, FinancialSnapshot], list[str]]:
+    """批量拉取。返回 ({ticker: FinancialSnapshot}, [failed_tickers])，失败的自动重试一次。
+
+    user_id 透传给 hub.fetch，用本用户自己的付费 key，避免跨用户借用（D-1）。
+    """
     results: dict[str, FinancialSnapshot] = {}
     failed_suppliers: list[SupplierInfo] = []
 
-    tasks = {s.ticker: (s, fetch_financial_snapshot(s)) for s in suppliers}
-    for ticker, (supplier, coro) in tasks.items():
-        snap = await coro
+    # 真并发：fetch_financial_snapshot 内部 _SEMAPHORE(4) 负责限流（此前串行 await 使信号量形同虚设）
+    snaps = await asyncio.gather(*[fetch_financial_snapshot(s, user_id) for s in suppliers])
+    for supplier, snap in zip(suppliers, snaps):
         if snap is not None:
-            results[ticker] = snap
+            results[supplier.ticker] = snap
         else:
             failed_suppliers.append(supplier)
 
     if failed_suppliers:
         logger.info(f"财务数据重试: {len(failed_suppliers)} 个失败的 ticker")
-        for s in failed_suppliers:
-            snap = await fetch_financial_snapshot(s)
+        retries = await asyncio.gather(*[fetch_financial_snapshot(s, user_id) for s in failed_suppliers])
+        for s, snap in zip(failed_suppliers, retries):
             if snap is not None:
                 results[s.ticker] = snap
 

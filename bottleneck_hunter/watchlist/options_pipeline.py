@@ -97,7 +97,8 @@ async def _fetch_one(ticker: str, store: WatchlistStore) -> str:
         try:
             # DataHub 多源：polygon(付费,priority0) → yfinance(免费兜底)，按额度/熔断自动换源
             from bottleneck_hunter.data_provider.hub import CAP_OPTIONS, get_hub
-            result = await get_hub().fetch(CAP_OPTIONS, ticker, "us_stock", "")
+            uid = getattr(store, "_user_id", "")  # 用本用户自己的 key，避免跨用户借用
+            result = await get_hub().fetch(CAP_OPTIONS, ticker, "us_stock", uid)
             if result:
                 store.save_options([result])
                 return "ok"

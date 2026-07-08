@@ -252,7 +252,7 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
             yield _sse("step_start", step="financial_fetch", index=3, message=STEP_LABELS["financial_fetch"])
             yield _sse("step_progress", step="financial_fetch",
                        message=f"正在为 {len(all_suppliers)} 家供应商拉取财务数据和聪明钱信号...", log=True)
-            fin_task = fetch_batch(all_suppliers)
+            fin_task = fetch_batch(all_suppliers, getattr(store, "_user_id", ""))
             sm_task = smart_money_batch(all_suppliers)
             (financial_map, fin_failed), (smart_money_map, sm_failed) = await asyncio.gather(fin_task, sm_task)
             failed_tickers = list(set(fin_failed + sm_failed))
@@ -488,6 +488,7 @@ async def run_refresh_suppliers(
     language: str,
     provider: str,
     model: str,
+    user_id: str = "",
 ) -> AsyncGenerator[dict, None]:
     """独立重新运行供应商搜索+评估，返回 SSE 事件流。"""
     from bottleneck_hunter.chain.models import BottleneckReport
@@ -591,7 +592,7 @@ async def run_refresh_suppliers(
         if all_suppliers:
             yield _sse("step_progress", step="supplier_search",
                        message=f"正在为 {len(all_suppliers)} 家供应商拉取财务数据和聪明钱信号...", log=True)
-            fin_task = fetch_batch(all_suppliers)
+            fin_task = fetch_batch(all_suppliers, user_id)
             sm_task = smart_money_batch(all_suppliers)
             (financial_map, fin_failed), (smart_money_map, sm_failed) = await asyncio.gather(fin_task, sm_task)
             failed_tickers = list(set(fin_failed + sm_failed))

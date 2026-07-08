@@ -71,14 +71,14 @@ def test_probe_timeout(monkeypatch):
     assert ok is False and "超时" in msg
 
 
-def test_probe_non_testable_no_network(monkeypatch):
-    # Morningstar/OpenBB 不应发起任何网络请求
+def test_probe_unknown_source(monkeypatch):
+    # 未知数据源不应发起任何网络请求，直接返回未知提示
     def _fail(*a, **k):
         raise AssertionError("不该联网")
     monkeypatch.setattr(cat.requests, "get", _fail)
     monkeypatch.setattr(cat.requests, "post", _fail)
-    ok, msg = cat.probe_source("morningstar", "whatever")
-    assert ok is False and "自助 API" in msg
+    ok, msg = cat.probe_source("nonexistent_source", "whatever")
+    assert ok is False and "未知数据源" in msg
 
 
 def test_probe_empty_key_rejected():
@@ -116,7 +116,7 @@ def test_resolve_key_no_cross_user_borrow(tmp_path, monkeypatch):
 def test_catalog_json_safe():
     c = cat.get_catalog()
     ids = [s["id"] for s in c]
-    assert "fmp" in ids and "custom" in ids and "morningstar" in ids
+    assert "fmp" in ids and "custom" in ids and "polygon" in ids
     assert all("probe" not in s for s in c)                       # probe 函数不进 JSON
 
 

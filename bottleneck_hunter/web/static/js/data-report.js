@@ -12,7 +12,7 @@ function esc(s) {
 
 const HEALTH_DOT = { success: '🟢', error: '🔴', idle: '⚪', running: '🟡', unknown: '⚪' };
 const CAP_LABEL = {
-  quote: '实时报价', daily: '日K行情', earnings: '财报/一致预期', news: '新闻',
+  quote: '实时报价', daily: '日K行情', earnings: '财报/一致预期', financials: '深财务', news: '新闻',
   sec: 'SEC文件', institutional: '机构/评级', options: '期权', notice: 'A股公告', smartmoney: '聪明钱',
 };
 const MKT_LABEL = { us_stock: '美股', a_stock: 'A股', hk_stock: '港股' };
@@ -92,11 +92,13 @@ function _managerSection(manager, hub) {
   const rows = all.map(m => {
     const cb = m.circuit_open ? '🔴 熔断' : '🟢 正常';
     const mkts = (m.markets || []).map(x => MKT_LABEL[x] || x).join('/');
-    return `<tr><td>${esc(m.name)}</td><td>${esc(m.kind)}</td><td>${esc(mkts)}</td>
+    const caps = (m.capabilities || []).filter(c => c !== 'insider')
+      .map(c => CAP_LABEL[c] || c).join('、') || '行情';
+    return `<tr><td>${esc(m.name)}</td><td>${esc(m.kind)}</td><td>${esc(caps)}</td><td>${esc(mkts)}</td>
       <td>${cb}</td><td>${m.total_calls || 0}</td><td>${m.total_failures || 0}</td></tr>`;
   }).join('');
-  return `<h4 style="margin:16px 0 8px">取数器运行时（熔断/调用）</h4>
-    <table class="aic-test-table"><thead><tr><th>源</th><th>类型</th><th>市场</th><th>熔断</th><th>调用</th><th>失败</th></tr></thead>
+  return `<h4 style="margin:16px 0 8px">取数器运行时（能力/熔断/调用）</h4>
+    <table class="aic-test-table"><thead><tr><th>源</th><th>类型</th><th>服务能力</th><th>市场</th><th>熔断</th><th>调用</th><th>失败</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
