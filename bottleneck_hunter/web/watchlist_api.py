@@ -20,6 +20,8 @@ from bottleneck_hunter.watchlist.models import (
     UpdateWatchlistRequest,
 )
 from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.web.streaming._common import _sse
+from bottleneck_hunter.web.streaming._notice import with_notices
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +116,7 @@ async def refresh_all(request: Request, user: dict = Depends(get_current_user)):
                 break
             yield event
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 @router.post("/refresh/{pipeline}")
@@ -132,7 +134,7 @@ async def refresh_pipeline(pipeline: str, request: Request, user: dict = Depends
                 break
             yield event
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -157,7 +159,7 @@ async def refresh_intelligence(request: Request, market: str = "us_stock", user:
                 "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
             }
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 @router.post("/refresh-strategy")
@@ -178,7 +180,7 @@ async def refresh_strategy(request: Request, market: str = "us_stock", user: dic
                 "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
             }
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 @router.get("/strategy-summaries")
@@ -466,7 +468,7 @@ async def uzi_trigger(entry_id: str, analysis_type: str, request: Request, user:
                 break
             yield {"event": evt.get("event", "progress"), "data": _json.dumps(evt, ensure_ascii=False)}
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 # ─────────────────────────────────────────────────────────────

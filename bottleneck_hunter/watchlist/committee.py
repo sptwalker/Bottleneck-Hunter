@@ -85,8 +85,9 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     """
     chain: list[tuple] = []
     seen: set[str] = set()
+    # 委员链自管重试降级，取裸模型（勿再套 FallbackChatModel，避免双重重试/破坏多样性）
     llm, provider, model = get_llm_for_position(
-        position=member.get("config_key"), provider_hint=member["provider_hint"])
+        position=member.get("config_key"), provider_hint=member["provider_hint"], with_fallback=False)
     if llm:
         chain.append((llm, provider, model))
         seen.add(provider)
@@ -94,14 +95,14 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     for hint in _FALLBACK_PROVIDERS:
         if hint in seen:
             continue
-        fl, fp, fm = get_llm_for_position(provider_hint=hint)
+        fl, fp, fm = get_llm_for_position(provider_hint=hint, with_fallback=False)
         if fl and fp not in seen:
             chain.append((fl, fp, fm))
             seen.add(fp)
             break
     # 仍为空则退到通用默认
     if not chain:
-        dl, dp, dm = get_llm_for_position()
+        dl, dp, dm = get_llm_for_position(with_fallback=False)
         if dl:
             chain.append((dl, dp, dm))
     return chain
@@ -127,6 +128,12 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
                 if idx > 0 or attempt > 0:
                     logger.info("委员 %s 经重试/降级成功（%s/%s, 第%d次）",
                                 role, provider, model, attempt + 1)
+                if idx > 0:
+                    # 真正切到了备用模型 → 提示用户
+                    from bottleneck_hunter.llm_clients.fallback import classify_reason, push_notice, _build_message
+                    fp, fm = chain[0][1], chain[0][2]
+                    reason = classify_reason(last_err) if last_err else "调用异常"
+                    push_notice(_build_message(fp, fm, reason, provider, model))
                 return content, provider, model
             except Exception as e:
                 last_err = e

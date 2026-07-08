@@ -14,6 +14,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.auth.dependencies import get_current_user
+from bottleneck_hunter.web.streaming._common import _sse
+from bottleneck_hunter.web.streaming._notice import with_notices
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +238,7 @@ async def run_batch_review_endpoint(request: Request, market: str = "us_stock", 
             data = json.dumps(evt.get("data", evt), ensure_ascii=False)
             yield {"event": event_name, "data": data}
 
-    return EventSourceResponse(generate())
+    return EventSourceResponse(with_notices(generate(), _sse))
 
 
 @router.get("/feedback")
@@ -315,7 +317,7 @@ async def generate_tuning(request: Request, market: str = "us_stock", user: dict
             data = json.dumps(evt.get("data", evt), ensure_ascii=False)
             yield {"event": event_name, "data": data}
 
-    return EventSourceResponse(generate())
+    return EventSourceResponse(with_notices(generate(), _sse))
 
 
 @router.post("/tuning/{tuning_id}/approve")

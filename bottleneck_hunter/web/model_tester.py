@@ -32,7 +32,7 @@ TEST_DIMENSIONS = [
 
 async def test_connectivity(provider: str, model: str) -> dict:
     try:
-        llm = create_llm(provider, model, temperature=0.1)
+        llm = create_llm(provider, model, temperature=0.1, with_fallback=False)
         t0 = time.time()
         resp = await asyncio.wait_for(
             llm.ainvoke([HumanMessage(content="hi")]),
@@ -93,7 +93,7 @@ def _parse_json_response(text: str):
 
 async def test_json_output(provider: str, model: str) -> dict:
     try:
-        llm = create_llm(provider, model, temperature=0.1)
+        llm = create_llm(provider, model, temperature=0.1, with_fallback=False)
         total_weight = sum(t["weight"] for t in _JSON_PROMPTS)
         earned = 0.0
         details = []
@@ -196,7 +196,7 @@ def _score_chinese_analysis(text: str) -> tuple[float, dict]:
 
 async def test_chinese_analysis(provider: str, model: str) -> dict:
     try:
-        llm = create_llm(provider, model, temperature=0.3)
+        llm = create_llm(provider, model, temperature=0.3, with_fallback=False)
         resp = await asyncio.wait_for(
             llm.ainvoke([HumanMessage(content=_CN_ANALYSIS_PROMPT)]),
             timeout=60,
@@ -213,7 +213,7 @@ async def test_chinese_analysis(provider: str, model: str) -> dict:
 async def test_speed(provider: str, model: str) -> dict:
     """连续梯度评分，不用台阶。测 2 次取平均。"""
     try:
-        llm = create_llm(provider, model, temperature=0.1)
+        llm = create_llm(provider, model, temperature=0.1, with_fallback=False)
         latencies = []
         prompts = [
             "请用一句话描述人工智能的发展趋势。",
@@ -263,7 +263,7 @@ _SCORING_PROMPT_TEMPLATE = """请对以下产业链环节的"瓶颈程度"打分
 async def test_scoring_variance(provider: str, model: str) -> dict:
     """同时考核：方差（区分度）+ 排序正确性（是否识别出高低瓶颈）。"""
     try:
-        llm = create_llm(provider, model, temperature=0.1)
+        llm = create_llm(provider, model, temperature=0.1, with_fallback=False)
         scores = []
         for scenario in _SCORING_SCENARIOS:
             try:
@@ -375,7 +375,7 @@ _INSTRUCTION_TESTS = [
 
 async def test_instruction_follow(provider: str, model: str) -> dict:
     try:
-        llm = create_llm(provider, model, temperature=0.1)
+        llm = create_llm(provider, model, temperature=0.1, with_fallback=False)
         passed = 0
         details = {}
 

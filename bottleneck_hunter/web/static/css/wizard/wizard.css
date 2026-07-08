@@ -836,13 +836,16 @@
 .wiz-step.step-red .wiz-step-dot { background: #dc2626; color: #fff; border-color: #dc2626; }
 .wiz-step.step-yellow .wiz-step-dot { background: #d97706; color: #fff; border-color: #d97706; }
 
-/* 运行中：当前步骤图标斑马纹循环动画（barber-pole） */
-@keyframes wiz-zebra-scroll { to { background-position: 24px 0; } }
+/* 运行中：当前步骤图标斑马纹循环动画（barber-pole）
+   背景横向平移 = 斜纹周期 × √2，才能无缝滚动（同 decision.css 的 dc-zebra-move） */
+@keyframes wiz-zebra-scroll { from { background-position: 0 0; } to { background-position: 8.49px 0; } }
 .wiz-step.running .wiz-step-dot {
-  background-image: linear-gradient(45deg,
-    var(--accent) 25%, #fff 25%, #fff 50%,
-    var(--accent) 50%, var(--accent) 75%, #fff 75%);
-  background-size: 12px 12px;
+  background-color: #fff;
+  background-image: repeating-linear-gradient(45deg,
+    var(--accent) 0, var(--accent) 3px, #fff 3px, #fff 6px);
+  background-size: 8.49px 100%;   /* 6px 斜纹周期 × √2 */
+  background-repeat: repeat;
+  background-position: 0 0;
   color: var(--accent);
   border-color: #fff;
   text-shadow: 0 0 3px rgba(255,255,255,.95);

@@ -110,7 +110,7 @@ async def test_api_key(req: TestApiKeyRequest, user: dict = Depends(get_current_
         raise HTTPException(status_code=400, detail=f"{provider} 无测试模型")
 
     try:
-        llm = create_llm(provider, model, api_key=test_key)
+        llm = create_llm(provider, model, api_key=test_key, with_fallback=False)
         await asyncio.wait_for(
             llm.ainvoke([HumanMessage(content="hi")]),
             timeout=60,

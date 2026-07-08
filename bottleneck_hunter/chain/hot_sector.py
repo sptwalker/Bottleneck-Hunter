@@ -555,7 +555,7 @@ async def llm_recommend_hot_sectors(
     2. 用 LLM 生成结构化推荐（保证可靠输出）
     3. 结果缓存30分钟
     """
-    from bottleneck_hunter.llm_clients.factory import create_llm
+    from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_position
     from langchain_core.messages import SystemMessage, HumanMessage
 
     cache_key = f"{provider}::{model}"
@@ -610,7 +610,14 @@ async def llm_recommend_hot_sectors(
         )
 
     try:
-        llm = create_llm(provider, model, temperature=0.3)
+        # provider 为空 = 主模型"跟随顶栏配置" → 走回退链解析，勿直接 create_llm('')（会被下方 except 吞掉→静默返回空）
+        if provider:
+            llm = create_llm(provider, model, temperature=0.3)
+        else:
+            llm, provider, model = get_llm_for_position(None, temperature=0.3)
+            if llm is None:
+                logger.error("热点推荐：未配置可用 LLM provider")
+                return []
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
         resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30.0)
 

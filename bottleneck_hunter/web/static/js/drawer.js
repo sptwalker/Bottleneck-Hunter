@@ -23,7 +23,8 @@ export function openDrawer(company) {
   const klineDom = document.getElementById('drawer-kline');
   if (klineDom && ticker) {
     klineDom.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px 0">加载K线数据…</p>';
-    const market = state.config?.market || 'us_stock';
+    // 市场以企业自身归属为准，勿依赖 wizard state（从历史加载时未同步 → A股会误用 us_stock 拉空）
+    const market = company.supplier?.market || company.market || state.config?.market || 'us_stock';
     fetch(`/api/stock/${encodeURIComponent(ticker)}/kline?market=${market}`)
       .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(data => {

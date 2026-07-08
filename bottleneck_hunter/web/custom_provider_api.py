@@ -183,6 +183,7 @@ async def test_provider(provider_id: str, user: dict = Depends(get_current_user)
             provider_id,
             custom["default_model"],
             api_key=custom.get("api_key"),
+            with_fallback=False,
         )
         await asyncio.wait_for(
             llm.ainvoke([HumanMessage(content="hi")]),

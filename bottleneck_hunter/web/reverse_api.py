@@ -21,6 +21,8 @@ from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.web.api import _user_analysis_store
 from bottleneck_hunter.web.streaming._common import _sanitize
 from bottleneck_hunter.web.streaming.reverse import stream_reverse_analysis
+from bottleneck_hunter.web.streaming._common import _sse
+from bottleneck_hunter.web.streaming._notice import with_notices
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +82,7 @@ async def reverse_analyze(request: Request, req: ReverseAnalyzeRequest,
             if await request.is_disconnected():
                 break
             yield event
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 @router.get("/list")
@@ -148,7 +150,7 @@ async def reverse_cross_analyze(request: Request, req: ReverseCrossRequest,
                                     "ticker": s.supplier.ticker,
                                     "final_score": s.final.final_score if s.final else s.overall_score,
                                     "bottleneck_node": s.bottleneck_node} for s in scorecards])
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 # ── 参数化路由 ───────────────────────────────────────────

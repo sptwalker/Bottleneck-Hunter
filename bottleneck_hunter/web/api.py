@@ -23,6 +23,8 @@ from bottleneck_hunter.web.streaming import (
     stream_phase1, stream_phase2, stream_phase4, stream_roundtable,
 )
 from bottleneck_hunter.web import phase_cache
+from bottleneck_hunter.web.streaming._common import _sse
+from bottleneck_hunter.web.streaming._notice import with_notices
 from bottleneck_hunter.chain.supplier_eval import FinalScorer
 
 from bottleneck_hunter.auth.dependencies import get_current_user
@@ -88,7 +90,7 @@ async def screen(request: Request, config: ScreenRequest, user: dict = Depends(g
                 break
             yield event
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 class CrossValidateRequest(BaseModel):
@@ -104,7 +106,7 @@ async def cross_validate(req: CrossValidateRequest, user: dict = Depends(get_cur
         async for event in run_cross_validation(req.scorecards, req.validation_models, req.language):
             yield event
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 class RefreshSuppliersRequest(BaseModel):
@@ -128,7 +130,7 @@ async def refresh_suppliers(req: RefreshSuppliersRequest, user: dict = Depends(g
         ):
             yield event
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 class RetryBottleneckRequest(BaseModel):
@@ -148,7 +150,7 @@ async def retry_bottleneck(req: RetryBottleneckRequest, user: dict = Depends(get
         ):
             yield event
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 class RefetchDataRequest(BaseModel):
@@ -242,7 +244,7 @@ async def phase1(request: Request, req: Phase1Request, user: dict = Depends(get_
             if await request.is_disconnected():
                 break
             yield event
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 @router.post("/phase2")
@@ -264,7 +266,7 @@ async def phase2(request: Request, req: Phase2Request, user: dict = Depends(get_
             if await request.is_disconnected():
                 break
             yield event
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 @router.post("/phase3/score")
@@ -340,7 +342,7 @@ async def phase4(request: Request, req: Phase4Request, user: dict = Depends(get_
             if await request.is_disconnected():
                 break
             yield event
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 class MeetingRequest(BaseModel):
@@ -368,7 +370,7 @@ async def phase4_meeting(request: Request, req: MeetingRequest, user: dict = Dep
             if await request.is_disconnected():
                 break
             yield event
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 @router.get("/phase/{analysis_id}/{phase_num}")
@@ -453,9 +455,11 @@ class HotScanRequest(BaseModel):
 async def hot_scan(req: HotScanRequest, user: dict = Depends(get_current_user)):
     """LLM 智能热点赛道推荐 — 可靠替代纯 AKShare 方案。"""
     from bottleneck_hunter.chain.hot_sector import llm_recommend_hot_sectors
+    from bottleneck_hunter.llm_clients.fallback import begin_notices, drain_notices
 
+    begin_notices()
     results = await llm_recommend_hot_sectors(req.provider, req.model, req.top_n)
-    return {"recommendations": results}
+    return {"recommendations": results, "fallback_notice": drain_notices()}
 
 
 @router.get("/report")
@@ -688,7 +692,7 @@ async def get_ai_reports(analysis_id: str, user: dict = Depends(get_current_user
 async def ai_report(req: AiReportRequest, user: dict = Depends(get_current_user)):
     """AI 生成横向对比报告或图表解读，返回 SSE 流。生成完毕后自动持久化。"""
     from bottleneck_hunter.chain.models import SupplierScorecard
-    from bottleneck_hunter.llm_clients.factory import create_llm
+    from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_position
     from langchain_core.messages import SystemMessage, HumanMessage
 
     _user_store = _user_analysis_store(user)
@@ -951,11 +955,16 @@ analysis='''请结合方法论背景和数据，对堆叠图进行系统解读�
         "请基于提供的方法论背景和公司数据进行分析，确保你的解读体现对算法逻辑的理解。"
     )
 
-    llm = create_llm(req.provider, req.model)
+    # provider 为空 = 主模型下拉"跟随顶栏配置" → 走角色/回退链解析，勿直接 create_llm('') 会 500
+    if req.provider:
+        llm = create_llm(req.provider, req.model)
+        _provider, _model = req.provider, req.model
+    else:
+        llm, _provider, _model = get_llm_for_position(None)
+        if llm is None:
+            raise HTTPException(status_code=400, detail="未配置可用的 AI 模型，请在顶栏 AI 配置中心设置")
     _aid = req.analysis_id
     _sc = current_scoring
-    _model = req.model
-    _provider = req.provider
 
     async def event_generator():
         try:
@@ -1004,7 +1013,7 @@ analysis='''请结合方法论背景和数据，对堆叠图进行系统解读�
             logger.exception("AI report generation failed")
             yield {"event": "error", "data": json.dumps({"message": str(e)}, ensure_ascii=False)}
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
 # ── Settings API ──────────────────────────────────────────────
@@ -1195,7 +1204,7 @@ async def test_providers(user: dict = Depends(get_current_user)):
     async def _test_one(info: dict) -> dict:
         pid = info["id"]
         try:
-            llm = create_llm(pid, info["model"], api_key=info.get("api_key"))
+            llm = create_llm(pid, info["model"], api_key=info.get("api_key"), with_fallback=False)
             await asyncio.wait_for(
                 llm.ainvoke([HumanMessage(content="hi")]),
                 timeout=60,
@@ -1225,7 +1234,7 @@ async def _test_llm(provider: str, model: str, label: str) -> dict:
     from langchain_core.messages import HumanMessage
     from bottleneck_hunter.llm_clients.factory import create_llm
     try:
-        llm = create_llm(provider, model)
+        llm = create_llm(provider, model, with_fallback=False)
         await asyncio.wait_for(
             llm.ainvoke([HumanMessage(content="hi")]),
             timeout=30,

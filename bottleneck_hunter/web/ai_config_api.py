@@ -213,7 +213,7 @@ async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
         llm = create_llm(provider, model,
                          api_key=(api_key or None),
                          base_url=(req.base_url.strip() or None),
-                         user_id=uid)
+                         user_id=uid, with_fallback=False)
         await asyncio.wait_for(
             asyncio.to_thread(lambda: llm.invoke([HumanMessage(content="hi")])),
             timeout=60,

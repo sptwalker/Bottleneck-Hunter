@@ -262,6 +262,7 @@ async function _retryFailedBottlenecks() {
         if (!dataLines.length) continue;
         try {
           const data = JSON.parse(dataLines.join('\n'));
+          if (data.kind === 'model_fallback' || data.event === 'model_fallback') { window.notifyFallback?.(data.message); continue; }
           if (data.message && bar) {
             const label = bar.querySelector('.retry-label');
             if (label) label.textContent = data.message;
@@ -1125,6 +1126,7 @@ export async function refreshCrossValidation() {
         if (!dataLines.length) continue;
         try {
           const data = JSON.parse(dataLines.join('\n'));
+          if (data.kind === 'model_fallback' || data.event === 'model_fallback') { window.notifyFallback?.(data.message); continue; }
           if (data.step === 'cross_validate' && data.message && !gotResult) {
             body.innerHTML = `<p class="loading-text">${escapeHtml(data.message)}</p>`;
           }
@@ -1146,6 +1148,7 @@ export async function refreshCrossValidation() {
         if (!line.startsWith('data:')) continue;
         try {
           const data = JSON.parse(line.slice(5).trim());
+          if (data.kind === 'model_fallback' || data.event === 'model_fallback') { window.notifyFallback?.(data.message); continue; }
           if (data.result && Array.isArray(data.result) && !gotResult) {
             gotResult = true;
             window.appState.results.cross_validate = data.result;
@@ -1549,6 +1552,7 @@ async function _doRefreshSuppliers() {
         if (!dataLines.length) continue;
         try {
           const data = JSON.parse(dataLines.join('\n'));
+          if (data.kind === 'model_fallback' || data.event === 'model_fallback') { window.notifyFallback?.(data.message); continue; }
           if (data.message && !gotResult) {
             container.innerHTML = `<p class="loading-text">${escapeHtml(data.message)}</p>`;
           }
@@ -1575,6 +1579,7 @@ async function _doRefreshSuppliers() {
         if (!line.startsWith('data:')) continue;
         try {
           const data = JSON.parse(line.slice(5).trim());
+          if (data.kind === 'model_fallback' || data.event === 'model_fallback') { window.notifyFallback?.(data.message); continue; }
           if (data.scorecards && Array.isArray(data.scorecards) && !gotResult) {
             gotResult = true;
             newScorecards = data.scorecards;

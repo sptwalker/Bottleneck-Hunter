@@ -175,6 +175,11 @@ function handleEvent(evt, state) {
   const { event, data } = evt;
   console.log(`[SSE] ${event}:`, data.step || '', data.message || '');
 
+  if (event === 'model_fallback' || data.kind === 'model_fallback') {
+    window.notifyFallback?.(data.message);
+    return;
+  }
+
   if (event === 'step_start') {
     document.getElementById('pipeline-status').textContent = data.message || '';
     setStepState(data.step, 'running');

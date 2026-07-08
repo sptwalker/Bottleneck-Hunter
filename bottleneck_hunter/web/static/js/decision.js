@@ -192,6 +192,7 @@ async function dcSSE(url, { onEvent, onDone, onError, method = 'POST', body = nu
         if (line.startsWith('data: ')) {
           try {
             const data = JSON.parse(line.slice(6));
+            if (data.event === 'model_fallback' || data.kind === 'model_fallback') { window.notifyFallback?.(data.message); continue; }
             if (onEvent) onEvent(data);
           } catch {}
         }
@@ -1388,7 +1389,7 @@ async function consultStream(path, body, { onEvent, onDone, onError } = {}) {
       buffer = lines.pop() || '';
       for (const line of lines) {
         if (line.startsWith('data: ')) {
-          try { const data = JSON.parse(line.slice(6)); if (onEvent) onEvent(data); } catch {}
+          try { const data = JSON.parse(line.slice(6)); if (data.event === 'model_fallback' || data.kind === 'model_fallback') { window.notifyFallback?.(data.message); } else if (onEvent) onEvent(data); } catch {}
         }
       }
     }

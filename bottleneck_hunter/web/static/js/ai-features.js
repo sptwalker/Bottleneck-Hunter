@@ -487,6 +487,7 @@ async function _fetchAiInterp(chartType, force) {
         if (!line.startsWith('data:')) continue;
         try {
           const d = JSON.parse(line.slice(5).trim());
+          if (d.kind === 'model_fallback') { window.notifyFallback?.(d.message); continue; }
           if (d.text) {
             accumulated += d.text;
             body.innerHTML = '<div class="md-body">' + formatMarkdown(accumulated) + '</div>';
@@ -584,6 +585,7 @@ async function _fetchAiReport(bodyEl, btn, force) {
         if (!line.startsWith('data:')) continue;
         try {
           const d = JSON.parse(line.slice(5).trim());
+          if (d.kind === 'model_fallback') { window.notifyFallback?.(d.message); continue; }
           if (d.text) {
             accumulated += d.text;
             bodyEl.innerHTML = '<div class="md-body">' + formatMarkdown(accumulated) + '</div>';

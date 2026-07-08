@@ -71,7 +71,7 @@ async function stSSE(url, { onEvent, onDone, onError, method = 'POST', body = nu
       buf = lines.pop();
       for (const line of lines) {
         if (line.startsWith('data: ')) {
-          try { onEvent?.(JSON.parse(line.slice(6))); }
+          try { const _d = JSON.parse(line.slice(6)); if (_d.kind === 'model_fallback' || _d.event === 'model_fallback') { window.notifyFallback?.(_d.message); } else onEvent?.(_d); }
           catch { onEvent?.({ raw: line.slice(6) }); }
         }
       }

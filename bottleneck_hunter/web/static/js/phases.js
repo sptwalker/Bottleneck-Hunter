@@ -1988,6 +1988,7 @@ async function fetchHotScan(force = false) {
       body: JSON.stringify({ provider, model, top_n: 8 }),
     });
     const data = await resp.json();
+    (data.fallback_notice || []).forEach(n => window.notifyFallback?.(n.message));
     _hotScanCache = data.recommendations || [];
     _hotScanTime = Date.now();
     renderHotModal(_hotScanCache);

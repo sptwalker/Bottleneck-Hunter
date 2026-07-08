@@ -1437,6 +1437,7 @@ async function triggerUziAnalysis(entry, analysisType) {
         if (line.startsWith('data: ')) {
           try {
             const data = JSON.parse(line.slice(6));
+          if (data.kind === 'model_fallback' || data.event === 'model_fallback') { window.notifyFallback?.(data.message); continue; }
             handleUziEvent(data);
           } catch {}
         }
@@ -1985,6 +1986,7 @@ async function _doRefreshData(opts = {}) {
         if (!line.startsWith('data:')) continue;
         try {
           const d = JSON.parse(line.substring(5));
+          if (d.kind === 'model_fallback' || d.event === 'model_fallback') { window.notifyFallback?.(d.message); continue; }
           if (d.message) _updateRefreshStatus(d.message);
         } catch (_) {}
       }
@@ -2037,6 +2039,7 @@ async function _doRefreshIntel(opts = {}) {
         if (!line.startsWith('data:')) continue;
         try {
           const d = JSON.parse(line.substring(5));
+          if (d.kind === 'model_fallback' || d.event === 'model_fallback') { window.notifyFallback?.(d.message); continue; }
           if (d.message) _updateRefreshStatus(d.message);
           if (d.completed != null && d.total) {
             _updateRefreshProgress(d.completed, d.total);
@@ -2083,6 +2086,7 @@ async function _doRefreshStrategy(opts = {}) {
         if (!line.startsWith('data:')) continue;
         try {
           const d = JSON.parse(line.substring(5));
+          if (d.kind === 'model_fallback' || d.event === 'model_fallback') { window.notifyFallback?.(d.message); continue; }
           if (d.message) _updateRefreshStatus(d.message);
           if (d.completed != null && d.total) {
             _updateRefreshProgress(d.completed, d.total);

@@ -169,6 +169,7 @@ def create_llm(
     api_key: str | None = None,
     base_url: str | None = None,
     user_id: str = "",
+    with_fallback: bool = True,
     **kwargs,
 ) -> BaseChatModel:
     """Create a chat LLM instance for the given provider and model.
@@ -179,7 +180,31 @@ def create_llm(
         api_key: 用户级 API KEY（优先级高于 .env 全局 KEY）
         base_url: 显式端点（最高优先级）；否则经 resolve_provider_base_url 解析
         user_id: 传入则优先用该用户的 provider_configs 覆盖
+        with_fallback: True(默认) 则包一层 FallbackChatModel（调用失败自动换备选模型并提示）。
+            测试/自检类调用（要测这一个具体模型）应传 False。
     """
+    llm = _create_raw_llm(provider, model, api_key=api_key, base_url=base_url, user_id=user_id, **kwargs)
+    if not with_fallback:
+        return llm
+
+    from bottleneck_hunter.llm_clients.fallback import FallbackChatModel, build_fallback_candidates
+    resolved_model = model or resolve_provider_model(provider, user_id)
+    temperature = kwargs.get("temperature", 0.3)
+    backups = build_fallback_candidates(provider, resolved_model, user_id, temperature)
+    if not backups:
+        return llm  # 无可用备选 → 不套壳，保持原样
+    return FallbackChatModel(candidates=[(llm, provider.lower().strip(), resolved_model), *backups])
+
+
+def _create_raw_llm(
+    provider: str,
+    model: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    user_id: str = "",
+    **kwargs,
+) -> BaseChatModel:
+    """构建单个裸 LLM 实例（不含自动替换包装）。"""
     provider = provider.lower().strip()
     # Key 优先级：显式传入 > 统一 provider 缓存（含迁移来的原内置）> env 兜底（CLI 无 UI 时）。
     # 缓存优先于 env，保证在 UI 里改 Key 后立即生效、不被旧的 .env 值盖住。
@@ -239,10 +264,14 @@ def get_models_for_role(
     role_key: str,
     user_id: str = "",
     temperature: float = 0.3,
+    with_fallback: bool = False,
 ) -> list[tuple[BaseChatModel, str, str]]:
     """统一接口: 返回该角色配置的所有模型实例列表。
 
     优先级: 数据库 ai_role_config → DC_MODEL_* 环境变量 → 角色注册表默认值 → fallback 链
+
+    with_fallback: 默认 False —— 多模型 fan-out 角色（投委会/圆桌/瓶颈交叉/L1）沿用「某成员失败即丢弃」
+        语义并保持 provider 多样性，不做跨 provider 自动替换。单模型位（get_llm_for_position）传 True。
 
     Returns:
         list of (llm_instance, provider_id, model_name)
@@ -253,7 +282,7 @@ def get_models_for_role(
         results = []
         for cfg in configs:
             try:
-                llm = create_llm(cfg["provider"], cfg["model"], temperature=temperature)
+                llm = create_llm(cfg["provider"], cfg["model"], temperature=temperature, with_fallback=with_fallback)
                 results.append((llm, cfg["provider"], cfg["model"]))
             except Exception as e:
                 logger.warning("create_llm 失败 %s/%s: %s", cfg["provider"], cfg["model"], e)
@@ -265,7 +294,7 @@ def get_models_for_role(
     if env_val and ":" in env_val:
         p, m = env_val.split(":", 1)
         try:
-            return [(create_llm(p, m, temperature=temperature), p, m)]
+            return [(create_llm(p, m, temperature=temperature, with_fallback=with_fallback), p, m)]
         except Exception:
             pass
 
@@ -279,7 +308,7 @@ def get_models_for_role(
                 model = role_def.default_model or resolve_provider_model(role_def.default_provider)
                 if model:
                     try:
-                        return [(create_llm(role_def.default_provider, model, temperature=temperature),
+                        return [(create_llm(role_def.default_provider, model, temperature=temperature, with_fallback=with_fallback),
                                  role_def.default_provider, model)]
                     except Exception:
                         pass
@@ -293,7 +322,7 @@ def get_models_for_role(
             if not model:
                 continue
             try:
-                return [(create_llm(provider, model, temperature=temperature), provider, model)]
+                return [(create_llm(provider, model, temperature=temperature, with_fallback=with_fallback), provider, model)]
             except Exception:
                 continue
 
@@ -304,16 +333,19 @@ def get_llm_for_position(
     position: str | None = None,
     provider_hint: str | None = None,
     temperature: float = 0.3,
+    with_fallback: bool = True,
 ) -> tuple[BaseChatModel | None, str, str]:
     """统一的「按 position 获取 LLM」入口（向后兼容）。
 
     委托给 get_models_for_role() 取第一个结果。
     provider_hint 作为旧代码的兼容路径保留。
+    with_fallback: 默认 True，单模型位获得调用失败自动替换；自管重试链的调用方
+        （如 committee._build_llm_chain）传 False 以拿到裸模型。
     返回: (llm_instance, provider_id, model_name) 或 (None, '', '')
     """
     try:
         if position:
-            results = get_models_for_role(position, temperature=temperature)
+            results = get_models_for_role(position, temperature=temperature, with_fallback=with_fallback)
             if results:
                 return results[0]
 
@@ -322,13 +354,13 @@ def get_llm_for_position(
             if env_key and os.getenv(env_key):
                 model = resolve_provider_model(provider_hint)
                 if model:
-                    return create_llm(provider_hint, model, temperature=temperature), provider_hint, model
+                    return create_llm(provider_hint, model, temperature=temperature, with_fallback=with_fallback), provider_hint, model
 
         for provider, key_env in _FALLBACK_CHAIN:
             if os.getenv(key_env):
                 model = resolve_provider_model(provider)
                 if model:
-                    return create_llm(provider, model, temperature=temperature), provider, model
+                    return create_llm(provider, model, temperature=temperature, with_fallback=with_fallback), provider, model
     except Exception as e:
         logger.warning("get_llm_for_position 失败 (position=%s): %s", position, e)
     return None, "", ""

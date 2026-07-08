@@ -65,7 +65,15 @@ def _budget():
 
 
 def _sse_response(request: Request, gen_coro):
+    from bottleneck_hunter.llm_clients.fallback import begin_notices, drain_notices
+
     async def event_generator():
+        begin_notices()
+
+        def _flush():
+            for n in drain_notices():
+                yield {"event": "model_fallback", "data": json.dumps(n, ensure_ascii=False)}
+
         async for evt in gen_coro:
             if await request.is_disconnected():
                 break
@@ -73,6 +81,10 @@ def _sse_response(request: Request, gen_coro):
                 "event": evt.get("event", "progress"),
                 "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
             }
+            for e in _flush():
+                yield e
+        for e in _flush():
+            yield e
     return EventSourceResponse(event_generator())
 
 

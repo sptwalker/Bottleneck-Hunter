@@ -40,7 +40,12 @@ export async function readSSEStream(url, body, { onEvent, onTick, onError, signa
             try {
               const data = JSON.parse(line.slice(5).trim());
               data._sseEvent = sseEvent;
-              if (onEvent) onEvent(data);
+              // 模型自动替换提示：中心拦截，覆盖所有 readSSEStream 消费方
+              if (sseEvent === 'model_fallback' || data.kind === 'model_fallback') {
+                window.notifyFallback?.(data.message);
+              } else if (onEvent) {
+                onEvent(data);
+              }
             } catch (e) { console.warn(`[${label}] JSON解析失败:`, e.message, line.slice(0, 200)); }
             sseEvent = '';
           } else if (line.trim() === '') {
@@ -51,7 +56,8 @@ export async function readSSEStream(url, body, { onEvent, onTick, onError, signa
       if (buffer.trim().startsWith('data:')) {
         try {
           const data = JSON.parse(buffer.trim().slice(5).trim());
-          if (onEvent) onEvent(data);
+          if (data.kind === 'model_fallback') window.notifyFallback?.(data.message);
+          else if (onEvent) onEvent(data);
         } catch (e) { console.warn(`[${label}] 尾部JSON解析失败:`, e.message); }
       }
       return;
