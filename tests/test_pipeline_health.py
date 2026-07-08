@@ -95,13 +95,29 @@ class TestStaleTickers:
         stale = store.get_stale_tickers(max_age_hours=48)
         assert len(stale) == 0
 
-    def test_old_snapshot_is_stale(self, store):
-        """老快照的 ticker 应过期"""
+    def test_recent_fetch_with_old_bar_not_stale(self, store):
+        """刚抓取过(fetched_at=now)但 K线交易日很旧(如回补的老 bar)→ 不应误报未更新。
+
+        这是用户报的 bug：一键刷新过，但因判据误用 ms.date（交易日）而非 fetched_at 恒报 stale。
+        """
         _add_ticker(store, "AAPL")
-        old_date = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
+        old_bar = (datetime.now(timezone.utc) - timedelta(days=180)).strftime("%Y-%m-%d")
         store.save_snapshots([{
-            "ticker": "AAPL", "date": old_date,
+            "ticker": "AAPL", "date": old_bar,   # 交易日 6 个月前
             "close": 150.0, "volume": 1000,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),  # 但刚抓取
+        }])
+        stale = store.get_stale_tickers(max_age_hours=48)
+        assert len(stale) == 0, "刚刷新过就不该报未更新"
+
+    def test_old_snapshot_is_stale(self, store):
+        """超过阈值未抓取的 ticker 应过期（按 fetched_at 判定）"""
+        _add_ticker(store, "AAPL")
+        old_fetch = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+        store.save_snapshots([{
+            "ticker": "AAPL", "date": "2026-01-01",
+            "close": 150.0, "volume": 1000,
+            "fetched_at": old_fetch,   # 5 天前抓取
         }])
         stale = store.get_stale_tickers(max_age_hours=48)
         assert len(stale) == 1

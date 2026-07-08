@@ -237,19 +237,23 @@ class _BudgetMixin:
 
 
     def get_stale_tickers(self, max_age_hours: int = 48) -> list[dict]:
-        """返回快照数据超过 max_age_hours 的活跃 ticker 列表。"""
+        """返回超过 max_age_hours 未刷新的活跃 ticker 列表。
+
+        判据用 fetched_at（上次抓取时间），不是 ms.date（K线交易日）——后者在周末/节假日/
+        数据源回补旧 bar 时会合理地"旧"，导致刚一键刷新过仍误报"未更新"。
+        """
         conn = self._connect()
         try:
             q, p = self._user_filter(
                 """
                 SELECT w.ticker, w.company_name, w.market,
-                       MAX(ms.date) AS last_date
+                       MAX(ms.fetched_at) AS last_fetched
                 FROM watchlist w
                 LEFT JOIN market_snapshots ms ON w.ticker = ms.ticker
                 WHERE w.is_active = 1
                 GROUP BY w.ticker
-                HAVING last_date IS NULL
-                   OR last_date < date('now', ?)
+                HAVING last_fetched IS NULL
+                   OR datetime(last_fetched) < datetime('now', ?)
                 """,
                 (f"-{max_age_hours} hours",),
                 table="w",
