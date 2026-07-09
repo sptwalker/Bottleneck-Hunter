@@ -465,14 +465,23 @@ async def hot_scan(req: HotScanRequest, user: dict = Depends(get_current_user)):
 @router.get("/update-history")
 async def update_history(user: dict = Depends(get_current_user)):
     """系统更新历史（最近 10 条，通俗版）。数据源：仓库根目录 UPDATE_HISTORY.json。"""
-    path = Path.cwd() / "UPDATE_HISTORY.json"
-    try:
-        items = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-        if not isinstance(items, list):
-            items = []
-    except Exception as e:
-        logger.warning("读取更新历史失败: %s", e)
-        items = []
+    # 稳健定位：优先仓库根（相对本文件，parents[2] = 仓库根），回退 cwd。
+    # 勿只用 Path.cwd() —— 服务器工作目录随启动方式变化会读不到已提交的文件。
+    candidates = [
+        Path(__file__).resolve().parents[2] / "UPDATE_HISTORY.json",
+        Path.cwd() / "UPDATE_HISTORY.json",
+    ]
+    items = []
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed, list):
+                items = parsed
+                break
+        except Exception as e:
+            logger.warning("读取更新历史失败 (%s): %s", path, e)
     # 按日期倒序（容错：无 date 的排后），取前 10
     items.sort(key=lambda x: str(x.get("date", "")), reverse=True)
     return {"updates": items[:10]}
