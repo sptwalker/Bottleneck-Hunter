@@ -259,7 +259,8 @@ async def pipeline_health(user: dict = Depends(get_current_user)):
     """返回管道状态 + 过期 ticker 列表。"""
     store = _user_store(user)
     statuses = store.get_pipeline_statuses()
-    stale = store.get_stale_tickers(max_age_hours=48)
+    # 用户提示只算真有旧数据(>48h)的；刚添加/尚未抓取(NULL)的不算"超过48小时未更新"
+    stale = store.get_stale_tickers(max_age_hours=48, include_never_fetched=False)
     return {"pipelines": statuses, "stale_tickers": stale}
 
 

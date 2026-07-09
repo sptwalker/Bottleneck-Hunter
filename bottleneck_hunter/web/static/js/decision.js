@@ -1539,7 +1539,23 @@ function renderConsultSnapshot(snap) {
       + `<summary><span class="dc-snap-label">新闻</span> ${news.length} 条（点击展开/收起摘要）</summary>`
       + items + '</details>';
   }
-  el.innerHTML = (rows.join('') + newsHtml) || '<div class="dc-snap-row">（暂无数据快照）</div>';
+  // 顶部日期条：显示本次宏观信息的更新时间（快照采集时刻）
+  const dateBar = snap.ts
+    ? `<div class="dc-snap-datebar">📅 宏观信息更新于 ${escDC(_fmtSnapTs(snap.ts))}</div>`
+    : '';
+  const body = (rows.join('') + newsHtml) || '<div class="dc-snap-row">（暂无数据快照）</div>';
+  el.innerHTML = dateBar + body;
+}
+
+function _fmtSnapTs(ts) {
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts).slice(0, 10);
+    return d.toLocaleString('zh-CN', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+  } catch { return String(ts).slice(0, 10); }
 }
 
 function renderConsultLog(transcript) {

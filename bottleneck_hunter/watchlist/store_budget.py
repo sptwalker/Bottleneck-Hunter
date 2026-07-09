@@ -236,24 +236,29 @@ class _BudgetMixin:
             conn.close()
 
 
-    def get_stale_tickers(self, max_age_hours: int = 48) -> list[dict]:
+    def get_stale_tickers(self, max_age_hours: int = 48, include_never_fetched: bool = True) -> list[dict]:
         """返回超过 max_age_hours 未刷新的活跃 ticker 列表。
 
         判据用 fetched_at（上次抓取时间），不是 ms.date（K线交易日）——后者在周末/节假日/
         数据源回补旧 bar 时会合理地"旧"，导致刚一键刷新过仍误报"未更新"。
+
+        include_never_fetched：
+        - True（默认，供调度器兜底刷新）：包含从未抓取（last_fetched IS NULL）的标的，让它们被补抓。
+        - False（供"超过N小时未更新"用户提示）：只算真有旧数据(>N 小时)的；刚添加、尚未抓取的
+          标的 fetched_at 为 NULL，其数据"0 小时"而非"超过48小时"，不应被误报为陈旧。
         """
         conn = self._connect()
         try:
+            null_clause = "last_fetched IS NULL OR " if include_never_fetched else "last_fetched IS NOT NULL AND "
             q, p = self._user_filter(
-                """
+                f"""
                 SELECT w.ticker, w.company_name, w.market,
                        MAX(ms.fetched_at) AS last_fetched
                 FROM watchlist w
                 LEFT JOIN market_snapshots ms ON w.ticker = ms.ticker
                 WHERE w.is_active = 1
                 GROUP BY w.ticker
-                HAVING last_fetched IS NULL
-                   OR datetime(last_fetched) < datetime('now', ?)
+                HAVING {null_clause}datetime(last_fetched) < datetime('now', ?)
                 """,
                 (f"-{max_age_hours} hours",),
                 table="w",
