@@ -215,10 +215,10 @@ function renderProviders() {
             <span class="aic-provider-name">${escHtml(displayName)}</span>
             ${model ? `<span class="aic-provider-model">${escHtml(model)}</span>` : ''}
           </div>
-          <div class="aic-provider-actions-inline">
-            <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">编辑</button>
-            <button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-custom="1">删除</button>
-          </div>
+        </div>
+        <div class="aic-provider-actions-inline">
+          <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">编辑</button>
+          <button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-custom="1">删除</button>
         </div>
       </div>`;
     }).join('');
@@ -984,6 +984,7 @@ const DS_SERVES = {
   fmp: '财报/一致预期 · 深财务 · 新闻', finnhub: '财报 · 新闻', tushare: 'A股财报',
   alphavantage: '深财务 · 财报 · 新闻', tiingo: '新闻 · 深财务',
   polygon: '期权（需 Polygon 付费 Options 订阅，否则回退 yfinance）', custom: '自定义',
+  fred: '宏观经济数据（利率 · 通胀 · 失业率 · 美债）',
 };
 
 function renderPaidSources() {

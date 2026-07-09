@@ -102,10 +102,8 @@ async def get_roles(user: dict = Depends(get_current_user)):
 
 
 def _build_providers_list(user_id: str = "", include_unconfigured: bool = False) -> list[dict]:
-    """统一 provider 列表：唯一真源为 custom_providers 表（原内置已迁入）。
-
-    每个 provider 均可编辑/删除/测试，不再区分内置/自定义。
-    include_unconfigured 参数保留仅为兼容旧调用签名，现无实际分支（表中即为已配置）。
+    """统一 provider 列表：provider 定义（catalog）来自 custom_providers 表（全平台共享），
+    但「是否已配置 Key / key_hint」严格按**当前用户**判定（严格隔离，Key 从不全局）。
     """
     providers = []
     if _auth_store is None:
@@ -115,18 +113,28 @@ def _build_providers_list(user_id: str = "", include_unconfigured: bool = False)
     except Exception:
         return providers
 
+    # 当前用户自己的 Key 提示（provider -> key_hint）
+    user_hints: dict[str, str] = {}
+    if user_id:
+        try:
+            for k in _auth_store.get_user_api_keys(user_id):
+                user_hints[k["provider"]] = k.get("key_hint", "") or ""
+        except Exception:
+            pass
+
     for cp in rows:
         if cp.get("is_active") == 0:
             continue
         pid = cp["provider_id"]
+        has_key = pid in user_hints
         providers.append({
             "id": pid,
             "name": cp.get("display_name") or pid,
-            "configured": True,
+            "configured": has_key,               # 按当前用户
             "is_builtin": False,
             "default_model": cp.get("default_model", "") or "",
             "base_url": cp.get("base_url", "") or "",
-            "key_hint": cp.get("api_key_hint", "") or "",
+            "key_hint": user_hints.get(pid, ""),  # 当前用户自己的 hint
         })
     return providers
 

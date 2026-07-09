@@ -99,6 +99,14 @@
   color: var(--muted);
 }
 
+/* aic-hint 基础样式：无此规则时裸用（如数据源卡「服务能力」/官网链接）会继承过大字号并溢出卡片 */
+.aic-hint {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 /* ── Section 1: Provider Management ──────────────────────── */
 
 .aic-provider-grid {
@@ -140,22 +148,22 @@
 .aic-provider-name {
   font-weight: 600;
   font-size: 13px;
-  min-width: 80px;
-  flex-shrink: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .aic-provider-info {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 80px;
-  flex-shrink: 0;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .aic-provider-actions-inline {
   display: flex;
   gap: 4px;
-  margin-left: auto;
+  justify-content: flex-end;
   flex-shrink: 0;
 }
 

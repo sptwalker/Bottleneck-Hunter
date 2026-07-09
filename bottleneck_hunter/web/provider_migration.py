@@ -109,9 +109,17 @@ def migrate_builtin_providers_to_custom(auth_store, wl_store, admin_user_id: str
         display = (global_cfg and global_cfg.get("display_name")) or _PROVIDER_DISPLAY.get(pid, pid)
 
         try:
-            auth_store.save_custom_provider(pid, display, base_url, encrypted, hint, model)
+            # 严格隔离：custom_providers 只存定义（不含 Key）；Key 落到 admin 用户级存储
+            auth_store.save_custom_provider(pid, display, base_url, "", "", model)
+            if admin_user_id and encrypted:
+                # encrypted 已是密文（来自 admin 加密表或本次 encrypt(env)），直接落 admin 用户级
+                try:
+                    if not auth_store.get_user_api_key_encrypted(admin_user_id, pid):
+                        auth_store.save_user_api_key(admin_user_id, pid, encrypted, hint)
+                except Exception as e:
+                    logger.warning("迁移内置 provider Key 到 admin 用户级失败 (%s): %s", pid, e)
             migrated += 1
-            logger.info("已迁移内置 provider 至统一管理: %s", pid)
+            logger.info("已迁移内置 provider 至统一管理(定义, 无全局Key): %s", pid)
         except Exception as e:
             logger.warning("迁移内置 provider 失败 (%s): %s", pid, e)
             continue

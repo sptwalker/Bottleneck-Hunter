@@ -153,10 +153,11 @@ async def macro_consult_ask(request: Request, req: MacroConsultAsk,
 
 @router.get("/macro/consult/history")
 async def macro_consult_history(market: str = "us_stock", user: dict = Depends(get_current_user)):
-    """取该市场的滚动会话（含完整 transcript）。"""
-    from bottleneck_hunter.watchlist.macro_consultation import _load_session
+    """取该市场的滚动会话（含完整 transcript）。stale=新闻库已有更新新闻，前端据此决定是否重开生成。"""
+    from bottleneck_hunter.watchlist.macro_consultation import _load_session, snapshot_is_stale
     store = _user_store(user).for_market(market)
-    return {"session": _load_session(store, market)}
+    session = _load_session(store, market)
+    return {"session": session, "stale": snapshot_is_stale(store, market, session)}
 
 
 # ─────────────────────────────────────────────────────────

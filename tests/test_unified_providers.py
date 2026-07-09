@@ -21,15 +21,18 @@ def stores(tmp_path, monkeypatch):
 
 
 def test_migrate_env_key_creates_row(stores, monkeypatch):
-    """有 env Key 的内置 provider 应迁入 custom_providers（含种子 base_url/模型/显示名）。"""
+    """严格隔离：有 env Key 的内置 provider 迁入 custom_providers（仅定义，无全局Key）；
+    Key 落到 admin 用户级存储。"""
     auth, wl = stores
     monkeypatch.setenv("ZHIPU_API_KEY", "sk-test-glm-123456")
-    # 确保其它内置 provider 的 env 干净，只迁移 glm
     for env_var in F.PROVIDER_KEY_MAP.values():
         if env_var != "ZHIPU_API_KEY":
             monkeypatch.delenv(env_var, raising=False)
 
-    migrated = migrate_builtin_providers_to_custom(auth, wl)
+    auth.create_user("admin", password="x", role="admin")
+    admin_id = auth.get_user_by_username("admin").id
+
+    migrated = migrate_builtin_providers_to_custom(auth, wl, admin_user_id=admin_id)
     assert migrated == 1
 
     row = auth.get_custom_provider("glm")
@@ -37,11 +40,14 @@ def test_migrate_env_key_creates_row(stores, monkeypatch):
     assert row["display_name"] == "GLM (智谱)"
     assert row["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
     assert row["default_model"] == F.PROVIDER_MODELS["glm"]
-    assert row["api_key_encrypted"]  # Key 已加密入库
+    # 严格隔离：custom_providers 不再持有 Key
+    assert not row["api_key_encrypted"]
 
-    # 加密 Key 可解密回原文
+    # Key 落到 admin 用户级，且可解密回原文
     from bottleneck_hunter.auth.crypto import decrypt
-    assert decrypt(row["api_key_encrypted"]) == "sk-test-glm-123456"
+    enc = auth.get_user_api_key_encrypted(admin_id, "glm")
+    assert enc
+    assert decrypt(enc) == "sk-test-glm-123456"
 
 
 def test_migrate_idempotent(stores, monkeypatch):
@@ -107,35 +113,55 @@ def test_deleted_provider_not_resurrected(stores, monkeypatch, tmp_path):
     assert auth.get_custom_provider("minimax") is None
 
 
-def test_build_providers_list_unified(stores):
-    """_build_providers_list 只从 custom_providers 出数据，全部 configured=True。"""
+def test_build_providers_list_per_user(stores):
+    """_build_providers_list：定义来自 custom_providers（共享），但 configured 严格按当前用户。"""
     from bottleneck_hunter.web import ai_config_api as aic
+    from bottleneck_hunter.auth.crypto import encrypt, make_hint
 
     auth, _wl = stores
     auth.save_custom_provider("myglm", "我的 GLM", "https://open.bigmodel.cn/api/paas/v4",
                               "", "", "glm-4-flash")
+    auth.create_user("uA", password="x", role="user")
+    auth.create_user("uB", password="x", role="user")
+    a = auth.get_user_by_username("uA").id
+    b = auth.get_user_by_username("uB").id
+    # 只有 A 配了 myglm 的 Key
+    auth.save_user_api_key(a, "myglm", encrypt("sk-a"), make_hint("sk-a"))
+
     aic.set_auth_store(auth)
     try:
-        lst = aic._build_providers_list()
-        assert [p["id"] for p in lst] == ["myglm"]
-        p = lst[0]
-        assert p["configured"] is True
-        assert p["name"] == "我的 GLM"
-        assert p["default_model"] == "glm-4-flash"
+        la = {p["id"]: p for p in aic._build_providers_list(a)}
+        lb = {p["id"]: p for p in aic._build_providers_list(b)}
+        assert list(la) == ["myglm"] and list(lb) == ["myglm"]
+        # 定义共享，configured 按用户
+        assert la["myglm"]["configured"] is True
+        assert la["myglm"]["name"] == "我的 GLM"
+        assert la["myglm"]["default_model"] == "glm-4-flash"
+        assert la["myglm"]["key_hint"]                 # A 有自己的 hint
+        assert lb["myglm"]["configured"] is False      # B 没配 → 未配置
+        assert lb["myglm"]["key_hint"] == ""           # B 看不到 A 的 hint
     finally:
         aic.set_auth_store(None)
 
 
-def test_create_llm_key_priority_cache_over_env(monkeypatch):
-    """统一后 create_llm 的 Key 优先级：显式参数 > 统一缓存 > env。"""
+def test_create_llm_strict_isolation(monkeypatch):
+    """严格隔离：显式 api_key 仍最优先；无用户 KEY 时不再回退 env/缓存，而是抛错。"""
+    from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
+    from bottleneck_hunter.auth import current_user as CU
+    # env 全局 KEY 存在也不应被使用
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-old")
-    F.register_custom_provider("deepseek", "https://api.deepseek.com", "sk-cache-new", "deepseek-chat")
+    # 注册 provider 元数据（不再含 KEY）
+    F.register_custom_provider("deepseek", "https://api.deepseek.com", default_model="deepseek-chat")
+    monkeypatch.setattr(F, "_resolve_user_llm_key", lambda p, u: None)  # 用户无 KEY
+    tok = CU.set_current_user("userA")
     try:
-        llm = F.create_llm("deepseek", "deepseek-chat")
-        # ChatOpenAI 的 api_key 为 SecretStr
-        assert llm.openai_api_key.get_secret_value() == "sk-cache-new"
-        # 显式传入最优先
-        llm2 = F.create_llm("deepseek", "deepseek-chat", api_key="sk-explicit")
-        assert llm2.openai_api_key.get_secret_value() == "sk-explicit"
+        # 无用户 KEY → 严格失败（证明不读 env、不读全局缓存）
+        with pytest.raises(MissingUserKeyError):
+            F.create_llm("deepseek", "deepseek-chat", with_fallback=False)
+        # 显式传入最优先，正常构建
+        llm = F.create_llm("deepseek", "deepseek-chat", api_key="sk-explicit", with_fallback=False)
+        assert llm.openai_api_key.get_secret_value() == "sk-explicit"
     finally:
+        CU.reset_current_user(tok)
         F.unregister_custom_provider("deepseek")
+

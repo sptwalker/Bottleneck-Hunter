@@ -1574,9 +1574,18 @@ async def run_full_refresh(
     budget: BudgetTracker | None = None,
     market: str = "us_stock",
 ) -> AsyncGenerator[dict, None]:
-    """全量刷新：重新生成 L1 + L2 + L3 + L4 + 投委会"""
+    """全量刷新：重新抓取市场新闻 + 重新生成 L1 + L2 + L3 + L4 + 投委会"""
     store = store.for_market(market)
     yield _sse("refresh_start", message="开始全量决策刷新...")
+
+    # 先刷新市场新闻源（拉新 RSS 落库），供 L1 与宏观咨询读到最新新闻
+    try:
+        from bottleneck_hunter.watchlist.news_pipeline import refresh_market_news
+        llm, _p, _m = get_llm_for_position(position="L1_macro")
+        n = await refresh_market_news(store, market, llm=llm, budget=budget)
+        yield _sse("refresh_progress", step="market_news", message=f"市场新闻已更新（{n} 条）")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("全量刷新：市场新闻刷新失败: %s", e)
 
     async for evt in run_macro_strategy(store, budget, market=market):
         yield evt

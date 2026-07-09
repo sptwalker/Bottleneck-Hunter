@@ -105,6 +105,22 @@ def _probe_polygon(key: str, base_url: str = "") -> tuple[bool, str]:
     return False, _clip(str(data.get("error") or "响应异常"))
 
 
+def _probe_fred(key: str, base_url: str = "") -> tuple[bool, str]:
+    # FRED（美联储经济数据）：拉一个已知序列（联邦基金利率 FEDFUNDS）最近 1 条观测验证 Key。
+    r = requests.get(
+        "https://api.stlouisfed.org/fred/series/observations"
+        f"?series_id=FEDFUNDS&api_key={key}&file_type=json&sort_order=desc&limit=1",
+        timeout=_TIMEOUT, headers=_UA)
+    if r.status_code == 400:
+        return False, "认证失败：API Key 无效（FRED 需 32 位小写字母数字 Key）"
+    r.raise_for_status()
+    data = r.json()
+    obs = data.get("observations") or []
+    if obs and obs[0].get("value") not in (None, "", "."):
+        return True, f"连通成功（联邦基金利率 {obs[0]['value']}% @ {obs[0].get('date','')}）"
+    return False, _clip(str(data.get("error_message") or "响应异常"))
+
+
 def _probe_custom(key: str, base_url: str = "") -> tuple[bool, str]:
     """自定义源：GET 用户填写的探测 URL（{KEY} 占位符替换为实际 Key）。"""
     if not base_url:
@@ -139,6 +155,10 @@ DATA_SOURCE_CATALOG: list[dict] = [
     {"id": "polygon", "name": "Polygon.io", "env": "POLYGON_API_KEY",
      "site": "https://polygon.io/docs",
      "note": "美股行情/期权/参考数据", "testable": True, "probe": _probe_polygon},
+    {"id": "fred", "name": "FRED（美联储经济数据）", "env": "FRED_API_KEY",
+     "site": "https://fred.stlouisfed.org/docs/api/api_key.html",
+     "note": "宏观经济数据：联邦基金利率/CPI通胀/失业率/10年美债（免费，供 L1 宏观决策）",
+     "testable": True, "probe": _probe_fred},
     {"id": "custom", "name": "自定义数据源", "env": "",
      "site": "", "note": "填写完整探测 URL（用 {KEY} 作 API Key 占位符）+ API Key",
      "testable": True, "probe": _probe_custom},
@@ -176,24 +196,22 @@ def probe_source(source_id: str, api_key: str, base_url: str = "") -> tuple[bool
 
 
 def resolve_data_source_key(source_id: str, user_id: str = "") -> str:
-    """供 fetcher 读取数据源 Key。
+    """供 fetcher 读取数据源 Key —— 严格按用户隔离。
 
-    - 有 user_id（用户请求）：只认该用户自己配置的 key，无则回退 env。
-      **不借用他人 key** —— 否则会造成跨用户额度泄漏。
-    - 无 user_id（后台全局采集，无 user 上下文）：取任一用户配置的 key，仍无则回退 env。
+    只认「当前上下文用户」（或显式 user_id）自己配置的 key；查不到即返回空串
+    （该数据源对该用户不可用，上层走免费源/缺数据）。
+    **绝不**借用他人 key、**绝不**读 os.environ 全局 key。
     """
+    from bottleneck_hunter.auth.current_user import get_current_user_id
+    uid = user_id or get_current_user_id()
+    if not uid:
+        return ""
     try:
         from bottleneck_hunter.auth.crypto import decrypt
         from bottleneck_hunter.auth.store import AuthStore
-        store = AuthStore()
-        if user_id:
-            enc = store.get_data_source_key_encrypted(user_id, source_id)
-        else:
-            enc = store.any_data_source_key_encrypted(source_id)  # 仅后台全局采集
+        enc = AuthStore().get_data_source_key_encrypted(uid, source_id)
         if enc:
             return decrypt(enc)
     except Exception as e:  # noqa: BLE001
         logger.debug("resolve_data_source_key(%s) DB 读取失败: %s", source_id, e)
-    meta = _CATALOG_BY_ID.get(source_id)
-    env_var = (meta or {}).get("env", "")
-    return os.environ.get(env_var, "") if env_var else ""
+    return ""

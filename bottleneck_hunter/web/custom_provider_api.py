@@ -58,23 +58,28 @@ async def list_providers(user: dict = Depends(get_current_user)):
 
 @router.post("")
 async def create_provider(req: CustomProviderRequest, user: dict = Depends(require_admin)):
-    """添加 provider（OpenAI 兼容或原内置同构）。仅管理员——custom_providers 为全平台共享配置。"""
+    """添加 provider（OpenAI 兼容或原内置同构）。仅管理员——provider 定义（base_url/模型）全平台共享。
+
+    严格隔离：API Key **不再**全局存储，而是写入创建者自己的用户级加密表；其他用户
+    需各自在配置中心为该 provider 填入自己的 Key 才能使用。
+    """
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
 
     pid = req.provider_id.lower().strip()
     if not _PROVIDER_ID_RE.match(pid):
         raise HTTPException(status_code=400, detail="provider_id 格式无效（小写字母开头，仅含字母/数字/下划线/连字符）")
 
-    encrypted = encrypt(req.api_key) if req.api_key else ""
-    hint = make_hint(req.api_key) if req.api_key else ""
-
     store = _store()
+    # provider 定义共享，但不含密钥（encrypted/hint 恒为空）
     record_id = store.save_custom_provider(
-        pid, req.display_name, req.base_url, encrypted, hint, req.default_model,
+        pid, req.display_name, req.base_url, "", "", req.default_model,
     )
+    # 密钥写入创建者的用户级存储
+    uid = user.get("sub", "")
+    if req.api_key and uid:
+        store.save_user_api_key(uid, pid, encrypt(req.api_key), make_hint(req.api_key))
 
-    api_key_plain = req.api_key if req.api_key else ""
-    register_custom_provider(pid, req.base_url, api_key_plain, req.default_model)
+    register_custom_provider(pid, req.base_url, default_model=req.default_model)
 
     logger.info("自定义 provider 已创建: %s (%s)", pid, req.base_url)
     return {"ok": True, "id": record_id, "provider_id": pid}
@@ -82,7 +87,10 @@ async def create_provider(req: CustomProviderRequest, user: dict = Depends(requi
 
 @router.put("/{provider_id}")
 async def update_provider(provider_id: str, req: CustomProviderRequest, user: dict = Depends(require_admin)):
-    """更新自定义 provider。仅管理员——base_url 可覆盖，普通用户改动会劫持全平台 LLM 流量。"""
+    """更新自定义 provider。仅管理员——base_url 可覆盖，普通用户改动会劫持全平台 LLM 流量。
+
+    严格隔离：若传了新 api_key，仅更新到当前管理员自己的用户级存储，不落全局。
+    """
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
 
     store = _store()
@@ -90,26 +98,15 @@ async def update_provider(provider_id: str, req: CustomProviderRequest, user: di
     if not existing:
         raise HTTPException(status_code=404, detail="未找到该自定义 provider")
 
-    encrypted = existing.get("api_key_encrypted", "")
-    hint = existing.get("api_key_hint", "")
-    api_key_plain = ""
-
-    if req.api_key:
-        encrypted = encrypt(req.api_key)
-        hint = make_hint(req.api_key)
-        api_key_plain = req.api_key
-    elif encrypted:
-        from bottleneck_hunter.auth.crypto import decrypt
-        try:
-            api_key_plain = decrypt(encrypted)
-        except Exception:
-            api_key_plain = ""
-
+    # provider 定义共享，密钥不落全局
     store.save_custom_provider(
-        provider_id, req.display_name, req.base_url, encrypted, hint, req.default_model,
+        provider_id, req.display_name, req.base_url, "", "", req.default_model,
     )
+    uid = user.get("sub", "")
+    if req.api_key and uid:
+        store.save_user_api_key(uid, provider_id, encrypt(req.api_key), make_hint(req.api_key))
 
-    register_custom_provider(provider_id, req.base_url, api_key_plain, req.default_model)
+    register_custom_provider(provider_id, req.base_url, default_model=req.default_model)
 
     logger.info("自定义 provider 已更新: %s", provider_id)
     return {"ok": True, "provider_id": provider_id}
@@ -179,10 +176,16 @@ async def test_provider(provider_id: str, user: dict = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="未找到该自定义 provider")
 
     try:
+        # 用当前用户自己的 Key 测试（严格隔离，不用全局）
+        from bottleneck_hunter.web.user_api import resolve_user_api_key
+        uid = user.get("sub", "")
+        user_key = resolve_user_api_key(uid, provider_id) if uid else None
+        if not user_key:
+            return {"ok": False, "provider_id": provider_id, "error": "你尚未为该 provider 配置 API Key"}
         llm = create_llm(
             provider_id,
             custom["default_model"],
-            api_key=custom.get("api_key"),
+            api_key=user_key,
             with_fallback=False,
         )
         await asyncio.wait_for(

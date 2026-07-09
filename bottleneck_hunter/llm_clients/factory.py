@@ -3,7 +3,9 @@
 Supports: openai, anthropic, deepseek, google, qwen, glm, minimax, openrouter, siliconflow, agnes, kimi
 以及用户自定义的 OpenAI 兼容端点。
 
-Per-user API KEY: 传入 api_key 参数即可覆盖 .env 中的全局 KEY。
+严格按用户隔离：API KEY 只从「当前上下文用户」的加密存储解析，无任何全局兜底
+（不读 .env / os.environ，不借用其他用户的 KEY）。拿不到用户自己的 KEY 即抛
+MissingUserKeyError。仅 KEYLESS 白名单（本地 ollama 等）无需 KEY。
 """
 
 from __future__ import annotations
@@ -14,6 +16,18 @@ import os
 from langchain_core.language_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
+
+
+class MissingUserKeyError(RuntimeError):
+    """当前用户未配置该 provider 的 API KEY（严格隔离下不兜底）。"""
+
+    def __init__(self, provider: str):
+        self.provider = provider
+        super().__init__(f"未配置 {provider} 的 API Key，请先在配置中心填入你自己的 Key")
+
+
+# 本地/无需 KEY 的 provider 白名单：这些不强制要求用户 KEY
+KEYLESS_PROVIDERS = {"ollama"}
 
 # provider → 环境变量名映射，供外部查询
 PROVIDER_KEY_MAP: dict[str, str] = {
@@ -59,17 +73,21 @@ _BUILTIN_BASE_URLS: dict[str, str] = {
 }
 
 # ── 自定义 provider 运行时缓存 ──────────────────────────
+# 严格隔离：这里只缓存 base_url / default_model（非机密），绝不缓存 api_key。
+# api_key 一律走用户级加密存储 + 当前上下文用户解析。
 _CUSTOM_PROVIDERS: dict[str, dict] = {}
 
 
-def register_custom_provider(provider_id: str, base_url: str, api_key: str, default_model: str):
-    """注册一个自定义 OpenAI 兼容 provider 到运行时缓存。"""
+def register_custom_provider(provider_id: str, base_url: str, api_key: str = "", default_model: str = ""):
+    """注册自定义 provider 的元数据（base_url/default_model）到运行时缓存。
+
+    api_key 参数保留仅为向后兼容签名，但**不再被缓存**（严格隔离，禁止全局明文 KEY）。
+    """
     _CUSTOM_PROVIDERS[provider_id] = {
         "base_url": base_url,
-        "api_key": api_key,
         "default_model": default_model,
     }
-    logger.info("已注册自定义 provider: %s (%s)", provider_id, base_url)
+    logger.info("已注册自定义 provider 元数据: %s (%s)", provider_id, base_url)
 
 
 def unregister_custom_provider(provider_id: str):
@@ -155,12 +173,23 @@ def resolve_provider_base_url(provider: str, user_id: str = "") -> str | None:
     return _BUILTIN_BASE_URLS.get(provider)
 
 
-def _resolve_key(provider: str, api_key: str | None = None) -> str | None:
-    """解析 API KEY：优先用户传入 → 其次环境变量。"""
-    if api_key:
-        return api_key
-    env_var = PROVIDER_KEY_MAP.get(provider, "")
-    return os.getenv(env_var) if env_var else None
+def _resolve_user_llm_key(provider: str, user_id: str) -> str | None:
+    """解析某用户自己配置的 provider API KEY（加密表 → 解密），无则 None。严格：不读 env、不借他人。"""
+    if not user_id:
+        return None
+    try:
+        from bottleneck_hunter.web.user_api import resolve_user_api_key
+        return resolve_user_api_key(user_id, provider)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("解析用户 LLM KEY 失败 (%s/%s): %s", user_id[:8] if user_id else "", provider, e)
+        return None
+
+
+def _user_has_llm_key(provider: str, user_id: str) -> bool:
+    """当前用户是否配置了该 provider 的 KEY（KEYLESS provider 视为始终可用）。"""
+    if provider in KEYLESS_PROVIDERS:
+        return True
+    return bool(_resolve_user_llm_key(provider, user_id))
 
 
 def create_llm(
@@ -206,18 +235,20 @@ def _create_raw_llm(
 ) -> BaseChatModel:
     """构建单个裸 LLM 实例（不含自动替换包装）。"""
     provider = provider.lower().strip()
-    # Key 优先级：显式传入 > 统一 provider 缓存（含迁移来的原内置）> env 兜底（CLI 无 UI 时）。
-    # 缓存优先于 env，保证在 UI 里改 Key 后立即生效、不被旧的 .env 值盖住。
+    # 严格按用户隔离的 KEY 解析：显式传入（测试端点）> 当前上下文用户的加密 KEY。
+    # 绝不读 _CUSTOM_PROVIDERS 明文缓存、绝不读 os.getenv、绝不借他人 KEY。
+    from bottleneck_hunter.auth.current_user import get_current_user_id
     key = api_key
-    if not key:
-        custom = _CUSTOM_PROVIDERS.get(provider)
-        if custom and custom.get("api_key"):
-            key = custom["api_key"]
-    if not key:
-        key = _resolve_key(provider, None)
+    uid = user_id or get_current_user_id()
+    if not key and uid:
+        key = _resolve_user_llm_key(provider, uid)
     if not model:
         model = resolve_provider_model(provider, user_id)
     resolved_base = base_url or resolve_provider_base_url(provider, user_id)
+
+    # 无 KEY 且非 KEYLESS provider（如 ollama）→ 严格失败，不兜底
+    if not key and provider not in KEYLESS_PROVIDERS:
+        raise MissingUserKeyError(provider)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
@@ -276,53 +307,53 @@ def get_models_for_role(
     Returns:
         list of (llm_instance, provider_id, model_name)
     """
+    from bottleneck_hunter.auth.current_user import get_current_user_id
+    uid = user_id or get_current_user_id()
     # 优先级1: 数据库
-    configs = _load_role_configs_from_db(role_key, user_id)
+    configs = _load_role_configs_from_db(role_key, uid)
     if configs:
         results = []
         for cfg in configs:
             try:
-                llm = create_llm(cfg["provider"], cfg["model"], temperature=temperature, with_fallback=with_fallback)
+                llm = create_llm(cfg["provider"], cfg["model"], temperature=temperature, with_fallback=with_fallback, user_id=uid)
                 results.append((llm, cfg["provider"], cfg["model"]))
             except Exception as e:
                 logger.warning("create_llm 失败 %s/%s: %s", cfg["provider"], cfg["model"], e)
         if results:
             return results
 
-    # 优先级2: 环境变量
+    # 优先级2: 环境变量（仅选模型，KEY 仍需当前用户自己的）
     env_val = os.environ.get(f"DC_MODEL_{role_key.upper()}", "").strip()
     if env_val and ":" in env_val:
         p, m = env_val.split(":", 1)
         try:
-            return [(create_llm(p, m, temperature=temperature, with_fallback=with_fallback), p, m)]
+            return [(create_llm(p, m, temperature=temperature, with_fallback=with_fallback, user_id=uid), p, m)]
         except Exception:
             pass
 
-    # 优先级3: 角色注册表默认值（模型经解析器：role.default_model → provider_configs → 种子）
+    # 优先级3: 角色注册表默认值（当前用户须已配置该 provider 的 KEY）
     try:
         from bottleneck_hunter.llm_clients.role_registry import get_role
         role_def = get_role(role_key)
-        if role_def:
-            env_key = PROVIDER_KEY_MAP.get(role_def.default_provider, "")
-            if env_key and os.getenv(env_key):
-                model = role_def.default_model or resolve_provider_model(role_def.default_provider)
-                if model:
-                    try:
-                        return [(create_llm(role_def.default_provider, model, temperature=temperature, with_fallback=with_fallback),
-                                 role_def.default_provider, model)]
-                    except Exception:
-                        pass
+        if role_def and _user_has_llm_key(role_def.default_provider, uid):
+            model = role_def.default_model or resolve_provider_model(role_def.default_provider, uid)
+            if model:
+                try:
+                    return [(create_llm(role_def.default_provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
+                             role_def.default_provider, model)]
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    # 优先级4: fallback 链（模型经解析器，不写死）
-    for provider, key_env in _FALLBACK_CHAIN:
-        if os.getenv(key_env):
-            model = resolve_provider_model(provider)
+    # 优先级4: fallback 链（当前用户已配置 KEY 的 provider）
+    for provider, _key_env in _FALLBACK_CHAIN:
+        if _user_has_llm_key(provider, uid):
+            model = resolve_provider_model(provider, uid)
             if not model:
                 continue
             try:
-                return [(create_llm(provider, model, temperature=temperature, with_fallback=with_fallback), provider, model)]
+                return [(create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid), provider, model)]
             except Exception:
                 continue
 
@@ -344,23 +375,23 @@ def get_llm_for_position(
     返回: (llm_instance, provider_id, model_name) 或 (None, '', '')
     """
     try:
+        from bottleneck_hunter.auth.current_user import get_current_user_id
+        uid = get_current_user_id()
         if position:
-            results = get_models_for_role(position, temperature=temperature, with_fallback=with_fallback)
+            results = get_models_for_role(position, user_id=uid, temperature=temperature, with_fallback=with_fallback)
             if results:
                 return results[0]
 
-        if provider_hint:
-            env_key = PROVIDER_KEY_MAP.get(provider_hint, "")
-            if env_key and os.getenv(env_key):
-                model = resolve_provider_model(provider_hint)
-                if model:
-                    return create_llm(provider_hint, model, temperature=temperature, with_fallback=with_fallback), provider_hint, model
+        if provider_hint and _user_has_llm_key(provider_hint, uid):
+            model = resolve_provider_model(provider_hint, uid)
+            if model:
+                return create_llm(provider_hint, model, temperature=temperature, with_fallback=with_fallback, user_id=uid), provider_hint, model
 
-        for provider, key_env in _FALLBACK_CHAIN:
-            if os.getenv(key_env):
-                model = resolve_provider_model(provider)
+        for provider, _key_env in _FALLBACK_CHAIN:
+            if _user_has_llm_key(provider, uid):
+                model = resolve_provider_model(provider, uid)
                 if model:
-                    return create_llm(provider, model, temperature=temperature, with_fallback=with_fallback), provider, model
+                    return create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid), provider, model
     except Exception as e:
         logger.warning("get_llm_for_position 失败 (position=%s): %s", position, e)
     return None, "", ""

@@ -87,30 +87,35 @@ def test_probe_empty_key_rejected():
 
 
 def test_resolve_key_db_then_env(tmp_path, monkeypatch):
-    # DB 有 → 返回解密值
+    """严格隔离：只认该用户自己的 key；无 key 时返回空（不再回退 env）。"""
     import bottleneck_hunter.auth.store as store_mod
     from bottleneck_hunter.auth.crypto import encrypt
     s = _store(tmp_path)
     s.save_data_source_key("u1", "finnhub", "", encrypt("db-key"), make_hint("db-key"))
     monkeypatch.setattr(store_mod, "AuthStore", lambda *a, **k: s)
     assert cat.resolve_data_source_key("finnhub", "u1") == "db-key"
-    # DB 无 → 回退 env
+    # 即使 env 有全局 key，未配置的用户也拿不到（不读 env）
     monkeypatch.setenv("FINNHUB_API_KEY", "env-key")
-    assert cat.resolve_data_source_key("finnhub", "nouser") in ("env-key", "db-key")
+    assert cat.resolve_data_source_key("finnhub", "nouser") == ""
 
 
 def test_resolve_key_no_cross_user_borrow(tmp_path, monkeypatch):
-    """有 user_id 但没配 key 的用户，不得借用别人配的 key（跨用户额度泄漏回归）。"""
+    """严格隔离：没配 key 的用户不得借用别人的 key；无 user 上下文也不借用（后台亦严格）。"""
     import bottleneck_hunter.auth.store as store_mod
     from bottleneck_hunter.auth.crypto import encrypt
+    from bottleneck_hunter.auth import current_user as CU
     s = _store(tmp_path)
     s.save_data_source_key("owner", "finnhub", "", encrypt("owner-key"), make_hint("owner-key"))
     monkeypatch.setattr(store_mod, "AuthStore", lambda *a, **k: s)
     monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
-    # 别的用户没配 + 无 env → 拿到空，绝不借用 owner-key
+    # 别的用户没配 → 空，绝不借用 owner-key
     assert cat.resolve_data_source_key("finnhub", "stranger") == ""
-    # 后台采集（user_id 为空）→ 仍可借用任一 key
-    assert cat.resolve_data_source_key("finnhub", "") == "owner-key"
+    # 无 user 上下文（显式空 + ContextVar 空）→ 也不借用
+    tok = CU.set_current_user("")
+    try:
+        assert cat.resolve_data_source_key("finnhub", "") == ""
+    finally:
+        CU.reset_current_user(tok)
 
 
 def test_catalog_json_safe():

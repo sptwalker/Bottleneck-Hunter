@@ -44,6 +44,13 @@ def _create_manager() -> FetcherManager:
     except ImportError:
         logger.info("pytdx 未安装，跳过")
 
+    # A股可靠兜底：baostock (priority=3)，走独立服务器，不依赖东方财富接口
+    try:
+        from bottleneck_hunter.data_provider.fetchers.baostock_fetcher import BaostockFetcher
+        manager.register(BaostockFetcher())
+    except ImportError:
+        logger.info("baostock 未安装，跳过")
+
     # 美股：yfinance (priority=0) > finnhub (2)
     try:
         from bottleneck_hunter.data_provider.fetchers.yfinance_fetcher import YfinanceFetcher

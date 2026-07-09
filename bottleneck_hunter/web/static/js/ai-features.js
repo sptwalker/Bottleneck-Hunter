@@ -468,8 +468,9 @@ async function _fetchAiInterp(chartType, force) {
       }),
     });
     if (!resp.ok) {
-      const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
-      body.innerHTML = `<p style="color:var(--danger)">AI 解读请求失败 (${resp.status})</p>`;
+      let msg = `AI 解读请求失败 (${resp.status})`;
+      try { const j = await resp.json(); if (j.detail) msg = j.detail; } catch {}
+      body.innerHTML = `<p style="color:var(--danger)">${msg}</p>`;
       return;
     }
     body.innerHTML = '';

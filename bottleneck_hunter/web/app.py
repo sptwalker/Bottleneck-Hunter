@@ -94,21 +94,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).warning("内置 provider 统一迁移失败: %s", e)
 
-    # 加载全部 provider（含迁移来的原内置）到 factory 运行时缓存
+    # 加载全部 provider 的**元数据**（base_url/default_model）到 factory 运行时缓存。
+    # 严格隔离：绝不解密/缓存任何 api_key —— KEY 一律按当前用户从加密表实时解析。
     from bottleneck_hunter.llm_clients.factory import register_custom_provider
     for cp in _auth_store.list_custom_providers():
         detail = _auth_store.get_custom_provider(cp["provider_id"])
         if detail and detail.get("is_active"):
-            api_key = ""
-            if detail.get("api_key_encrypted"):
-                try:
-                    from bottleneck_hunter.auth.crypto import decrypt
-                    api_key = decrypt(detail["api_key_encrypted"])
-                except Exception:
-                    pass
             register_custom_provider(
-                cp["provider_id"], cp["base_url"], api_key, cp["default_model"],
+                cp["provider_id"], cp["base_url"], default_model=cp["default_model"],
             )
+
+    # 一次性迁移历史全局 KEY（.env + custom_providers 全局密钥）→ admin 用户级存储，然后清除全局。
+    try:
+        from bottleneck_hunter.web.key_isolation_migration import migrate_global_keys_to_admin
+        migrate_global_keys_to_admin(_auth_store, admin_user_id=(admin_user.id if admin_user else ""))
+    except Exception as e:
+        logging.getLogger(__name__).warning("全局 KEY 迁移失败: %s", e)
 
     # 加载全局 provider 覆盖（默认模型/base_url）到 factory 运行时缓存
     try:
@@ -190,7 +191,13 @@ class AuthMiddleware:
             if "state" not in scope:
                 scope["state"] = {}
             scope["state"]["user"] = user_payload
-            await self.app(scope, receive, send)
+            # 设置请求级「当前用户」上下文：供下游 LLM/数据源 KEY 严格按用户解析
+            from bottleneck_hunter.auth.current_user import set_current_user, reset_current_user
+            _uctx = set_current_user(user_payload.get("sub", ""))
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                reset_current_user(_uctx)
             return
 
         # 公开路径：即使未认证也放行（不注入 user）
@@ -242,6 +249,14 @@ class NoCacheStaticMiddleware:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="BottleneckHunter", version="0.1.0", lifespan=lifespan)
+
+    # 严格隔离：用户未配置 KEY → 统一 400 友好提示（而非 500）
+    from fastapi.responses import JSONResponse
+    from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
+
+    @app.exception_handler(MissingUserKeyError)
+    async def _missing_key_handler(request, exc):  # noqa: ANN001
+        return JSONResponse(status_code=400, content={"detail": str(exc), "code": "missing_user_key"})
 
     # 中间件注册顺序：最后注册的最先执行
     # AuthMiddleware → NoCacheStaticMiddleware → FastAPI

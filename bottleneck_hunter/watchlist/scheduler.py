@@ -66,6 +66,20 @@ def _get_active_user_stores(category: str | None = None) -> list[tuple[str, Watc
     return result
 
 
+def _iter_users(category: str | None = None):
+    """遍历活跃用户，并在每个用户的处理期间设置请求级「当前用户」上下文。
+
+    供后台任务使用：确保下游 LLM/数据源 KEY 严格按该用户解析（不会误用他人 KEY）。
+    """
+    from bottleneck_hunter.auth.current_user import set_current_user, reset_current_user
+    for uid, store, budget in _get_active_user_stores(category):
+        tok = set_current_user(uid)
+        try:
+            yield uid, store, budget
+        finally:
+            reset_current_user(tok)
+
+
 def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
     """Create and configure scheduler. Returns the scheduler or None if APScheduler not installed."""
     global _scheduler, _wl_store, _budget, _auth_store
@@ -130,7 +144,7 @@ def shutdown_scheduler() -> None:
 async def job_price_update(market: str = "us_stock") -> dict[str, str]:
     """Fetch prices for watchlist tickers of a specific market (multi-user)."""
     all_results: dict[str, str] = {}
-    for uid, store, budget in _get_active_user_stores("watchlist_data"):
+    for uid, store, budget in _iter_users("watchlist_data"):
         try:
             from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
 
@@ -166,7 +180,7 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
 async def job_daily_scan(market: str = "us_stock") -> dict:
     """Daily scan: news (+ SEC/options for US), iterates all users."""
     all_results: dict[str, dict] = {}
-    for uid, store, budget in _get_active_user_stores("watchlist_data"):
+    for uid, store, budget in _iter_users("watchlist_data"):
         try:
             by_market = store.get_tickers_by_market()
             tickers = by_market.get(market, [])
@@ -454,7 +468,7 @@ async def job_macro_update() -> None:
 
 async def job_daily_decision(market: str = "us_stock") -> None:
     """每日自动决策：运行完整 L1→L4→投委会流程（多用户）。"""
-    for uid, store, budget in _get_active_user_stores("daily_decision"):
+    for uid, store, budget in _iter_users("daily_decision"):
         try:
             by_market = store.get_tickers_by_market()
             tickers = by_market.get(market, [])
@@ -472,7 +486,7 @@ async def job_daily_decision(market: str = "us_stock") -> None:
 
 async def job_catalyst_scan() -> None:
     """催化剂扫描：清理过期 + 检测新催化剂（多用户）。"""
-    for uid, store, budget in _get_active_user_stores("catalyst"):
+    for uid, store, budget in _iter_users("catalyst"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Catalyst scan (%s) starting", label)
@@ -487,7 +501,7 @@ async def job_catalyst_scan() -> None:
 
 async def job_weekly_strategy(market: str = "us_stock") -> None:
     """每周策略刷新：L1 宏观策略 + L2 组合策略（多用户）。"""
-    for uid, store, budget in _get_active_user_stores("weekly_strategy"):
+    for uid, store, budget in _iter_users("weekly_strategy"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Weekly strategy refresh (%s/%s) starting", market, label)
@@ -501,7 +515,7 @@ async def job_weekly_strategy(market: str = "us_stock") -> None:
 
 async def job_auto_review(market: str = "us_stock") -> None:
     """自动复盘：批量复盘未复盘的卖出交易（多用户）。"""
-    for uid, store, budget in _get_active_user_stores("auto_review"):
+    for uid, store, budget in _iter_users("auto_review"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
             market_store = store.for_market(market)
@@ -530,7 +544,7 @@ async def job_auto_review(market: str = "us_stock") -> None:
             logger.error("Auto review (user=%s) failed: %s", uid[:8] if uid else "global", e)
 
     # P3.1 机会成本扫描（踏空/错误持有），与复盘同周期运行
-    for uid, store, budget in _get_active_user_stores("auto_review"):
+    for uid, store, budget in _iter_users("auto_review"):
         try:
             from bottleneck_hunter.watchlist.trade_reviewer import scan_missed_opportunities
             async for evt in scan_missed_opportunities(store, market=market):
@@ -543,7 +557,7 @@ async def job_auto_review(market: str = "us_stock") -> None:
 
     # P1.6 用户偏好学习：从确认/拒绝历史归纳偏好写入 user_preferences，供 L4 参考。
     # 需累计足够样本才有意义（交易+反馈 ≥3），否则跳过避免噪声偏好。
-    for uid, store, budget in _get_active_user_stores("auto_review"):
+    for uid, store, budget in _iter_users("auto_review"):
         try:
             from bottleneck_hunter.watchlist.preference_learner import learn_preferences
             sample = len(store.get_sim_trades(limit=50)) + len(store.get_rejection_patterns(limit=50))
@@ -559,7 +573,7 @@ async def job_auto_review(market: str = "us_stock") -> None:
 
 async def job_institutional_update() -> None:
     """每周更新美股机构持仓 & 分析师评级数据（多用户）。"""
-    for uid, store, budget in _get_active_user_stores("watchlist_data"):
+    for uid, store, budget in _iter_users("watchlist_data"):
         try:
             by_market = store.get_tickers_by_market()
             us_tickers = by_market.get("us_stock", [])
@@ -604,7 +618,7 @@ async def job_institutional_update() -> None:
 
 async def job_earnings_update(market: str = "us_stock") -> None:
     """周度更新财报数据（经 DataHub：FMP 美股含一致预期 / Tushare A股），填 earnings_reports。"""
-    for uid, store, budget in _get_active_user_stores("watchlist_data"):
+    for uid, store, budget in _iter_users("watchlist_data"):
         try:
             by_market = store.get_tickers_by_market()
             tickers = by_market.get(market, [])
@@ -691,7 +705,7 @@ async def job_stale_refresh() -> None:
     """
     from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
     from bottleneck_hunter.watchlist.strategy_engine import refresh_intelligence_one, refresh_strategy_one
-    for uid, store, budget in _get_active_user_stores("watchlist_data"):
+    for uid, store, budget in _iter_users("watchlist_data"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
             threshold = int(store.get_auto_update_config().get("stale_threshold_hours", "24") or 24)
@@ -747,7 +761,7 @@ async def job_full_refresh(market: str = "us_stock") -> None:
         await job_catalyst_scan()
         # 完整决策（L1→L4+投委会）
         from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
-        for uid, store, budget in _get_active_user_stores("full_refresh"):
+        for uid, store, budget in _iter_users("full_refresh"):
             try:
                 await _drain_sse(run_daily_decision(store, budget, scope="full", market=market))
             except Exception as e:

@@ -214,6 +214,15 @@ async def _screen_async():
     # --- LLM setup ---
     from bottleneck_hunter.llm_clients.factory import create_llm
 
+    # 严格按用户隔离：CLI 无 web 登录态，需显式指定用户（其 KEY 存于加密表）。
+    import os as _os
+    _cli_uid = _os.getenv("BH_CLI_USER_ID", "").strip()
+    if not _cli_uid:
+        console.print("[red]严格隔离模式：CLI 需设置 BH_CLI_USER_ID 指向你的用户 ID（其 API Key 存于配置中心）。[/red]")
+        raise typer.Exit(1)
+    from bottleneck_hunter.auth.current_user import set_current_user
+    set_current_user(_cli_uid)
+
     provider = questionary.text(
         "LLM Provider:",
         default="openai",

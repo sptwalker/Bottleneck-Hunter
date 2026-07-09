@@ -1510,6 +1510,7 @@ export function initWizard() {
 
   // 加载历史
   loadWizardHistory();
+  loadUpdateHistory();
 
   // 日志面板控制
   document.getElementById('wiz-log-clear')?.addEventListener('click', clearLog);
@@ -1629,7 +1630,31 @@ async function loadWizardHistory() {
   }
 }
 
-/* ── 载入历史分析到 Wizard ─────────────────── */
+/* ── 系统更新历史（首页栏目）───────────────── */
+async function loadUpdateHistory() {
+  const list = document.getElementById('update-history-list');
+  if (!list) return;
+  try {
+    const resp = await fetch('/api/update-history');
+    const data = await resp.json();
+    const updates = data.updates || [];
+    if (!updates.length) {
+      list.innerHTML = '<li class="uh-empty">暂无更新记录</li>';
+      return;
+    }
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    list.innerHTML = updates.map(u => `
+      <li class="uh-item">
+        <span class="uh-date">${esc(u.date)}</span>
+        <div class="uh-body">
+          <div class="uh-title">${esc(u.title)}</div>
+          <div class="uh-summary">${esc(u.summary)}</div>
+        </div>
+      </li>`).join('');
+  } catch (e) {
+    list.innerHTML = '<li class="uh-empty">加载失败</li>';
+  }
+}
 async function loadWizardAnalysis(analysisId) {
   try {
     logMsg('正在载入历史分析...');

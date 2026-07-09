@@ -62,6 +62,23 @@ def _load_session(store: WatchlistStore, market: str) -> dict | None:
     return recs[0] if recs else None
 
 
+def snapshot_is_stale(store: WatchlistStore, market: str, session: dict | None) -> bool:
+    """新闻库是否已有比该会话最后一个快照更新的市场新闻（用于决定是否需要重开生成）。"""
+    if not session:
+        return True
+    snaps = [m for m in (session.get("transcript_json") or []) if m.get("type") == "snapshot"]
+    if not snaps:
+        return True
+    def _mx(items):
+        return max((n.get("date", "") for n in (items or [])), default="")
+    try:
+        from bottleneck_hunter.watchlist.news_pipeline import market_sentinel
+        db_latest = _mx(store.get_news(market_sentinel(market), limit=15))
+        return bool(db_latest) and db_latest > _mx(snaps[-1].get("news"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _snapshot_entry(market_ctx: dict, strategy: dict | None) -> dict:
     """把 L1 数据快照 + 当前策略结论组装成一条 snapshot transcript 条目。"""
     rj = (strategy or {}).get("result_json") or {}
@@ -256,10 +273,12 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
     transcript = list(session.get("transcript_json") or []) if session else []
     today = _now_iso()[:10]
     last_snap_ts = max((m.get("ts", "") for m in transcript if m.get("type") == "snapshot"), default="")
+    snaps = [m for m in transcript if m.get("type") == "snapshot"]
 
-    # 当日已开场 → 回放，不再生成
-    if session and last_snap_ts[:10] == today:
-        snaps = [m for m in transcript if m.get("type") == "snapshot"]
+    # 当日已开场 → 回放；但若新闻库已有比上次快照更新的新闻（如全量刷新/定时扫描后），则重生成
+    fresher_news = snapshot_is_stale(store, market, session) if snaps else False
+
+    if session and last_snap_ts[:10] == today and not fresher_news:
         if snaps:
             yield _sse("snapshot", **snaps[-1])
         for m in transcript:

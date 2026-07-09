@@ -1643,9 +1643,11 @@ async function openConsultDrawer() {
   if (snapEl) snapEl.innerHTML = '<div class="dc-snap-row">加载中…</div>';
 
   let transcript = null;
+  let newsStale = false;
   try {
     const resp = await dcFetch(`/macro/consult/history?market=${encodeURIComponent(dcConsult.market)}`);
     const session = resp.session;
+    newsStale = !!resp.stale;
     if (session && Array.isArray(session.transcript_json) && session.transcript_json.length) {
       transcript = session.transcript_json;
       const snaps = transcript.filter(m => m.type === 'snapshot');
@@ -1654,8 +1656,13 @@ async function openConsultDrawer() {
     }
   } catch (e) { /* 无历史，继续走 open 生成 */ }
 
-  // 当日已有开场 → 历史已展示，不再调用 open（省重复烧钱）；否则生成快照+开场
-  if (transcript && _todayHasOpening(transcript)) return;
+  // 当日已有开场且无更新新闻 → 历史已展示，不再调用 open（省重复烧钱）；
+  // 有更新新闻（如全量刷新/定时扫描后）→ 重开生成最新快照。
+  if (transcript && _todayHasOpening(transcript) && !newsStale) return;
+  // 将要重新生成 → 清掉刚回显的历史，避免与新流重复
+  if (log) log.innerHTML = '';
+  if (snapEl) snapEl.innerHTML = '<div class="dc-snap-row">加载中…</div>';
+  dcConsult.bubbles = {};
   setConsultSending(true);
   await consultStream('/macro/consult/open', { market: dcConsult.market }, {
     onEvent: handleConsultEvent,

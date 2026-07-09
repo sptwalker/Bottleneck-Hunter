@@ -179,25 +179,26 @@ class FallbackChatModel(BaseChatModel):
 
 def build_fallback_candidates(primary_provider: str, primary_model: str,
                               user_id: str = "", temperature: float = 0.3) -> list:
-    """构造备选候选列表（不含主模型）：复用 _FALLBACK_CHAIN 中有 key 且不同于主的 provider。"""
+    """构造备选候选列表（不含主模型）：_FALLBACK_CHAIN 中当前用户已配置 KEY 且不同于主的 provider。"""
     # 延迟导入避免与 factory 循环依赖
     from bottleneck_hunter.llm_clients.factory import (
-        _FALLBACK_CHAIN, PROVIDER_KEY_MAP, create_llm, resolve_provider_model,
+        _FALLBACK_CHAIN, _user_has_llm_key, create_llm, resolve_provider_model,
     )
-    import os
+    from bottleneck_hunter.auth.current_user import get_current_user_id
 
+    uid = user_id or get_current_user_id()
     out = []
     primary = (primary_provider or "").lower().strip()
-    for provider, key_env in _FALLBACK_CHAIN:
+    for provider, _key_env in _FALLBACK_CHAIN:
         if provider == primary:
             continue
-        if not os.getenv(key_env):
+        if not _user_has_llm_key(provider, uid):  # 严格：只用当前用户自己配了 KEY 的备选
             continue
-        model = resolve_provider_model(provider, user_id)
+        model = resolve_provider_model(provider, uid)
         if not model:
             continue
         try:
-            llm = create_llm(provider, model, temperature=temperature, with_fallback=False)
+            llm = create_llm(provider, model, temperature=temperature, with_fallback=False, user_id=uid)
             out.append((llm, provider, model))
         except Exception:  # noqa: BLE001
             continue

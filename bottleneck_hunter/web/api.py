@@ -462,6 +462,22 @@ async def hot_scan(req: HotScanRequest, user: dict = Depends(get_current_user)):
     return {"recommendations": results, "fallback_notice": drain_notices()}
 
 
+@router.get("/update-history")
+async def update_history(user: dict = Depends(get_current_user)):
+    """系统更新历史（最近 10 条，通俗版）。数据源：仓库根目录 UPDATE_HISTORY.json。"""
+    path = Path.cwd() / "UPDATE_HISTORY.json"
+    try:
+        items = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        if not isinstance(items, list):
+            items = []
+    except Exception as e:
+        logger.warning("读取更新历史失败: %s", e)
+        items = []
+    # 按日期倒序（容错：无 date 的排后），取前 10
+    items.sort(key=lambda x: str(x.get("date", "")), reverse=True)
+    return {"updates": items[:10]}
+
+
 @router.get("/report")
 async def download_report(path: str, user: dict = Depends(get_current_user)):
     """Download a generated report file."""
@@ -1030,10 +1046,8 @@ def _mask_value(val: str | None, is_url: bool = False) -> str:
 
 
 def _build_providers_response(user_id: str = "") -> list[dict]:
-    """构建 providers 列表，合并全局 KEY + 用户 KEY 状态。"""
-    env_vals = dotenv_values(ENV_PATH) if ENV_PATH.exists() else {}
-
-    # 获取用户已配置的 KEY hint
+    """构建 providers 列表 —— 严格按当前用户判定配置状态，无任何全局 KEY 概念。"""
+    # 当前用户已配置的 KEY hint
     user_keys: dict[str, str] = {}
     if user_id:
         try:
@@ -1048,23 +1062,10 @@ def _build_providers_response(user_id: str = "") -> list[dict]:
     for p in PROVIDER_REGISTRY:
         env_var = p["env_var"]
         is_url = p.get("is_url", False)
-        raw = os.environ.get(env_var, "") or env_vals.get(env_var, "")
-        has_global = bool(raw)
         has_user = p["id"] in user_keys
 
-        # 优先显示用户 KEY 状态
-        if has_user:
-            masked = user_keys[p["id"]]
-            configured = True
-            source = "user"
-        elif has_global:
-            masked = _mask_value(raw, is_url)
-            configured = True
-            source = "global"
-        else:
-            masked = ""
-            configured = False
-            source = ""
+        configured = has_user
+        masked = user_keys[p["id"]] if has_user else ""
 
         result.append({
             "id": p["id"],
@@ -1073,8 +1074,8 @@ def _build_providers_response(user_id: str = "") -> list[dict]:
             "is_url": is_url,
             "configured": configured,
             "masked": masked,
-            "source": source,          # "user" | "global" | ""
-            "has_global": has_global,  # 是否有全局 fallback
+            "source": "user" if has_user else "",  # 只可能是 user；无全局
+            "has_global": False,                    # 严格隔离：不存在全局 KEY
         })
     return result
 
@@ -1096,20 +1097,19 @@ class SaveSettingsRequest(BaseModel):
 
 
 def persist_provider_keys(user: dict, settings: dict[str, str]) -> int:
-    """持久化 Provider API Key（单一真源）。
+    """持久化 Provider API Key（严格按用户隔离，单一真源）。
 
-    所有用户的 KEY 加密写入用户级存储（user_api_keys 表）；
-    admin 额外写入 .env + os.environ 作为全局 fallback（供分析流程 create_llm 读取）。
+    所有用户（含 admin）的 KEY 一律只加密写入用户级存储（user_api_keys 表）。
+    **不再写 .env / os.environ**——杜绝任何全局 KEY，防止跨用户借用。
 
     settings: {ENV_VAR: value}。返回成功保存的数量。
-    供 /api/settings 与 /api/ai-config/providers/keys 共用，避免临时 os.environ 双写。
+    供 /api/settings 与 /api/ai-config/providers/keys 共用。
     """
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
 
     allowed_vars = {p["env_var"] for p in PROVIDER_REGISTRY}
     env_to_provider = {p["env_var"]: p["id"] for p in PROVIDER_REGISTRY}
     user_id = user.get("sub", "")
-    is_admin = user.get("role") == "admin"
 
     saved = 0
     for key, value in settings.items():
@@ -1117,40 +1117,25 @@ def persist_provider_keys(user: dict, settings: dict[str, str]) -> int:
             continue
         value = value.strip()
         provider_id = env_to_provider.get(key, "")
+        if not provider_id or not user_id:
+            continue
 
-        # 空值 = 清除该 provider 的 KEY（用户级加密表 + admin 全局 .env/os.environ）——供"删除内置 provider"使用
+        # 空值 = 清除该用户对该 provider 的 KEY
         if not value:
-            if provider_id and user_id:
-                try:
-                    from bottleneck_hunter.web.user_api import _store as _get_auth
-                    _get_auth().delete_user_api_key(user_id, provider_id)
-                except Exception as e:
-                    logger.warning(f"清除用户 KEY 失败 ({provider_id}): {e}")
-            if is_admin:
-                try:
-                    if ENV_PATH.exists():
-                        set_key(str(ENV_PATH), key, "")
-                    os.environ.pop(key, None)
-                except Exception as e:
-                    logger.warning(f"清除全局 KEY 失败 ({key}): {e}")
+            try:
+                from bottleneck_hunter.web.user_api import _store as _get_auth
+                _get_auth().delete_user_api_key(user_id, provider_id)
+            except Exception as e:
+                logger.warning(f"清除用户 KEY 失败 ({provider_id}): {e}")
             saved += 1
             continue
 
-        if provider_id and user_id:
-            try:
-                from bottleneck_hunter.web.user_api import _store as _get_auth
-                store = _get_auth()
-                store.save_user_api_key(user_id, provider_id, encrypt(value), make_hint(value))
-            except Exception as e:
-                logger.warning(f"保存用户 KEY 失败 ({provider_id}): {e}")
-
-        # admin 写入 .env + os.environ 作为全局 fallback
-        if is_admin:
-            if not ENV_PATH.exists():
-                ENV_PATH.write_text("", encoding="utf-8")
-            set_key(str(ENV_PATH), key, value)
-            os.environ[key] = value
-        saved += 1
+        try:
+            from bottleneck_hunter.web.user_api import _store as _get_auth
+            _get_auth().save_user_api_key(user_id, provider_id, encrypt(value), make_hint(value))
+            saved += 1
+        except Exception as e:
+            logger.warning(f"保存用户 KEY 失败 ({provider_id}): {e}")
 
     return saved
 
@@ -1179,9 +1164,8 @@ async def test_providers(user: dict = Depends(get_current_user)):
 
     configured = []
     for p in PROVIDER_REGISTRY:
-        env_var = p["env_var"]
         is_url = p.get("is_url", False)
-        # 检查是否有 KEY（用户级优先，全局 fallback）
+        # 严格隔离：只认当前用户自己的 KEY，无全局兜底
         user_key = None
         if user_id:
             try:
@@ -1189,9 +1173,8 @@ async def test_providers(user: dict = Depends(get_current_user)):
                 user_key = resolve_user_api_key(user_id, p["id"])
             except Exception:
                 pass
-        global_key = os.environ.get(env_var, "").strip()
 
-        if not user_key and not global_key:
+        if not user_key:
             continue
         model = resolve_provider_model(p["id"], user_id)
         if not model:

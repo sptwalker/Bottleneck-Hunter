@@ -501,14 +501,9 @@ class AuthStore:
             return cur.rowcount > 0
 
     def any_data_source_key_encrypted(self, source_id: str) -> str | None:
-        """任取一个配置了该数据源的加密 KEY（供无 user 上下文的后台采集兜底）。"""
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT encrypted_key FROM data_source_keys WHERE source_id = ? "
-                "AND encrypted_key != '' ORDER BY updated_at DESC LIMIT 1",
-                (source_id,),
-            ).fetchone()
-            return row["encrypted_key"] if row else None
+        """已废弃：严格按用户隔离下禁止跨用户借用数据源 KEY，永远返回 None。"""
+        # ponytail: 保留方法签名以防旧调用，但行为改为严格拒绝借用
+        return None
 
     # ── 自定义 Provider ───────────────────────────────────
 

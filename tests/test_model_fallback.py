@@ -189,74 +189,74 @@ class TestFallbackChatModel:
 
 # ── build_fallback_candidates ────────────────────────────
 class TestBuildCandidates:
-    def _patch_env(self, monkeypatch, keys):
-        # 清掉所有 provider key，只留指定的
-        for p, k in F.PROVIDER_KEY_MAP.items():
-            monkeypatch.delenv(k, raising=False)
-        for k in keys:
-            monkeypatch.setenv(k, "x")
+    def _keyed(self, monkeypatch, providers):
+        """让指定 provider 视为「当前用户已配置 KEY」，其余无 KEY。"""
+        from bottleneck_hunter.auth import current_user
+        monkeypatch.setattr(current_user, "current_user_id",
+                            __import__("contextvars").ContextVar("t", default="u1"))
+        monkeypatch.setattr(F, "_resolve_user_llm_key",
+                            lambda provider, uid: ("kkk" if provider in providers else None))
+        monkeypatch.setattr(F, "_create_raw_llm", lambda p, m, **k: OkLLM(f"{p}"))
 
     def test_excludes_primary_only_keyed(self, monkeypatch):
-        self._patch_env(monkeypatch, ["DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY", "MOONSHOT_API_KEY"])
-        monkeypatch.setattr(F, "_create_raw_llm", lambda p, m, **k: OkLLM(f"{p}"))
-        cands = FB.build_fallback_candidates("deepseek", "deepseek-chat")
+        self._keyed(monkeypatch, {"deepseek", "qwen", "kimi"})
+        cands = FB.build_fallback_candidates("deepseek", "deepseek-chat", user_id="u1")
         provs = [c[1] for c in cands]
         assert "deepseek" not in provs          # 排除主
         assert "qwen" in provs and "kimi" in provs
 
     def test_none_when_no_other_keys(self, monkeypatch):
-        self._patch_env(monkeypatch, ["DEEPSEEK_API_KEY"])
-        monkeypatch.setattr(F, "_create_raw_llm", lambda p, m, **k: OkLLM())
-        assert FB.build_fallback_candidates("deepseek", "deepseek-chat") == []
+        self._keyed(monkeypatch, {"deepseek"})  # 只有主有 KEY
+        assert FB.build_fallback_candidates("deepseek", "deepseek-chat", user_id="u1") == []
 
 
 # ── factory.create_llm 包壳逻辑 ──────────────────────────
 class TestCreateLLMWrapping:
-    def _env(self, monkeypatch, keys):
-        for p, k in F.PROVIDER_KEY_MAP.items():
-            monkeypatch.delenv(k, raising=False)
-        for k in keys:
-            monkeypatch.setenv(k, "x")
+    def _keyed(self, monkeypatch, providers):
+        monkeypatch.setattr(F, "_resolve_user_llm_key",
+                            lambda provider, uid: ("kkk" if provider in providers else None))
         monkeypatch.setattr(F, "_create_raw_llm", lambda p, m, **k: OkLLM(f"{p}/{m}"))
 
     def test_with_fallback_wraps(self, monkeypatch):
-        self._env(monkeypatch, ["DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY"])
-        llm = F.create_llm("deepseek", "deepseek-chat", with_fallback=True)
+        self._keyed(monkeypatch, {"deepseek", "qwen"})
+        llm = F.create_llm("deepseek", "deepseek-chat", with_fallback=True, user_id="u1")
         assert isinstance(llm, FallbackChatModel)
         assert len(llm.candidates) >= 2
         assert llm.candidates[0][1] == "deepseek"  # 主在首位
 
     def test_with_fallback_false_returns_raw(self, monkeypatch):
-        self._env(monkeypatch, ["DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY"])
-        llm = F.create_llm("deepseek", "deepseek-chat", with_fallback=False)
+        self._keyed(monkeypatch, {"deepseek", "qwen"})
+        llm = F.create_llm("deepseek", "deepseek-chat", with_fallback=False, user_id="u1")
         assert isinstance(llm, OkLLM)
 
     def test_no_backups_returns_raw(self, monkeypatch):
-        self._env(monkeypatch, ["DEEPSEEK_API_KEY"])  # 仅主，无备选
-        llm = F.create_llm("deepseek", "deepseek-chat", with_fallback=True)
+        self._keyed(monkeypatch, {"deepseek"})  # 仅主，无备选
+        llm = F.create_llm("deepseek", "deepseek-chat", with_fallback=True, user_id="u1")
         assert isinstance(llm, OkLLM)
 
 
 class TestRoleResolution:
     """get_models_for_role 默认不包壳（保多样性）；get_llm_for_position 包壳。"""
 
-    def _env(self, monkeypatch, keys):
-        for p, k in F.PROVIDER_KEY_MAP.items():
-            monkeypatch.delenv(k, raising=False)
-        for k in keys:
-            monkeypatch.setenv(k, "x")
+    def _keyed(self, monkeypatch, providers):
+        from bottleneck_hunter.auth import current_user
+        monkeypatch.setattr(current_user, "current_user_id",
+                            __import__("contextvars").ContextVar("t", default="u1"))
+        monkeypatch.setattr(F, "_resolve_user_llm_key",
+                            lambda provider, uid: ("kkk" if provider in providers else None))
         monkeypatch.setattr(F, "_create_raw_llm", lambda p, m, **k: OkLLM(f"{p}/{m}"))
         monkeypatch.setattr(F, "_load_role_configs_from_db", lambda *a, **k: [])
 
     def test_get_models_for_role_no_fallback_by_default(self, monkeypatch):
-        self._env(monkeypatch, ["DASHSCOPE_API_KEY", "MOONSHOT_API_KEY"])
-        res = F.get_models_for_role("__fake_role__")
+        self._keyed(monkeypatch, {"qwen", "kimi"})
+        res = F.get_models_for_role("__fake_role__", user_id="u1")
         assert res and not isinstance(res[0][0], FallbackChatModel)
 
     def test_get_llm_for_position_wraps(self, monkeypatch):
-        self._env(monkeypatch, ["DASHSCOPE_API_KEY", "MOONSHOT_API_KEY"])
+        self._keyed(monkeypatch, {"qwen", "kimi"})
         llm, provider, model = F.get_llm_for_position("__fake_role__")
         assert isinstance(llm, FallbackChatModel)
+
 
 
 # ── with_notices 投递包装器 ──────────────────────────────

@@ -85,6 +85,56 @@ MARKET_INDEX_KEYS: dict[str, list[str]] = {
 }
 
 
+# ── FRED（美联储经济数据）：真宏观经济指标，补齐 yfinance 只有行情价格的缺口 ──
+# (显示名, FRED series_id, 是否需按 CPI 计算同比通胀)
+_FRED_INDICATORS = [
+    ("fed_funds_rate", "FEDFUNDS", "联邦基金利率(%)", False),
+    ("unemployment_rate", "UNRATE", "美国失业率(%)", False),
+    ("cpi_yoy", "CPIAUCSL", "美国CPI同比(%)", True),
+]
+
+
+def _fred_series(key: str, series_id: str, limit: int = 1) -> list[dict]:
+    import requests
+    r = requests.get(
+        "https://api.stlouisfed.org/fred/series/observations"
+        f"?series_id={series_id}&api_key={key}&file_type=json&sort_order=desc&limit={limit}",
+        timeout=10, headers={"User-Agent": "BottleneckHunter/1.0"})
+    r.raise_for_status()
+    return [o for o in (r.json().get("observations") or []) if o.get("value") not in (None, "", ".")]
+
+
+def _fetch_fred_indicators() -> dict:
+    """拉取 FRED 关键宏观指标（利率/失业率/CPI同比）。无 Key 则返回空（该源对当前用户不可用）。"""
+    from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
+    key = resolve_data_source_key("fred")
+    if not key:
+        return {}
+    out: dict[str, dict] = {}
+    for k, series_id, label, is_cpi in _FRED_INDICATORS:
+        try:
+            if is_cpi:
+                obs = _fred_series(key, series_id, limit=13)  # 需 13 个月算同比
+                if len(obs) >= 13:
+                    latest, year_ago = float(obs[0]["value"]), float(obs[12]["value"])
+                    yoy = round((latest / year_ago - 1) * 100, 2) if year_ago else 0.0
+                    prev_yoy = None
+                    if len(obs) >= 14:
+                        prev_yoy = round((float(obs[1]["value"]) / float(obs[13]["value"]) - 1) * 100, 2)
+                    out[k] = {"value": yoy, "change_pct": round(yoy - prev_yoy, 2) if prev_yoy is not None else 0.0,
+                              "label": label, "date": obs[0].get("date", "")}
+            else:
+                obs = _fred_series(key, series_id, limit=2)
+                if obs:
+                    val = float(obs[0]["value"])
+                    prev = float(obs[1]["value"]) if len(obs) >= 2 else val
+                    out[k] = {"value": round(val, 2), "change_pct": round(val - prev, 2),
+                              "label": label, "date": obs[0].get("date", "")}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("FRED 指标 %s 采集失败: %s", series_id, e)
+    return out
+
+
 async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = None) -> dict:
     """采集宏观数据并存入 macro_snapshots 表，返回整合的宏观数据字典。
 
@@ -133,6 +183,18 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
             except Exception as e:
                 logger.warning("北向资金采集失败: %s", e)
         tasks.append(_fetch_north())
+
+    # FRED 真宏观指标（利率/失业率/CPI同比）—— Fed 政策对各市场都有外溢，全局纳入；无 Key 自动跳过
+    async def _fetch_fred():
+        try:
+            fred = await asyncio.to_thread(_fetch_fred_indicators)
+            for k, v in fred.items():
+                results[k] = v
+                store.save_macro_snapshot(k, today, v["value"], now_iso,
+                                          change_pct=v.get("change_pct", 0.0))
+        except Exception as e:
+            logger.warning("FRED 宏观指标采集失败: %s", e)
+    tasks.append(_fetch_fred())
 
     await asyncio.gather(*tasks, return_exceptions=True)
 

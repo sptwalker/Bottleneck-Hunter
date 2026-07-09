@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -24,32 +23,17 @@ class FinnhubFetcher(BaseFetcher):
 
     def __init__(self):
         super().__init__()
-        self._api_key: str = ""
-        self._key_checked = False
 
     def _ensure_api_key(self) -> str:
-        if self._api_key:
-            return self._api_key
-        # 优先从「付费数据源」配置读（DB，按用户/全局），再回退 env —— 兑现界面配置生效
+        """按「当前上下文用户」实时解析 Finnhub Key。严格隔离：不读 env、不进程缓存、不借他人。
+
+        因 fetcher 是全局单例、跨用户复用，绝不能缓存 Key。
+        """
         try:
             from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
-            self._api_key = resolve_data_source_key("finnhub")
+            return resolve_data_source_key("finnhub") or ""
         except Exception:  # noqa: BLE001
-            self._api_key = ""
-        if self._api_key:
-            return self._api_key
-        self._api_key = os.environ.get("FINNHUB_API_KEY", "")
-        if not self._api_key and not self._key_checked:
-            try:
-                from dotenv import load_dotenv
-                load_dotenv()
-                self._api_key = os.environ.get("FINNHUB_API_KEY", "")
-            except ImportError:
-                pass
-            self._key_checked = True
-        if not self._api_key and not self._key_checked:
-            logger.info("finnhub: 未配置 API Key（付费数据源/env 均无），数据源不可用")
-        return self._api_key
+            return ""
 
     def _get_client(self):
         import finnhub

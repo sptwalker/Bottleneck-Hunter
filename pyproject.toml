@@ -39,6 +39,7 @@ dependencies = [
 datasources = [
     "efinance>=0.5",
     "pytdx>=1.72",
+    "baostock>=0.8.8",
     "finnhub-python>=2.4.0",
 ]
 dev = [
