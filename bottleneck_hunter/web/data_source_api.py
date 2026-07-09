@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -62,6 +63,7 @@ async def catalog(user: dict = Depends(get_current_user)):
             "configured": cfg is not None,
             "key_hint": cfg.get("key_hint", "") if cfg else "",
             "base_url_saved": cfg.get("base_url", "") if cfg else "",
+            "verified": bool(cfg.get("verified_at")) if cfg else False,
         })
     return {"sources": out}
 
@@ -103,4 +105,16 @@ async def test_source(req: TestRequest, user: dict = Depends(get_current_user)):
     if not base_url:
         base_url = _store().get_data_source_base_url(uid, req.source_id)
     ok, msg = await asyncio.to_thread(probe_source, req.source_id, api_key, base_url)
+
+    # 持久化验证状态：仅当被测 KEY 与已保存的 KEY 一致时（避免用未保存的临时 KEY 误标已验证）
+    try:
+        stored = next((c for c in _store().get_data_source_keys(uid) if c["source_id"] == req.source_id), None)
+        if stored:
+            tested_hint = make_hint(req.api_key) if req.api_key else stored.get("key_hint", "")
+            if tested_hint == stored.get("key_hint", ""):
+                _store().set_data_source_verified(
+                    uid, req.source_id, datetime.utcnow().isoformat() if ok else "")
+    except Exception:  # noqa: BLE001
+        pass
+
     return {"ok": ok, "source_id": req.source_id, "msg": msg}

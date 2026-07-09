@@ -86,10 +86,12 @@ async def create_provider(req: CustomProviderRequest, user: dict = Depends(requi
 
 
 @router.put("/{provider_id}")
-async def update_provider(provider_id: str, req: CustomProviderRequest, user: dict = Depends(require_admin)):
-    """更新自定义 provider。仅管理员——base_url 可覆盖，普通用户改动会劫持全平台 LLM 流量。
+async def update_provider(provider_id: str, req: CustomProviderRequest, user: dict = Depends(get_current_user)):
+    """更新 provider。
 
-    严格隔离：若传了新 api_key，仅更新到当前管理员自己的用户级存储，不落全局。
+    严格按用户隔离：
+    - **共享定义**（display_name/base_url/default_model）仅管理员可改（普通用户改动会劫持全平台 LLM 流量）。
+    - **API Key** 任何用户都能设置——写入各自的用户级加密存储，互不影响。
     """
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
 
@@ -98,17 +100,21 @@ async def update_provider(provider_id: str, req: CustomProviderRequest, user: di
     if not existing:
         raise HTTPException(status_code=404, detail="未找到该自定义 provider")
 
-    # provider 定义共享，密钥不落全局
-    store.save_custom_provider(
-        provider_id, req.display_name, req.base_url, "", "", req.default_model,
-    )
+    is_admin = user.get("role") == "admin"
     uid = user.get("sub", "")
+
+    # 仅管理员可更新共享定义（不含密钥）
+    if is_admin:
+        store.save_custom_provider(
+            provider_id, req.display_name, req.base_url, "", "", req.default_model,
+        )
+        register_custom_provider(provider_id, req.base_url, default_model=req.default_model)
+
+    # 所有用户：保存自己的 Key 到用户级存储
     if req.api_key and uid:
         store.save_user_api_key(uid, provider_id, encrypt(req.api_key), make_hint(req.api_key))
 
-    register_custom_provider(provider_id, req.base_url, default_model=req.default_model)
-
-    logger.info("自定义 provider 已更新: %s", provider_id)
+    logger.info("provider 已更新: %s (admin=%s, key=%s)", provider_id, is_admin, bool(req.api_key))
     return {"ok": True, "provider_id": provider_id}
 
 

@@ -663,6 +663,8 @@ function handlePhase1Event(data) {
   // step_done: 有 result 字段
   if (data.result && data.step === 'decompose') {
     _updateP1Progress(40, '产业链拆解完成');
+    // 拆解完成即渲染产业链图，不必等后续（瓶颈分析可能较慢）——用户能马上看到产业链结果
+    try { renderPhase1({ chain: data.result, top_reports: [] }); } catch (e) { console.warn('渲染产业链图失败', e); }
   }
 
   // 瓶颈分析进度: 解析 "(X/Y)"

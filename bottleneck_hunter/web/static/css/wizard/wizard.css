@@ -851,8 +851,9 @@
   text-shadow: 0 0 3px rgba(255,255,255,.95);
   animation: wiz-zebra-scroll .6s linear infinite;
 }
+/* 减少动效偏好下：斑马纹是「运行中」的进度反馈（非装饰），保留滚动但放慢、更柔和 */
 @media (prefers-reduced-motion: reduce) {
-  .wiz-step.running .wiz-step-dot { animation: none; }
+  .wiz-step.running .wiz-step-dot { animation-duration: 1.4s; }
 }
 
 .wiz-step-line {

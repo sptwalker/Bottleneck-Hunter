@@ -93,6 +93,7 @@ class AuthStore:
                     is_active INTEGER DEFAULT 1,
                     created_at TEXT,
                     updated_at TEXT,
+                    verified_at TEXT DEFAULT '',
                     UNIQUE(user_id, source_id)
                 );
                 CREATE TABLE IF NOT EXISTS email_verifications (
@@ -114,6 +115,9 @@ class AuthStore:
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
             if "email" not in cols:
                 conn.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
+            ds_cols = {r["name"] for r in conn.execute("PRAGMA table_info(data_source_keys)").fetchall()}
+            if ds_cols and "verified_at" not in ds_cols:
+                conn.execute("ALTER TABLE data_source_keys ADD COLUMN verified_at TEXT DEFAULT ''")
 
     # ── 系统配置 ──────────────────────────────────────────
 
@@ -452,7 +456,7 @@ class AuthStore:
             if existing:
                 conn.execute(
                     "UPDATE data_source_keys SET base_url = ?, encrypted_key = ?, key_hint = ?, "
-                    "updated_at = ? WHERE user_id = ? AND source_id = ?",
+                    "updated_at = ?, verified_at = '' WHERE user_id = ? AND source_id = ?",
                     (base_url, encrypted_key, key_hint, now, user_id, source_id),
                 )
                 return existing["id"]
@@ -464,14 +468,22 @@ class AuthStore:
             return record_id
 
     def get_data_source_keys(self, user_id: str) -> list[dict]:
-        """返回用户所有数据源配置（不含明文，只有 hint + base_url）。"""
+        """返回用户所有数据源配置（不含明文，只有 hint + base_url + 验证状态）。"""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT source_id, key_hint, base_url, created_at, updated_at "
+                "SELECT source_id, key_hint, base_url, created_at, updated_at, verified_at "
                 "FROM data_source_keys WHERE user_id = ? ORDER BY source_id",
                 (user_id,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def set_data_source_verified(self, user_id: str, source_id: str, verified_at: str) -> None:
+        """标记/清除某数据源 KEY 的验证状态（verified_at 为空串表示未验证）。"""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE data_source_keys SET verified_at = ? WHERE user_id = ? AND source_id = ?",
+                (verified_at or "", user_id, source_id),
+            )
 
     def get_data_source_key_encrypted(self, user_id: str, source_id: str) -> str | None:
         """返回指定数据源的加密 KEY（用于解密后传给 fetcher）。"""

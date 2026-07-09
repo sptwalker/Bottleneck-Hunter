@@ -53,11 +53,12 @@ _COMMITTEE_WEIGHTS = {
     "chinese_analysis": 0.25, "speed": 0.05,
     "scoring_variance": 0.35, "instruction_follow": 0.15,
 }
-# - 产业链管线：重 JSON 结构化与速度（批量调用），中文次之
+# - 产业链管线：产业链分析要「长结构化输出稳、严格遵循 schema」，速度是次要的
+#   （快而脆的模型在几十次长输出调用里反而常失败）。重 JSON 结构化 + 指令遵循 + 中文长文分析，弱化速度。
 _PIPELINE_WEIGHTS = {
-    "connectivity": 0.05, "json_output": 0.35,
-    "chinese_analysis": 0.10, "speed": 0.30,
-    "scoring_variance": 0.05, "instruction_follow": 0.15,
+    "connectivity": 0.05, "json_output": 0.40,
+    "chinese_analysis": 0.20, "speed": 0.05,
+    "scoring_variance": 0.05, "instruction_follow": 0.25,
 }
 # - 看板模块：重速度与 JSON（高频小任务），均衡
 _WATCHLIST_WEIGHTS = {

@@ -68,6 +68,11 @@ export function initAIConfig() {
 
   // Custom endpoint actions
   container.querySelector('#aic-add-custom')?.addEventListener('click', () => showCustomForm());
+  // 新增 Provider（共享定义）仅管理员可见；普通用户只能为已有 provider 配自己的 Key
+  if (window.appState?.user?.role !== 'admin') {
+    const addBtn = container.querySelector('#aic-add-custom');
+    if (addBtn) addBtn.style.display = 'none';
+  }
   container.querySelector('#aic-custom-cancel')?.addEventListener('click', hideCustomForm);
   container.querySelector('#aic-custom-save')?.addEventListener('click', saveCustomProvider);
   container.querySelector('#aic-custom-test')?.addEventListener('click', testFormConfig);
@@ -207,6 +212,11 @@ function renderProviders() {
       const id = cp.provider_id;
       const displayName = cp.display_name || id;
       const model = cp.default_model || '';
+      const isAdmin = window.appState?.user?.role === 'admin';
+      const editLabel = isAdmin ? '编辑' : '配置 Key';
+      const delBtn = isAdmin
+        ? `<button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-custom="1">删除</button>`
+        : '';
       return `
       <div class="aic-provider-item" data-pid="${escHtml(id)}">
         <div class="aic-provider-row-top">
@@ -217,8 +227,8 @@ function renderProviders() {
           </div>
         </div>
         <div class="aic-provider-actions-inline">
-          <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">编辑</button>
-          <button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-custom="1">删除</button>
+          <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">${editLabel}</button>
+          ${delBtn}
         </div>
       </div>`;
     }).join('');
@@ -338,11 +348,12 @@ function showCustomForm(editData) {
 
   const nameEl = document.getElementById('aic-custom-name');
   const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+  const isAdmin = window.appState?.user?.role === 'admin';
 
   if (editData && typeof editData === 'object' && editData.provider_id) {
-    // 编辑现有 provider：id 只读，其余可改
-    show('aic-field-name', true); show('aic-field-id', true);
-    show('aic-field-url', true); show('aic-field-model', true);
+    // 编辑现有 provider：管理员可改共享定义；普通用户只配自己的 API Key（隐藏定义字段）
+    show('aic-field-name', isAdmin); show('aic-field-id', isAdmin);
+    show('aic-field-url', isAdmin); show('aic-field-model', isAdmin);
     document.getElementById('aic-custom-edit-id').value = editData.provider_id;
     nameEl.value = editData.display_name || '';
     nameEl.disabled = false;
@@ -991,9 +1002,12 @@ function renderPaidSources() {
   const grid = document.getElementById('paid-source-grid');
   if (!grid) return;
   grid.innerHTML = _paidSources.map(s => {
-    const dot = s.configured ? 'aic-status-ok' : 'aic-status-unknown';
+    const dot = s.configured ? (s.verified ? 'aic-status-ok' : 'aic-status-unknown') : 'aic-status-unknown';
     const site = s.site ? `<a href="${escHtml(s.site)}" target="_blank" rel="noopener" class="aic-hint" style="margin-left:6px">官网↗</a>` : '';
-    const hint = s.key_hint ? `已存凭证：${escHtml(s.key_hint)}（未验证）` : (s.testable ? '未配置' : '仅存凭证');
+    const vtag = s.verified
+      ? '<span style="color:oklch(0.62 0.17 145)">已验证</span>'
+      : '<span style="color:var(--muted)">未验证</span>';
+    const hint = s.key_hint ? `已存凭证：${escHtml(s.key_hint)}（${vtag}）` : (s.testable ? '未配置' : '仅存凭证');
     const serves = DS_SERVES[s.id] ? `<span class="aic-hint" style="display:block;margin-top:2px">服务能力：${DS_SERVES[s.id]}</span>` : '';
     const customUrl = s.id === 'custom'
       ? `<input class="aic-provider-input" data-ds-url="${escHtml(s.id)}" placeholder="探测 URL（用 {KEY} 占位）" value="${escHtml(s.base_url_saved || '')}" style="margin-bottom:6px">`
@@ -1070,7 +1084,7 @@ async function _dsTest(id, btn) {
     const data = await resp.json();
     const dot = document.querySelector(`[data-ds-card="${id}"] .aic-provider-status`);
     if (data.ok) {
-      _dsStatus(id, '✓ ' + (data.msg || '连通成功'), 'ok');
+      _dsStatus(id, '✓ 已验证 · ' + (data.msg || '连通成功'), 'ok');
       if (dot) dot.className = 'aic-provider-status aic-status-ok';
     } else {
       _dsStatus(id, '✕ ' + (data.msg || '连通失败'), 'fail');
