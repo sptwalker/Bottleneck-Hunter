@@ -68,11 +68,6 @@ export function initAIConfig() {
 
   // Custom endpoint actions
   container.querySelector('#aic-add-custom')?.addEventListener('click', () => showCustomForm());
-  // 新增 Provider（共享定义）仅管理员可见；普通用户只能为已有 provider 配自己的 Key
-  if (window.appState?.user?.role !== 'admin') {
-    const addBtn = container.querySelector('#aic-add-custom');
-    if (addBtn) addBtn.style.display = 'none';
-  }
   container.querySelector('#aic-custom-cancel')?.addEventListener('click', hideCustomForm);
   container.querySelector('#aic-custom-save')?.addEventListener('click', saveCustomProvider);
   container.querySelector('#aic-custom-test')?.addEventListener('click', testFormConfig);
@@ -196,6 +191,11 @@ async function loadRecommendations() {
 function renderProviders() {
   const grid = document.getElementById('aic-provider-grid');
   if (!grid) return;
+
+  // 「+ 添加 Provider」（新增共享定义）仅管理员可见。在此设置而非 init，
+  // 以避免 initAIConfig 早于 auth 加载导致 role 未就绪时误隐藏。
+  const addBtn = document.getElementById('aic-add-custom');
+  if (addBtn) addBtn.style.display = (window.appState?.user?.role === 'admin') ? '' : 'none';
 
   try {
     // 统一真源：custom_providers 表（原内置已迁入）。全部卡片一律可编辑 + 可删除。

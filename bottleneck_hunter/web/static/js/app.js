@@ -51,6 +51,9 @@ async function initAuth() {
     if (resp.ok) {
       const user = await resp.json();
       window.appState.user = user;
+      // 认证完成后再按角色设置管理员专属按钮，避免早于 auth 加载被误隐藏
+      const addProviderBtn = document.getElementById('aic-add-custom');
+      if (addProviderBtn) addProviderBtn.style.display = user.role === 'admin' ? '' : 'none';
       const nameEl = document.getElementById('user-display-name');
       if (nameEl) nameEl.textContent = user.display_name || user.username;
       const avatarEl = document.getElementById('user-avatar');
