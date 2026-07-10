@@ -13,9 +13,14 @@ from pydantic import BaseModel, Field
 from bottleneck_hunter.auth.dependencies import get_current_user, require_admin
 from bottleneck_hunter.llm_clients.factory import (
     PROVIDER_KEY_MAP,
+    _FALLBACK_CHAIN,
+    _user_has_llm_key,
     create_llm,
     get_custom_provider,
+    is_provider_active,
     register_custom_provider,
+    resolve_provider_model,
+    set_provider_status,
     unregister_custom_provider,
 )
 
@@ -206,3 +211,97 @@ async def test_provider(provider_id: str, user: dict = Depends(get_current_user)
         if len(err_msg) > 120:
             err_msg = err_msg[:120] + "..."
         return {"ok": False, "provider_id": provider_id, "error": err_msg}
+
+
+# ── 主要 / 禁用（管理员）──────────────────────────────────────
+
+class ToggleActiveRequest(BaseModel):
+    active: bool
+
+
+def _refresh_factory_status() -> None:
+    """把 custom_providers 的「禁用集合 + 主要 provider」推送到 factory 运行时状态。"""
+    try:
+        cps = _store().list_custom_providers()
+        inactive = [c["provider_id"] for c in cps if not c.get("is_active")]
+        primary = next((c["provider_id"] for c in cps if c.get("is_primary")), "")
+        set_provider_status(inactive, primary)
+    except Exception as e:
+        logger.debug("刷新 provider 状态失败: %s", e)
+
+
+@router.post("/{provider_id}/primary")
+async def set_primary(provider_id: str, user: dict = Depends(require_admin)):
+    """把 provider 设为全局「主要」（默认+兜底优先）。仅管理员——全平台共享。"""
+    store = _store()
+    if not store.set_provider_primary(provider_id):
+        raise HTTPException(status_code=404, detail="未找到该 provider")
+    _refresh_factory_status()
+    logger.info("已设为主要 provider: %s", provider_id)
+    return {"ok": True, "provider_id": provider_id}
+
+
+@router.post("/{provider_id}/toggle-active")
+async def toggle_active(provider_id: str, req: ToggleActiveRequest,
+                        user: dict = Depends(require_admin)):
+    """启用/禁用 provider。仅管理员。禁用时联动把引用它的角色配置替换为可用模型（优先主要）。"""
+    store = _store()
+    if store.get_custom_provider(provider_id) is None:
+        raise HTTPException(status_code=404, detail="未找到该 provider")
+    store.set_custom_provider_active(provider_id, req.active)
+    _refresh_factory_status()  # 先刷新，替换选型时才能正确判断谁已启用
+
+    replaced = 0
+    if not req.active:
+        replaced = _reassign_role_configs(provider_id, store.get_primary_provider())
+
+    logger.info("provider %s -> %s（替换 %d 处角色配置）",
+                provider_id, "启用" if req.active else "禁用", replaced)
+    return {"ok": True, "provider_id": provider_id, "active": req.active, "replaced": replaced}
+
+
+def _reassign_role_configs(disabled_pid: str, primary_pid: str) -> int:
+    """把所有用户 ai_role_config 中引用 disabled_pid 的行改写为可用替代模型。
+
+    每行按其所属用户单独选型：优先「主要」provider，其次 _FALLBACK_CHAIN 中该用户已配
+    KEY、启用中、非被禁的第一个；都不可用则删除该行（避免替换成一个也用不了的模型）。
+    返回受影响的角色配置条数。
+    """
+    from bottleneck_hunter.watchlist.store import WatchlistStore
+
+    wl = WatchlistStore()
+    try:
+        rows = wl.get_role_configs_using_provider(disabled_pid)
+    except Exception as e:
+        logger.debug("扫描角色配置失败: %s", e)
+        return 0
+
+    disabled = (disabled_pid or "").lower().strip()
+    candidates = ([primary_pid] if primary_pid else []) + [p for p, _ in _FALLBACK_CHAIN]
+    replaced = 0
+    for r in rows:
+        uid = r.get("user_id", "") or ""
+        new_pid, new_model = "", ""
+        for cand in candidates:
+            c = (cand or "").lower().strip()
+            if not c or c == disabled or not is_provider_active(c):
+                continue
+            if _user_has_llm_key(c, uid):
+                m = resolve_provider_model(c, uid)
+                if m:
+                    new_pid, new_model = c, m
+                    break
+        try:
+            if new_pid:
+                wl.upsert_role_config(
+                    r["role_key"], r["slot_index"], new_pid, new_model,
+                    role_label=r.get("role_label", "") or "",
+                    role_group=r.get("role_group", "") or "",
+                    user_id=uid,
+                )
+            else:
+                wl.delete_role_config(r["role_key"], r["slot_index"], user_id=uid)
+            replaced += 1
+        except Exception as e:
+            logger.debug("替换角色配置失败 %s: %s", r.get("id"), e)
+    return replaced

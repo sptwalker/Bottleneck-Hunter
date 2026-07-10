@@ -419,6 +419,20 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
+    def get_role_configs_using_provider(self, provider: str) -> list[dict]:
+        """跨**所有用户**返回引用指定 provider 的启用中角色配置。
+        仅供管理员禁用 provider 时联动替换（不做 user 过滤，属全局运维操作）。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, role_key, role_label, role_group, slot_index, provider, model, user_id "
+                "FROM ai_role_config WHERE provider = ? AND is_active = 1",
+                (provider,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
 
     def delete_role_config(self, role_key: str, slot_index: int,
                            user_id: str | None = None) -> bool:

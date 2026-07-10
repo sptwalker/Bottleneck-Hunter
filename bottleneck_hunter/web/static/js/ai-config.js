@@ -80,6 +80,8 @@ export function initAIConfig() {
     const isCustom = btn.dataset.custom === '1';
     if (btn.dataset.aicAct === 'edit') editProvider(id, isCustom);
     else if (btn.dataset.aicAct === 'delete') deleteProvider(id, btn.dataset.name || id, isCustom);
+    else if (btn.dataset.aicAct === 'primary') setProviderPrimary(id, btn.dataset.name || id);
+    else if (btn.dataset.aicAct === 'disable') toggleProviderActive(id, btn.dataset.name || id, btn.dataset.active === '1');
   });
 
   // Auto-generate ID from name
@@ -213,22 +215,34 @@ function renderProviders() {
       const displayName = cp.display_name || id;
       const model = cp.default_model || '';
       const isAdmin = window.appState?.user?.role === 'admin';
+      const isDisabled = cp.is_active === 0;
+      const isPrimary = cp.is_primary === 1;
       const editLabel = isAdmin ? '编辑' : '配置 Key';
       const delBtn = isAdmin
         ? `<button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-custom="1">删除</button>`
         : '';
+      // 主要（未主要且启用中可点）/ 禁用切换 —— 仅管理员
+      const primaryBtn = (isAdmin && !isPrimary && !isDisabled)
+        ? `<button class="btn btn-xs" data-aic-act="primary" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" title="设为全局主要模型（默认+兜底优先）">设为主要</button>`
+        : '';
+      const disableBtn = isAdmin
+        ? `<button class="btn btn-xs aic-btn-disable" data-aic-act="disable" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-active="${isDisabled ? '0' : '1'}">${isDisabled ? '启用' : '禁用'}</button>`
+        : '';
+      const primaryBadge = isPrimary
+        ? '<span class="aic-provider-primary-badge" title="全局主要模型（默认+兜底优先）">主要</span>'
+        : '';
       return `
-      <div class="aic-provider-item" data-pid="${escHtml(id)}">
+      <div class="aic-provider-item${isDisabled ? ' is-disabled' : ''}" data-pid="${escHtml(id)}">
         <div class="aic-provider-row-top">
-          <span class="aic-provider-status aic-status-ok"></span>
+          <span class="aic-provider-status ${isDisabled ? 'aic-status-fail' : 'aic-status-ok'}"></span>
           <div class="aic-provider-info">
-            <span class="aic-provider-name">${escHtml(displayName)}</span>
+            <span class="aic-provider-name">${escHtml(displayName)}${primaryBadge}</span>
             ${model ? `<span class="aic-provider-model">${escHtml(model)}</span>` : ''}
           </div>
         </div>
         <div class="aic-provider-actions-inline">
           <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">${editLabel}</button>
-          ${delBtn}
+          ${primaryBtn}${disableBtn}${delBtn}
         </div>
       </div>`;
     }).join('');
@@ -519,6 +533,47 @@ async function deleteCustomProvider(id, name) {
       setStatus('aic-provider-status', 'Provider 已删除', 'ok');
     } else {
       alert('删除失败');
+    }
+  } catch (e) {
+    alert('网络错误: ' + e.message);
+  }
+}
+
+async function setProviderPrimary(id, name) {
+  try {
+    const resp = await fetch(`${CUSTOM_API}/${id}/primary`, { method: 'POST' });
+    if (resp.ok) {
+      await loadCustomProviders();
+      await loadRoles();
+      setStatus('aic-provider-status', `已将「${name}」设为主要模型（默认+兜底优先）`, 'ok');
+    } else {
+      alert(resp.status === 403 ? '仅管理员可设置主要模型' : '设置主要失败');
+    }
+  } catch (e) {
+    alert('网络错误: ' + e.message);
+  }
+}
+
+async function toggleProviderActive(id, name, currentlyActive) {
+  const disabling = currentlyActive;
+  if (disabling && !confirm(`确定禁用「${name}」？\n所有使用它的角色分配将自动替换为可用模型（优先主要模型）。`)) return;
+  try {
+    const resp = await fetch(`${CUSTOM_API}/${id}/toggle-active`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: !currentlyActive }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      await loadCustomProviders();
+      await loadRoles();
+      if (disabling) {
+        setStatus('aic-provider-status', `已禁用「${name}」，${data.replaced || 0} 处角色配置已替换为可用模型`, 'ok');
+      } else {
+        setStatus('aic-provider-status', `已启用「${name}」`, 'ok');
+      }
+    } else {
+      alert(resp.status === 403 ? '仅管理员可启用/禁用 Provider' : '操作失败');
     }
   } catch (e) {
     alert('网络错误: ' + e.message);

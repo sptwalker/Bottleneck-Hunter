@@ -179,18 +179,27 @@ class FallbackChatModel(BaseChatModel):
 
 def build_fallback_candidates(primary_provider: str, primary_model: str,
                               user_id: str = "", temperature: float = 0.3) -> list:
-    """构造备选候选列表（不含主模型）：_FALLBACK_CHAIN 中当前用户已配置 KEY 且不同于主的 provider。"""
+    """构造备选候选列表（不含主模型）：全局「主要」provider 前置，其后接 _FALLBACK_CHAIN；
+    仅取当前用户已配 KEY、启用中、且不同于主模型的 provider（严格隔离 + 跳过被禁用）。"""
     # 延迟导入避免与 factory 循环依赖
     from bottleneck_hunter.llm_clients.factory import (
         _FALLBACK_CHAIN, _user_has_llm_key, create_llm, resolve_provider_model,
+        is_provider_active, get_primary_provider,
     )
     from bottleneck_hunter.auth.current_user import get_current_user_id
 
     uid = user_id or get_current_user_id()
     out = []
     primary = (primary_provider or "").lower().strip()
-    for provider, _key_env in _FALLBACK_CHAIN:
-        if provider == primary:
+    # 主要 provider 前置到备选链首，实现「其它模型失效自动替换为主要」
+    chain = ([get_primary_provider()] if get_primary_provider() else []) + [p for p, _ in _FALLBACK_CHAIN]
+    seen: set[str] = set()
+    for provider in chain:
+        provider = (provider or "").lower().strip()
+        if not provider or provider == primary or provider in seen:
+            continue
+        seen.add(provider)
+        if not is_provider_active(provider):  # 跳过已被管理员禁用的 provider
             continue
         if not _user_has_llm_key(provider, uid):  # 严格：只用当前用户自己配了 KEY 的备选
             continue

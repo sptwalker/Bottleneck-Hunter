@@ -105,6 +105,32 @@ def list_custom_provider_ids() -> list[str]:
     return list(_CUSTOM_PROVIDERS.keys())
 
 
+# ── provider 启用/禁用 + 全局「主要」运行时状态 ──────────────────────
+# 真源是 custom_providers.is_active / is_primary；由 app 启动 + 管理端点推送到此缓存，
+# 供解析层（get_models_for_role / build_fallback_candidates）跳过被禁用、优先主要。
+_INACTIVE_PROVIDERS: set[str] = set()
+_PRIMARY_PROVIDER: str = ""
+
+
+def set_provider_status(inactive_ids, primary_id: str = "") -> None:
+    """刷新「已禁用 provider 集合」与「全局主要 provider」运行时状态。"""
+    global _PRIMARY_PROVIDER
+    _INACTIVE_PROVIDERS.clear()
+    _INACTIVE_PROVIDERS.update((p or "").lower().strip() for p in (inactive_ids or []) if p)
+    _PRIMARY_PROVIDER = (primary_id or "").lower().strip()
+    logger.info("provider 状态已刷新: 禁用=%s 主要=%s", sorted(_INACTIVE_PROVIDERS), _PRIMARY_PROVIDER or "(无)")
+
+
+def is_provider_active(provider_id: str) -> bool:
+    """provider 是否启用（未被管理员禁用）。未知的默认视为启用。"""
+    return (provider_id or "").lower().strip() not in _INACTIVE_PROVIDERS
+
+
+def get_primary_provider() -> str:
+    """当前全局「主要」provider id（管理员设定），未设则空串。"""
+    return _PRIMARY_PROVIDER
+
+
 # ── provider 覆盖（全局/user_id='' 行的运行时缓存）+ 模型/base_url 解析 ──────────
 _PROVIDER_OVERRIDES: dict[str, dict] = {}  # {provider_id: {default_model, base_url}}
 
@@ -314,6 +340,8 @@ def get_models_for_role(
     if configs:
         results = []
         for cfg in configs:
+            if not is_provider_active(cfg["provider"]):
+                continue  # 跳过已被管理员禁用的 provider（其它优先级会兜底到主要/可用模型）
             try:
                 llm = create_llm(cfg["provider"], cfg["model"], temperature=temperature, with_fallback=with_fallback, user_id=uid)
                 results.append((llm, cfg["provider"], cfg["model"]))
@@ -335,7 +363,7 @@ def get_models_for_role(
     try:
         from bottleneck_hunter.llm_clients.role_registry import get_role
         role_def = get_role(role_key)
-        if role_def and _user_has_llm_key(role_def.default_provider, uid):
+        if role_def and is_provider_active(role_def.default_provider) and _user_has_llm_key(role_def.default_provider, uid):
             model = role_def.default_model or resolve_provider_model(role_def.default_provider, uid)
             if model:
                 try:
@@ -346,8 +374,16 @@ def get_models_for_role(
     except Exception:
         pass
 
-    # 优先级4: fallback 链（当前用户已配置 KEY 的 provider）
-    for provider, _key_env in _FALLBACK_CHAIN:
+    # 优先级4: 主要模型优先 + 应急兜底链（均跳过被禁用 provider）
+    chain = ([_PRIMARY_PROVIDER] if _PRIMARY_PROVIDER else []) + [p for p, _ in _FALLBACK_CHAIN]
+    seen: set[str] = set()
+    for provider in chain:
+        provider = (provider or "").lower().strip()
+        if not provider or provider in seen:
+            continue
+        seen.add(provider)
+        if not is_provider_active(provider):
+            continue
         if _user_has_llm_key(provider, uid):
             model = resolve_provider_model(provider, uid)
             if not model:

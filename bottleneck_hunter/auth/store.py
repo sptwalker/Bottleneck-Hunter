@@ -118,6 +118,9 @@ class AuthStore:
             ds_cols = {r["name"] for r in conn.execute("PRAGMA table_info(data_source_keys)").fetchall()}
             if ds_cols and "verified_at" not in ds_cols:
                 conn.execute("ALTER TABLE data_source_keys ADD COLUMN verified_at TEXT DEFAULT ''")
+            cp_cols = {r["name"] for r in conn.execute("PRAGMA table_info(custom_providers)").fetchall()}
+            if cp_cols and "is_primary" not in cp_cols:
+                conn.execute("ALTER TABLE custom_providers ADD COLUMN is_primary INTEGER DEFAULT 0")
 
     # ── 系统配置 ──────────────────────────────────────────
 
@@ -555,7 +558,7 @@ class AuthStore:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT id, provider_id, display_name, base_url, api_key_hint, "
-                "default_model, is_active, created_at, updated_at "
+                "default_model, is_active, is_primary, created_at, updated_at "
                 "FROM custom_providers ORDER BY created_at"
             ).fetchall()
             return [dict(r) for r in rows]
@@ -577,3 +580,33 @@ class AuthStore:
                 (provider_id,),
             )
             return cur.rowcount > 0
+
+    def set_custom_provider_active(self, provider_id: str, active: bool) -> bool:
+        """启用/禁用 provider。禁用时一并撤销其「主要」标记（禁用的不能是主要）。"""
+        with self._conn() as conn:
+            if active:
+                cur = conn.execute(
+                    "UPDATE custom_providers SET is_active = 1 WHERE provider_id = ?", (provider_id,))
+            else:
+                cur = conn.execute(
+                    "UPDATE custom_providers SET is_active = 0, is_primary = 0 WHERE provider_id = ?", (provider_id,))
+            return cur.rowcount > 0
+
+    def set_provider_primary(self, provider_id: str) -> bool:
+        """设为唯一「主要」provider（自动激活自身，清除其它主要标记）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id FROM custom_providers WHERE provider_id = ?", (provider_id,)).fetchone()
+            if not row:
+                return False
+            conn.execute("UPDATE custom_providers SET is_primary = 0")
+            conn.execute(
+                "UPDATE custom_providers SET is_primary = 1, is_active = 1 WHERE provider_id = ?", (provider_id,))
+            return True
+
+    def get_primary_provider(self) -> str:
+        """返回当前「主要」provider id，未设则空串。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT provider_id FROM custom_providers WHERE is_primary = 1 LIMIT 1").fetchone()
+            return row["provider_id"] if row else ""

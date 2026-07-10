@@ -97,12 +97,22 @@ async def lifespan(app: FastAPI):
     # 加载全部 provider 的**元数据**（base_url/default_model）到 factory 运行时缓存。
     # 严格隔离：绝不解密/缓存任何 api_key —— KEY 一律按当前用户从加密表实时解析。
     from bottleneck_hunter.llm_clients.factory import register_custom_provider
-    for cp in _auth_store.list_custom_providers():
+    _all_custom_providers = _auth_store.list_custom_providers()
+    for cp in _all_custom_providers:
         detail = _auth_store.get_custom_provider(cp["provider_id"])
         if detail and detail.get("is_active"):
             register_custom_provider(
                 cp["provider_id"], cp["base_url"], default_model=cp["default_model"],
             )
+
+    # 推送「禁用集合 + 主要 provider」到 factory 运行时状态（禁用/主要生效于解析层）
+    try:
+        from bottleneck_hunter.llm_clients.factory import set_provider_status
+        _inactive = [c["provider_id"] for c in _all_custom_providers if not c.get("is_active")]
+        _primary = next((c["provider_id"] for c in _all_custom_providers if c.get("is_primary")), "")
+        set_provider_status(_inactive, _primary)
+    except Exception as e:
+        logging.getLogger(__name__).debug("加载 provider 启用/主要状态失败: %s", e)
 
     # 一次性迁移历史全局 KEY（.env + custom_providers 全局密钥）→ admin 用户级存储，然后清除全局。
     try:
