@@ -472,20 +472,28 @@ async def env_test(user: dict = Depends(_require_admin)):
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
     no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
 
+    # 被墙域名(google/yahoo)不是快速拒绝而是丢包挂住，且 DNS 污染时 getaddrinfo
+    # 会在 httpx 超时之外额外阻塞 —— 故用 wait_for 硬封顶，保证整体几秒内返回、
+    # 不触发前置反代的网关超时(504)。
+    HARD_CAP = 8
+
     async def _probe(label: str, url: str, overseas: bool) -> dict:
         import httpx
         t0 = time.monotonic()
         try:
-            # trust_env=True → 自动认 HTTPS_PROXY/NO_PROXY，与真实抓取一致
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True, trust_env=True) as c:
-                r = await c.get(url)
+            async def _do():
+                # trust_env=True → 自动认 HTTPS_PROXY/NO_PROXY，与真实抓取一致
+                async with httpx.AsyncClient(timeout=HARD_CAP, follow_redirects=True, trust_env=True) as c:
+                    return await c.get(url)
+            r = await asyncio.wait_for(_do(), timeout=HARD_CAP)
             ms = round((time.monotonic() - t0) * 1000)
             return {"label": label, "url": url, "overseas": overseas,
                     "ok": r.status_code < 500, "status": r.status_code, "ms": ms, "error": ""}
         except Exception as e:  # noqa: BLE001
             ms = round((time.monotonic() - t0) * 1000)
+            err = "连接超时/被墙（丢包挂起）" if isinstance(e, asyncio.TimeoutError) else str(e)[:160]
             return {"label": label, "url": url, "overseas": overseas,
-                    "ok": False, "status": 0, "ms": ms, "error": str(e)[:160]}
+                    "ok": False, "status": 0, "ms": ms, "error": err}
 
     results = await asyncio.gather(*[_probe(*t) for t in targets])
 
