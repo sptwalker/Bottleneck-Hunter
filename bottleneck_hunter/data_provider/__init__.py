@@ -51,12 +51,20 @@ def _create_manager() -> FetcherManager:
     except ImportError:
         logger.info("baostock 未安装，跳过")
 
-    # 美股：yfinance (priority=0) > finnhub (2)
+    # 美股：yfinance (priority=0) > akshare_us (1, 国内可达兜底) > finnhub (2, 需密钥)
     try:
         from bottleneck_hunter.data_provider.fetchers.yfinance_fetcher import YfinanceFetcher
         manager.register(YfinanceFetcher())
     except ImportError:
         logger.info("yfinance 未安装，跳过")
+
+    # 美股国内兜底：yfinance 在境内数据中心常被 Yahoo 限流(Too Many Requests)，
+    # 用新浪美股(akshare)兜底，免密钥、国内可达。
+    try:
+        from bottleneck_hunter.data_provider.fetchers.akshare_us_fetcher import AkshareUsFetcher
+        manager.register(AkshareUsFetcher())
+    except ImportError:
+        logger.info("akshare 未安装，跳过美股兜底")
 
     try:
         from bottleneck_hunter.data_provider.fetchers.finnhub_fetcher import FinnhubFetcher

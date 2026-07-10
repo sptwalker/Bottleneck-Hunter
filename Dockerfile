@@ -17,6 +17,10 @@ WORKDIR /app
 # 先只拷贝依赖清单，利用镜像层缓存（依赖不变则跳过重装）
 COPY pyproject.toml README.md ./
 COPY bottleneck_hunter/ ./bottleneck_hunter/
+# 运行时按仓库根定位的非包文件：更新历史 + 新手必读指南
+# （否则容器内 /app 下读不到 → 首页「更新历史」与「新手必读」为空）
+COPY UPDATE_HISTORY.json ./
+COPY docs/ ./docs/
 RUN pip install -e .
 
 # 构建期编译器不进运行时镜像的必要性不高（单阶段简单优先）；

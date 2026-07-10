@@ -375,11 +375,50 @@ _MARKET_NEWS_TOPICS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+def _fetch_cn_market_news(limit: int = 12) -> list[dict]:
+    """国内可访问的市场财经快讯（akshare：财联社/东财/同花顺），Google News 被墙时兜底。
+
+    列名随源/版本变化，故用「含关键字」方式弹性识别标题/日期列。
+    """
+    try:
+        import akshare as ak
+    except ImportError:
+        return []
+    sources = [
+        ("财联社", lambda: ak.stock_info_global_cls(symbol="全部")),
+        ("东方财富", lambda: ak.stock_info_global_em()),
+        ("同花顺", lambda: ak.stock_info_global_ths()),
+    ]
+    for name, fn in sources:
+        try:
+            df = fn()
+            if df is None or getattr(df, "empty", True):
+                continue
+            cols = list(df.columns)
+            title_col = next((c for c in cols if "标题" in str(c)), None) or cols[0]
+            date_col = (next((c for c in cols if "日期" in str(c)), None)
+                        or next((c for c in cols if "时间" in str(c)), None))
+            items = []
+            for _, r in df.head(limit).iterrows():
+                title = str(r.get(title_col, "") or "").strip()
+                if not title:
+                    continue
+                d = str(r.get(date_col, "") or "")[:10] if date_col else ""
+                items.append({"topic": "", "title": title, "date": d, "source_name": name})
+            if items:
+                logger.info("市场新闻改用国内源「%s」兜底，%d 条", name, len(items))
+                return items
+        except Exception as e:  # noqa: BLE001
+            logger.debug("国内新闻源 %s 失败: %s", name, e)
+    return []
+
+
 async def fetch_market_news(market: str = "us_stock", llm=None, budget: BudgetTracker | None = None,
                             per_topic: int = 4) -> list[dict]:
-    """抓取市场/主题级近期新闻（RSS，免费），供 L1 宏观决策的 {market_news} 使用。
+    """抓取市场/主题级近期新闻，供 L1 宏观决策的 {market_news} 使用。
 
     - 按 market 的主题词表并发抓 Google News RSS，按 id 去重。
+    - Google News 抓不到（如国内服务器被墙）→ 用国内可访问的财经快讯兜底。
     - 有 llm+budget 时用 _summarize_with_llm 得整体市场情绪，附到每条。
     - 任何失败均优雅降级：返回已拿到的部分或空列表，绝不让 L1 因新闻抓取而中断。
     """
@@ -408,6 +447,10 @@ async def fetch_market_news(market: str = "us_stock", llm=None, budget: BudgetTr
                 "date": r.get("date", ""),
                 "source_name": r.get("source_name", ""),
             })
+
+    if not items:
+        # Google News 抓不到（如国内服务器被墙）→ 用国内可访问的财经快讯兜底
+        items = await asyncio.to_thread(_fetch_cn_market_news, max(per_topic * 4, 12))
 
     if not items:
         return []
