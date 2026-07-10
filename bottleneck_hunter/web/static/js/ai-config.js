@@ -47,7 +47,6 @@ let _roles = [];
 let _providers = [];
 let _customProviders = [];
 let _testResults = [];
-let _recommendations = [];
 let _activeModule = '产业链分析';
 
 /* ── Init ─────────────────────────────────────────────── */
@@ -58,7 +57,6 @@ export function initAIConfig() {
 
   loadRoles();
   loadTestResults();
-  loadRecommendations();
   loadCustomProviders();
   loadAutoUpdateSummary();
   loadPaidSources();
@@ -99,18 +97,6 @@ export function initAIConfig() {
 
   // Matrix actions
   container.querySelector('#aic-save-matrix')?.addEventListener('click', saveMatrixConfig);
-
-  // Recommend actions
-  container.querySelector('#aic-gen-recommend')?.addEventListener('click', () => generateRecommendations(true));
-  container.querySelector('#aic-apply-recommend')?.addEventListener('click', applyRecommendations);
-
-  // Recommend modal
-  document.getElementById('aic-recommend-modal-close')?.addEventListener('click', hideRecommendModal);
-  document.getElementById('aic-recommend-modal-cancel')?.addEventListener('click', hideRecommendModal);
-  document.getElementById('aic-recommend-modal-apply')?.addEventListener('click', async () => {
-    await applyRecommendations();
-    hideRecommendModal();
-  });
 
   // Module tabs（分配矩阵按系统模块）
   container.querySelectorAll('.aic-module-tab').forEach(tab => {
@@ -163,7 +149,7 @@ function renderSidebarError(msg) {
   if (body) body.innerHTML = `<div class="aic-sidebar-empty">${escHtml(msg)}<br><button class="btn btn-xs" style="margin-top:8px" onclick="window._aicRetryLoad()">重试</button></div>`;
 }
 
-window._aicRetryLoad = () => { loadRoles(); loadCustomProviders(); loadTestResults(); loadRecommendations(); };
+window._aicRetryLoad = () => { loadRoles(); loadCustomProviders(); loadTestResults(); };
 
 async function loadTestResults() {
   try {
@@ -174,18 +160,6 @@ async function loadTestResults() {
     renderTestResults();
   } catch (e) {
     console.error('Failed to load test results:', e);
-  }
-}
-
-async function loadRecommendations() {
-  try {
-    const resp = await fetch(`${API}/recommendations`);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    _recommendations = data.recommendations || [];
-    renderRecommendations();
-  } catch (e) {
-    console.error('Failed to load recommendations:', e);
   }
 }
 
@@ -673,9 +647,6 @@ async function startComprehensiveTest() {
     if (btn) { btn.disabled = false; btn.textContent = '开始综合测试'; }
     setTimeout(() => { if (progressEl) progressEl.classList.remove('active'); }, 2000);
     await loadTestResults();
-    if (_testDoneCount > 0) {
-      await generateRecommendations(true);
-    }
   }
 }
 
@@ -842,103 +813,6 @@ async function saveMatrixConfig() {
   }
 }
 
-/* ── Section 4: Auto-recommendation ──────────────────── */
-
-async function generateRecommendations(showModal = false) {
-  const btn = document.getElementById('aic-gen-recommend');
-  if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
-
-  try {
-    const resp = await fetch(`${API}/recommend`, { method: 'POST' });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      setStatus('aic-recommend-status', err.detail || '生成失败', 'fail');
-      return;
-    }
-    const data = await resp.json();
-    _recommendations = data.recommendations || [];
-    renderRecommendations();
-    setStatus('aic-recommend-status', `已生成 ${_recommendations.length} 条推荐`, 'ok');
-    if (showModal && _recommendations.length > 0) {
-      showRecommendModal();
-    }
-  } catch (e) {
-    setStatus('aic-recommend-status', '网络错误', 'fail');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '生成推荐'; }
-  }
-}
-
-async function applyRecommendations() {
-  const btn = document.getElementById('aic-apply-recommend');
-  if (btn) { btn.disabled = true; btn.textContent = '应用中...'; }
-
-  try {
-    const resp = await fetch(`${API}/recommend/apply`, { method: 'POST' });
-    if (!resp.ok) {
-      setStatus('aic-recommend-status', '应用失败', 'fail');
-      return;
-    }
-    const data = await resp.json();
-    setStatus('aic-recommend-status', `已应用 ${data.applied} 条推荐`, 'ok');
-    await loadRoles();
-  } catch (e) {
-    setStatus('aic-recommend-status', '网络错误', 'fail');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '一键应用'; }
-  }
-}
-
-function renderRecommendations() {
-  const grid = document.getElementById('aic-recommend-grid');
-  if (!grid) return;
-
-  if (_recommendations.length === 0) {
-    grid.innerHTML = '<div class="aic-rec-empty">暂无推荐结果，请先运行综合测试后点击"生成推荐"</div>';
-    return;
-  }
-
-  const groupOf = {};
-  for (const r of _roles) groupOf[r.key] = r.group;
-
-  const cardHtml = (rec) => {
-    const role = _roles.find(r => r.key === rec.role_key);
-    const currentSlot = (role?.slots || []).find(s => s.slot_index === rec.slot_index);
-    const currentText = currentSlot ? `${currentSlot.provider}:${currentSlot.model}` : '未配置';
-    const recText = `${rec.provider}:${rec.model}`;
-    const isSame = currentText === recText;
-    return `
-      <div class="aic-rec-card">
-        <div class="aic-rec-card-header">
-          <span class="aic-rec-role">${escHtml(rec.role_label || rec.role_key)}${rec.slot_index > 0 ? ` #${rec.slot_index + 1}` : ''}</span>
-          <span class="aic-rec-score">${(rec.composite_score || 0).toFixed(1)}</span>
-        </div>
-        <div class="aic-rec-model">${escHtml(recText)}</div>
-        <div class="aic-rec-vs">
-          ${isSame ? '与当前配置一致' : `当前: ${escHtml(currentText)} <span class="aic-vs-arrow">&rarr;</span> ${escHtml(recText)}`}
-        </div>
-      </div>`;
-  };
-
-  let html = '';
-  const known = new Set();
-  for (const mod of MODULE_TREE) {
-    mod.groups.forEach(g => known.add(g));
-    const recs = _recommendations
-      .filter(rec => mod.groups.includes(groupOf[rec.role_key]))
-      .sort((a, b) => (mod.groups.indexOf(groupOf[a.role_key]) - mod.groups.indexOf(groupOf[b.role_key])));
-    if (!recs.length) continue;
-    html += `<div class="aic-rec-module"><div class="aic-rec-module-title">${escHtml(mod.module)}</div>`;
-    html += `<div class="aic-rec-cards">${recs.map(cardHtml).join('')}</div></div>`;
-  }
-  const rest = _recommendations.filter(rec => !known.has(groupOf[rec.role_key]));
-  if (rest.length) {
-    html += `<div class="aic-rec-module"><div class="aic-rec-module-title">其它</div>`;
-    html += `<div class="aic-rec-cards">${rest.map(cardHtml).join('')}</div></div>`;
-  }
-  grid.innerHTML = html;
-}
-
 /* ── Utilities ────────────────────────────────────────── */
 
 /* ── Section: 调度看板（智能调度 Phase 2）──────────────── */
@@ -1060,78 +934,6 @@ function setStatus(id, msg, type) {
   if (type === 'ok' || type === 'warn') {
     setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 3000);
   }
-}
-
-/* ── Recommend Modal ──────────────────────────────────── */
-
-function showRecommendModal() {
-  const modal = document.getElementById('aic-recommend-modal');
-  const body = document.getElementById('aic-recommend-modal-body');
-  if (!modal || !body) return;
-
-  const groups = {};
-  for (const rec of _recommendations) {
-    const role = _roles.find(r => r.key === rec.role_key);
-    const g = role?.group || 'other';
-    if (!groups[g]) groups[g] = [];
-    const currentSlot = (role?.slots || []).find(s => s.slot_index === rec.slot_index);
-    groups[g].push({ ...rec, role, currentSlot });
-  }
-
-  const groupOrder = ['decision', 'committee', 'pipeline', 'watchlist', 'bottleneck'];
-  let html = '<div class="aic-rm-summary">';
-  html += `<p>综合测试完成，共 ${_testResults.length} 个模型参与测试，已为 ${_recommendations.length} 个角色生成推荐配置。</p>`;
-  html += '</div>';
-
-  for (const gKey of groupOrder) {
-    const items = groups[gKey];
-    if (!items || items.length === 0) continue;
-    const gLabel = GROUP_LABELS[gKey] || gKey;
-
-    html += `<div class="aic-rm-group">`;
-    html += `<div class="aic-rm-group-title">${escHtml(gLabel)}</div>`;
-    html += `<table class="aic-rm-table"><tbody>`;
-
-    for (const item of items) {
-      const label = item.role?.label || item.role_key;
-      const recModel = `${item.provider}:${item.model}`;
-      const curModel = item.currentSlot
-        ? `${item.currentSlot.provider}:${item.currentSlot.model}`
-        : '';
-      const isChanged = curModel && curModel !== recModel;
-      const isNew = !curModel;
-      const cs = item.composite_score ?? 0;
-
-      let statusHtml;
-      if (isNew) {
-        statusHtml = '<span class="aic-rm-badge aic-rm-new">新配置</span>';
-      } else if (isChanged) {
-        statusHtml = '<span class="aic-rm-badge aic-rm-changed">变更</span>';
-      } else {
-        statusHtml = '<span class="aic-rm-badge aic-rm-same">不变</span>';
-      }
-
-      html += `<tr>
-        <td class="aic-rm-role">${escHtml(label)}${item.slot_index > 0 ? ` #${item.slot_index + 1}` : ''}</td>
-        <td class="aic-rm-model">
-          <span class="aic-rm-model-name">${escHtml(recModel)}</span>
-          ${isChanged ? `<span class="aic-rm-old">← ${escHtml(curModel)}</span>` : ''}
-        </td>
-        <td class="aic-rm-score ${scoreClass(cs)}">${cs.toFixed(1)}</td>
-        <td>${statusHtml}</td>
-      </tr>`;
-    }
-
-    html += `</tbody></table></div>`;
-  }
-
-  body.innerHTML = html;
-  modal.style.display = 'flex';
-}
-
-function hideRecommendModal() {
-  const modal = document.getElementById('aic-recommend-modal');
-  if (modal) modal.style.display = 'none';
 }
 
 /* ── 付费数据源 ─────────────────────────────────────── */

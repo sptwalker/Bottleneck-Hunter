@@ -109,6 +109,36 @@ def load_routing_policy(user_id: str = "", role_key: str = "") -> dict:
         return {}
 
 
+def load_capability_scores(user_id: str = "", role_key: str = "") -> dict:
+    """按角色 capability_weights 计算各 provider 的能力综合分(0-10)。无模式测试数据→空(中性)。
+
+    这是调度器**唯一的「质量」信号来源**（模式测试），补上运行时 ops 遥测测不出的
+    输出质量维度（JSON 正确性/中文分析/评分区分度）。每个 provider 取其最佳被测模型的分。
+    """
+    try:
+        from bottleneck_hunter.llm_clients.role_registry import get_role
+        from bottleneck_hunter.watchlist.store import WatchlistStore
+        role = get_role(role_key)
+        weights = role.capability_weights if role else None
+        if not weights:
+            return {}
+        total_w = sum(weights.values())
+        if total_w <= 0:
+            return {}
+        rows = WatchlistStore().get_test_results(user_id=user_id or "")
+        by_pm: dict[tuple, dict] = {}
+        for r in rows:
+            by_pm.setdefault((r["provider"], r["model"]), {})[r["test_type"]] = r["score"]
+        out: dict[str, float] = {}
+        for (prov, _model), scores in by_pm.items():
+            comp = sum(scores.get(dim, 0) * w for dim, w in weights.items()) / total_w  # 0-10 加权均值
+            p = (prov or "").lower().strip()
+            out[p] = max(out.get(p, 0.0), comp)  # 每 provider 取其最佳模型
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _ranking_enabled() -> bool:
     """全局 feature flag：BH_SCHEDULER_RANK=0 可一键关回静态顺序。"""
     return os.environ.get("BH_SCHEDULER_RANK", "1") != "0"
@@ -132,7 +162,7 @@ def _load_stats(user_id: str) -> dict:
     return agg
 
 
-def _score(provider: str, user_id: str, primary: str, stats: dict, policy: dict) -> float:
+def _score(provider: str, user_id: str, primary: str, stats: dict, policy: dict, caps: dict) -> float:
     p = (provider or "").lower().strip()
     s = stats.get(p, {})
     calls = s.get("calls", 0)
@@ -141,6 +171,11 @@ def _score(provider: str, user_id: str, primary: str, stats: dict, policy: dict)
     # 健康：熔断中重罚沉底
     health_factor = 0.05 if health.is_open(user_id, p) else 1.0
     score = reliability * health_factor
+    # 能力先验（模式测试的质量分 0-10）：温和乘子 0.7~1.0，差异化但不压过健康/可靠性；无数据中性
+    if caps:
+        comp = caps.get(p)
+        if comp is not None:
+            score *= 0.7 + 0.3 * (max(0.0, min(10.0, comp)) / 10.0)
     if p == primary:
         score += PRIMARY_BONUS   # 主模型加成上限
     # 用户策略：免费/付费偏好 + 质量/价格优化
@@ -154,26 +189,28 @@ def _score(provider: str, user_id: str, primary: str, stats: dict, policy: dict)
             score += 0.2
         if opt == "price" and tier == "free":
             score += 0.3   # 价格优先＝偏向免费
-        # optimize_for=='quality' 已由 reliability 主导；待 accuracy 数据积累后加权强化
+        # optimize_for=='quality' 由上面能力先验 + reliability 共同体现
     return score
 
 
 def rank_providers(providers, user_id: str = "", primary_provider: str = "",
-                   policy: dict | None = None, stats=None) -> list:
-    """按 健康度×可靠性 + 主模型加成 + 用户策略 对 provider 列表排序(高→低)。
+                   policy: dict | None = None, role_key: str = "", stats=None, caps=None) -> list:
+    """按 健康度×可靠性×能力先验 + 主模型加成 + 用户策略 对 provider 列表排序(高→低)。
 
-    **无遥测数据且无策略时所有 provider 同分 → 稳定排序保持原顺序 → 平滑退化为现状。**
-    feature flag 关闭时直接返回原列表。
+    **无遥测/无能力数据/无策略时所有 provider 同分 → 稳定排序保持原顺序 → 平滑退化为现状。**
+    feature flag 关闭时直接返回原列表。role_key 提供时加载该角色的能力分先验。
     """
     providers = list(providers)
     if not _ranking_enabled() or len(providers) < 2:
         return providers
     if stats is None:
         stats = _load_stats(user_id)
+    if caps is None:
+        caps = load_capability_scores(user_id, role_key) if role_key else {}
     primary = (primary_provider or "").lower().strip()
     policy = policy or {}
     # Python sorted 稳定：同分元素保持原相对顺序（无数据/无策略即原顺序）
-    return sorted(providers, key=lambda p: _score(p, user_id, primary, stats, policy), reverse=True)
+    return sorted(providers, key=lambda p: _score(p, user_id, primary, stats, policy, caps), reverse=True)
 
 
 def _selfcheck() -> None:

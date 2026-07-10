@@ -335,7 +335,17 @@ def get_models_for_role(
     """
     from bottleneck_hunter.auth.current_user import get_current_user_id
     uid = user_id or get_current_user_id()
-    # 优先级1: 数据库
+    # 角色元信息：多槽 fan-out 角色需返回 N 个多样化模型（交叉验证）
+    role_def = None
+    try:
+        from bottleneck_hunter.llm_clients.role_registry import get_role
+        role_def = get_role(role_key)
+    except Exception:  # noqa: BLE001
+        pass
+    multi = bool(role_def and role_def.multi_model)
+    n_slots = (role_def.max_slots if (multi and role_def.max_slots) else 1)
+
+    # 优先级1: 数据库矩阵（手动覆盖，最高优先）
     configs = _load_role_configs_from_db(role_key, uid)
     if configs:
         results = []
@@ -359,57 +369,67 @@ def get_models_for_role(
         except Exception:
             pass
 
-    # 优先级3: 角色注册表默认值（当前用户须已配置该 provider 的 KEY）
-    try:
-        from bottleneck_hunter.llm_clients.role_registry import get_role
-        role_def = get_role(role_key)
-        if role_def and is_provider_active(role_def.default_provider) and _user_has_llm_key(role_def.default_provider, uid):
-            model = role_def.default_model or resolve_provider_model(role_def.default_provider, uid)
-            if model:
-                try:
-                    return [(create_llm(role_def.default_provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
-                             role_def.default_provider, model)]
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    # 优先级3: 角色注册表默认值 —— 仅单模型位（多槽 fan-out 交由优先级4 自动选 N 个多样化模型）
+    if not multi and role_def:
+        try:
+            if is_provider_active(role_def.default_provider) and _user_has_llm_key(role_def.default_provider, uid):
+                model = role_def.default_model or resolve_provider_model(role_def.default_provider, uid)
+                if model:
+                    try:
+                        return [(create_llm(role_def.default_provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
+                                 role_def.default_provider, model)]
+                    except Exception:
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
 
-    # 优先级4: 主要模型优先 + 应急兜底链（均跳过被禁用 provider）
-    chain = ([_PRIMARY_PROVIDER] if _PRIMARY_PROVIDER else []) + [p for p, _ in _FALLBACK_CHAIN]
-    # 去重保序
+    # 优先级4: 智能调度 —— 候选池 = 主模型 + 所有已注册 provider + 应急链，按
+    #   健康度×可靠性×能力先验 + 用户策略 排序；单模型位取 top-1，多槽 fan-out 取 top-N
+    #   个不同 provider（保持交叉验证多样性）。无数据/无策略 → 稳定排序退化为静态链。
+    try:
+        universe = list_custom_provider_ids()
+    except Exception:  # noqa: BLE001
+        universe = []
+    chain = ([_PRIMARY_PROVIDER] if _PRIMARY_PROVIDER else []) + universe + [p for p, _ in _FALLBACK_CHAIN]
     _seen0: set[str] = set()
     chain = [p for p in ((c or "").lower().strip() for c in chain) if p and not (p in _seen0 or _seen0.add(p))]
-    # 智能排序：按健康度/遥测/用户策略把最优可用 provider 排前，作为「默认自动」的主选。
-    # 无数据且无策略 → 稳定排序保持原顺序（平滑退化为静态链，不劣于现状）。
-    policy = {}
+    policy: dict = {}
+    tier_of = None
     try:
         from bottleneck_hunter.llm_clients.health import rank_providers, load_routing_policy, provider_tier
         policy = load_routing_policy(uid, role_key)
-        chain = rank_providers(chain, uid, _PRIMARY_PROVIDER, policy=policy)
+        chain = rank_providers(chain, uid, _PRIMARY_PROVIDER, policy=policy, role_key=role_key)
+        tier_of = provider_tier
     except Exception:  # noqa: BLE001
         pass
+    results = []
+    seen_prov: set[str] = set()
     for provider in chain:
-        if not is_provider_active(provider):
+        if not is_provider_active(provider) or provider in seen_prov:
             continue
-        if _user_has_llm_key(provider, uid):
-            model = resolve_provider_model(provider, uid)
-            if not model:
-                continue
+        if not _user_has_llm_key(provider, uid):
+            continue
+        model = resolve_provider_model(provider, uid)
+        if not model:
+            continue
+        try:
+            llm = create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid)
+        except Exception:
+            continue
+        results.append((llm, provider, model))
+        seen_prov.add(provider)
+        # 免费→付费回落强提示（仅首个主选）
+        if len(results) == 1 and tier_of and policy.get("prefer_tier") == "free" and tier_of(provider) == "paid":
             try:
-                llm = create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid)
-                # 免费→付费回落强提示：用户选了免费优先，但只剩付费可用时明确告知
-                if policy.get("prefer_tier") == "free" and provider_tier(provider) == "paid":
-                    try:
-                        from bottleneck_hunter.llm_clients.fallback import push_notice
-                        push_notice({"type": "tier_fallback", "provider": provider, "model": model,
-                                     "message": f"⚠️ 免费模型当前不可用，已临时启用付费模型 {provider}/{model}"})
-                    except Exception:  # noqa: BLE001
-                        pass
-                return [(llm, provider, model)]
-            except Exception:
-                continue
+                from bottleneck_hunter.llm_clients.fallback import push_notice
+                push_notice({"type": "tier_fallback", "provider": provider, "model": model,
+                             "message": f"⚠️ 免费模型当前不可用，已临时启用付费模型 {provider}/{model}"})
+            except Exception:  # noqa: BLE001
+                pass
+        if len(results) >= n_slots:
+            break
 
-    return []
+    return results
 
 
 def get_llm_for_position(

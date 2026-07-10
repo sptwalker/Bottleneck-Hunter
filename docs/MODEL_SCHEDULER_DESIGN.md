@@ -164,6 +164,15 @@
 - **平滑性**：无策略时等权退化；校验保守可按角色关闭。
 - **实现**：`validate.py`（角色无关内容启发式：空/伪JSON解析失败/拒答，接入非流式路径，坏格式换模型、末候选兜底，`BH_SCHEDULER_VALIDATE=0` 可关）；`ai_routing_policy` 表 + `rank_providers` 策略感知（免费/付费/价格）+ 免费全熔断→回落付费强提示；`drain_usage` 使用清单 → `with_notices` 发 `model_usage` 事件；`/model-usage`（聚合+日曲线+熔断+策略）、`/routing-policy` GET/POST；前端「🧭 调度看板」页签（策略选择器 + 使用表 + 内联 SVG 成功率曲线）。provider tier 用默认映射（免费:deepseek/qwen/glm/kimi/siliconflow；付费:openai/anthropic/google/…），暂不做逐 provider 标注 UI。
 
+### Phase 2.5 — 模式测试喂入调度器 + 干净切换（取代静态分配）✅ 已完成
+- **背景**：智能调度器建成后，静态分配（手填矩阵 priority-1、DC_MODEL_ 环境影子 priority-2、推荐→冻结矩阵）仍**覆盖**调度器，调度形同虚设。此阶段让「模式测试」这唯一的质量信号喂进调度器，并干净切换到调度器驱动。
+- **A 能力先验**：`health.load_capability_scores(user, role)` 按角色 `capability_weights` 内联加权算各 provider 的模式测试综合分(0-10)；`rank_providers` 加 `role_key` 参数，`_score` 乘一个 0.7~1.0 的能力乘子（差异化但不压过健康/可靠性；无数据中性）。这补上调度器缺的「质量」维度，取代「推荐→冻结矩阵」。
+- **B 多槽自动选型**：`get_models_for_role` 早取 `role_def`；多槽 fan-out 角色（L1_macro 2 槽 / bottleneck 3 槽）跳过 priority-3，priority-4 候选池扩为**全部已注册 provider**，按排序取 **top-N 个不同 provider**（保交叉验证多样性）；单模型位取 top-1。矩阵留空即自动。
+- **C 退役推荐**：删 `/recommend`、`/recommend/apply`、`/recommendations` 端点 + 前端「生成推荐/一键应用」按钮/网格/模态/JS。模式测试(`/test/*`)保留——现改喂调度器。
+- **D 干净切换**：备份 admin 23 条矩阵 + 9 个 DC_MODEL_ 到 `data/ai_role_config_backup_pre_scheduler.json`；清空矩阵；注释 `.env` 的 `DC_MODEL_*` 影子配置（[[project_ai_config_unified]] 红线）。切换后全部角色由调度器接管：L1_macro→[kimi,deepseek]、bottleneck→3 个多样化、委员会 4 员靠角色默认保持 deepseek/qwen/kimi/glm 多样性。
+- **可覆盖不变**：手动矩阵 UI 保留——需固定某角色用某模型时手填即覆盖调度器（"默认智能、用户可覆盖"）。
+- **文件**：`health.py`、`factory.py`、`ai_config_api.py`、前端 `index.html`/`ai-config.js`、`.env`（DC_MODEL 注释）。
+
 ### Phase 3（最后）— 统一两套容错
 - **目标**：把 `committee._invoke_with_retry` 的"同模型瞬态退避重试"并入统一策略层，删除并行实现。
 - **风险最高**：迁移不彻底会回退投委会稳定性。**必须带投委会回归测试，单独一步做。**

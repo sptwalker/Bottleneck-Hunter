@@ -1191,21 +1191,7 @@
             </div>
           </div>
 
-          <!-- Section 4: 自动推荐 -->
-          <div class="aic-card">
-            <div class="aic-card-header">
-              <h3>自动推荐</h3>
-              <span class="aic-hint">基于综合测试结果，为每个角色自动推荐最佳模型</span>
-            </div>
-            <div class="aic-recommend-controls">
-              <button class="btn btn-sm btn-primary" id="aic-gen-recommend">生成推荐</button>
-              <button class="btn btn-sm" id="aic-apply-recommend">一键应用</button>
-              <span class="aic-save-status" id="aic-recommend-status"></span>
-            </div>
-            <div class="aic-recommend-grid" id="aic-recommend-grid">
-              <div class="aic-rec-empty">暂无推荐结果，请先运行综合测试后点击"生成推荐"</div>
-            </div>
-          </div>
+          <!-- 自动推荐已退役：智能调度器(🧭 调度看板)现按运行时健康度 + 模式测试能力分动态选型，无需手动生成/冻结推荐 -->
 
           </div><!-- /pane assign -->
 
@@ -1715,21 +1701,7 @@
   </div>
 </div>
 
-<!-- 推荐配置弹窗 -->
-<div class="modal-overlay" id="aic-recommend-modal" style="display:none" role="dialog" aria-modal="true">
-  <div class="modal" style="max-width:720px;">
-    <div class="modal-header">
-      <h3>AI 模型推荐配置</h3>
-      <button class="modal-close" id="aic-recommend-modal-close" aria-label="关闭">&times;</button>
-    </div>
-    <div class="modal-body" id="aic-recommend-modal-body">
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-sm" id="aic-recommend-modal-cancel">关闭</button>
-      <button class="btn btn-sm btn-primary" id="aic-recommend-modal-apply">一键应用全部推荐</button>
-    </div>
-  </div>
-</div>
+<!-- 推荐配置弹窗已退役（智能调度取代静态推荐冻结）-->
 
 <script type="module" src="/static/js/app.js?v=81"></script>
 <script src="/static/js/syslog.js"></script>
