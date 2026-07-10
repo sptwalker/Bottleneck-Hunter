@@ -126,6 +126,41 @@ def test_model_assignments_endpoint_contract(tmp_path, monkeypatch):
         assert isinstance(r["picks"], list)
 
 
+def _patch_assignments(monkeypatch, manual_role, manual_provider, picks_for_role):
+    """给 _build_assignments 注入：某角色有手填配置 + get_models_for_role 返回指定 picks。"""
+    import bottleneck_hunter.web.decision_api as D
+    from bottleneck_hunter.watchlist.store import WatchlistStore
+    import tempfile
+    D.set_store(WatchlistStore(str(tempfile.mkdtemp() + "/t.db")))
+
+    def fake_load(role, uid):
+        return [{"provider": manual_provider, "model": "x"}] if role == manual_role else []
+    def fake_get(role, user_id="", **kw):
+        return picks_for_role if role == manual_role else []
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.factory._load_role_configs_from_db", fake_load)
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.factory.get_models_for_role", fake_get)
+    return D
+
+
+def test_assignments_source_manual_when_picks_match(monkeypatch):
+    """手填 deepseek 且实际 picks 也是 deepseek → source=manual（走真正的子集判定，非空兜底）。"""
+    D = _patch_assignments(monkeypatch, "L2_strategic", "deepseek",
+                           [(None, "deepseek", "deepseek-chat")])
+    res = asyncio.run(D.get_model_assignments(user={"sub": "", "role": "admin"}))
+    a = {r["role_key"]: r for r in res["assignments"]}
+    assert a["L2_strategic"]["source"] == "manual"
+    assert a["L2_strategic"]["picks"] == [{"provider": "deepseek", "model": "deepseek-chat"}]
+
+
+def test_assignments_source_auto_when_manual_bypassed(monkeypatch):
+    """手填 deepseek 但实际 picks 落到 qwen（手填被禁用/失败→智能调度）→ 如实标 auto（不误标 manual）。"""
+    D = _patch_assignments(monkeypatch, "L2_strategic", "deepseek",
+                           [(None, "qwen", "qwen-plus")])
+    res = asyncio.run(D.get_model_assignments(user={"sub": "", "role": "admin"}))
+    a = {r["role_key"]: r for r in res["assignments"]}
+    assert a["L2_strategic"]["source"] == "auto"   # qwen 不属手填的 deepseek → auto
+
+
 # ── B1 模式测试周期自动化：选型 + 封顶（mock，不发真实 LLM 调用）──
 def test_select_stale_models_filters_fresh(monkeypatch):
     import bottleneck_hunter.watchlist.scheduler as S

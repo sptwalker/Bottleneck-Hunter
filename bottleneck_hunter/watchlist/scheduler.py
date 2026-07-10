@@ -698,7 +698,9 @@ async def job_model_calibration() -> None:
 
 
 # ── 模型能力分保鲜（月度）：对各用户已配、能力分已过期的模型重跑综合测试 ──
-_CAP_REFRESH_STALE_DAYS = 30    # N 天内测过的视为新鲜，跳过
+# 新鲜度 45 天 > 30 天月度间隔：某用户本月刷过的模型下月仍算新鲜 → 全局配额自然
+# 轮换到其他用户，避免靠前用户每月吃满 cap、靠后用户永不刷新。
+_CAP_REFRESH_STALE_DAYS = 45
 _CAP_REFRESH_MAX_MODELS = 10    # 每次任务全局最多重测的模型数（防失控，真实 LLM 调用）
 
 
@@ -736,7 +738,14 @@ async def job_model_capability_refresh() -> None:
     """月度：对各用户已配、且能力分已过期的模型重跑综合测试，刷新调度器的质量先验。
 
     每次任务全局最多重测 _CAP_REFRESH_MAX_MODELS 个模型（防失控）。**发起真实 LLM 调用**，
-    故受自动更新全局总开关门控（admin 可一键停）。_iter_users 设 current_user → KEY 严格按用户。
+    多重成本护栏：①自动更新全局总开关门控（admin 可一键停）②各用户自动更新主开关
+    ③budget.can_spend 门控（已超月度预算的用户跳过）④全局封顶 10。_iter_users 设
+    current_user → KEY 严格按用户。
+
+    计费口径：本任务属**有上限的诊断类维护**（月度、封顶 10 个模型、多用 免费档 模型），
+    其花费不写入 BudgetTracker 台账（不计入用户日/月使用量）；由上述 can_spend 前置门控
+    与全局封顶共同兜底，不会失控。如需纳入硬预算，让 model_tester 回传 token 用量后
+    在此 budget.record(...) 即可。
     """
     if not _wl_store or not _auth_store:
         return
