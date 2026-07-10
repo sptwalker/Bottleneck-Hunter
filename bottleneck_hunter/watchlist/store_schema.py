@@ -942,4 +942,14 @@ MIGRATIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_model_calls_date ON model_call_stats(date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_model_calls_pm ON model_call_stats(provider, model, date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_model_calls_user ON model_call_stats(user_id, date DESC)",
+    # ── 模型调度策略（Phase 2）：按用户存偏好；role_key='' 为全局默认，非空为角色覆盖 ──
+    """CREATE TABLE IF NOT EXISTS ai_routing_policy (
+        user_id      TEXT DEFAULT '',
+        role_key     TEXT DEFAULT '',
+        prefer_tier  TEXT DEFAULT 'auto',      -- auto | free | paid
+        optimize_for TEXT DEFAULT 'balanced',  -- balanced | quality | price
+        updated_at   TEXT,
+        UNIQUE(user_id, role_key)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_routing_policy_user ON ai_routing_policy(user_id)",
 ]

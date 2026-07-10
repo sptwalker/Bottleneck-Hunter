@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
-from bottleneck_hunter.llm_clients.fallback import begin_notices, drain_notices
+from bottleneck_hunter.llm_clients.fallback import begin_notices, drain_notices, drain_usage
 
 
 async def with_notices(gen: AsyncGenerator, sse_fn) -> AsyncGenerator:
     """包装事件流：开启提示收集，并在每个事件后 flush 出 model_fallback 事件。
+    流结束时额外发一条 model_usage 事件（本次各模型使用清单）。
 
     sse_fn: 形如 _sse(event, **data) 的函数，返回该 host 约定的事件 dict。
     """
@@ -28,3 +29,6 @@ async def with_notices(gen: AsyncGenerator, sse_fn) -> AsyncGenerator:
     finally:
         for n in drain_notices():
             yield sse_fn("model_fallback", **n)
+        usage = drain_usage()
+        if usage:
+            yield sse_fn("model_usage", **usage)

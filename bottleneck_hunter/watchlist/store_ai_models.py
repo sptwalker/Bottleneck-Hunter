@@ -484,6 +484,67 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
+    def get_model_call_series(self, days: int = 30, user_id: str | None = None) -> list[dict]:
+        """按 日期×provider 聚合最近 days 天：用于健康看板的「长期表现曲线」。"""
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        uid = self._user_id if user_id is None else user_id
+        conn = self._connect()
+        try:
+            q = ("SELECT date, provider, "
+                 "SUM(calls) AS calls, SUM(ok) AS ok, "
+                 "CASE WHEN SUM(calls)>0 THEN ROUND(100.0*SUM(ok)/SUM(calls),1) ELSE 0 END AS ok_rate, "
+                 "CASE WHEN SUM(calls)>0 THEN ROUND(SUM(latency_sum)/SUM(calls),0) ELSE 0 END AS avg_latency_ms "
+                 "FROM model_call_stats WHERE date >= ?")
+            p: tuple = (cutoff,)
+            if uid:
+                q += " AND user_id = ?"
+                p += (uid,)
+            q += " GROUP BY date, provider ORDER BY date"
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    # ── 模型调度策略（Phase 2）：per-user，role_key='' 为全局默认，非空为角色覆盖 ──
+
+    def set_routing_policy(self, prefer_tier: str = "auto", optimize_for: str = "balanced",
+                           role_key: str = "", user_id: str | None = None) -> None:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        with self._write_conn() as conn:
+            conn.execute(
+                """INSERT INTO ai_routing_policy (user_id, role_key, prefer_tier, optimize_for, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, role_key) DO UPDATE SET
+                     prefer_tier = excluded.prefer_tier,
+                     optimize_for = excluded.optimize_for,
+                     updated_at = excluded.updated_at""",
+                (uid, role_key or "", prefer_tier, optimize_for, _now_iso()),
+            )
+
+    def get_routing_policy(self, user_id: str | None = None, role_key: str = "") -> dict | None:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            r = conn.execute(
+                "SELECT prefer_tier, optimize_for FROM ai_routing_policy WHERE user_id = ? AND role_key = ?",
+                (uid, role_key or ""),
+            ).fetchone()
+            return dict(r) if r else None
+        finally:
+            conn.close()
+
+    def get_all_routing_policies(self, user_id: str | None = None) -> list[dict]:
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT role_key, prefer_tier, optimize_for FROM ai_routing_policy WHERE user_id = ?",
+                (uid,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
 
 
     def delete_role_config(self, role_key: str, slot_index: int,

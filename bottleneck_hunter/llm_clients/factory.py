@@ -379,11 +379,13 @@ def get_models_for_role(
     # 去重保序
     _seen0: set[str] = set()
     chain = [p for p in ((c or "").lower().strip() for c in chain) if p and not (p in _seen0 or _seen0.add(p))]
-    # 智能排序：按健康度/遥测把最优可用 provider 排前，作为「默认自动」的主选。
-    # 无数据 → 稳定排序保持原顺序（平滑退化为静态链，不劣于现状）。
+    # 智能排序：按健康度/遥测/用户策略把最优可用 provider 排前，作为「默认自动」的主选。
+    # 无数据且无策略 → 稳定排序保持原顺序（平滑退化为静态链，不劣于现状）。
+    policy = {}
     try:
-        from bottleneck_hunter.llm_clients.health import rank_providers
-        chain = rank_providers(chain, uid, _PRIMARY_PROVIDER)
+        from bottleneck_hunter.llm_clients.health import rank_providers, load_routing_policy, provider_tier
+        policy = load_routing_policy(uid, role_key)
+        chain = rank_providers(chain, uid, _PRIMARY_PROVIDER, policy=policy)
     except Exception:  # noqa: BLE001
         pass
     for provider in chain:
@@ -394,7 +396,16 @@ def get_models_for_role(
             if not model:
                 continue
             try:
-                return [(create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid), provider, model)]
+                llm = create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid)
+                # 免费→付费回落强提示：用户选了免费优先，但只剩付费可用时明确告知
+                if policy.get("prefer_tier") == "free" and provider_tier(provider) == "paid":
+                    try:
+                        from bottleneck_hunter.llm_clients.fallback import push_notice
+                        push_notice({"type": "tier_fallback", "provider": provider, "model": model,
+                                     "message": f"⚠️ 免费模型当前不可用，已临时启用付费模型 {provider}/{model}"})
+                    except Exception:  # noqa: BLE001
+                        pass
+                return [(llm, provider, model)]
             except Exception:
                 continue
 

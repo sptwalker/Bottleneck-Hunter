@@ -25,17 +25,41 @@ logger = logging.getLogger(__name__)
 
 # ── 提示 sink（请求级）──────────────────────────────────
 _notices: ContextVar[list | None] = ContextVar("llm_fallback_notices", default=None)
+# ── 使用清单 sink（请求级）：记录本次实际用到的 (provider, model) ──
+_usage: ContextVar[list | None] = ContextVar("llm_usage", default=None)
 
 
 def begin_notices() -> None:
     """请求入口调用：开启一次收集（后续 push 才会被记录）。"""
     _notices.set([])
+    _usage.set([])
 
 
 def push_notice(notice: dict) -> None:
     lst = _notices.get()
     if lst is not None:
         lst.append(notice)
+
+
+def _push_usage(provider: str, model: str) -> None:
+    lst = _usage.get()
+    if lst is not None:
+        lst.append((provider, model))
+
+
+def drain_usage() -> dict | None:
+    """汇总本次各模型使用次数：{"summary": "deepseek×3, qwen×1", "items": [...]}。无则 None。"""
+    lst = _usage.get()
+    if not lst:
+        return None
+    counts: dict[tuple, int] = {}
+    for pm in lst:
+        counts[pm] = counts.get(pm, 0) + 1
+    items = [{"provider": p, "model": m, "count": c} for (p, m), c in counts.items()]
+    items.sort(key=lambda x: -x["count"])
+    summary = "、".join(f"{it['provider']}×{it['count']}" if it["count"] > 1 else it["provider"] for it in items)
+    lst.clear()
+    return {"summary": summary, "items": items}
 
 
 def drain_notices() -> list[dict]:
@@ -60,6 +84,15 @@ def _get_metric_store():
         from bottleneck_hunter.watchlist.store import WatchlistStore
         _metric_store = WatchlistStore()  # 缓存一份（构造含 schema 迁移），record 用各自的 _write_conn
     return _metric_store
+
+
+def _validate(msg) -> tuple[bool, str]:
+    """输出格式校验（Phase 2）。fail-silent：校验层异常绝不影响主链路（放行）。"""
+    try:
+        from bottleneck_hunter.llm_clients.validate import validate_output
+        return validate_output(msg)
+    except Exception:  # noqa: BLE001
+        return True, ""
 
 
 def _record_call(provider: str, model: str, ok: bool, t0: float, reason: str = "") -> None:
@@ -148,10 +181,19 @@ class FallbackChatModel(BaseChatModel):
             t0 = time.monotonic()
             try:
                 msg = await llm.ainvoke(messages, stop=stop, **kwargs)
-                _record_call(provider, model, True, t0)
-                if i > 0:
-                    self._notify(first_reason or "调用异常", provider, model)
-                return ChatResult(generations=[ChatGeneration(message=msg)])
+                vok, vreason = _validate(msg)
+                is_last = i == len(self.candidates) - 1
+                _record_call(provider, model, vok, t0, "" if vok else "输出" + vreason)
+                if vok or is_last:  # 末候选即便格式不佳也接受，不为格式问题整体失败
+                    _push_usage(provider, model)
+                    if i > 0:
+                        self._notify(first_reason or "调用异常", provider, model)
+                    return ChatResult(generations=[ChatGeneration(message=msg)])
+                # 输出格式不合格且有下一候选 → 视同失败，换模型
+                last_exc = last_exc or ValueError(vreason)
+                if i == 0:
+                    first_reason = "输出" + vreason
+                logger.warning("候选模型 %s/%s 输出校验不合格(%s)，尝试下一候选", provider, model, vreason)
             except Exception as e:  # noqa: BLE001 - 逐候选降级
                 last_exc = e
                 reason = classify_reason(e)
@@ -172,6 +214,7 @@ class FallbackChatModel(BaseChatModel):
                     emitted = True
                     yield ChatGenerationChunk(message=chunk)
                 _record_call(provider, model, True, t0)
+                _push_usage(provider, model)
                 if i > 0:
                     self._notify(first_reason or "调用异常", provider, model)
                 return
@@ -195,10 +238,18 @@ class FallbackChatModel(BaseChatModel):
             t0 = time.monotonic()
             try:
                 msg = llm.invoke(messages, stop=stop, **kwargs)
-                _record_call(provider, model, True, t0)
-                if i > 0:
-                    self._notify(first_reason or "调用异常", provider, model)
-                return ChatResult(generations=[ChatGeneration(message=msg)])
+                vok, vreason = _validate(msg)
+                is_last = i == len(self.candidates) - 1
+                _record_call(provider, model, vok, t0, "" if vok else "输出" + vreason)
+                if vok or is_last:
+                    _push_usage(provider, model)
+                    if i > 0:
+                        self._notify(first_reason or "调用异常", provider, model)
+                    return ChatResult(generations=[ChatGeneration(message=msg)])
+                last_exc = last_exc or ValueError(vreason)
+                if i == 0:
+                    first_reason = "输出" + vreason
+                logger.warning("候选模型 %s/%s 输出校验不合格(%s)，尝试下一候选", provider, model, vreason)
             except Exception as e:  # noqa: BLE001
                 last_exc = e
                 reason = classify_reason(e)
@@ -219,6 +270,7 @@ class FallbackChatModel(BaseChatModel):
                     emitted = True
                     yield ChatGenerationChunk(message=chunk)
                 _record_call(provider, model, True, t0)
+                _push_usage(provider, model)
                 if i > 0:
                     self._notify(first_reason or "调用异常", provider, model)
                 return
@@ -269,11 +321,13 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
             out.append((llm, provider, model))
         except Exception:  # noqa: BLE001
             continue
-    # 按运行时健康度/遥测对备选重排：熔断中/低成功率的沉底，主模型加成保持粘性。
-    # 无数据 → rank_providers 稳定排序保持原顺序（平滑退化为现状）。
+    # 按运行时健康度/遥测/用户策略对备选重排：熔断中/低成功率的沉底，主模型加成保持粘性。
+    # build_fallback_candidates 不知具体角色，用全局策略(role_key='')。
+    # 无数据/无策略 → rank_providers 稳定排序保持原顺序（平滑退化为现状）。
     try:
-        from bottleneck_hunter.llm_clients.health import rank_providers
-        ranked = rank_providers([c[1] for c in out], uid, get_primary_provider())
+        from bottleneck_hunter.llm_clients.health import rank_providers, load_routing_policy
+        policy = load_routing_policy(uid, "")
+        ranked = rank_providers([c[1] for c in out], uid, get_primary_provider(), policy=policy)
         pos = {p: i for i, p in enumerate(ranked)}
         out.sort(key=lambda c: pos.get(c[1], 999))
     except Exception:  # noqa: BLE001

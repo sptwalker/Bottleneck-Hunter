@@ -1023,6 +1023,53 @@ async def calibrate_models(market: str = "us_stock", user: dict = Depends(get_cu
     return {"calibrated": calibrated, "message": f"已校准 {calibrated} 个模型/角色组合"}
 
 
+# ── 模型调度用量看板 + 用户策略（智能调度 Phase 2）──────────────
+
+@router.get("/model-usage")
+async def get_model_usage(days: int = 14, user: dict = Depends(get_current_user)):
+    """模型调度看板：各模型调用/成功率/延迟 + 长期曲线 + 当前熔断 + 用户策略。"""
+    store = _user_store(user)
+    uid = user.get("sub", "")
+    stats = store.get_model_call_stats(days=days)
+    series = store.get_model_call_series(days=days)
+    from bottleneck_hunter.llm_clients.health import health, provider_tier
+    for r in stats:
+        r["tier"] = provider_tier(r["provider"])
+        r["cooldown_s"] = health.cooldown_remaining(uid, r["provider"])
+    cooling = [{"provider": r["provider"], "cooldown_s": r["cooldown_s"]}
+               for r in stats if r["cooldown_s"] > 0]
+    policy = store.get_routing_policy() or {"prefer_tier": "auto", "optimize_for": "balanced"}
+    return {"stats": stats, "series": series, "cooling": cooling, "policy": policy}
+
+
+class RoutingPolicyRequest(BaseModel):
+    prefer_tier: str = "auto"       # auto | free | paid
+    optimize_for: str = "balanced"  # balanced | quality | price
+    role_key: str = ""              # 空=全局默认；非空=角色覆盖
+
+
+@router.get("/routing-policy")
+async def get_routing_policy_ep(user: dict = Depends(get_current_user)):
+    """返回当前用户的全局策略 + 所有角色覆盖。"""
+    store = _user_store(user)
+    return {
+        "global": store.get_routing_policy(role_key="") or {"prefer_tier": "auto", "optimize_for": "balanced"},
+        "overrides": store.get_all_routing_policies(),
+    }
+
+
+@router.post("/routing-policy")
+async def set_routing_policy_ep(req: RoutingPolicyRequest, user: dict = Depends(get_current_user)):
+    """保存用户模型策略（严格按用户隔离）。role_key 空=全局默认。"""
+    if req.prefer_tier not in ("auto", "free", "paid"):
+        raise HTTPException(400, "prefer_tier 无效")
+    if req.optimize_for not in ("balanced", "quality", "price"):
+        raise HTTPException(400, "optimize_for 无效")
+    store = _user_store(user)
+    store.set_routing_policy(req.prefer_tier, req.optimize_for, role_key=req.role_key)
+    return {"ok": True}
+
+
 # ─────────────────────────────────────────────────────────
 # Phase 22A: 会议历史记录
 # ─────────────────────────────────────────────────────────
