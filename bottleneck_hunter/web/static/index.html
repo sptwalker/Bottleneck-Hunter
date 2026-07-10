@@ -1383,6 +1383,7 @@
         <button class="admin-tab active" data-tab="users" role="tab" aria-selected="true">用户管理</button>
         <button class="admin-tab" data-tab="invites" role="tab" aria-selected="false">邀请码</button>
         <button class="admin-tab" data-tab="config" role="tab" aria-selected="false">系统配置</button>
+        <button class="admin-tab" data-tab="envtest" role="tab" aria-selected="false">🔧 环境测试</button>
       </div>
 
       <!-- 用户管理 -->
@@ -1521,6 +1522,19 @@
         <div class="admin-cfg-actions">
           <button class="btn btn-primary btn-sm" id="admin-cfg-save">保存配置</button>
           <span class="admin-cfg-status" id="admin-cfg-status"></span>
+        </div>
+      </div>
+
+      <!-- 服务器环境测试（临时诊断）-->
+      <div class="admin-tab-pane" id="admin-tab-envtest" role="tabpanel">
+        <div class="admin-card">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+            <h3 style="margin:0">服务器网络环境测试</h3>
+            <button class="btn btn-sm btn-primary" id="envtest-run">开始测试</button>
+            <span class="admin-cfg-status" id="envtest-status"></span>
+          </div>
+          <p class="admin-hint" style="margin:0 0 10px">从服务器实测各境外/境内站点连通性与当前代理状态。测完可全选下方文本复制发回分析。</p>
+          <pre id="envtest-log" class="envtest-log">（点击「开始测试」）</pre>
         </div>
       </div>
     </div>

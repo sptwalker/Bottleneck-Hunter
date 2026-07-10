@@ -444,6 +444,61 @@ async def test_smtp(req: SmtpTestRequest, user: dict = Depends(_require_admin)):
     return {"ok": True, "message": f"测试邮件已发送至 {req.to_email}"}
 
 
+# ── 服务器环境测试（临时诊断：探测境外/境内站点连通性 + 代理状态）──────────
+
+@router.post("/env-test")
+async def env_test(user: dict = Depends(_require_admin)):
+    """从服务器实测各境外/境内站点连通性，返回逐条结果。供境内部署诊断网络/代理。"""
+    import os
+    import time
+    import asyncio
+    from datetime import datetime, timezone
+
+    # 探测目标：境外(需代理/常被墙) + 境内(对照，应始终通)
+    targets = [
+        # (标签, URL, 是否境外)
+        ("Google", "https://www.google.com", True),
+        ("Google News RSS(宏观新闻源)", "https://news.google.com/rss/search?q=AI", True),
+        ("Yahoo Finance", "https://finance.yahoo.com", True),
+        ("Yahoo 行情API(yfinance)", "https://query1.finance.yahoo.com/v8/finance/chart/AAPL", True),
+        ("FRED(美联储数据)", "https://api.stlouisfed.org", True),
+        ("Financial Modeling Prep", "https://financialmodelingprep.com", True),
+        ("Finnhub", "https://finnhub.io", True),
+        ("东方财富(akshare/A股)", "https://push2his.eastmoney.com", False),
+        ("DeepSeek(国内LLM)", "https://api.deepseek.com", False),
+        ("Tushare(A股财报)", "https://tushare.pro", False),
+    ]
+
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+    no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+
+    async def _probe(label: str, url: str, overseas: bool) -> dict:
+        import httpx
+        t0 = time.monotonic()
+        try:
+            # trust_env=True → 自动认 HTTPS_PROXY/NO_PROXY，与真实抓取一致
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True, trust_env=True) as c:
+                r = await c.get(url)
+            ms = round((time.monotonic() - t0) * 1000)
+            return {"label": label, "url": url, "overseas": overseas,
+                    "ok": r.status_code < 500, "status": r.status_code, "ms": ms, "error": ""}
+        except Exception as e:  # noqa: BLE001
+            ms = round((time.monotonic() - t0) * 1000)
+            return {"label": label, "url": url, "overseas": overseas,
+                    "ok": False, "status": 0, "ms": ms, "error": str(e)[:160]}
+
+    results = await asyncio.gather(*[_probe(*t) for t in targets])
+
+    # 环境信息
+    env = {
+        "proxy": proxy or "(未设置 HTTPS_PROXY — 直连)",
+        "no_proxy": no_proxy or "(未设置)",
+        "server_time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "tz": os.environ.get("TZ", "(未设)"),
+    }
+    return {"results": list(results), "env": env}
+
+
 # ── 统计 ──────────────────────────────────────────────
 
 @router.get("/stats")

@@ -41,6 +41,7 @@ function switchTab(tab) {
   if (tab === 'users') loadUsers();
   else if (tab === 'invites') loadInviteCodes();
   else if (tab === 'config') loadConfig();
+  else if (tab === 'envtest') loadEnvTest();
 }
 
 // ── 用户管理 ──────────────────────────────────────────
@@ -595,6 +596,52 @@ window._adminCopyAiConfig = async (sourceUserId) => {
     if (status) { status.textContent = `拷贝失败: ${err.message}`; status.className = 'admin-cfg-status error'; }
   }
 };
+
+
+// ── 服务器环境测试（临时诊断）────────────────────────
+function loadEnvTest() {
+  const btn = document.getElementById('envtest-run');
+  const logEl = document.getElementById('envtest-log');
+  const statusEl = document.getElementById('envtest-status');
+  if (!btn || btn._bound) return;
+  btn._bound = true;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    if (statusEl) { statusEl.textContent = '测试中…'; statusEl.className = 'admin-cfg-status'; }
+    logEl.textContent = '正在从服务器探测各站点连通性…\n';
+    try {
+      const res = await fetch('/api/admin/env-test', { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const lines = [];
+      lines.push('===== 服务器环境测试 =====');
+      lines.push(`时间: ${data.env?.server_time || ''}   TZ: ${data.env?.tz || ''}`);
+      lines.push(`当前代理(HTTPS_PROXY): ${data.env?.proxy || ''}`);
+      lines.push(`NO_PROXY: ${data.env?.no_proxy || ''}`);
+      lines.push('');
+      lines.push('--- 境外站点（境内需代理才通）---');
+      (data.results || []).filter(r => r.overseas).forEach(r => lines.push(_fmtEnvRow(r)));
+      lines.push('');
+      lines.push('--- 境内站点（对照，应始终通）---');
+      (data.results || []).filter(r => !r.overseas).forEach(r => lines.push(_fmtEnvRow(r)));
+      logEl.textContent = lines.join('\n');
+      if (statusEl) { statusEl.textContent = '完成'; statusEl.className = 'admin-cfg-status success'; }
+    } catch (err) {
+      logEl.textContent += `\n测试失败: ${err.message}`;
+      if (statusEl) { statusEl.textContent = '失败'; statusEl.className = 'admin-cfg-status error'; }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function _fmtEnvRow(r) {
+  // r.status>0 = 网络可达（收到 HTTP 响应，哪怕 401/403/429/404）；status=0 = 连不上（被墙/超时）
+  const reach = r.status > 0 ? '✓ 网络可达' : '✗ 连不上';
+  const st = r.status ? `HTTP ${r.status}` : (r.error || '连接失败/超时');
+  return `${reach}  ${r.label}  —  ${st} (${r.ms}ms)
+    ${r.url}`;
+}
 
 
 // ── Utils ─────────────────────────────────────────────
