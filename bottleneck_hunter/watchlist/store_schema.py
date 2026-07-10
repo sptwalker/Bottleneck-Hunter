@@ -840,20 +840,6 @@ MIGRATIONS: list[str] = [
         UNIQUE(provider, model, test_type, user_id)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_model_cap_test ON model_capability_test(provider, model, user_id)",
-    """CREATE TABLE IF NOT EXISTS model_recommendation (
-        id              TEXT PRIMARY KEY,
-        role_key        TEXT NOT NULL,
-        slot_index      INTEGER DEFAULT 0,
-        recommended_provider TEXT NOT NULL,
-        recommended_model TEXT NOT NULL,
-        composite_score  REAL DEFAULT 0,
-        score_breakdown  TEXT DEFAULT '{}',
-        reason          TEXT DEFAULT '',
-        generated_at    TEXT NOT NULL,
-        user_id         TEXT DEFAULT '',
-        UNIQUE(role_key, slot_index, user_id)
-    )""",
-    "CREATE INDEX IF NOT EXISTS idx_model_rec_role ON model_recommendation(role_key, user_id)",
     # ── 反向分析：从企业代码反推瓶颈环节并评分，结果持久化 ──
     """CREATE TABLE IF NOT EXISTS reverse_analyses (
         id              TEXT PRIMARY KEY,

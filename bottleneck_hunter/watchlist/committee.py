@@ -91,9 +91,12 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     if llm:
         chain.append((llm, provider, model))
         seen.add(provider)
-    # 备用：选一个与主模型不同且可用的 provider
+    # 备用：选一个与主模型不同、且**未熔断**的可用 provider（避免把已知失效的 provider 选进链白耗一轮）
+    from bottleneck_hunter.auth.current_user import get_current_user_id
+    from bottleneck_hunter.llm_clients.health import health
+    uid = get_current_user_id()
     for hint in _FALLBACK_PROVIDERS:
-        if hint in seen:
+        if hint in seen or health.is_open(uid, hint):
             continue
         fl, fp, fm = get_llm_for_position(provider_hint=hint, with_fallback=False)
         if fl and fp not in seen:

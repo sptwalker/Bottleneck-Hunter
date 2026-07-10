@@ -125,7 +125,9 @@
 
 ## 八、硬护栏（必须写成显式约束，不能靠排序自然涌现）
 
-1. **fan-out 角色多样性红线** — `L1_macro`(2槽)/`bottleneck`(3槽)/委员会是 `with_fallback=False`、成员失败即丢弃、**保 provider 多样性**（交叉验证价值全在多样性）。调度**绝不能对 fan-out 做"跨 provider 收敛到同一最优模型"**，只能"每槽独立选当前最优、且槽间 provider 不重复的健康模型"。
+1. **fan-out 角色多样性红线** — 两类机制，勿混：
+   - **role 内多槽**（`L1_macro` 2槽 / `bottleneck` 3槽）：`get_models_for_role` 优先级4 用 `seen_prov` **强制槽间 provider 不重复**，`with_fallback=False`、成员失败即丢弃。调度**绝不能对这类做"跨 provider 收敛到同一最优模型"**。
+   - **委员会 4 员**（`committee_risk/growth/value/contrarian`）：是 **4 个独立单模型角色**，多样性来自各自的**角色默认 provider**（deepseek/qwen/kimi/glm）+ 用户为它们各配了 KEY；调度器**不跨成员强制去重**（各成员独立解析）。**若用户缺 qwen/kimi/glm 的 KEY，委员会会退化到少数几个 provider（甚至收敛同一个）——这是 KEY 覆盖不足的必然，非调度缺陷**。委员会备用链已跳过熔断中的 provider。
 2. **严格 Key 隔离红线**（[[project_strict_key_isolation]]） — 排序/切换/熔断/评分表全部严格按 `(user, market, provider)` 分表，**绝无全局共享健康表/权重**。代价：状态量随用户数膨胀、一个用户的失败经验不惠及他人（合规但低效，接受）。
 3. **无第二套影子配置**（[[project_ai_config_unified]]） — 模型/端点解析统一走 `resolve_provider_model/base_url`；策略存 AI 配置中心，不另起 `DC_MODEL_` 影子写。
 4. **流式约束** — 首 token 已发出即不可切换模型；调度须在开流前选定 provider。

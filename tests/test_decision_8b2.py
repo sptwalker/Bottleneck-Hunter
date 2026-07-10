@@ -267,7 +267,7 @@ class TestCommittee:
         consensus_llm = _mock_llm_response(CONSENSUS_RESPONSE)
 
         call_count = {"n": 0}
-        def mock_get_llm(provider_hint=None, position=None):
+        def mock_get_llm(provider_hint=None, position=None, **kwargs):
             call_count["n"] += 1
             if call_count["n"] <= 4:
                 return review_llm, provider_hint or "deepseek", "mock-model"

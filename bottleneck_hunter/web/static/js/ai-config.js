@@ -1,6 +1,6 @@
 /**
  * ai-config.js — 统一 AI 配置页面
- * 4 个区块: Provider 管理 / 综合测试 / 模型分配矩阵 / 自动推荐
+ * 区块: Provider 管理 / 综合测试 / 模型分配矩阵 / 调度看板
  */
 
 const API = '/api/ai-config';
@@ -13,7 +13,7 @@ const GROUP_LABELS = {
   bottleneck: '瓶颈交叉评分',
 };
 
-// 系统模块层级（流程顺序）—— 供分配页签(#4)/自动推荐(#5)/侧栏树(#6)统一排序
+// 系统模块层级（流程顺序）—— 供分配页签 / 侧栏树 统一排序
 const MODULE_TREE = [
   { module: '产业链分析', groups: ['pipeline', 'bottleneck'] },
   { module: '观察池',     groups: ['watchlist'] },
@@ -817,6 +817,7 @@ async function saveMatrixConfig() {
 
 /* ── Section: 调度看板（智能调度 Phase 2）──────────────── */
 const DC_SCHED_API = '/api/decision';
+const esc = escHtml;  // 本模块统一转义函数别名（renderSchedUsage 等用）
 let _schedBound = false;
 
 async function loadScheduler() {

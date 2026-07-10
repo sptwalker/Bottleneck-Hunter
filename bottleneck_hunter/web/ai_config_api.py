@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -78,11 +77,7 @@ async def get_roles(user: dict = Depends(get_current_user)):
                     "provider": s["provider"],
                     "model": s["model"],
                 })
-        else:
-            env_val = os.environ.get(f"DC_MODEL_{role_def.key.upper()}", "").strip()
-            if env_val and ":" in env_val:
-                p, m = env_val.split(":", 1)
-                slots.append({"slot_index": 0, "provider": p, "model": m})
+        # 矩阵留空即由智能调度自动选型（DC_MODEL_* 环境影子配置已退役，不再回显）
 
         roles.append({
             "key": role_def.key,

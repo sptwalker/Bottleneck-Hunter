@@ -11,7 +11,6 @@ MissingUserKeyError。仅 KEYLESS 白名单（本地 ollama 等）无需 KEY。
 from __future__ import annotations
 
 import logging
-import os
 
 from langchain_core.language_models import BaseChatModel
 
@@ -325,7 +324,8 @@ def get_models_for_role(
 ) -> list[tuple[BaseChatModel, str, str]]:
     """统一接口: 返回该角色配置的所有模型实例列表。
 
-    优先级: 数据库 ai_role_config → DC_MODEL_* 环境变量 → 角色注册表默认值 → fallback 链
+    优先级: 数据库 ai_role_config(手填矩阵/可覆盖) → 角色注册表默认值(仅单模型位) → 智能调度排序
+    （DC_MODEL_* 环境影子配置已退役，不再读取）
 
     with_fallback: 默认 False —— 多模型 fan-out 角色（投委会/圆桌/瓶颈交叉/L1）沿用「某成员失败即丢弃」
         语义并保持 provider 多样性，不做跨 provider 自动替换。单模型位（get_llm_for_position）传 True。
@@ -360,24 +360,22 @@ def get_models_for_role(
         if results:
             return results
 
-    # 优先级2: 环境变量（仅选模型，KEY 仍需当前用户自己的）
-    env_val = os.environ.get(f"DC_MODEL_{role_key.upper()}", "").strip()
-    if env_val and ":" in env_val:
-        p, m = env_val.split(":", 1)
-        try:
-            return [(create_llm(p, m, temperature=temperature, with_fallback=with_fallback, user_id=uid), p, m)]
-        except Exception:
-            pass
+    # 优先级2（DC_MODEL_* 环境影子配置）已退役：它是旧的静态角色→模型硬绑定，会**无条件**
+    # 覆盖智能调度、且单值会让多槽 fan-out 塌成 1 个模型。统一配置只认「手填矩阵(可覆盖)」+
+    # 智能调度，不再读 DC_MODEL_（见 docs/MODEL_SCHEDULER_DESIGN.md Phase 2.5、memory project_ai_config_unified）。
 
-    # 优先级3: 角色注册表默认值 —— 仅单模型位（多槽 fan-out 交由优先级4 自动选 N 个多样化模型）
+    # 优先级3: 角色注册表默认值 —— 仅单模型位（多槽 fan-out 交由优先级4 自动选 N 个多样化模型）。
+    # 默认 provider 若正处熔断（近期失效）则跳过，交由优先级4 排序选一个健康的，避免每请求先打死模型白耗一轮。
     if not multi and role_def:
         try:
-            if is_provider_active(role_def.default_provider) and _user_has_llm_key(role_def.default_provider, uid):
-                model = role_def.default_model or resolve_provider_model(role_def.default_provider, uid)
+            from bottleneck_hunter.llm_clients.health import health as _health
+            dp = role_def.default_provider
+            if is_provider_active(dp) and not _health.is_open(uid, dp) and _user_has_llm_key(dp, uid):
+                model = role_def.default_model or resolve_provider_model(dp, uid)
                 if model:
                     try:
-                        return [(create_llm(role_def.default_provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
-                                 role_def.default_provider, model)]
+                        return [(create_llm(dp, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
+                                 dp, model)]
                     except Exception:
                         pass
         except Exception:  # noqa: BLE001
@@ -418,8 +416,12 @@ def get_models_for_role(
             continue
         results.append((llm, provider, model))
         seen_prov.add(provider)
-        # 免费→付费回落强提示（仅首个主选）
-        if len(results) == 1 and tier_of and policy.get("prefer_tier") == "free" and tier_of(provider) == "paid":
+        # 免费→付费回落强提示（仅首个主选，且用户确有免费 provider 的 KEY——否则纯付费用户会被
+        # 误报"免费不可用"并每次刷屏；只有"免费本可用但当前熔断/失效"才提示）。
+        if (len(results) == 1 and tier_of and policy.get("prefer_tier") == "free"
+                and tier_of(provider) == "paid"
+                and any(tier_of(c) == "free" and is_provider_active(c) and _user_has_llm_key(c, uid)
+                        for c in chain)):
             try:
                 from bottleneck_hunter.llm_clients.fallback import push_notice
                 push_notice({"type": "tier_fallback", "provider": provider, "model": model,

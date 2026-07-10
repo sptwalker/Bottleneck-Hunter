@@ -644,71 +644,6 @@
   margin-left: auto;
 }
 
-/* ── Section 4: Auto-recommendation ──────────────────────── */
-
-.aic-recommend-controls {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 14px;
-}
-
-.aic-recommend-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-}
-
-.aic-rec-card {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
-  background: var(--bg);
-}
-
-.aic-rec-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-.aic-rec-role {
-  font-weight: 600;
-  font-size: 13px;
-}
-
-.aic-rec-score {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--accent);
-}
-
-.aic-rec-model {
-  font-size: 12px;
-  color: var(--muted);
-  margin-bottom: 4px;
-}
-
-.aic-rec-vs {
-  font-size: 11px;
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.aic-rec-vs .aic-vs-arrow {
-  color: oklch(0.72 0.19 142);
-}
-
-.aic-rec-empty {
-  text-align: center;
-  padding: 24px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
 /* ── Migration notice ────────────────────────────────────── */
 
 .aic-migration-notice {
@@ -893,101 +828,6 @@
   background: oklch(0.63 0.24 25 / 0.1);
 }
 
-/* ── Recommend Modal ───────────────────────────────────── */
-
-.aic-rm-summary {
-  margin-bottom: 16px;
-}
-
-.aic-rm-summary p {
-  font-size: 13px;
-  color: var(--muted);
-  margin: 0;
-}
-
-.aic-rm-group {
-  margin-bottom: 14px;
-}
-
-.aic-rm-group-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 4px;
-}
-
-.aic-rm-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.aic-rm-table td {
-  padding: 6px 8px;
-  border-bottom: 1px solid oklch(0.92 0 0 / 0.6);
-  vertical-align: middle;
-}
-
-.aic-rm-table tr:last-child td {
-  border-bottom: none;
-}
-
-.aic-rm-role {
-  font-weight: 600;
-  white-space: nowrap;
-  min-width: 100px;
-}
-
-.aic-rm-model {
-  min-width: 160px;
-}
-
-.aic-rm-model-name {
-  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.aic-rm-old {
-  font-size: 11px;
-  color: var(--muted);
-  display: block;
-  margin-top: 1px;
-}
-
-.aic-rm-score {
-  font-weight: 700;
-  text-align: center;
-  min-width: 40px;
-}
-
-.aic-rm-badge {
-  font-size: 10px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.aic-rm-new {
-  background: oklch(0.72 0.19 142 / 0.15);
-  color: oklch(0.50 0.19 142);
-}
-
-.aic-rm-changed {
-  background: oklch(0.75 0.15 250 / 0.15);
-  color: oklch(0.50 0.15 250);
-}
-
-.aic-rm-same {
-  background: oklch(0.90 0 0);
-  color: var(--muted);
-}
-
 /* ── 自动更新面板 ─────────────────────────────────────── */
 .au-master-row { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
 .au-toggle { display:flex; align-items:center; gap:8px; cursor:pointer; font-size:14px; }
@@ -1008,7 +848,7 @@
 .au-sch-fields { white-space:nowrap; color:var(--muted,#666); }
 .au-sch { padding:2px 5px; }
 
-/* ── 系统配置中心：模块页签 / 分组小标题 / 推荐分段 / 侧栏树 ── */
+/* ── 系统配置中心：模块页签 / 分组小标题 / 侧栏树 ── */
 .aic-module-tab {
   padding: 8px 18px; border: none; background: none; font-size: 13px; font-weight: 500;
   color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;
@@ -1022,13 +862,6 @@
   font-size: 12px; font-weight: 600; color: var(--muted);
   padding: 4px 0 6px; margin-bottom: 6px; border-bottom: 1px dashed var(--border);
 }
-
-.aic-rec-module { margin-bottom: 16px; }
-.aic-rec-module-title {
-  font-size: 13px; font-weight: 700; color: var(--fg); margin-bottom: 8px;
-  padding-left: 8px; border-left: 3px solid var(--accent);
-}
-.aic-rec-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
 
 .aic-tree { display: flex; flex-direction: column; gap: 10px; }
 .aic-tree-module {

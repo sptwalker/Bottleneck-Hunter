@@ -100,8 +100,7 @@ def provider_tier(provider: str) -> str:
 def load_routing_policy(user_id: str = "", role_key: str = "") -> dict:
     """读用户调度策略：角色覆盖优先，回退全局默认，再回退空(中性 auto/balanced)。"""
     try:
-        from bottleneck_hunter.watchlist.store import WatchlistStore
-        wl = WatchlistStore()
+        wl = _get_store()
         pol = wl.get_routing_policy(user_id or "", role_key) if role_key else None
         pol = pol or wl.get_routing_policy(user_id or "", "")
         return pol or {}
@@ -117,7 +116,6 @@ def load_capability_scores(user_id: str = "", role_key: str = "") -> dict:
     """
     try:
         from bottleneck_hunter.llm_clients.role_registry import get_role
-        from bottleneck_hunter.watchlist.store import WatchlistStore
         role = get_role(role_key)
         weights = role.capability_weights if role else None
         if not weights:
@@ -125,7 +123,7 @@ def load_capability_scores(user_id: str = "", role_key: str = "") -> dict:
         total_w = sum(weights.values())
         if total_w <= 0:
             return {}
-        rows = WatchlistStore().get_test_results(user_id=user_id or "")
+        rows = _get_store().get_test_results(user_id=user_id or "")
         by_pm: dict[tuple, dict] = {}
         for r in rows:
             by_pm.setdefault((r["provider"], r["model"]), {})[r["test_type"]] = r["score"]
@@ -144,11 +142,26 @@ def _ranking_enabled() -> bool:
     return os.environ.get("BH_SCHEDULER_RANK", "1") != "0"
 
 
-def _load_stats(user_id: str) -> dict:
-    """按 provider 聚合最近遥测：{provider: {calls, ok_rate}}。读失败→空(全中性)。"""
-    try:
+# 缓存一份 WatchlistStore（构造含 schema 迁移，约 2.7ms）——排序在 get_models_for_role 热路径每次
+# 多路调用，避免每次 new。record 用各自的 _write_conn，读用短连接，共享实例线程安全。
+_store = None
+
+
+def _get_store():
+    global _store
+    if _store is None:
         from bottleneck_hunter.watchlist.store import WatchlistStore
-        rows = WatchlistStore().get_model_call_stats(days=_STATS_DAYS, user_id=user_id or "")
+        _store = WatchlistStore()
+    return _store
+
+
+def _load_stats(user_id: str) -> dict:
+    """按 provider 聚合最近遥测：{provider: {calls, ok_rate}}。读失败→空(全中性)。
+    空 user_id → 空（严格隔离：无当前用户时绝不借用跨用户聚合来排序）。"""
+    if not user_id:
+        return {}
+    try:
+        rows = _get_store().get_model_call_stats(days=_STATS_DAYS, user_id=user_id)
     except Exception:  # noqa: BLE001
         return {}
     agg: dict[str, dict] = {}
@@ -168,14 +181,13 @@ def _score(provider: str, user_id: str, primary: str, stats: dict, policy: dict,
     calls = s.get("calls", 0)
     # 可靠性：样本足够才生效(0%→0.3, 100%→1.0)，否则中性 1.0（冷启动不惩罚）
     reliability = (0.3 + 0.7 * s.get("ok_rate", 100.0) / 100.0) if calls >= _MIN_CALLS else 1.0
-    # 健康：熔断中重罚沉底
-    health_factor = 0.05 if health.is_open(user_id, p) else 1.0
-    score = reliability * health_factor
-    # 能力先验（模式测试的质量分 0-10）：温和乘子 0.7~1.0，差异化但不压过健康/可靠性；无数据中性
+    score = reliability
+    # 能力先验（模式测试的质量分 0-10）：乘子。质量优先策略放宽差异区间(0.5~1.0)，否则温和(0.7~1.0)。无数据中性
     if caps:
         comp = caps.get(p)
         if comp is not None:
-            score *= 0.7 + 0.3 * (max(0.0, min(10.0, comp)) / 10.0)
+            lo = 0.5 if (policy and policy.get("optimize_for") == "quality") else 0.7
+            score *= lo + (1.0 - lo) * (max(0.0, min(10.0, comp)) / 10.0)
     if p == primary:
         score += PRIMARY_BONUS   # 主模型加成上限
     # 用户策略：免费/付费偏好 + 质量/价格优化
@@ -189,7 +201,12 @@ def _score(provider: str, user_id: str, primary: str, stats: dict, policy: dict,
             score += 0.2
         if opt == "price" and tier == "free":
             score += 0.3   # 价格优先＝偏向免费
-        # optimize_for=='quality' 由上面能力先验 + reliability 共同体现
+        # optimize_for=='quality' 上面已放宽能力乘子区间
+    # 熔断：**最终乘子**，压过一切加成（坏了就别硬顶）。放最后，确保已熔断者恒沉到健康 provider 之下，
+    # 同时保留多个全熔断时的相对次序（不至无候选）。这是熔断唯一可靠的沉底点——若在加成前乘，
+    # 后续加法(主模型/免费/价格 最高+1.1)会把死 provider 抬回顶部。
+    if health.is_open(user_id, p):
+        score *= 0.05
     return score
 
 
@@ -231,6 +248,16 @@ def _selfcheck() -> None:
     assert rank_providers(["a", "b"], "u", stats=st)[0] == "b"
     # 主模型加成：同为无数据时主排第一
     assert rank_providers(["a", "b"], "u", primary_provider="b", stats={})[0] == "b"
+    # 熔断必须压过一切加成（W1 回归）：已熔断的免费主模型，在 free+price 策略 + 满能力分下，
+    # 仍须排在健康付费 provider 之后（否则冷却期每请求先打死模型白耗一轮）。
+    health.reset()
+    health.record_failure("u", "deepseek", "认证失败(密钥无效)")
+    caps = {"deepseek": 10.0, "openai": 5.0}
+    r = rank_providers(["deepseek", "openai"], "u", primary_provider="deepseek",
+                       policy={"prefer_tier": "free", "optimize_for": "price"},
+                       caps=caps, stats={})
+    assert r == ["openai", "deepseek"], ("熔断被加成击穿！", r)
+    health.reset()
     print("health selfcheck OK")
 
 

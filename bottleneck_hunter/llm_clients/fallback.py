@@ -183,8 +183,10 @@ class FallbackChatModel(BaseChatModel):
                 msg = await llm.ainvoke(messages, stop=stop, **kwargs)
                 vok, vreason = _validate(msg)
                 is_last = i == len(self.candidates) - 1
-                _record_call(provider, model, vok, t0, "" if vok else "输出" + vreason)
-                if vok or is_last:  # 末候选即便格式不佳也接受，不为格式问题整体失败
+                accept = vok or is_last  # 末候选即便格式不佳也接受，不为格式问题整体失败
+                # 接受即视为该次可用 → 记成功、不开熔断（末候选被返回给用户，是"用了它"不是"它挂了"）
+                _record_call(provider, model, accept, t0, "" if accept else vreason)
+                if accept:
                     _push_usage(provider, model)
                     if i > 0:
                         self._notify(first_reason or "调用异常", provider, model)
@@ -192,7 +194,7 @@ class FallbackChatModel(BaseChatModel):
                 # 输出格式不合格且有下一候选 → 视同失败，换模型
                 last_exc = last_exc or ValueError(vreason)
                 if i == 0:
-                    first_reason = "输出" + vreason
+                    first_reason = vreason
                 logger.warning("候选模型 %s/%s 输出校验不合格(%s)，尝试下一候选", provider, model, vreason)
             except Exception as e:  # noqa: BLE001 - 逐候选降级
                 last_exc = e
@@ -240,15 +242,16 @@ class FallbackChatModel(BaseChatModel):
                 msg = llm.invoke(messages, stop=stop, **kwargs)
                 vok, vreason = _validate(msg)
                 is_last = i == len(self.candidates) - 1
-                _record_call(provider, model, vok, t0, "" if vok else "输出" + vreason)
-                if vok or is_last:
+                accept = vok or is_last
+                _record_call(provider, model, accept, t0, "" if accept else vreason)
+                if accept:
                     _push_usage(provider, model)
                     if i > 0:
                         self._notify(first_reason or "调用异常", provider, model)
                     return ChatResult(generations=[ChatGeneration(message=msg)])
                 last_exc = last_exc or ValueError(vreason)
                 if i == 0:
-                    first_reason = "输出" + vreason
+                    first_reason = vreason
                 logger.warning("候选模型 %s/%s 输出校验不合格(%s)，尝试下一候选", provider, model, vreason)
             except Exception as e:  # noqa: BLE001
                 last_exc = e

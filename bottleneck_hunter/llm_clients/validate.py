@@ -43,11 +43,12 @@ def validate_output(message) -> tuple[bool, str]:
     if not t:
         return False, "输出为空"
     body = _strip_fence(t)
-    # 看起来是 JSON 但解析失败（剥 code fence 后）
+    # 看起来是 JSON 但解析失败（剥 code fence 后）。用 raw_decode 接受"合法 JSON + 尾随说明文字"
+    # （如 {"score":8}\n\n分析…），只判真正结构损坏，贯彻"宁漏勿误杀"。
     if body[:1] in ("{", "["):
         try:
-            json.loads(body)
-        except Exception:  # noqa: BLE001
+            json.JSONDecoder().raw_decode(body)
+        except ValueError:
             return False, "JSON格式损坏"
     # 极短 + 拒答话术开头（很保守，避免误杀正常短答）
     low = t.lower()
