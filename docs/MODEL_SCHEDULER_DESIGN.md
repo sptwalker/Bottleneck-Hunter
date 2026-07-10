@@ -156,12 +156,13 @@
 - **平滑性**：**无遥测时 `rank_candidates` 退化为现静态顺序**；feature flag 可随时关回现状。数据越多，排序越准——"逐渐发挥作用"在此兑现。
 - **实现**：`health.py`（`ProviderHealth` 进程内熔断，按 (user,provider) 隔离；`rank_providers` 按 健康度×可靠性+主模型加成 排序，无数据稳定排序退化为原顺序）；接入 `build_fallback_candidates`（备选重排）+ `get_models_for_role` 优先级4（排后选主）+ `_record_call`（成功清除/失败冷却）。全局 flag `BH_SCHEDULER_RANK=0` 可一键关回静态。**熔断优先于主模型加成**（坏了就别硬顶）。per-user 灰度暂用全局 flag（YAGNI）。
 
-### Phase 2 — 策略 + 输出校验 + 通告面板（按需 · 约 2 天）
+### Phase 2 — 策略 + 输出校验 + 通告面板（按需 · 约 2 天）✅ 已完成
 - **目标**：用户可配策略；格式校验触发切换；用户可见使用情况。
 - **改动**：`RoutingPolicy`（全局默认 + 角色覆盖 + free/paid tier）挂 AI 配置中心；免费→付费自动回落 + 强提示；`OutputValidator`（仅 JSON/评分角色，保守）；`drain_notices` 加"本次各岗位模型使用清单"；`/model-usage` 健康仪表盘 + 输出曲线（长期平均表现）。
 - **文件**：`ai_config_api.py`、`custom_provider_api.py`、`admin_api.py`、`fallback.py`、前端 `ai-config.js`/新面板、css。
 - **退出标准**：切换弹提示 + 面板可看各模型可用性/延迟/成本/熔断/切换次数与历史曲线。
 - **平滑性**：无策略时等权退化；校验保守可按角色关闭。
+- **实现**：`validate.py`（角色无关内容启发式：空/伪JSON解析失败/拒答，接入非流式路径，坏格式换模型、末候选兜底，`BH_SCHEDULER_VALIDATE=0` 可关）；`ai_routing_policy` 表 + `rank_providers` 策略感知（免费/付费/价格）+ 免费全熔断→回落付费强提示；`drain_usage` 使用清单 → `with_notices` 发 `model_usage` 事件；`/model-usage`（聚合+日曲线+熔断+策略）、`/routing-policy` GET/POST；前端「🧭 调度看板」页签（策略选择器 + 使用表 + 内联 SVG 成功率曲线）。provider tier 用默认映射（免费:deepseek/qwen/glm/kimi/siliconflow；付费:openai/anthropic/google/…），暂不做逐 provider 标注 UI。
 
 ### Phase 3（最后）— 统一两套容错
 - **目标**：把 `committee._invoke_with_retry` 的"同模型瞬态退避重试"并入统一策略层，删除并行实现。

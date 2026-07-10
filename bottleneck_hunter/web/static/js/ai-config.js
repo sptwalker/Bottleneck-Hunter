@@ -131,6 +131,7 @@ export function initAIConfig() {
       container.querySelectorAll('.aic-tab-pane').forEach(p => {
         p.classList.toggle('active', p.dataset.pane === pane);
       });
+      if (pane === 'scheduler') loadScheduler();
     });
   });
 }
@@ -939,6 +940,113 @@ function renderRecommendations() {
 }
 
 /* ── Utilities ────────────────────────────────────────── */
+
+/* ── Section: 调度看板（智能调度 Phase 2）──────────────── */
+const DC_SCHED_API = '/api/decision';
+let _schedBound = false;
+
+async function loadScheduler() {
+  const preferSel = document.getElementById('sched-prefer-tier');
+  const optSel = document.getElementById('sched-optimize-for');
+  if (!preferSel) return;
+  if (!_schedBound) {
+    _schedBound = true;
+    document.getElementById('sched-policy-save')?.addEventListener('click', saveSchedPolicy);
+    document.getElementById('sched-refresh')?.addEventListener('click', loadSchedUsage);
+    document.getElementById('sched-days')?.addEventListener('change', loadSchedUsage);
+    try {
+      const res = await fetch(`${DC_SCHED_API}/routing-policy`);
+      if (res.ok) {
+        const g = (await res.json()).global || {};
+        preferSel.value = g.prefer_tier || 'auto';
+        optSel.value = g.optimize_for || 'balanced';
+      }
+    } catch { /* 忽略 */ }
+  }
+  loadSchedUsage();
+}
+
+async function saveSchedPolicy() {
+  const prefer_tier = document.getElementById('sched-prefer-tier').value;
+  const optimize_for = document.getElementById('sched-optimize-for').value;
+  try {
+    const res = await fetch(`${DC_SCHED_API}/routing-policy`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefer_tier, optimize_for, role_key: '' }),
+    });
+    setStatus('sched-policy-status', res.ok ? '策略已保存' : '保存失败', res.ok ? 'ok' : 'fail');
+  } catch {
+    setStatus('sched-policy-status', '网络错误', 'fail');
+  }
+}
+
+async function loadSchedUsage() {
+  const root = document.getElementById('sched-usage-root');
+  if (!root) return;
+  const days = document.getElementById('sched-days')?.value || 14;
+  setStatus('sched-usage-status', '加载中…', 'info');
+  try {
+    const res = await fetch(`${DC_SCHED_API}/model-usage?days=${days}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    root.innerHTML = renderSchedUsage(await res.json());
+    setStatus('sched-usage-status', '', 'info');
+  } catch (e) {
+    root.innerHTML = `<div class="aic-provider-empty">加载失败：${esc(e.message)}</div>`;
+    setStatus('sched-usage-status', '失败', 'fail');
+  }
+}
+
+function renderSchedUsage(data) {
+  const stats = data.stats || [];
+  if (!stats.length) {
+    return '<div class="aic-provider-empty">暂无调用数据。系统运行、发生模型调用后，这里会逐步积累各模型的成功率/延迟/切换情况。</div>';
+  }
+  const series = data.series || [];
+  const byProv = {};
+  series.forEach(r => { (byProv[r.provider] = byProv[r.provider] || []).push(r); });
+
+  let html = '<table class="sched-usage-table"><thead><tr>' +
+    '<th>模型</th><th>档位</th><th>调用</th><th>成功率</th><th>均延迟</th><th>近期成功率曲线</th><th>状态</th>' +
+    '</tr></thead><tbody>';
+  for (const r of stats) {
+    const okColor = r.ok_rate >= 90 ? 'ok' : r.ok_rate >= 70 ? 'warn' : 'fail';
+    const tierBadge = r.tier === 'free' ? '<span class="sched-tier free">免费</span>'
+      : r.tier === 'paid' ? '<span class="sched-tier paid">付费</span>' : '';
+    const cool = r.cooldown_s > 0
+      ? `<span class="sched-cooling">熔断中 ${r.cooldown_s}s</span>`
+      : '<span class="sched-ok">正常</span>';
+    const spark = sparkline((byProv[r.provider] || []).map(x => x.ok_rate));
+    html += `<tr>
+      <td><strong>${esc(r.provider)}</strong><br><small style="color:var(--muted)">${esc(r.model)}</small></td>
+      <td>${tierBadge}</td>
+      <td>${r.calls}</td>
+      <td class="sched-rate ${okColor}">${r.ok_rate}%</td>
+      <td>${r.avg_latency_ms || 0}ms</td>
+      <td>${spark}</td>
+      <td>${cool}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  if ((data.cooling || []).length) {
+    html += `<p class="admin-hint">⚠️ 当前熔断中（暂时跳过）：${data.cooling.map(c => esc(c.provider)).join('、')}</p>`;
+  }
+  return html;
+}
+
+// 极简内联 SVG 折线（成功率 0-100 曲线），无外部依赖（前端库被墙，一律本地/内联）
+function sparkline(vals) {
+  if (!vals || vals.length < 2) return '<span style="color:var(--muted)">—</span>';
+  const w = 90, h = 22, n = vals.length;
+  const pts = vals.map((v, i) => {
+    const x = (i / (n - 1)) * (w - 2) + 1;
+    const y = h - 1 - (Math.max(0, Math.min(100, v)) / 100) * (h - 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const last = vals[vals.length - 1];
+  const color = last >= 90 ? 'oklch(0.72 0.19 142)' : last >= 70 ? 'oklch(0.75 0.15 85)' : 'oklch(0.63 0.24 25)';
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="vertical-align:middle">
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+}
 
 function setStatus(id, msg, type) {
   const el = document.getElementById(id);

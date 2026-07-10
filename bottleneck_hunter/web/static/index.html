@@ -1081,6 +1081,7 @@
           <button class="aic-main-tab" data-tab="paiddata" role="tab">外部数据源</button>
           <button class="aic-main-tab" data-tab="datareport" role="tab">数据报告</button>
           <button class="aic-main-tab" data-tab="autoupdate" role="tab">自动更新管理</button>
+          <button class="aic-main-tab" data-tab="scheduler" role="tab">🧭 调度看板</button>
         </div>
         <div class="aic-layout">
         <div class="aic-sections">
@@ -1267,6 +1268,52 @@
             <div class="aic-card-body"><div id="data-report-root">加载中…</div></div>
           </div>
           </div><!-- /pane datareport -->
+
+          <!-- 调度看板（智能调度 Phase 2）-->
+          <div class="aic-tab-pane" data-pane="scheduler">
+            <div class="aic-card">
+              <div class="aic-card-header">
+                <h3>模型使用策略</h3>
+                <span class="aic-save-status" id="sched-policy-status"></span>
+              </div>
+              <div class="aic-card-body">
+                <p class="admin-hint" style="margin-top:0">系统默认智能调度（按可用性/成功率自动选模、失效即无缝切换）。下面可叠加你的偏好，仅作用于你自己（严格按用户隔离）。</p>
+                <div class="sched-policy-row">
+                  <label>付费/免费：
+                    <select id="sched-prefer-tier">
+                      <option value="auto">自动（不限）</option>
+                      <option value="free">优先免费</option>
+                      <option value="paid">优先付费</option>
+                    </select>
+                  </label>
+                  <label>质量/价格：
+                    <select id="sched-optimize-for">
+                      <option value="balanced">均衡</option>
+                      <option value="quality">优先质量</option>
+                      <option value="price">优先价格</option>
+                    </select>
+                  </label>
+                  <button class="btn btn-sm btn-primary" id="sched-policy-save">保存策略</button>
+                </div>
+                <p class="admin-hint" style="margin-bottom:0">「优先免费」时若免费模型全部不可用/熔断，会自动回落到付费模型并提示你。</p>
+              </div>
+            </div>
+            <div class="aic-card">
+              <div class="aic-card-header">
+                <h3>模型使用情况</h3>
+                <div class="aic-provider-actions">
+                  <select id="sched-days">
+                    <option value="7">近 7 天</option>
+                    <option value="14" selected>近 14 天</option>
+                    <option value="30">近 30 天</option>
+                  </select>
+                  <button class="btn btn-sm" id="sched-refresh">刷新</button>
+                  <span class="aic-save-status" id="sched-usage-status"></span>
+                </div>
+              </div>
+              <div class="aic-card-body"><div id="sched-usage-root">加载中…</div></div>
+            </div>
+          </div><!-- /pane scheduler -->
 
         </div><!-- /aic-sections -->
 

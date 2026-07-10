@@ -372,6 +372,45 @@
 
 .aic-btn-disable { color: var(--muted); }
 
+/* ── 调度看板（Phase 2）───────────────────────────────── */
+.sched-policy-row {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+.sched-policy-row label { font-size: 13px; color: var(--text, inherit); }
+.sched-policy-row select {
+  margin-left: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #ccc);
+  background: var(--bg, #fff);
+  color: inherit;
+}
+.sched-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.sched-usage-table th, .sched-usage-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border, #eee);
+}
+.sched-usage-table th { color: var(--muted); font-weight: 600; }
+.sched-rate.ok { color: oklch(0.6 0.19 142); font-weight: 600; }
+.sched-rate.warn { color: oklch(0.68 0.15 85); font-weight: 600; }
+.sched-rate.fail { color: oklch(0.63 0.24 25); font-weight: 600; }
+.sched-tier {
+  padding: 1px 6px; border-radius: 8px; font-size: 11px; font-weight: 600;
+}
+.sched-tier.free { background: oklch(0.72 0.19 142 / 0.15); color: oklch(0.5 0.17 142); }
+.sched-tier.paid { background: oklch(0.7 0.15 55 / 0.15); color: oklch(0.55 0.15 55); }
+.sched-cooling { color: oklch(0.63 0.24 25); font-weight: 600; }
+.sched-ok { color: var(--muted); }
+
 .aic-provider-actions {
   display: flex;
   gap: 8px;
