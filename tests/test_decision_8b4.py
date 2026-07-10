@@ -340,6 +340,8 @@ class TestDecisionAPIFeedback:
         app = FastAPI()
         app.include_router(router, prefix="/api/decision")
         set_store(s)
+        from bottleneck_hunter.auth.dependencies import get_current_user
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "", "username": "test", "role": "admin"}
         return TestClient(app), s
 
     def test_reviews_empty(self, client, store):
