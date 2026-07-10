@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextvars import ContextVar
 
 from langchain_core.language_models import BaseChatModel
@@ -45,6 +46,35 @@ def drain_notices() -> list[dict]:
     out = list(lst)
     lst.clear()
     return out
+
+
+# ── 调用遥测（智能调度 Phase 0 地基）─────────────────────
+# 每个候选调用在结局处旁路记一条（成败/延迟/原因），喂养 Phase 1 的健康度/速度排序。
+# 严格 fail-silent：遥测异常绝不影响 LLM 主链路。
+_metric_store = None
+
+
+def _get_metric_store():
+    global _metric_store
+    if _metric_store is None:
+        from bottleneck_hunter.watchlist.store import WatchlistStore
+        _metric_store = WatchlistStore()  # 缓存一份（构造含 schema 迁移），record 用各自的 _write_conn
+    return _metric_store
+
+
+def _record_call(provider: str, model: str, ok: bool, t0: float, reason: str = "") -> None:
+    """旁路记一次候选调用遥测（fail-silent）。
+    ponytail: 同步旁路写；LLM 调用秒级、频率低，撞 _write_lock 概率极小。
+    高并发场景再改内存滑窗聚合 / asyncio.to_thread 异步落盘。"""
+    try:
+        from bottleneck_hunter.auth.current_user import get_current_user_id
+        latency_ms = (time.monotonic() - t0) * 1000
+        _get_metric_store().record_model_call(
+            provider, model, ok, latency_ms=latency_ms, reason=reason,
+            user_id=get_current_user_id(),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def classify_reason(exc: Exception) -> str:
@@ -99,14 +129,17 @@ class FallbackChatModel(BaseChatModel):
         last_exc = None
         first_reason = None
         for i, (llm, provider, model) in enumerate(self.candidates):
+            t0 = time.monotonic()
             try:
                 msg = await llm.ainvoke(messages, stop=stop, **kwargs)
+                _record_call(provider, model, True, t0)
                 if i > 0:
                     self._notify(first_reason or "调用异常", provider, model)
                 return ChatResult(generations=[ChatGeneration(message=msg)])
             except Exception as e:  # noqa: BLE001 - 逐候选降级
                 last_exc = e
                 reason = classify_reason(e)
+                _record_call(provider, model, False, t0, reason)
                 if i == 0:
                     first_reason = reason
                 logger.warning("候选模型 %s/%s 调用失败(%s): %s", provider, model, reason, e)
@@ -117,18 +150,21 @@ class FallbackChatModel(BaseChatModel):
         first_reason = None
         for i, (llm, provider, model) in enumerate(self.candidates):
             emitted = False
+            t0 = time.monotonic()
             try:
                 async for chunk in llm.astream(messages, stop=stop, **kwargs):
                     emitted = True
                     yield ChatGenerationChunk(message=chunk)
+                _record_call(provider, model, True, t0)
                 if i > 0:
                     self._notify(first_reason or "调用异常", provider, model)
                 return
             except Exception as e:  # noqa: BLE001
+                reason = classify_reason(e)
+                _record_call(provider, model, False, t0, reason)
                 if emitted:
                     raise  # 已吐出部分 token，无法安全重启，交由上层处理
                 last_exc = e
-                reason = classify_reason(e)
                 if i == 0:
                     first_reason = reason
                 logger.warning("候选模型 %s/%s 流式失败(%s): %s", provider, model, reason, e)
@@ -140,14 +176,17 @@ class FallbackChatModel(BaseChatModel):
         last_exc = None
         first_reason = None
         for i, (llm, provider, model) in enumerate(self.candidates):
+            t0 = time.monotonic()
             try:
                 msg = llm.invoke(messages, stop=stop, **kwargs)
+                _record_call(provider, model, True, t0)
                 if i > 0:
                     self._notify(first_reason or "调用异常", provider, model)
                 return ChatResult(generations=[ChatGeneration(message=msg)])
             except Exception as e:  # noqa: BLE001
                 last_exc = e
                 reason = classify_reason(e)
+                _record_call(provider, model, False, t0, reason)
                 if i == 0:
                     first_reason = reason
                 logger.warning("候选模型 %s/%s 调用失败(%s): %s", provider, model, reason, e)
@@ -158,18 +197,21 @@ class FallbackChatModel(BaseChatModel):
         first_reason = None
         for i, (llm, provider, model) in enumerate(self.candidates):
             emitted = False
+            t0 = time.monotonic()
             try:
                 for chunk in llm.stream(messages, stop=stop, **kwargs):
                     emitted = True
                     yield ChatGenerationChunk(message=chunk)
+                _record_call(provider, model, True, t0)
                 if i > 0:
                     self._notify(first_reason or "调用异常", provider, model)
                 return
             except Exception as e:  # noqa: BLE001
+                reason = classify_reason(e)
+                _record_call(provider, model, False, t0, reason)
                 if emitted:
                     raise
                 last_exc = e
-                reason = classify_reason(e)
                 if i == 0:
                     first_reason = reason
                 logger.warning("候选模型 %s/%s 流式失败(%s): %s", provider, model, reason, e)

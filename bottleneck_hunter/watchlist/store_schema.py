@@ -922,4 +922,24 @@ MIGRATIONS: list[str] = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_ds_stats_date ON datasource_stats(date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_ds_stats_source ON datasource_stats(source, date DESC)",
+    # ── AI 模型调用遥测（智能调度 Phase 0 地基）：按 日期×用户×provider×model×角色 聚合
+    #    calls/ok/fail/延迟/末次原因。聚合而非 per-call 追加 → 避开高频写 _write_lock 压力，
+    #    日粒度足够画长期表现曲线。喂养 Phase 1 的 rank_candidates 健康度/速度维度。──
+    """CREATE TABLE IF NOT EXISTS model_call_stats (
+        date         TEXT NOT NULL,
+        user_id      TEXT DEFAULT '',
+        provider     TEXT NOT NULL,
+        model        TEXT NOT NULL,
+        role_context TEXT DEFAULT '',
+        calls        INTEGER DEFAULT 0,
+        ok           INTEGER DEFAULT 0,
+        fail         INTEGER DEFAULT 0,
+        latency_sum  REAL DEFAULT 0,
+        last_reason  TEXT DEFAULT '',
+        updated_at   TEXT,
+        UNIQUE(date, user_id, provider, model, role_context)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_model_calls_date ON model_call_stats(date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_model_calls_pm ON model_call_stats(provider, model, date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_model_calls_user ON model_call_stats(user_id, date DESC)",
 ]

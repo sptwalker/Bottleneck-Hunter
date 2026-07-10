@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from bottleneck_hunter.watchlist.store_base import _now_iso
+from bottleneck_hunter.watchlist.store_base import _now_iso, _today
 
 
 class _AIModelsMixin:
@@ -432,6 +432,58 @@ class _AIModelsMixin:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    # ── AI 模型调用遥测（智能调度 Phase 0）：按 日期×用户×provider×model×角色 UPSERT 累加 ──
+
+    def record_model_call(self, provider: str, model: str, ok: bool,
+                          latency_ms: float = 0.0, reason: str = "",
+                          role_context: str = "", user_id: str | None = None) -> None:
+        """记一次 LLM 调用遥测（成败/延迟/末次原因）。失败只 debug 不抛——
+        遥测是旁路，绝不影响主链路。仿 record_ds_call 的聚合 UPSERT 范式。"""
+        uid = user_id if user_id is not None else (self._user_id or "")
+        try:
+            with self._write_conn() as conn:
+                conn.execute(
+                    """INSERT INTO model_call_stats
+                       (date, user_id, provider, model, role_context, calls, ok, fail, latency_sum, last_reason, updated_at)
+                       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                       ON CONFLICT(date, user_id, provider, model, role_context) DO UPDATE SET
+                         calls = calls + 1,
+                         ok = ok + excluded.ok,
+                         fail = fail + excluded.fail,
+                         latency_sum = latency_sum + excluded.latency_sum,
+                         last_reason = CASE WHEN excluded.last_reason != '' THEN excluded.last_reason ELSE model_call_stats.last_reason END,
+                         updated_at = excluded.updated_at""",
+                    (_today(), uid, (provider or "").lower().strip(), model or "", role_context or "",
+                     1 if ok else 0, 0 if ok else 1, float(latency_ms), (reason or "")[:200], _now_iso()),
+                )
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).debug("record_model_call 失败: %s", e)
+
+    def get_model_call_stats(self, days: int = 30, user_id: str | None = None) -> list[dict]:
+        """按 provider×model 聚合最近 days 天调用遥测：总调用/成功/失败/成功率/均延迟/末次原因。
+        user_id=None → 当前 store 用户；传 '' → 全平台聚合（管理看板用）。"""
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        uid = self._user_id if user_id is None else user_id
+        conn = self._connect()
+        try:
+            q = ("SELECT provider, model, "
+                 "SUM(calls) AS calls, SUM(ok) AS ok, SUM(fail) AS fail, "
+                 "CASE WHEN SUM(calls)>0 THEN ROUND(100.0*SUM(ok)/SUM(calls),1) ELSE 0 END AS ok_rate, "
+                 "CASE WHEN SUM(calls)>0 THEN ROUND(SUM(latency_sum)/SUM(calls),0) ELSE 0 END AS avg_latency_ms, "
+                 "MAX(date) AS last_date "
+                 "FROM model_call_stats WHERE date >= ?")
+            p: tuple = (cutoff,)
+            if uid:
+                q += " AND user_id = ?"
+                p += (uid,)
+            q += " GROUP BY provider, model ORDER BY calls DESC"
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
 
 
     def delete_role_config(self, role_key: str, slot_index: int,
