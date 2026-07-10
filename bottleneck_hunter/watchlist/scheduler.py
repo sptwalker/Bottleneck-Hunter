@@ -697,6 +697,84 @@ async def job_model_calibration() -> None:
             logger.error("Model calibration (user=%s) failed: %s", uid[:8] if uid else "global", e)
 
 
+# ── 模型能力分保鲜（月度）：对各用户已配、能力分已过期的模型重跑综合测试 ──
+_CAP_REFRESH_STALE_DAYS = 30    # N 天内测过的视为新鲜，跳过
+_CAP_REFRESH_MAX_MODELS = 10    # 每次任务全局最多重测的模型数（防失控，真实 LLM 调用）
+
+
+def _select_stale_models(uid: str, store, days: int = _CAP_REFRESH_STALE_DAYS) -> list[tuple[str, str]]:
+    """返回该用户需要重测的 [(provider, model)]：已配 KEY 的 provider × 其默认模型，
+    过滤掉 days 天内已测过的（按 model_capability_test.tested_at 判新鲜度）。"""
+    from datetime import datetime, timedelta, timezone
+
+    from bottleneck_hunter.llm_clients.factory import resolve_provider_model
+
+    if not _auth_store:
+        return []
+    try:
+        keyed = {k["provider"] for k in _auth_store.get_user_api_keys(uid)}
+    except Exception:  # noqa: BLE001
+        return []
+    # 与 _now_iso() 一致：UTC + 秒级，保证与 tested_at 同格式可比
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    fresh = set()
+    try:
+        for r in store.get_test_results(user_id=uid):
+            if (r.get("tested_at") or "") >= cutoff:
+                fresh.add((r["provider"], r["model"]))
+    except Exception:  # noqa: BLE001
+        pass
+    out = []
+    for prov in sorted(keyed):
+        model = resolve_provider_model(prov, uid)
+        if model and (prov, model) not in fresh:
+            out.append((prov, model))
+    return out
+
+
+async def job_model_capability_refresh() -> None:
+    """月度：对各用户已配、且能力分已过期的模型重跑综合测试，刷新调度器的质量先验。
+
+    每次任务全局最多重测 _CAP_REFRESH_MAX_MODELS 个模型（防失控）。**发起真实 LLM 调用**，
+    故受自动更新全局总开关门控（admin 可一键停）。_iter_users 设 current_user → KEY 严格按用户。
+    """
+    if not _wl_store or not _auth_store:
+        return
+    try:
+        from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+        if not is_global_enabled(_auth_store):
+            logger.info("自动更新全局总开关关闭，跳过模型能力分刷新")
+            return
+    except Exception as e:  # noqa: BLE001
+        # 读开关失败 → **fail-closed**：宁可不刷新，也不在开关状态未知时发起真实付费调用
+        logger.warning("读取全局总开关失败，安全起见跳过模型能力分刷新: %s", e)
+        return
+
+    from bottleneck_hunter.web.model_tester import run_comprehensive_test
+
+    tested = 0
+    # category="model_capability" → 遵守全局总开关 + 各用户自动更新主开关（关了自动更新的用户不被计费）
+    for uid, store, budget in _iter_users("model_capability"):
+        if tested >= _CAP_REFRESH_MAX_MODELS:
+            break
+        for prov, model in _select_stale_models(uid, store):
+            if tested >= _CAP_REFRESH_MAX_MODELS:
+                break
+            if not budget.can_spend(estimated_tokens=6 * 1500, provider=prov):
+                logger.info("用户 %s 预算不足，跳过其能力分刷新", uid[:8] if uid else "global")
+                break   # 该用户预算耗尽 → 跳到下一用户
+            try:
+                results = await run_comprehensive_test(prov, model)
+                for dim, res in results.items():
+                    store.save_test_result(prov, model, dim, res.get("score", 0),
+                                           json.dumps(res, ensure_ascii=False), user_id=uid)
+                tested += 1
+                logger.info("能力分已刷新: %s/%s (user=%s)", prov, model, uid[:8] if uid else "global")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("能力分刷新失败 %s/%s: %s", prov, model, e)
+    logger.info("模型能力分刷新完成：本次重测 %d 个模型", tested)
+
+
 async def job_stale_refresh() -> None:
     """陈旧兜底刷新：刷新每个用户超过其阈值(默认24h)未更新的观察池标的。
 
@@ -799,6 +877,7 @@ _JOB_SPECS = [
     ("cn_earnings_update",     job_earnings_update,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly earnings update (Tushare)"),
     ("datasource_report",      job_datasource_report,   {},                     _TZ_US_EASTERN, "daily",    "Data source health check & usage report"),
     ("model_calibration",      job_model_calibration,   {},                     _TZ_US_EASTERN, "weekly",   "Weekly AI model accuracy calibration"),
+    ("model_capability_refresh", job_model_capability_refresh, {},               _TZ_US_EASTERN, "monthly",  "Monthly AI model capability re-test (刷新能力分)"),
     ("stale_refresh",          job_stale_refresh,       {},                     None,           "interval", "Stale watchlist refresh (safety net)"),
     ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_US_EASTERN, "weekly",   "US full refresh (data+decision)"),
     ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
@@ -815,6 +894,9 @@ def _make_trigger(spec, schedule):
         return IntervalTrigger(hours=int(s.get("interval_hours", 6) or 6))
     hour = int(s.get("hour", 0))
     minute = int(s.get("minute", 0))
+    if kind == "monthly":
+        # 每月 1 号（能力分保鲜等低频任务）
+        return CronTrigger(day=1, hour=hour, minute=minute, timezone=tz)
     dow = s.get("day_of_week", "sat") if kind == "weekly" else "mon-fri"
     return CronTrigger(day_of_week=dow, hour=hour, minute=minute, timezone=tz)
 

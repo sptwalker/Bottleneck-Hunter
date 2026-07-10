@@ -124,3 +124,101 @@ def test_model_assignments_endpoint_contract(tmp_path, monkeypatch):
     for r in res["assignments"]:
         assert {"role_key", "label", "group", "multi", "source", "picks"} <= set(r)
         assert isinstance(r["picks"], list)
+
+
+# ── B1 模式测试周期自动化：选型 + 封顶（mock，不发真实 LLM 调用）──
+def test_select_stale_models_filters_fresh(monkeypatch):
+    import bottleneck_hunter.watchlist.scheduler as S
+    from bottleneck_hunter.watchlist.store_base import _now_iso
+
+    class FakeAuth:
+        def get_user_api_keys(self, uid):
+            return [{"provider": "deepseek"}, {"provider": "qwen"}]
+    monkeypatch.setattr(S, "_auth_store", FakeAuth())
+
+    class FakeStore:  # deepseek 刚测过(fresh)，qwen 从没测过(stale)
+        def get_test_results(self, user_id=None):
+            return [{"provider": "deepseek", "model": "deepseek-chat", "tested_at": _now_iso()}]
+    out = dict(S._select_stale_models("u1", FakeStore(), days=30))
+    assert "qwen" in out and "deepseek" not in out   # 新鲜的跳过，过期的选中
+
+
+class _FakeBudget:
+    def can_spend(self, **kw):
+        return True
+
+
+def test_job_capability_refresh_caps_at_max(monkeypatch):
+    import bottleneck_hunter.watchlist.scheduler as S
+
+    saved = []
+
+    class FakeStore:
+        def get_test_results(self, user_id=None):
+            return []  # 全部 stale
+        def save_test_result(self, prov, model, dim, score, raw, user_id=None):
+            saved.append((prov, model, dim))
+
+    class FakeAuth:
+        def get_user_api_keys(self, uid):
+            # 12 个 provider（>封顶 10）
+            return [{"provider": p} for p in
+                    ["deepseek", "qwen", "glm", "kimi", "openai", "google",
+                     "siliconflow", "agnes", "minimax", "openrouter", "spark_x2", "xiaomimimo"]]
+
+    monkeypatch.setattr(S, "_wl_store", FakeStore())
+    monkeypatch.setattr(S, "_auth_store", FakeAuth())
+    monkeypatch.setattr(S, "_iter_users",
+                        lambda category=None: iter([("u1", FakeStore(), _FakeBudget())]))
+    monkeypatch.setattr("bottleneck_hunter.watchlist.schedule_config.is_global_enabled", lambda a: True)
+
+    async def fake_test(prov, model):
+        return {"json_output": {"score": 8}}
+    monkeypatch.setattr("bottleneck_hunter.web.model_tester.run_comprehensive_test", fake_test)
+
+    asyncio.run(S.job_model_capability_refresh())
+    tested = {(p, m) for p, m, _ in saved}
+    assert len(tested) == S._CAP_REFRESH_MAX_MODELS   # 封顶生效（10）
+
+
+def test_job_capability_refresh_budget_gate(monkeypatch):
+    """预算不足的用户 → 不发起任何测试。"""
+    import bottleneck_hunter.watchlist.scheduler as S
+    saved = []
+
+    class FakeStore:
+        def get_test_results(self, user_id=None):
+            return []
+        def save_test_result(self, *a, **k):
+            saved.append(a)
+
+    class FakeAuth:
+        def get_user_api_keys(self, uid):
+            return [{"provider": "deepseek"}]
+
+    class BrokeBudget:
+        def can_spend(self, **kw):
+            return False
+
+    monkeypatch.setattr(S, "_wl_store", FakeStore())
+    monkeypatch.setattr(S, "_auth_store", FakeAuth())
+    monkeypatch.setattr(S, "_iter_users",
+                        lambda category=None: iter([("u1", FakeStore(), BrokeBudget())]))
+    monkeypatch.setattr("bottleneck_hunter.watchlist.schedule_config.is_global_enabled", lambda a: True)
+    monkeypatch.setattr("bottleneck_hunter.web.model_tester.run_comprehensive_test",
+                        lambda p, m: (_ for _ in ()).throw(AssertionError("预算不足不应发起测试")))
+    asyncio.run(S.job_model_capability_refresh())
+    assert saved == []   # 预算不足 → 零测试
+
+
+def test_job_capability_refresh_respects_global_killswitch(monkeypatch):
+    import bottleneck_hunter.watchlist.scheduler as S
+    monkeypatch.setattr(S, "_wl_store", object())
+    monkeypatch.setattr(S, "_auth_store", object())
+    monkeypatch.setattr("bottleneck_hunter.watchlist.schedule_config.is_global_enabled", lambda a: False)
+    called = {"n": 0}
+    monkeypatch.setattr(S, "_iter_users", lambda category=None: (called.__setitem__("n", 1), iter([]))[1])
+    asyncio.run(S.job_model_capability_refresh())
+    assert called["n"] == 0   # 总开关关 → 直接返回，不遍历用户
+
+

@@ -32,6 +32,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "cn_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
     "datasource_report":      {"hour": 7, "minute": 30},
     "model_calibration":      {"day_of_week": "sun", "hour": 12, "minute": 0},
+    "model_capability_refresh": {"hour": 3, "minute": 0},   # 月度(每月1号)：能力分重测
     # A股（Asia/Shanghai）
     "cn_price_premarket":     {"hour": 9,  "minute": 0},
     "cn_price_postmarket":    {"hour": 16, "minute": 0},
