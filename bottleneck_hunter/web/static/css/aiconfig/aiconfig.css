@@ -411,6 +411,26 @@
 .sched-cooling { color: oklch(0.63 0.24 25); font-weight: 600; }
 .sched-ok { color: var(--muted); }
 
+/* 调度看板：告警条 + 各角色实际选型 */
+.sched-alert {
+  padding: 8px 12px; margin-bottom: 10px; border-radius: 6px; font-size: 13px;
+  background: oklch(0.7 0.15 55 / 0.12); color: oklch(0.5 0.15 55);
+  border: 1px solid oklch(0.7 0.15 55 / 0.3);
+}
+.sched-assign-group { margin-bottom: 14px; }
+.sched-assign-group-title {
+  font-size: 13px; font-weight: 700; color: var(--fg); margin-bottom: 6px;
+  padding-left: 8px; border-left: 3px solid var(--accent);
+}
+.sched-assign-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sched-assign-table td { padding: 6px 10px; border-bottom: 1px solid var(--border, #eee); vertical-align: top; }
+.sched-assign-role { font-weight: 600; white-space: nowrap; }
+.sched-assign-table code { font-size: 12px; background: oklch(0.93 0.01 250 / 0.5); padding: 1px 5px; border-radius: 4px; }
+.sched-src { padding: 1px 6px; border-radius: 8px; font-size: 11px; font-weight: 600; }
+.sched-src.manual { background: oklch(0.75 0.15 250 / 0.15); color: oklch(0.45 0.15 250); }
+.sched-src.auto { background: oklch(0.72 0.19 142 / 0.15); color: oklch(0.5 0.17 142); }
+.sched-none { color: var(--muted); font-size: 12px; }
+
 .aic-provider-actions {
   display: flex;
   gap: 8px;

@@ -827,7 +827,7 @@ async function loadScheduler() {
   if (!_schedBound) {
     _schedBound = true;
     document.getElementById('sched-policy-save')?.addEventListener('click', saveSchedPolicy);
-    document.getElementById('sched-refresh')?.addEventListener('click', loadSchedUsage);
+    document.getElementById('sched-refresh')?.addEventListener('click', () => { loadSchedUsage(); loadSchedAssignments(); });
     document.getElementById('sched-days')?.addEventListener('change', loadSchedUsage);
     try {
       const res = await fetch(`${DC_SCHED_API}/routing-policy`);
@@ -839,6 +839,50 @@ async function loadScheduler() {
     } catch { /* 忽略 */ }
   }
   loadSchedUsage();
+  loadSchedAssignments();
+}
+
+async function loadSchedAssignments() {
+  const root = document.getElementById('sched-assign-root');
+  if (!root) return;
+  try {
+    const res = await fetch(`${DC_SCHED_API}/model-assignments`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    root.innerHTML = renderSchedAssignments((await res.json()).assignments || []);
+  } catch (e) {
+    root.innerHTML = `<div class="aic-provider-empty">加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+const _GROUP_LABEL = {
+  decision: '决策层级', committee: '投资委员会', pipeline: '产业链管线',
+  watchlist: '看板模块', bottleneck: '瓶颈交叉评分',
+};
+
+function renderSchedAssignments(rows) {
+  if (!rows.length) return '<div class="aic-provider-empty">暂无角色</div>';
+  const byGroup = {};
+  rows.forEach(r => { (byGroup[r.group] = byGroup[r.group] || []).push(r); });
+  let html = '';
+  for (const [g, list] of Object.entries(byGroup)) {
+    html += `<div class="sched-assign-group"><div class="sched-assign-group-title">${esc(_GROUP_LABEL[g] || g)}</div>`;
+    html += '<table class="sched-assign-table"><tbody>';
+    for (const r of list) {
+      const badge = r.source === 'manual'
+        ? '<span class="sched-src manual">手填</span>'
+        : '<span class="sched-src auto">自动</span>';
+      const picks = r.picks.length
+        ? r.picks.map(p => `<code>${esc(p.provider)}/${esc(p.model)}</code>`).join(r.multi ? ' + ' : '')
+        : '<span class="sched-none">无可用（未配 Key）</span>';
+      html += `<tr>
+        <td class="sched-assign-role">${esc(r.label)}${r.multi ? ' <small>(多槽)</small>' : ''}</td>
+        <td>${badge}</td>
+        <td>${picks}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  return html;
 }
 
 async function saveSchedPolicy() {
@@ -876,11 +920,21 @@ function renderSchedUsage(data) {
   if (!stats.length) {
     return '<div class="aic-provider-empty">暂无调用数据。系统运行、发生模型调用后，这里会逐步积累各模型的成功率/延迟/切换情况。</div>';
   }
+  // 告警条：当前熔断中的 + 成功率偏低(<70%，且样本≥5)的模型
+  const cooling = (data.cooling || []).map(c => c.provider);
+  const weak = stats.filter(r => r.calls >= 5 && r.ok_rate < 70).map(r => `${r.provider}/${r.model}(${r.ok_rate}%)`);
+  let banner = '';
+  if (cooling.length || weak.length) {
+    const parts = [];
+    if (cooling.length) parts.push(`熔断中：${cooling.map(esc).join('、')}`);
+    if (weak.length) parts.push(`成功率偏低：${weak.map(esc).join('、')}`);
+    banner = `<div class="sched-alert">⚠️ ${parts.join('　|　')}</div>`;
+  }
   const series = data.series || [];
   const byProv = {};
   series.forEach(r => { (byProv[r.provider] = byProv[r.provider] || []).push(r); });
 
-  let html = '<table class="sched-usage-table"><thead><tr>' +
+  let html = banner + '<table class="sched-usage-table"><thead><tr>' +
     '<th>模型</th><th>档位</th><th>调用</th><th>成功率</th><th>均延迟</th><th>近期成功率曲线</th><th>状态</th>' +
     '</tr></thead><tbody>';
   for (const r of stats) {
@@ -902,9 +956,6 @@ function renderSchedUsage(data) {
     </tr>`;
   }
   html += '</tbody></table>';
-  if ((data.cooling || []).length) {
-    html += `<p class="admin-hint">⚠️ 当前熔断中（暂时跳过）：${data.cooling.map(c => esc(c.provider)).join('、')}</p>`;
-  }
   return html;
 }
 

@@ -1042,6 +1042,48 @@ async def get_model_usage(days: int = 14, user: dict = Depends(get_current_user)
     return {"stats": stats, "series": series, "cooling": cooling, "policy": policy}
 
 
+@router.get("/model-assignments")
+async def get_model_assignments(user: dict = Depends(get_current_user)):
+    """当前调度器为每个角色**实际选定**的模型（活决策）。
+
+    每角色展示 source（manual=手填矩阵覆盖且已生效 / auto=智能调度自动选）+ 选中的
+    provider/model 列表（多槽 fan-out 会有多个）。让"简化设置后系统给每个角色分了
+    什么"对用户可见。~20 角色 × 每角色多次 DB 读，放线程池避免阻塞事件循环。
+    """
+    return {"assignments": await asyncio.to_thread(_build_assignments, user.get("sub", ""))}
+
+
+def _build_assignments(uid: str) -> list[dict]:
+    from bottleneck_hunter.llm_clients.factory import _load_role_configs_from_db, get_models_for_role
+    from bottleneck_hunter.llm_clients.role_registry import ROLE_REGISTRY
+
+    out = []
+    for role_def in ROLE_REGISTRY.values():
+        source, picks = "auto", []
+        try:
+            configs = _load_role_configs_from_db(role_def.key, uid)
+            picks = [{"provider": p, "model": m}
+                     for (_llm, p, m) in get_models_for_role(role_def.key, user_id=uid)]
+            # source 按**实际选型**判定：仅当手填配置存在、且实际 picks 全来自该配置的 provider
+            # （或暂无可用）才算 manual；手填 provider 全禁用/失败而落到智能调度时，如实标 auto。
+            if configs:
+                manual_provs = {(c.get("provider") or "").lower().strip() for c in configs}
+                pick_provs = {(p["provider"] or "").lower().strip() for p in picks}
+                if not pick_provs or pick_provs <= manual_provs:
+                    source = "manual"
+        except Exception:  # noqa: BLE001 - 单角色失败不拖垮整个端点
+            logger.warning("角色 %s 装配失败", role_def.key, exc_info=True)
+        out.append({
+            "role_key": role_def.key,
+            "label": role_def.label,
+            "group": role_def.group,
+            "multi": role_def.multi_model,
+            "source": source,
+            "picks": picks,
+        })
+    return out
+
+
 class RoutingPolicyRequest(BaseModel):
     prefer_tier: str = "auto"       # auto | free | paid
     optimize_for: str = "balanced"  # balanced | quality | price
