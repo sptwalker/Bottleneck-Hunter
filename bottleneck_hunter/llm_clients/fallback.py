@@ -66,6 +66,9 @@ def _record_call(provider: str, model: str, ok: bool, t0: float, reason: str = "
     """旁路记一次候选调用遥测（fail-silent）。
     ponytail: 同步旁路写；LLM 调用秒级、频率低，撞 _write_lock 概率极小。
     高并发场景再改内存滑窗聚合 / asyncio.to_thread 异步落盘。"""
+    import sys
+    if "pytest" in sys.modules:
+        return  # 测试运行中不写真实遥测库，避免假模型数据污染 Phase 1 排序
     try:
         from bottleneck_hunter.auth.current_user import get_current_user_id
         latency_ms = (time.monotonic() - t0) * 1000
