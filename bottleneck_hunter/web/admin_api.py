@@ -475,17 +475,35 @@ async def env_test(user: dict = Depends(_require_admin)):
     # 被墙域名(google/yahoo)不是快速拒绝而是丢包挂住，且 DNS 污染时 getaddrinfo
     # 会在 httpx 超时之外额外阻塞 —— 故用 wait_for 硬封顶，保证整体几秒内返回、
     # 不触发前置反代的网关超时(504)。
-    HARD_CAP = 8
+    HARD_CAP = 8          # 每条整体封顶（含重试）：整体几秒返回、不触发反代 504
+    ATTEMPT_TIMEOUT = 6   # 单次尝试；须＞DNS 抖动失败耗时(实测~4.3s)，否则会被误判成超时而不重试
 
     async def _probe(label: str, url: str, overseas: bool) -> dict:
         import httpx
         t0 = time.monotonic()
+
+        async def _once():
+            # trust_env=True → 自动认 HTTPS_PROXY/NO_PROXY，与真实抓取一致
+            async with httpx.AsyncClient(timeout=ATTEMPT_TIMEOUT, follow_redirects=True, trust_env=True) as c:
+                return await c.get(url)
+
+        async def _fetch():
+            # 仅对「非超时」失败（DNS 丢包/连接重置等并发抖动）错开重试一次，
+            # 消除 FRED 这类假阴性；真·被墙（挂起→超时）不重试，免得白等。
+            last = None
+            for attempt in range(2):
+                try:
+                    return await asyncio.wait_for(_once(), timeout=ATTEMPT_TIMEOUT)
+                except asyncio.TimeoutError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    last = e
+                    if attempt == 0:
+                        await asyncio.sleep(0.3)
+            raise last
+
         try:
-            async def _do():
-                # trust_env=True → 自动认 HTTPS_PROXY/NO_PROXY，与真实抓取一致
-                async with httpx.AsyncClient(timeout=HARD_CAP, follow_redirects=True, trust_env=True) as c:
-                    return await c.get(url)
-            r = await asyncio.wait_for(_do(), timeout=HARD_CAP)
+            r = await asyncio.wait_for(_fetch(), timeout=HARD_CAP)
             ms = round((time.monotonic() - t0) * 1000)
             return {"label": label, "url": url, "overseas": overseas,
                     "ok": r.status_code < 500, "status": r.status_code, "ms": ms, "error": ""}
