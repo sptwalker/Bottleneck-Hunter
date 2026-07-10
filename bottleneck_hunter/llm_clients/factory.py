@@ -376,12 +376,17 @@ def get_models_for_role(
 
     # 优先级4: 主要模型优先 + 应急兜底链（均跳过被禁用 provider）
     chain = ([_PRIMARY_PROVIDER] if _PRIMARY_PROVIDER else []) + [p for p, _ in _FALLBACK_CHAIN]
-    seen: set[str] = set()
+    # 去重保序
+    _seen0: set[str] = set()
+    chain = [p for p in ((c or "").lower().strip() for c in chain) if p and not (p in _seen0 or _seen0.add(p))]
+    # 智能排序：按健康度/遥测把最优可用 provider 排前，作为「默认自动」的主选。
+    # 无数据 → 稳定排序保持原顺序（平滑退化为静态链，不劣于现状）。
+    try:
+        from bottleneck_hunter.llm_clients.health import rank_providers
+        chain = rank_providers(chain, uid, _PRIMARY_PROVIDER)
+    except Exception:  # noqa: BLE001
+        pass
     for provider in chain:
-        provider = (provider or "").lower().strip()
-        if not provider or provider in seen:
-            continue
-        seen.add(provider)
         if not is_provider_active(provider):
             continue
         if _user_has_llm_key(provider, uid):

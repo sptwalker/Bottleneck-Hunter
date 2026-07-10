@@ -63,18 +63,31 @@ def _get_metric_store():
 
 
 def _record_call(provider: str, model: str, ok: bool, t0: float, reason: str = "") -> None:
-    """旁路记一次候选调用遥测（fail-silent）。
+    """旁路记一次候选调用遥测 + 更新运行时健康度（fail-silent）。
     ponytail: 同步旁路写；LLM 调用秒级、频率低，撞 _write_lock 概率极小。
     高并发场景再改内存滑窗聚合 / asyncio.to_thread 异步落盘。"""
     import sys
-    if "pytest" in sys.modules:
-        return  # 测试运行中不写真实遥测库，避免假模型数据污染 Phase 1 排序
     try:
         from bottleneck_hunter.auth.current_user import get_current_user_id
+        uid = get_current_user_id()
+    except Exception:  # noqa: BLE001
+        uid = ""
+    # 健康度：内存态，始终更新（含测试），供 rank_providers 熔断沉底
+    try:
+        from bottleneck_hunter.llm_clients.health import health
+        if ok:
+            health.record_success(uid, provider)
+        else:
+            health.record_failure(uid, provider, reason)
+    except Exception:  # noqa: BLE001
+        pass
+    # 遥测落库：测试运行中跳过，避免假模型数据污染 Phase 1 排序
+    if "pytest" in sys.modules:
+        return
+    try:
         latency_ms = (time.monotonic() - t0) * 1000
         _get_metric_store().record_model_call(
-            provider, model, ok, latency_ms=latency_ms, reason=reason,
-            user_id=get_current_user_id(),
+            provider, model, ok, latency_ms=latency_ms, reason=reason, user_id=uid,
         )
     except Exception:  # noqa: BLE001
         pass
@@ -256,6 +269,15 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
             out.append((llm, provider, model))
         except Exception:  # noqa: BLE001
             continue
+    # 按运行时健康度/遥测对备选重排：熔断中/低成功率的沉底，主模型加成保持粘性。
+    # 无数据 → rank_providers 稳定排序保持原顺序（平滑退化为现状）。
+    try:
+        from bottleneck_hunter.llm_clients.health import rank_providers
+        ranked = rank_providers([c[1] for c in out], uid, get_primary_provider())
+        pos = {p: i for i, p in enumerate(ranked)}
+        out.sort(key=lambda c: pos.get(c[1], 999))
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 

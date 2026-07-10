@@ -140,19 +140,21 @@
 ### ✅ Phase -1（已完成）：主要/禁用
 `is_primary`/`is_active` + `set_provider_status`/`is_provider_active` 已实现，作为调度的用户显式意图输入。
 
-### Phase 0 — 补遥测地基（前置，不可跳 · 约 1 天 + 冷启动积累期）
+### Phase 0 — 补遥测地基（前置，不可跳 · 约 1 天 + 冷启动积累期）✅ 已完成
 - **目标**：开始积累每模型的延迟/成功率/故障画像。**不改任何行为。**
 - **改动**：`model_accuracy` 加列（或建 `model_calls` 表）；`record_call_metric` 在 `FallbackChatModel` 四路径出口旁路写（失败静默、批量落盘）；`record_prediction` 泛化到各 `role_context`。
 - **文件**：`store_ai_models.py`、`store_schema.py`、`fallback.py`。
 - **退出标准**：真实跑几次分析后，能从表里查到各岗位各模型的延迟/成败明细。
 - **平滑性**：纯旁路采集，零行为变更，零风险。
+- **实现**：建 `model_call_stats` 聚合表（仿 `datasource_stats`，按 日期×用户×provider×model×角色 UPSERT 累加，规避高频写压力）；`record_model_call`/`get_model_call_stats`；四路径旁路接入 + pytest 守卫防测试污染。role/market 列已留位、待 Phase 1+ 贯穿。
 
-### Phase 1 — 动态排序 + 熔断（= 拿 80% 价值 · 约 1.5 天）
+### Phase 1 — 动态排序 + 熔断（= 拿 80% 价值 · 约 1.5 天）✅ 已完成
 - **目标**：静态候选顺序 → 遥测排序；角色矩阵可留空即自动分配。
 - **改动**：新增 `rank_candidates()`，插进 `build_fallback_candidates` return 前；`get_models_for_role` 优先级 3/4 改调它（优先级 1 手填仍覆盖优先）；主模型加成上限；`ProviderHealth` 进程内熔断接 `classify_reason`。
 - **文件**：`fallback.py`、`factory.py`、新增 `llm_clients/health.py`。
 - **退出标准**：留空矩阵能自动选模；失效 provider 被熔断跳过；feature flag 按用户灰度。
 - **平滑性**：**无遥测时 `rank_candidates` 退化为现静态顺序**；feature flag 可随时关回现状。数据越多，排序越准——"逐渐发挥作用"在此兑现。
+- **实现**：`health.py`（`ProviderHealth` 进程内熔断，按 (user,provider) 隔离；`rank_providers` 按 健康度×可靠性+主模型加成 排序，无数据稳定排序退化为原顺序）；接入 `build_fallback_candidates`（备选重排）+ `get_models_for_role` 优先级4（排后选主）+ `_record_call`（成功清除/失败冷却）。全局 flag `BH_SCHEDULER_RANK=0` 可一键关回静态。**熔断优先于主模型加成**（坏了就别硬顶）。per-user 灰度暂用全局 flag（YAGNI）。
 
 ### Phase 2 — 策略 + 输出校验 + 通告面板（按需 · 约 2 天）
 - **目标**：用户可配策略；格式校验触发切换；用户可见使用情况。
