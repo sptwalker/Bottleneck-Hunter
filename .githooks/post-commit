@@ -1,0 +1,29 @@
+#!/bin/sh
+# 提交后：从本次 commit 的「📢 白话标记」自动生成首页更新记录并并入本次提交。
+#
+# 护栏（按顺序）：
+#  1. 文件锁哨兵防递归——amend 触发的二次 post-commit 直接跳过（比 env 继承可靠）。
+#  2. merge/rebase/cherry-pick 进行中不介入，避免改写 merge commit / 打断 rebase 序列。
+#  3. 从仓库根定位脚本（rev-parse），worktree / 子目录调用也可靠。
+LOCK=".git/UH_HOOK_LOCK"
+[ -f "$LOCK" ] && exit 0
+
+# 特殊状态（merge/rebase/cherry-pick）进行中 → 不 amend
+GITDIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+for f in MERGE_HEAD CHERRY_PICK_HEAD rebase-merge rebase-apply; do
+  [ -e "$GITDIR/$f" ] && exit 0
+done
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+PY=$(command -v python 2>/dev/null || command -v python3 2>/dev/null)
+[ -z "$PY" ] && exit 0
+
+"$PY" "$ROOT/scripts/gen_update_history.py" --quiet 2>/dev/null || exit 0
+
+# UPDATE_HISTORY.json 有变化 → 并入刚才的 commit（加锁防递归，退出即解锁）
+if ! git -C "$ROOT" diff --quiet -- UPDATE_HISTORY.json 2>/dev/null; then
+  : > "$LOCK"
+  trap 'rm -f "$LOCK"' EXIT
+  git -C "$ROOT" add UPDATE_HISTORY.json
+  git -C "$ROOT" commit --amend --no-edit --no-verify
+fi
