@@ -353,6 +353,35 @@
 .aic-status-ok { background: oklch(0.72 0.19 142); }
 .aic-status-fail { background: oklch(0.63 0.24 25); }
 .aic-status-unknown { background: oklch(0.75 0 0); }
+.aic-status-warn { background: oklch(0.75 0.15 85); }
+
+/* 首次引导卡（未配任何 Key 时）*/
+.aic-onboard-card {
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, oklch(0.72 0.19 142 / 0.08), oklch(0.75 0.15 250 / 0.06));
+  border: 1px solid oklch(0.72 0.19 142 / 0.25);
+}
+.aic-onboard-title { font-size: 17px; font-weight: 700; color: var(--fg); margin-bottom: 6px; }
+.aic-onboard-desc { font-size: 13px; color: var(--fg); opacity: 0.85; line-height: 1.6; }
+.aic-onboard-rec { font-size: 13px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
+.aic-onboard-rec b { color: var(--fg); }
+
+/* 已就绪状态条（已配 ≥1 个 Key）*/
+.aic-ready-banner {
+  padding: 8px 14px; margin-bottom: 12px; border-radius: 8px; font-size: 13px; font-weight: 500;
+  background: oklch(0.72 0.19 142 / 0.1); color: oklch(0.48 0.17 142);
+  border: 1px solid oklch(0.72 0.19 142 / 0.22);
+}
+
+/* 免费档徽标 + 卡片状态文案 */
+.aic-tier-badge {
+  margin-left: 6px; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600; vertical-align: middle;
+}
+.aic-tier-badge.free { background: oklch(0.72 0.19 142 / 0.15); color: oklch(0.5 0.17 142); }
+.aic-provider-state { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.aic-provider-item.is-configured { border-color: oklch(0.72 0.19 142 / 0.35); }
 
 /* 被禁用的 provider 卡片：整体置灰 + 名称删除线 */
 .aic-provider-item.is-disabled { opacity: 0.5; }

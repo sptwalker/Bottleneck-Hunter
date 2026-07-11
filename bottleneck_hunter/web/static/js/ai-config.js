@@ -48,6 +48,13 @@ let _providers = [];
 let _customProviders = [];
 let _testResults = [];
 let _activeModule = '产业链分析';
+let _providerHealth = {};   // provider_id -> {ok_rate, cooldown_s}（来自 /model-usage，健康点用）
+let _rolesLoaded = false;    // /roles 是否至少成功返回过一次（configured 判定就绪门闩，防竞态误弹引导卡）
+
+// 免费档 provider（与后端 health._PROVIDER_TIER 对应，前端仅用于引导徽标/推荐排序）。
+// ponytail: 小白名单，非精确 tier；新增自定义 provider 默认按"未知档"处理。
+const FREE_PROVIDERS = new Set(['deepseek', 'qwen', 'glm', 'kimi', 'siliconflow']);
+const RECOMMEND_ORDER = ['deepseek', 'qwen', 'glm', 'kimi'];  // 引导优先推荐的国内免费模型
 
 /* ── Init ─────────────────────────────────────────────── */
 
@@ -60,6 +67,7 @@ export function initAIConfig() {
   loadCustomProviders();
   loadAutoUpdateSummary();
   loadPaidSources();
+  loadProviderHealth();   // 融入模型卡片的成功率/熔断状态（增强，失败静默）
 
   // Provider actions
   container.querySelector('#aic-test-conn')?.addEventListener('click', testConnectivity);
@@ -135,6 +143,7 @@ async function loadRoles() {
     const data = await resp.json();
     _roles = data.roles || [];
     _providers = data.available_providers || [];
+    _rolesLoaded = true;   // configured 数据已就绪，引导态可安全渲染
     renderProviders();
     renderConfiguredModelSummary();
     renderMatrixForModule(_activeModule);
@@ -169,19 +178,46 @@ function renderProviders() {
   const grid = document.getElementById('aic-provider-grid');
   if (!grid) return;
 
+  const isAdmin = window.appState?.user?.role === 'admin';
   // 「+ 添加 Provider」（新增共享定义）仅管理员可见。在此设置而非 init，
   // 以避免 initAIConfig 早于 auth 加载导致 role 未就绪时误隐藏。
   const addBtn = document.getElementById('aic-add-custom');
-  if (addBtn) addBtn.style.display = (window.appState?.user?.role === 'admin') ? '' : 'none';
+  if (addBtn) addBtn.style.display = isAdmin ? '' : 'none';
 
   try {
-    // 统一真源：custom_providers 表（原内置已迁入）。全部卡片一律可编辑 + 可删除。
-    const list = [..._customProviders].sort((a, b) =>
-      String(a.display_name || a.provider_id).toLowerCase()
-        .localeCompare(String(b.display_name || b.provider_id).toLowerCase()));
+    // 「当前用户是否已配 Key」来自 _providers（按用户，含 configured/key_hint），
+    // 与 _customProviders（定义 + is_active/is_primary）按 id 合并。
+    const cfgMap = {};
+    _providers.forEach(p => { cfgMap[p.id] = p; });
+    const configuredCount = _customProviders.filter(cp => cfgMap[cp.provider_id]?.configured).length;
+
+    // 排序：未配 + 免费 + 推荐的靠前（引导用户先配免费模型），已配的其次
+    const list = [..._customProviders].sort((a, b) => {
+      const ac = cfgMap[a.provider_id]?.configured ? 1 : 0;
+      const bc = cfgMap[b.provider_id]?.configured ? 1 : 0;
+      if (ac !== bc) return ac - bc;                       // 未配的靠前
+      const ar = RECOMMEND_ORDER.indexOf(a.provider_id);
+      const br = RECOMMEND_ORDER.indexOf(b.provider_id);
+      if (ar !== br) return (ar < 0 ? 99 : ar) - (br < 0 ? 99 : br);  // 推荐的靠前
+      return String(a.display_name || a.provider_id).toLowerCase()
+        .localeCompare(String(b.display_name || b.provider_id).toLowerCase());
+    });
+
+    // 首次引导 / 已就绪状态条：仅在 /roles 就绪(configured 可信) 且有 provider 卡片时渲染，
+    // 避免竞态/空目录/加载失败时对已配用户误弹"你还没配 Key"引导卡。
+    if (_rolesLoaded && list.length) {
+      renderOnboardState(configuredCount);
+    } else {
+      const onboard = document.getElementById('aic-onboard');
+      const banner = document.getElementById('aic-ready-banner');
+      if (onboard) onboard.innerHTML = '';
+      if (banner) banner.innerHTML = '';
+    }
 
     if (!list.length) {
-      grid.innerHTML = '<div class="aic-provider-empty">暂无 Provider，点击下方「+ 添加 Provider」配置。</div>';
+      grid.innerHTML = isAdmin
+        ? '<div class="aic-provider-empty">暂无 Provider，点击上方「+ 添加 Provider」配置。</div>'
+        : '<div class="aic-provider-empty">暂无可用模型，请联系管理员开通后再配置密钥。</div>';
       return;
     }
 
@@ -189,34 +225,47 @@ function renderProviders() {
       const id = cp.provider_id;
       const displayName = cp.display_name || id;
       const model = cp.default_model || '';
-      const isAdmin = window.appState?.user?.role === 'admin';
       const isDisabled = cp.is_active === 0;
       const isPrimary = cp.is_primary === 1;
-      const editLabel = isAdmin ? '编辑' : '配置 Key';
+      const cfg = cfgMap[id] || {};
+      const configured = !!cfg.configured;
+      const keyHint = cfg.key_hint || '';
+      const health = _providerHealth[id];
+
+      // 健康点：未配→灰；禁用→灰；熔断→红；成功率<70%→黄；否则绿
+      let dotClass = 'aic-status-unknown', stateText = '未配置';
+      if (isDisabled) { dotClass = 'aic-status-unknown'; stateText = '已禁用'; }
+      else if (configured) {
+        stateText = keyHint ? `已连接 · ${escHtml(keyHint)}` : '已连接';
+        if (health && health.cooldown_s > 0) { dotClass = 'aic-status-fail'; stateText += ' · 暂时不可用'; }
+        else if (health && health.calls >= 5 && health.ok_rate < 70) { dotClass = 'aic-status-warn'; stateText += ` · 成功率${health.ok_rate}%`; }
+        else { dotClass = 'aic-status-ok'; if (health && health.calls >= 5) stateText += ` · 成功率${health.ok_rate}%`; }
+      }
+
+      const freeBadge = FREE_PROVIDERS.has(id) ? '<span class="aic-tier-badge free">免费</span>' : '';
+      const primaryBadge = isPrimary ? '<span class="aic-provider-primary-badge" title="全局主要模型（默认+兜底优先）">主要</span>' : '';
+      const editLabel = isAdmin ? '编辑' : (configured ? '换密钥' : '填入密钥');
+      const editCls = (!configured && !isAdmin) ? 'btn-primary' : '';
       const delBtn = isAdmin
         ? `<button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-custom="1">删除</button>`
         : '';
-      // 主要（未主要且启用中可点）/ 禁用切换 —— 仅管理员
       const primaryBtn = (isAdmin && !isPrimary && !isDisabled)
         ? `<button class="btn btn-xs" data-aic-act="primary" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" title="设为全局主要模型（默认+兜底优先）">设为主要</button>`
         : '';
       const disableBtn = isAdmin
         ? `<button class="btn btn-xs aic-btn-disable" data-aic-act="disable" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-active="${isDisabled ? '0' : '1'}">${isDisabled ? '启用' : '禁用'}</button>`
         : '';
-      const primaryBadge = isPrimary
-        ? '<span class="aic-provider-primary-badge" title="全局主要模型（默认+兜底优先）">主要</span>'
-        : '';
       return `
-      <div class="aic-provider-item${isDisabled ? ' is-disabled' : ''}" data-pid="${escHtml(id)}">
+      <div class="aic-provider-item${isDisabled ? ' is-disabled' : ''}${configured ? ' is-configured' : ''}" data-pid="${escHtml(id)}">
         <div class="aic-provider-row-top">
-          <span class="aic-provider-status ${isDisabled ? 'aic-status-fail' : 'aic-status-ok'}"></span>
+          <span class="aic-provider-status ${dotClass}"></span>
           <div class="aic-provider-info">
-            <span class="aic-provider-name">${escHtml(displayName)}${primaryBadge}</span>
-            ${model ? `<span class="aic-provider-model">${escHtml(model)}</span>` : ''}
+            <span class="aic-provider-name">${escHtml(displayName)}${freeBadge}${primaryBadge}</span>
+            <span class="aic-provider-state">${stateText}${model ? ` · ${escHtml(model)}` : ''}</span>
           </div>
         </div>
         <div class="aic-provider-actions-inline">
-          <button class="btn btn-xs" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">${editLabel}</button>
+          <button class="btn btn-xs ${editCls}" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">${editLabel}</button>
           ${primaryBtn}${disableBtn}${delBtn}
         </div>
       </div>`;
@@ -224,6 +273,43 @@ function renderProviders() {
   } catch (e) {
     console.error('renderProviders error:', e);
   }
+}
+
+// 首次引导（未配任何 Key）/ 已就绪状态条
+function renderOnboardState(configuredCount) {
+  const onboard = document.getElementById('aic-onboard');
+  const banner = document.getElementById('aic-ready-banner');
+  if (!onboard || !banner) return;
+  if (configuredCount === 0) {
+    onboard.innerHTML = `
+      <div class="aic-onboard-card">
+        <div class="aic-onboard-title">让 AI 开始为你工作</div>
+        <div class="aic-onboard-desc">在下面任选一个模型填入密钥即可 —— 系统会自动挑选、自动容错、越用越准，无需手动配置。</div>
+        <div class="aic-onboard-rec">💡 国内推荐免费模型（无需翻墙）：<b>DeepSeek</b> / <b>通义千问</b> / <b>智谱GLM</b> / <b>Kimi</b>，填 1 个即可开始，2–3 个容错更稳。</div>
+      </div>`;
+    banner.innerHTML = '';
+  } else {
+    onboard.innerHTML = '';
+    banner.innerHTML = `<div class="aic-ready-banner">✓ 已就绪 · 已连接 ${configuredCount} 个模型，系统将自动为各环节挑选并容错，无需手动分配。</div>`;
+  }
+}
+
+// 拉一次模型健康数据（成功率/熔断），融进 provider 卡片。失败静默（健康只是增强）。
+async function loadProviderHealth() {
+  try {
+    const res = await fetch('/api/decision/model-usage?days=14');
+    if (!res.ok) return;
+    const data = await res.json();
+    const map = {};
+    (data.stats || []).forEach(r => {
+      // 同 provider 多模型：取调用最多的那条代表健康
+      if (!map[r.provider] || r.calls > map[r.provider].calls) {
+        map[r.provider] = { ok_rate: r.ok_rate, calls: r.calls, cooldown_s: r.cooldown_s || 0 };
+      }
+    });
+    _providerHealth = map;
+    renderProviders();
+  } catch { /* 忽略 */ }
 }
 
 /* ── Custom Endpoint Management ─────────────────────── */
