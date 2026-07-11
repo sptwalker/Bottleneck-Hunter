@@ -287,6 +287,8 @@ def create_app() -> FastAPI:
     app.include_router(ai_config_router, prefix="/api/ai-config")
     app.include_router(reverse_router, prefix="/api/reverse")
     app.include_router(settings_router, prefix="/api/settings")
+    from bottleneck_hunter.web.egress_api import router as egress_router
+    app.include_router(egress_router, prefix="/api/egress")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

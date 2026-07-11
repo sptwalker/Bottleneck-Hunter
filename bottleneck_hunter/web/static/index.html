@@ -1077,7 +1077,7 @@
         <h2 class="aic-page-title">系统配置中心</h2>
         <div class="aic-main-tabs" role="tablist">
           <button class="aic-main-tab active" data-tab="apikey" role="tab">API KEY 管理</button>
-          <button class="aic-main-tab" data-tab="assign" role="tab">AI 模型分配</button>
+          <button class="aic-main-tab" data-tab="assign" role="tab">模型自定义分配</button>
           <button class="aic-main-tab" data-tab="paiddata" role="tab">外部数据源</button>
           <button class="aic-main-tab" data-tab="datareport" role="tab">数据报告</button>
           <button class="aic-main-tab" data-tab="autoupdate" role="tab">自动更新管理</button>
@@ -1090,7 +1090,7 @@
           <!-- Section 1: Provider 管理（统一：所有 Provider 可添加/编辑/删除） -->
           <div class="aic-card">
             <div class="aic-card-header">
-              <h3>Provider 管理</h3>
+              <h3>① 请添加你的 AI API KEY</h3>
               <span class="aic-hint">统一管理所有 LLM Provider（OpenAI 兼容端点、官方 SDK），全部可编辑、可删除</span>
             </div>
             <div class="aic-provider-actions" style="margin-bottom:12px">
@@ -1139,9 +1139,51 @@
             </div>
           </div>
 
+          <!-- 第二步：模型使用策略 + 一键自动配置（填完 Key 后在此完成，无需再去其它页签）-->
+          <div class="aic-card" id="aic-policy-card">
+            <div class="aic-card-header">
+              <h3>② 选择模型使用策略</h3>
+              <span class="aic-save-status" id="sched-policy-status"></span>
+            </div>
+            <div class="aic-card-body">
+              <p class="admin-hint" style="margin-top:0">填好上方 API Key 后，在此选择你的模型偏好。系统默认智能调度（按可用性/成功率自动选模、失效即无缝切换），下面可叠加你的偏好，仅作用于你自己（严格按用户隔离）。</p>
+              <div class="sched-policy-row">
+                <label>付费/免费：
+                  <select id="sched-prefer-tier">
+                    <option value="auto">自动（不限）</option>
+                    <option value="free">优先免费</option>
+                    <option value="paid">优先付费</option>
+                  </select>
+                </label>
+                <label>质量/价格：
+                  <select id="sched-optimize-for">
+                    <option value="balanced">均衡</option>
+                    <option value="quality">优先质量</option>
+                    <option value="price">优先价格</option>
+                  </select>
+                </label>
+                <button class="btn btn-sm btn-primary" id="sched-policy-save">保存策略</button>
+              </div>
+              <p class="admin-hint" style="margin-bottom:0">「优先免费」时若免费模型全部不可用/熔断，会自动回落到付费模型并提示你。</p>
+            </div>
+          </div>
+
+          <div class="aic-card" id="aic-autotest-card">
+            <div class="aic-card-header">
+              <h3>③ 点击按钮完成自动测试 + 配置</h3>
+            </div>
+            <div class="aic-card-body">
+              <div class="aic-autotest-row">
+                <button class="btn btn-primary" id="aic-autotest-btn">🚀 模型自动测试并配置</button>
+                <span class="aic-autotest-status" id="aic-autotest-status">一键测试各模型能力，系统据此自动为所有角色智能选型，无需手动分配。</span>
+              </div>
+            </div>
+          </div>
+
           </div><!-- /pane apikey -->
 
           <div class="aic-tab-pane" data-pane="assign">
+          <div class="aic-adv-notice">🛠 本页面提供给<b>高阶用户</b>手动配置各角色模型；<b>普通用户请使用「API KEY 管理」页的「🚀 模型自动测试并配置」</b>，系统会自动为所有角色智能选型。</div>
           <!-- Section 2: 综合测试 -->
           <div class="aic-card">
             <div class="aic-card-header">
@@ -1220,6 +1262,11 @@
             </div>
             <div id="au-admin-section" style="display:none">
               <div class="aic-card-header" style="margin-top:16px">
+                <h4>桌面借道（服务器取被墙数据）</h4>
+                <span class="aic-hint">桌面小助手连上后，全量/一键更新会自动借本机网络取新闻/SEC</span>
+              </div>
+              <div id="au-egress-status" class="au-egress-status">检测借道状态…</div>
+              <div class="aic-card-header" style="margin-top:16px">
                 <h4>全局时间表（管理员）</h4>
                 <span class="aic-hint">修改后立即生效，无需重启</span>
               </div>
@@ -1260,33 +1307,6 @@
 
           <!-- 调度看板（智能调度 Phase 2）-->
           <div class="aic-tab-pane" data-pane="scheduler">
-            <div class="aic-card">
-              <div class="aic-card-header">
-                <h3>模型使用策略</h3>
-                <span class="aic-save-status" id="sched-policy-status"></span>
-              </div>
-              <div class="aic-card-body">
-                <p class="admin-hint" style="margin-top:0">系统默认智能调度（按可用性/成功率自动选模、失效即无缝切换）。下面可叠加你的偏好，仅作用于你自己（严格按用户隔离）。</p>
-                <div class="sched-policy-row">
-                  <label>付费/免费：
-                    <select id="sched-prefer-tier">
-                      <option value="auto">自动（不限）</option>
-                      <option value="free">优先免费</option>
-                      <option value="paid">优先付费</option>
-                    </select>
-                  </label>
-                  <label>质量/价格：
-                    <select id="sched-optimize-for">
-                      <option value="balanced">均衡</option>
-                      <option value="quality">优先质量</option>
-                      <option value="price">优先价格</option>
-                    </select>
-                  </label>
-                  <button class="btn btn-sm btn-primary" id="sched-policy-save">保存策略</button>
-                </div>
-                <p class="admin-hint" style="margin-bottom:0">「优先免费」时若免费模型全部不可用/熔断，会自动回落到付费模型并提示你。</p>
-              </div>
-            </div>
             <div class="aic-card">
               <div class="aic-card-header">
                 <h3>模型使用情况</h3>

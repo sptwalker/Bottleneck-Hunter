@@ -410,6 +410,14 @@
   margin: 10px 0;
 }
 .sched-policy-row label { font-size: 13px; color: var(--text, inherit); }
+.aic-autotest-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.aic-autotest-status { font-size: 13px; color: var(--text-muted, #6b7280); flex: 1; min-width: 220px; }
+.aic-autotest-status.ok { color: #15803d; }
+.aic-autotest-status.fail { color: #dc2626; }
+.aic-adv-notice {
+  font-size: 13px; line-height: 1.6; padding: 10px 14px; margin-bottom: 14px;
+  border-radius: 8px; border: 1px solid #f59e0b55; background: #f59e0b12; color: var(--text, inherit);
+}
 .sched-policy-row select {
   margin-left: 6px;
   padding: 4px 8px;
@@ -879,6 +887,10 @@
 
 /* ── 自动更新面板 ─────────────────────────────────────── */
 .au-master-row { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+.au-egress-status { font-size:13px; padding:10px 12px; border-radius:6px; border:1px solid var(--border,#e5e7eb); line-height:1.6; }
+.au-egress-status code { background:rgba(0,0,0,.06); padding:1px 5px; border-radius:4px; }
+.au-egress-on { border-color:#16a34a55; background:#16a34a12; color:#15803d; }
+.au-egress-off { color:var(--text-muted,#6b7280); }
 .au-toggle { display:flex; align-items:center; gap:8px; cursor:pointer; font-size:14px; }
 .au-toggle input[type="checkbox"] { width:16px; height:16px; cursor:pointer; accent-color:var(--accent,#5470c6); }
 .au-categories { display:flex; flex-direction:column; gap:8px; margin:8px 0; }

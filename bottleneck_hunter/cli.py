@@ -81,6 +81,29 @@ def serve(
     uvicorn.run(web_app, host=host, port=port)
 
 
+@app.command()
+def relay(
+    server: str = typer.Option(..., help="服务器地址，如 https://your-server:8000"),
+    username: str = typer.Option(None, help="admin 用户名（省略则交互输入）"),
+):
+    """桌面借道小助手：借本机网络替服务器取被墙的新闻/SEC 数据。"""
+    from bottleneck_hunter.relay_client import run_relay
+
+    console.print(Panel(
+        f"[bold cyan]桌面借道小助手[/bold cyan]\n目标服务器: {server}",
+        style="cyan",
+    ))
+    username = username or questionary.text("admin 用户名:").ask()
+    password = questionary.password("密码:").ask()
+    if not username or not password:
+        console.print("[red]已取消[/red]")
+        raise typer.Exit(1)
+    try:
+        asyncio.run(run_relay(server, username, password))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]已停止借道。[/yellow]")
+
+
 def _show_hot_sectors() -> None:
     """Fetch and display hot sector rankings without LLM analysis."""
     console.print(Panel(

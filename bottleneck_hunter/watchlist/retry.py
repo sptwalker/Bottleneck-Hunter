@@ -84,10 +84,15 @@ _http_client: httpx.AsyncClient | None = None
 
 
 def get_http_client(timeout: float = 20) -> httpx.AsyncClient:
-    """获取共享的 httpx 异步客户端（延迟创建，跨请求复用连接池）。"""
+    """获取共享的 httpx 异步客户端（延迟创建，跨请求复用连接池）。
+
+    挂了桌面借道 transport：白名单域名（新闻/SEC）优先借 admin 桌面取数，
+    无 relay 或非白名单则直连（现状，零回归）。见 web/egress_relay.py。
+    """
     global _http_client
     if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.AsyncClient(timeout=timeout)
+        from bottleneck_hunter.web.egress_relay import build_relay_transport
+        _http_client = httpx.AsyncClient(timeout=timeout, transport=build_relay_transport())
     return _http_client
 
 

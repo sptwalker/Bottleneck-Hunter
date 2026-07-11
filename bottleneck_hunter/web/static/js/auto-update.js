@@ -58,8 +58,27 @@ function renderAutoUpdate() {
   // 管理员区
   const adminSec = document.getElementById('au-admin-section');
   if (adminSec) adminSec.style.display = _state.is_admin ? '' : 'none';
-  if (_state.is_admin) renderScheduleEditor();
+  if (_state.is_admin) { renderScheduleEditor(); loadEgressStatus(); }
   bindAutoUpdate();
+}
+
+async function loadEgressStatus() {
+  const el = document.getElementById('au-egress-status');
+  if (!el) return;
+  try {
+    const resp = await fetch('/api/egress/status');
+    if (!resp.ok) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    const s = await resp.json();
+    if (s.connected) {
+      const sites = (s.reachable || []).join('、') || '白名单站点';
+      el.className = 'au-egress-status au-egress-on';
+      el.innerHTML = `🛰 借道中 · 桌面已连接（${s.count} 个），可达：${sites}`;
+    } else {
+      el.className = 'au-egress-status au-egress-off';
+      el.innerHTML = '⚪ 未借道 · 在桌面运行 <code>bottleneck-hunter relay --server &lt;本服务器地址&gt;</code> 后自动生效';
+    }
+  } catch { el.style.display = 'none'; }
 }
 
 function renderScheduleEditor() {
