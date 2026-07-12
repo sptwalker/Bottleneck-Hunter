@@ -186,6 +186,12 @@ async def stream_phase1(
                run_count=locals().get("_run_count", 0), completed_phases=1, **phase1_data)
 
 
+def _load_phase1_from_db(store, analysis_id: str) -> dict | None:
+    """（保留旧名，转调共享实现）Phase1 缓存未命中时从 DB 回读重建。"""
+    from bottleneck_hunter.web.phase_rehydrate import load_phase1_from_db
+    return load_phase1_from_db(store, analysis_id)
+
+
 async def stream_phase2(
     *,
     analysis_id: str,
@@ -207,6 +213,9 @@ async def stream_phase2(
     logger.info("[stream-phase2] 启动 | provider=%s | model=%s | analysis_id=%s", provider, model, analysis_id)
 
     p1 = phase_cache.get_phase(analysis_id, 1)
+    if not p1:
+        # 缓存未命中（容器重启/TTL过期/LRU淘汰）→ 从 DB 回读重建，避免逼用户重跑 Phase 1
+        p1 = _load_phase1_from_db(store, analysis_id)
     if not p1:
         yield _sse("error", step="init", message="Phase 1 数据未找到，请先运行 Phase 1")
         return

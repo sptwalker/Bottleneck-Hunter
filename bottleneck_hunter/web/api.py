@@ -278,6 +278,10 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
 
     p2 = phase_cache.get_phase(req.analysis_id, 2)
     if not p2:
+        # 缓存未命中（容器重启/TTL过期/LRU淘汰）→ 从 DB 回读重建，避免逼用户重跑 Phase 2
+        from bottleneck_hunter.web.phase_rehydrate import load_phase2_from_db
+        p2 = load_phase2_from_db(store, req.analysis_id)
+    if not p2:
         raise HTTPException(status_code=404, detail="Phase 2 数据未找到")
 
     scorecards = [SupplierScorecard(**d) for d in p2["scorecards"]]
@@ -377,6 +381,14 @@ async def phase4_meeting(request: Request, req: MeetingRequest, user: dict = Dep
 async def get_phase_data(analysis_id: str, phase_num: int, user: dict = Depends(get_current_user)):
     """获取已缓存的 Phase 结果。"""
     data = phase_cache.get_phase(analysis_id, phase_num)
+    if data is None:
+        # 缓存未命中 → 对有 DB 源的 Phase1/2 回读重建（Phase3/4 为派生，重跑上游即得）
+        from bottleneck_hunter.web.phase_rehydrate import load_phase1_from_db, load_phase2_from_db
+        store = _user_analysis_store(user)
+        if phase_num == 1:
+            data = load_phase1_from_db(store, analysis_id)
+        elif phase_num == 2:
+            data = load_phase2_from_db(store, analysis_id)
     if data is None:
         raise HTTPException(status_code=404, detail=f"Phase {phase_num} 数据未找到")
     return data
