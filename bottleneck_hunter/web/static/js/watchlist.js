@@ -2086,6 +2086,7 @@ async function _doRefreshData(opts = {}) {
   _setAllRefreshBtnsDisabled(true);
   if (!opts.skipTimer) _startWlTimer();
   _showRefreshBar(opts.label || '正在刷新市场数据...');
+  let busy = false;
   try {
     const res = await fetch(`${API}/refresh`, { method: 'POST' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2103,6 +2104,7 @@ async function _doRefreshData(opts = {}) {
         try {
           const d = JSON.parse(line.substring(5));
           if (d.kind === 'model_fallback' || d.event === 'model_fallback') { window.notifyFallback?.(d.message); continue; }
+          if (d.refresh_busy) { busy = true; showToast(d.message, 'warning'); continue; }
           if (d.message) _updateRefreshStatus(d.message);
         } catch (_) {}
       }
@@ -2114,6 +2116,7 @@ async function _doRefreshData(opts = {}) {
     wlState.refreshing = false;
     _setAllRefreshBtnsDisabled(false);
   }
+  if (busy) { if (!opts.skipTimer) _hideRefreshBar(); return true; }
   _updateRefreshStatus('数据刷新完成');
   await loadWatchlist();
   await loadBudget();
@@ -2137,6 +2140,7 @@ async function _doRefreshIntel(opts = {}) {
   _setAllRefreshBtnsDisabled(true);
   if (!opts.skipTimer) _startWlTimer();
   _showRefreshBar(opts.label || '正在聚合情报信息...');
+  let busy = false;
   try {
     const market = wlState.filterMarket || 'us_stock';
     const marketQs = `?market=${market}`;
@@ -2156,6 +2160,7 @@ async function _doRefreshIntel(opts = {}) {
         try {
           const d = JSON.parse(line.substring(5));
           if (d.kind === 'model_fallback' || d.event === 'model_fallback') { window.notifyFallback?.(d.message); continue; }
+          if (d.refresh_busy) { busy = true; showToast(d.message, 'warning'); continue; }
           if (d.message) _updateRefreshStatus(d.message);
           if (d.completed != null && d.total) {
             _updateRefreshProgress(d.completed, d.total);
@@ -2163,6 +2168,7 @@ async function _doRefreshIntel(opts = {}) {
         } catch (_) {}
       }
     }
+    if (busy) return true;
     await loadWatchlist();
     showToast('情报聚合完成', 'success');
   } catch (e) {
@@ -2184,6 +2190,7 @@ async function _doRefreshStrategy(opts = {}) {
   _setAllRefreshBtnsDisabled(true);
   if (!opts.skipTimer) _startWlTimer();
   _showRefreshBar(opts.label || '正在生成操作策略...');
+  let busy = false;
   try {
     const market = wlState.filterMarket || 'us_stock';
     const marketQs = `?market=${market}`;
@@ -2203,6 +2210,7 @@ async function _doRefreshStrategy(opts = {}) {
         try {
           const d = JSON.parse(line.substring(5));
           if (d.kind === 'model_fallback' || d.event === 'model_fallback') { window.notifyFallback?.(d.message); continue; }
+          if (d.refresh_busy) { busy = true; showToast(d.message, 'warning'); continue; }
           if (d.message) _updateRefreshStatus(d.message);
           if (d.completed != null && d.total) {
             _updateRefreshProgress(d.completed, d.total);
@@ -2210,6 +2218,7 @@ async function _doRefreshStrategy(opts = {}) {
         } catch (_) {}
       }
     }
+    if (busy) return true;
     await loadStrategySummaries();
     showToast('策略生成完成', 'success');
   } catch (e) {
@@ -2252,11 +2261,12 @@ function initAutoRefresh() {
     btn.textContent = '⟳ 刷新中...';
     _startWlTimer();
     _showRefreshBar('一键刷新：正在刷新数据...');
-    await _doRefreshData({ skipTimer: true, label: '一键刷新：正在刷新数据...' });
+    const restore = () => { btn.textContent = origText; _hideRefreshBar(3000); };
+    if (await _doRefreshData({ skipTimer: true, label: '一键刷新：正在刷新数据...' })) return restore();
     _showRefreshBar('一键刷新：正在聚合情报...');
-    await _doRefreshIntel({ skipTimer: true, label: '一键刷新：正在聚合情报...' });
+    if (await _doRefreshIntel({ skipTimer: true, label: '一键刷新：正在聚合情报...' })) return restore();
     _showRefreshBar('一键刷新：正在生成策略...');
-    await _doRefreshStrategy({ skipTimer: true, label: '一键刷新：正在生成策略...' });
+    if (await _doRefreshStrategy({ skipTimer: true, label: '一键刷新：正在生成策略...' })) return restore();
     btn.textContent = origText;
     _updateRefreshStatus('全部刷新完成');
     showToast('一键刷新全部完成', 'success');

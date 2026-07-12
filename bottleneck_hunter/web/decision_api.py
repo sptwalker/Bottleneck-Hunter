@@ -230,18 +230,22 @@ async def run_daily(request: Request, body: DailyRequest | None = None, user: di
     scope: "full" | "l1" | "l3l4"
     """
     from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
+    from bottleneck_hunter.web import refresh_guard
     market = body.market if body else "us_stock"
     scope = body.scope if body else "full"
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_daily_decision(store, _user_budget(user), scope=scope, market=market))
+    return _sse_response(request, refresh_guard.guarded(
+        user["sub"], run_daily_decision(store, _user_budget(user), scope=scope, market=market)))
 
 
 @router.post("/full-refresh")
 async def full_refresh(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """全量刷新 L1+L2+L3+L4+投委会（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_full_refresh
+    from bottleneck_hunter.web import refresh_guard
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_full_refresh(store, _user_budget(user), market=market))
+    return _sse_response(request, refresh_guard.guarded(
+        user["sub"], run_full_refresh(store, _user_budget(user), market=market)))
 
 
 # ─────────────────────────────────────────────────────────

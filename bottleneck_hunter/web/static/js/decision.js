@@ -193,6 +193,7 @@ async function dcSSE(url, { onEvent, onDone, onError, method = 'POST', body = nu
           try {
             const data = JSON.parse(line.slice(6));
             if (data.event === 'model_fallback' || data.kind === 'model_fallback') { window.notifyFallback?.(data.message); continue; }
+            if (data.refresh_busy) { window.notifyFallback?.(data.message); hideProgress(); return; }
             if (onEvent) onEvent(data);
           } catch {}
         }
@@ -1785,8 +1786,9 @@ async function loadOpLogHistory(reset) {
   if (dcOpLog.category) params.set('category', dcOpLog.category);
   if (!reset && dcOpLog.oldestTs) params.set('before_ts', dcOpLog.oldestTs);
   try {
-    const resp = await dcFetch(`/oplog/history?${params}`);
-    const logs = (await resp.json()).logs || [];
+    const r = await fetch(`/api/oplog/history?${params}`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const logs = (await r.json()).logs || [];
     for (const rec of logs) {
       if (dcOpLog.seen.has(rec.id)) continue;
       dcOpLog.seen.add(rec.id);
@@ -1802,7 +1804,7 @@ async function loadOpLogHistory(reset) {
 function _opLogStartStream() {
   _opLogStopStream();
   try {
-    const es = new EventSource(`${DC_API}/oplog/stream`);
+    const es = new EventSource(`/api/oplog/stream`);
     es.addEventListener('oplog', (e) => {
       let rec; try { rec = JSON.parse(e.data); } catch { return; }
       if (!rec || dcOpLog.seen.has(rec.id)) return;

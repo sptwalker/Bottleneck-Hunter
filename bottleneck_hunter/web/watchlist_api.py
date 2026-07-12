@@ -20,12 +20,18 @@ from bottleneck_hunter.watchlist.models import (
     UpdateWatchlistRequest,
 )
 from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.web import refresh_guard
 from bottleneck_hunter.web.streaming._common import _sse
 from bottleneck_hunter.web.streaming._notice import with_notices
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["watchlist"])
+
+
+def _busy_event():
+    return {"event": "refresh_busy",
+            "data": json.dumps({"message": refresh_guard.BUSY_MSG, "refresh_busy": True}, ensure_ascii=False)}
 
 _store: WatchlistStore | None = None
 _auth_store = None
@@ -111,10 +117,16 @@ async def refresh_all(request: Request, user: dict = Depends(get_current_user)):
     store = _user_store(user)
 
     async def event_generator():
-        async for event in run_manual_refresh(user_store=store):
-            if await request.is_disconnected():
-                break
-            yield event
+        if not refresh_guard.acquire(user["sub"]):
+            yield _busy_event()
+            return
+        try:
+            async for event in run_manual_refresh(user_store=store):
+                if await request.is_disconnected():
+                    break
+                yield event
+        finally:
+            refresh_guard.release(user["sub"])
 
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
@@ -129,10 +141,16 @@ async def refresh_pipeline(pipeline: str, request: Request, user: dict = Depends
     store = _user_store(user)
 
     async def event_generator():
-        async for event in run_manual_refresh(pipeline, user_store=store):
-            if await request.is_disconnected():
-                break
-            yield event
+        if not refresh_guard.acquire(user["sub"]):
+            yield _busy_event()
+            return
+        try:
+            async for event in run_manual_refresh(pipeline, user_store=store):
+                if await request.is_disconnected():
+                    break
+                yield event
+        finally:
+            refresh_guard.release(user["sub"])
 
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
@@ -151,13 +169,19 @@ async def refresh_intelligence(request: Request, market: str = "us_stock", user:
     budget = BudgetTracker(store)
 
     async def event_generator():
-        async for evt in refresh_intelligence_all(store, budget):
-            if await request.is_disconnected():
-                break
-            yield {
-                "event": evt.get("event", "progress"),
-                "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
-            }
+        if not refresh_guard.acquire(user["sub"]):
+            yield _busy_event()
+            return
+        try:
+            async for evt in refresh_intelligence_all(store, budget):
+                if await request.is_disconnected():
+                    break
+                yield {
+                    "event": evt.get("event", "progress"),
+                    "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
+                }
+        finally:
+            refresh_guard.release(user["sub"])
 
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
@@ -172,13 +196,19 @@ async def refresh_strategy(request: Request, market: str = "us_stock", user: dic
     budget = BudgetTracker(store)
 
     async def event_generator():
-        async for evt in refresh_strategy_all(store, budget):
-            if await request.is_disconnected():
-                break
-            yield {
-                "event": evt.get("event", "progress"),
-                "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
-            }
+        if not refresh_guard.acquire(user["sub"]):
+            yield _busy_event()
+            return
+        try:
+            async for evt in refresh_strategy_all(store, budget):
+                if await request.is_disconnected():
+                    break
+                yield {
+                    "event": evt.get("event", "progress"),
+                    "data": json.dumps(evt.get("data", {}), ensure_ascii=False),
+                }
+        finally:
+            refresh_guard.release(user["sub"])
 
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
