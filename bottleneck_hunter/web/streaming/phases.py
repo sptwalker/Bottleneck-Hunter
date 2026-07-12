@@ -496,6 +496,19 @@ async def stream_phase2(
                                    max_market_cap_yi=max_market_cap_yi)
         except Exception:
             logger.exception("Phase2 保存失败")
+        # 为每个入围企业建立/更新持久化档案（含简介+评分），供观察池/决策中心按 ticker 直接调用
+        try:
+            store.upsert_company_archives([
+                {"ticker": sc.supplier.ticker,
+                 # 用企业自身 market，不用分析级 market（'all'/混合分析下才正确）
+                 "market": getattr(getattr(sc.supplier, "market", None), "value", None)
+                           or getattr(sc.supplier, "market", None) or market,
+                 "name": sc.supplier.name or sc.supplier.ticker,
+                 "scorecard": _sanitize(sc.model_dump()), "source": "phase2"}
+                for sc in scorecards if getattr(sc.supplier, "ticker", "")
+            ])
+        except Exception:
+            logger.warning("企业档案持久化失败(phase2)", exc_info=True)
 
     sc_count = len(phase2_data.get("scorecards", []))
     logger.info("[stream-phase2] 准备发送 phase2_complete | scorecards=%d", sc_count)

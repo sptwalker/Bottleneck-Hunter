@@ -100,6 +100,8 @@ class BudgetTracker:
             "monthly_limit": monthly_limit,
             "monthly_pct": round(monthly["cost"] / monthly_limit * 100, 1) if monthly_limit > 0 else 0,
             "mode": self.get_degradation_mode().value,
+            "daily_calls": daily.get("calls", 0),
+            "monthly_calls": monthly.get("calls", 0),
             "daily_input_tokens": daily["input_tokens"],
             "daily_output_tokens": daily["output_tokens"],
         }

@@ -9,6 +9,18 @@ import { state, logMsg, clearLog, getScoreColor, scoreNeedsDarkText, SCORE_COLOR
 import { readSSEStream } from './sse.js';
 import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, exportMeeting, MEETING_ROLES } from './ai-features.js';
 import { openDrawer, closeDrawer } from './drawer.js';
+
+// 最终评分/入围双击 → 统一企业详情抽屉（ranked 项已是完整 scorecard，直接传入用于系统评分页签）
+function openPhaseDrawer(r) {
+  if (!r || !window.openCompanyDrawer) { openDrawer(r); return; }  // 兜底回旧抽屉
+  const sup = r.supplier || {};
+  window.openCompanyDrawer({
+    ticker: sup.ticker || r.ticker || '',
+    name: sup.name || r.ticker || '',
+    market: sup.market || window.appState?.market || 'us_stock',
+    scorecard: r,
+  });
+}
 import { buildAnalysisTag } from './analysis-tag.js';
 import { showConfirm } from './utils/confirm.js';
 
@@ -1016,7 +1028,7 @@ function runPhase3(wQ, wA) {
   const ranked = allRanked.slice(0, topN);
   state.phase3 = { ranked_results: ranked, scoring_config: { quality_weight: wQ, alpha_weight: wA, top_n: topN } };
 
-  renderPhase3Table(ranked, openDrawer);
+  renderPhase3Table(ranked, openPhaseDrawer);
   renderScatterPlot(ranked);
   renderRadarChart(ranked);
   renderBarCompare(ranked);
@@ -1762,7 +1774,7 @@ async function loadWizardAnalysis(analysisId) {
       const allRanked = recalcPhase3(state.phase2.scorecards, wQ, wA);
       const ranked = allRanked.slice(0, topN);
       state.phase3 = { ranked_results: ranked, scoring_config: p3.scoring_config };
-      renderPhase3Table(ranked, openDrawer);
+      renderPhase3Table(ranked, openPhaseDrawer);
       renderScatterPlot(ranked);
       renderRadarChart(ranked);
       renderBarCompare(ranked);

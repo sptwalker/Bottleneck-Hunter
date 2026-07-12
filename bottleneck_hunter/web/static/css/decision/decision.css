@@ -2023,6 +2023,29 @@
   border-bottom-right-radius: 3px;
 }
 .dc-bubble-analyst { align-self: flex-start; border-bottom-left-radius: 3px; }
+/* ── 实时操作日志抽屉 ── */
+.dc-oplog-panel { width: min(720px, 94vw); display: flex; flex-direction: column; }
+.dc-oplog-live { font-size: 12px; color: #16a34a; margin-left: 8px; }
+.dc-oplog-live.off { color: var(--muted, #9ca3af); }
+.dc-oplog-filters { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border, #e5e7eb); flex-wrap: wrap; }
+.dc-oplog-filter { font-size: 13px; padding: 3px 10px; border-radius: 14px; border: 1px solid var(--border, #e5e7eb); background: transparent; color: inherit; cursor: pointer; }
+.dc-oplog-filter.active { background: var(--accent, #2563eb); color: #fff; border-color: transparent; }
+.dc-oplog-hint { margin-left: auto; font-size: 12px; color: var(--muted, #9ca3af); }
+.dc-oplog-list { flex: 1; overflow-y: auto; padding: 8px 14px; }
+.dc-oplog-row { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border-weak, #f0f0f0); font-size: 13px; }
+.dc-oplog-ts { color: var(--muted, #9ca3af); font-variant-numeric: tabular-nums; font-size: 12px; }
+.dc-oplog-cat { font-size: 12px; white-space: nowrap; }
+.dc-oplog-title { font-weight: 500; }
+.dc-oplog-res { font-size: 12px; padding: 1px 7px; border-radius: 10px; white-space: nowrap; }
+.dc-oplog-res-ok { background: #16a34a1a; color: #15803d; }
+.dc-oplog-res-warn { background: #f59e0b1a; color: #b45309; }
+.dc-oplog-res-fail { background: #dc26261a; color: #dc2626; }
+.dc-oplog-detail { grid-column: 1 / -1; color: var(--muted, #6b7280); font-size: 12px; margin-top: 2px; }
+.dc-oplog-r-fail .dc-oplog-title { color: #dc2626; }
+.dc-oplog-new { animation: dcOpLogNew 1.2s ease; }
+@keyframes dcOpLogNew { 0% { background: #2563eb22; } 100% { background: transparent; } }
+.dc-oplog-empty { text-align: center; color: var(--muted, #9ca3af); padding: 40px 0; font-size: 13px; }
+.dc-oplog-more { text-align: center; padding: 8px; border-top: 1px solid var(--border, #e5e7eb); }
 .dc-consult-retry { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .dc-consult-retry .dc-retry-hint { font-size: 12px; color: var(--danger, #dc2626); }
 .dc-bubble-macro_market { background: rgba(59,130,246,.10); border-left: 3px solid #3b82f6; }

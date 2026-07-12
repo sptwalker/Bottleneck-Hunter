@@ -3,6 +3,7 @@
  * 表格/卡片双模式 + 搜索/筛选/排序 + 详情抽屉 + UZI 分析
  */
 import { showConfirm } from './utils/confirm.js';
+import { buildDetailGrid } from './phase-views.js';
 
 const API = '/api/watchlist';
 
@@ -375,14 +376,16 @@ function renderBudget() {
   const text = document.getElementById('wl-budget-text');
   if (!fill || !text) return;
 
-  const dailyCost = b.daily_cost || 0;
-  const dailyLimit = b.daily_limit || 2.0;
-  const pct = Math.min((dailyCost / dailyLimit) * 100, 100);
+  // 诚实用量护栏：调用次数为真·实数；负载%=距每日失控熔断的比例（按调用规模估算，非美元）
+  const calls = b.daily_calls || 0;
+  const pct = Math.min(b.daily_pct || 0, 100);
 
   fill.style.width = `${pct}%`;
   fill.className = 'wl-budget-fill' +
     (pct > 90 ? ' wl-budget-danger' : pct > 70 ? ' wl-budget-warn' : '');
-  text.textContent = `$${dailyCost.toFixed(2)} / $${dailyLimit.toFixed(2)}`;
+  text.textContent = `今日 ${calls} 次调用 · 负载 ${Math.round(pct)}%`;
+  const bar = document.getElementById('wl-budget-bar');
+  if (bar) bar.title = '今日 LLM 调用次数（真实）与失控熔断负载（按调用规模估算，达上限自动停用以防烧钱）';
 }
 
 function renderPipeStatus() {
@@ -441,8 +444,33 @@ function escHtml(s) {
 function openDrawer(entryId) {
   const entry = wlState.entries.find(e => e.id === entryId);
   if (!entry) return;
+  openCompanyDrawer({ entry });
+}
 
-  wlState.drawerEntryId = entryId;
+// 统一企业详情抽屉入口：观察池(entry 有 id)走全量端点；分析/决策环节(只有 scorecard)走 scorecard + 兜底。
+export function openCompanyDrawer(ctx) {
+  const entry = ctx.entry || {
+    id: ctx.entry_id || null,
+    ticker: ctx.ticker,
+    market: ctx.market || 'us_stock',
+    company_name: ctx.name || ctx.ticker,
+    company_name_cn: ctx.name_cn || '',
+    tier: ctx.tier || '',
+    latest_snapshot: ctx.snapshot || null,
+  };
+  if (ctx.scorecard) entry._scorecard = ctx.scorecard;
+  // 无 entry_id 但有 ticker：匹配已入池的同标的 → 升级为全量视图
+  if (!entry.id && entry.ticker) {
+    const hit = (wlState.entries || []).find(e => e.ticker === entry.ticker);
+    if (hit) {
+      entry.id = hit.id; entry.tier = entry.tier || hit.tier;
+      entry.latest_snapshot = entry.latest_snapshot || hit.latest_snapshot;
+      if (hit.market) entry.market = hit.market;  // 采用池内条目的权威 market（纠正调用方可能传错的 market）
+    }
+  }
+
+  wlState.drawerEntry = entry;
+  wlState.drawerEntryId = entry.id;
   wlState.drawerTab = 'info';
 
   const drawer = document.getElementById('wl-drawer');
@@ -450,39 +478,56 @@ function openDrawer(entryId) {
   if (!drawer || !overlay) return;
 
   document.getElementById('wl-drawer-name').textContent = entry.company_name_cn || entry.company_name;
-  document.getElementById('wl-drawer-ticker').textContent = entry.ticker;
+  document.getElementById('wl-drawer-ticker').textContent = entry.ticker || '';
 
   const snap = entry.latest_snapshot;
   const priceEl = document.getElementById('wl-drawer-price');
   const changeEl = document.getElementById('wl-drawer-change');
   if (snap) {
-    const isA = (entry.market || '') === 'a_stock';
-    const currSign = isA ? '¥' : '$';
+    const currSign = (entry.market || '') === 'a_stock' ? '¥' : '$';
     priceEl.textContent = `${currSign}${Number(snap.close).toFixed(2)}`;
     const cp = snap.change_pct;
     if (cp != null) {
       changeEl.textContent = `${cp >= 0 ? '+' : ''}${cp.toFixed(2)}%`;
       changeEl.className = 'wl-drawer-change ' + (cp >= 0 ? 'wl-change-up' : 'wl-change-down');
-    } else {
-      changeEl.textContent = '';
-    }
-  } else {
-    priceEl.textContent = '';
-    changeEl.textContent = '';
-  }
+    } else { changeEl.textContent = ''; }
+  } else { priceEl.textContent = ''; changeEl.textContent = ''; }
 
   const tierEl = document.getElementById('wl-drawer-tier');
-  tierEl.className = `wl-drawer-tier-badge wl-tier-badge wl-tier-badge--${entry.tier}`;
-  tierEl.innerHTML = `<span class="wl-tier-dot wl-dot-${entry.tier}"></span>${tierLabel(entry.tier)}`;
+  if (entry.tier) {
+    tierEl.style.display = '';
+    tierEl.className = `wl-drawer-tier-badge wl-tier-badge wl-tier-badge--${entry.tier}`;
+    tierEl.innerHTML = `<span class="wl-tier-dot wl-dot-${entry.tier}"></span>${tierLabel(entry.tier)}`;
+  } else { tierEl.style.display = 'none'; }
+
+  // 观察池特有页签(持仓策略/UZI)：无 entry_id 时隐藏
+  document.querySelectorAll('.wl-drawer-tab[data-wl-only]').forEach(t => {
+    t.style.display = entry.id ? '' : 'none';
+  });
 
   drawer.style.display = 'flex';
   overlay.style.display = 'block';
-  requestAnimationFrame(() => {
-    drawer.classList.add('drawer-open');
-  });
+  requestAnimationFrame(() => drawer.classList.add('drawer-open'));
 
   setDrawerTab('info');
   loadDrawerTabData(entry, 'info');
+}
+// 暴露到全局：交叉验证/L2/L3/模拟持仓等模块双击列表时调用，避免跨模块循环 import
+if (typeof window !== 'undefined') window.openCompanyDrawer = openCompanyDrawer;
+
+// 全局委托：任意带 data-company-ticker 的行双击 → 统一详情抽屉（按 ticker 匹配观察池；命中即全量）
+if (typeof document !== 'undefined') {
+  document.addEventListener('dblclick', (e) => {
+    const el = e.target.closest('[data-company-ticker]');
+    if (!el || !window.openCompanyDrawer) return;
+    const ticker = el.getAttribute('data-company-ticker');
+    if (!ticker) return;
+    window.openCompanyDrawer({
+      ticker,
+      name: el.getAttribute('data-company-name') || ticker,
+      market: el.getAttribute('data-company-market') || window.appState?.market || 'us_stock',
+    });
+  });
 }
 
 function closeDrawer() {
@@ -507,9 +552,19 @@ function setDrawerTab(tab) {
 }
 
 async function loadDrawerTabData(entry, tab) {
+  // 需要观察池存储(entry_id)的页签：分析环节无 id 时给友好兜底，不打空端点
+  const needsEntry = ['price', 'news', 'capital', 'intelligence', 'strategy', 'uzi'];
+  if (!entry.id && needsEntry.includes(tab)) {
+    const pane = document.getElementById(`wl-tab-${tab}`);
+    if (pane) pane.innerHTML = '<div class="wl-empty" style="padding:40px;text-align:center;color:var(--muted)">该企业未加入观察池<br><span style="font-size:12px">加入观察池后可查看实时行情/新闻/资金/情报/策略</span></div>';
+    return;
+  }
   switch (tab) {
     case 'info':
       await loadInfoTab(entry);
+      break;
+    case 'score':
+      await loadScoreTab(entry);
       break;
     case 'price':
       await loadPriceTab(entry);
@@ -530,6 +585,35 @@ async function loadDrawerTabData(entry, tab) {
       await loadUziTab(entry);
       break;
   }
+}
+
+/* ── 系统评分 Tab（五维/预期差/优劣，复用 phase-views buildDetailGrid）──── */
+async function loadScoreTab(entry) {
+  const pane = document.getElementById('wl-tab-score');
+  if (!pane) return;
+  let sc = entry._scorecard;
+  if (!sc && entry.id) {
+    pane.innerHTML = '<div class="skeleton skeleton-table" style="min-height:200px"></div>';
+    const data = await fetchSourceScorecard(entry.id);
+    sc = data && data.scorecard ? data.scorecard : null;
+  }
+  // 持久化档案兜底：按 ticker 取（评选/入围/反查过的企业均有档案，不依赖易失的 source 反查）
+  if (!sc && entry.ticker) {
+    pane.innerHTML = '<div class="skeleton skeleton-table" style="min-height:200px"></div>';
+    try {
+      const r = await fetch(`/api/company-archive?ticker=${encodeURIComponent(entry.ticker)}`);
+      if (r.ok) {
+        const a = (await r.json()).archive;
+        if (a && a.scorecard && Object.keys(a.scorecard).length) sc = a.scorecard;
+      }
+    } catch { /* 忽略 */ }
+  }
+  if (sc) entry._scorecard = sc;
+  if (!sc) {
+    pane.innerHTML = '<div class="wl-empty" style="padding:40px;text-align:center;color:var(--muted)">暂无系统评分数据<br><span style="font-size:12px">该企业需经产业链分析(五维评分/预期差)或反向分析后才有评分</span></div>';
+    return;
+  }
+  pane.innerHTML = `<div class="wl-score-wrap">${buildDetailGrid(sc)}</div>`;
 }
 
 /* ── Info Tab (基本信息) ──────────────────────────────── */
@@ -553,11 +637,14 @@ async function loadInfoTab(entry) {
 
   const isPhase4 = entry.source === 'phase4';
   const market = entry.market || 'us_stock';
+  const sc = entry._scorecard || null;   // 分析环节的评分卡（含 supplier 简介）
 
-  const [src, overview] = await Promise.all([
-    isPhase4 ? fetchSourceScorecard(entry.id).catch(() => null) : Promise.resolve(null),
-    apiFetch(`/${entry.id}/overview`).catch(() => ({})),
-  ]);
+  // 观察池(有 id)走全量 overview；否则按 ticker 拉取(新接口)，未入池企业也能看基本信息
+  const overview = entry.id
+    ? await apiFetch(`/${entry.id}/overview`).catch(() => ({}))
+    : await apiFetch(`/company-overview?ticker=${encodeURIComponent(entry.ticker || '')}&market=${market}`).catch(() => ({}));
+  const src = (isPhase4 && entry.id) ? await fetchSourceScorecard(entry.id).catch(() => null)
+    : (sc ? { scorecard: sc } : null);
 
   const snap = overview.latest_snapshot || entry.latest_snapshot || {};
   const profile = overview.profile || {};
@@ -570,24 +657,23 @@ async function loadInfoTab(entry) {
   html += _buildQuoteCard(entry, snap);
   html += '</div>';
 
-  /* ── 来源 & 推荐原因 ── */
-  const addedDate = entry.added_at ? new Date(entry.added_at).toLocaleString('zh-CN') : '未知';
-  const sourceLabel = isPhase4 ? '系统推荐（Phase 4 产业链分析）' : '手动添加';
-
-  html += `<div class="wl-info-meta">
-    <div class="wl-info-meta-row"><span class="wl-info-meta-label">加入时间</span><span>${addedDate}</span></div>
-    <div class="wl-info-meta-row"><span class="wl-info-meta-label">来源</span><span class="wl-info-source-badge ${isPhase4 ? 'wl-info-source--phase4' : 'wl-info-source--manual'}">${sourceLabel}</span></div>
-  </div>`;
-
-  if (isPhase4 && src?.scorecard) {
-    html += buildRecommendationReason(src, entry);
-    html += buildScorecardDetail(src.scorecard, entry);
+  /* ── 来源 & 加入时间：仅观察池条目显示（入围/最终评选等分析环节不显示）── */
+  if (entry.id) {
+    const addedDate = entry.added_at ? new Date(entry.added_at).toLocaleString('zh-CN') : '未知';
+    const sourceLabel = isPhase4 ? '系统推荐（Phase 4 产业链分析）' : '手动添加';
+    html += `<div class="wl-info-meta">
+      <div class="wl-info-meta-row"><span class="wl-info-meta-label">加入时间</span><span>${addedDate}</span></div>
+      <div class="wl-info-meta-row"><span class="wl-info-meta-label">来源</span><span class="wl-info-source-badge ${isPhase4 ? 'wl-info-source--phase4' : 'wl-info-source--manual'}">${sourceLabel}</span></div>
+    </div>`;
+    if (isPhase4 && src?.scorecard) {
+      html += buildRecommendationReason(src, entry);
+      html += buildScorecardDetail(src.scorecard, entry);
+    }
   }
 
-  /* ── 公司概况 ── */
-  const desc = profile.description || raw.longBusinessSummary || '';
-  const longName = raw.longName || entry.company_name || entry.ticker;
-  const sector = profile.sector || raw.sector || '';
+  /* ── 公司概况（构建后统一移到页面最下方；中英对照）── */
+  const desc = profile.description || raw.longBusinessSummary || sc?.supplier?.description || '';
+  const sector = profile.sector || raw.sector || sc?.supplier?.sector || '';
   const industry = profile.industry || raw.industry || '';
   const country = profile.country || raw.country || '';
   const exchange = profile.exchange || raw.exchange || '';
@@ -595,21 +681,21 @@ async function loadInfoTab(entry) {
   const website = profile.website || raw.website || '';
   const employees = profile.employees || raw.fullTimeEmployees || 0;
 
+  let profileHtml = '';
   if (desc || sector || industry) {
-    html += '<div class="wl-info-section wl-profile-section"><h4>公司概况</h4>';
+    profileHtml += '<div class="wl-info-section wl-profile-section"><h4>公司概况</h4>';
     if (sector || industry || country || exchange) {
-      html += '<div class="wl-profile-tags">';
-      if (sector) html += `<span class="wl-profile-tag">${escHtml(sector)}</span>`;
-      if (industry) html += `<span class="wl-profile-tag">${escHtml(industry)}</span>`;
-      if (country) html += `<span class="wl-profile-tag">${escHtml(country)}</span>`;
-      if (exchange) html += `<span class="wl-profile-tag">${escHtml(exchange)}</span>`;
-      html += '</div>';
+      profileHtml += '<div class="wl-profile-tags">';
+      if (sector) profileHtml += `<span class="wl-profile-tag">${escHtml(sector)}</span>`;
+      if (industry) profileHtml += `<span class="wl-profile-tag">${escHtml(industry)}</span>`;
+      if (country) profileHtml += `<span class="wl-profile-tag">${escHtml(country)}</span>`;
+      if (exchange) profileHtml += `<span class="wl-profile-tag">${escHtml(exchange)}</span>`;
+      profileHtml += '</div>';
     }
     if (desc) {
-      const shortDesc = desc.length > 300 ? desc.substring(0, 300) + '...' : desc;
-      html += `<div class="wl-profile-desc" id="wl-profile-desc">
-        <p class="wl-profile-desc-text" id="wl-profile-desc-text">${escHtml(shortDesc)}</p>
-        ${desc.length > 300 ? '<button class="wl-profile-desc-toggle" id="wl-profile-desc-toggle">展开全部</button>' : ''}
+      profileHtml += `<div class="wl-profile-desc">
+        <p class="wl-profile-desc-text">${escHtml(desc)}</p>
+        <div class="wl-profile-trans" data-tt="${escHtml(desc)}"></div>
       </div>`;
     }
     const metaItems = [];
@@ -617,9 +703,9 @@ async function loadInfoTab(entry) {
     if (employees) metaItems.push(`<span>员工: ${Number(employees).toLocaleString()}</span>`);
     if (currency) metaItems.push(`<span>货币: ${escHtml(currency)}</span>`);
     if (metaItems.length) {
-      html += `<div class="wl-profile-meta">${metaItems.join('')}</div>`;
+      profileHtml += `<div class="wl-profile-meta">${metaItems.join('')}</div>`;
     }
-    html += '</div>';
+    profileHtml += '</div>';
   }
 
   /* ── 估值指标 ── */
@@ -676,24 +762,26 @@ async function loadInfoTab(entry) {
     ['做空占比', _fmtPct(raw.shortPercentOfFloat)],
   ]);
 
-  /* ── 备注 ── */
-  html += `<div class="wl-info-section wl-notes-section">
-    <h4>备注</h4>
-    <textarea class="wl-notes-input" id="wl-notes-textarea" rows="3" placeholder="添加备注...">${escHtml(entry.notes || '')}</textarea>
-    <button class="btn btn-sm" id="wl-notes-save" style="margin-top:6px">保存备注</button>
-  </div>`;
+  /* ── 备注 & 决策路径：仅观察池条目显示 ── */
+  if (entry.id) {
+    html += `<div class="wl-info-section wl-notes-section">
+      <h4>备注</h4>
+      <textarea class="wl-notes-input" id="wl-notes-textarea" rows="3" placeholder="添加备注...">${escHtml(entry.notes || '')}</textarea>
+      <button class="btn btn-sm" id="wl-notes-save" style="margin-top:6px">保存备注</button>
+    </div>`;
+    html += `<div class="wl-info-section">
+      <details class="wl-decision-trace">
+        <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--accent)">决策路径</summary>
+        <div id="wl-decision-trace-body" style="margin-top:8px">
+          <p style="color:var(--muted);font-size:12px">加载中...</p>
+        </div>
+      </details>
+    </div>`;
+  }
 
-  /* ── 决策路径 ── */
-  html += `<div class="wl-info-section">
-    <details class="wl-decision-trace">
-      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--accent)">决策路径</summary>
-      <div id="wl-decision-trace-body" style="margin-top:8px">
-        <p style="color:var(--muted);font-size:12px">加载中...</p>
-      </div>
-    </details>
-  </div>`;
-
+  html += profileHtml;   // 公司概况统一置于页面最下方
   pane.innerHTML = html;
+  _fillTranslations(pane, market);   // 公司概况中英对照（异步回填，不阻塞首屏）
 
   /* ── 公司简介展开/收起 ── */
   const descToggle = document.getElementById('wl-profile-desc-toggle');
@@ -782,7 +870,10 @@ function _buildQuoteCard(entry, snap) {
   const vol = snap.volume;
 
   if (!price && !cap) {
-    return `<div class="wl-quote-card"><div class="wl-quote-empty">暂无行情数据，请先点击"刷新数据"</div></div>`;
+    const hint = entry && entry.id
+      ? '暂无行情数据，请点击工具栏「刷新数据」获取'
+      : '该企业未加入观察池，加入后可获取实时行情';
+    return `<div class="wl-quote-card"><div class="wl-quote-empty">${hint}</div></div>`;
   }
 
   const changeClass = change > 0 ? 'val-up' : change < 0 ? 'val-down' : '';
@@ -1190,7 +1281,7 @@ async function loadNewsTab(entry) {
     html += '<p style="color:var(--muted);font-size:var(--fs-xs);padding:8px 0">暂无催化剂事件数据</p>';
   }
 
-  html += '<div class="wl-news-section-header" style="margin-top:20px"><h4>实时新闻</h4></div>';
+  html += '<div class="wl-news-section-header" style="margin-top:20px"><h4>实时新闻 <small style="color:var(--muted);font-weight:400">（中英对照）</small></h4></div>';
   if (news.length > 0) {
     html += `<div class="wl-news-list">${news.map(n => renderNewsItem(n)).join('')}</div>`;
   } else {
@@ -1198,6 +1289,28 @@ async function loadNewsTab(entry) {
   }
 
   pane.innerHTML = html;
+  _fillTranslations(pane, entry.market);   // 异步回填译文，不阻塞首屏
+}
+
+// 批量翻译带 data-tt 的元素并回填对照（新闻/公司概况共用；美股英→中，A股中→英）
+async function _fillTranslations(pane, market) {
+  const slots = pane.querySelectorAll('[data-tt]');
+  if (!slots.length) return;
+  const texts = [...new Set([...slots].map(s => s.getAttribute('data-tt')).filter(Boolean))];
+  if (!texts.length) return;
+  const target = market === 'a_stock' ? 'en' : 'zh';
+  try {
+    const resp = await fetch('/api/translate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts, target }),
+    });
+    if (!resp.ok) return;
+    const map = (await resp.json()).translations || {};
+    slots.forEach(s => {
+      const t = map[s.getAttribute('data-tt')];
+      if (t) s.textContent = t;
+    });
+  } catch { /* 翻译失败则只显示原文 */ }
 }
 
 function renderNewsItem(item) {
@@ -1214,8 +1327,10 @@ function renderNewsItem(item) {
       <span class="wl-news-sentiment ${sentClass}">${sentLabel}</span>
       <div class="wl-news-body">
         <div class="wl-news-title"><a${url}>${title}</a></div>
+        <div class="wl-news-trans" data-tt="${escHtml(item.title || '')}"></div>
         <div class="wl-news-meta">${item.source_name || ''} · ${ago}</div>
         ${summary}
+        ${item.summary ? `<div class="wl-news-trans wl-news-trans-sm" data-tt="${escHtml(item.summary)}"></div>` : ''}
       </div>
     </div>`;
 }
@@ -1890,7 +2005,8 @@ function initDrawer() {
     tab.addEventListener('click', () => {
       const tabName = tab.dataset.tab;
       setDrawerTab(tabName);
-      const entry = wlState.entries.find(e => e.id === wlState.drawerEntryId);
+      // 用当前抽屉 entry（分析上下文的合成 entry 不在 wlState.entries 里）
+      const entry = wlState.drawerEntry || wlState.entries.find(e => e.id === wlState.drawerEntryId);
       if (entry) loadDrawerTabData(entry, tabName);
     });
   });

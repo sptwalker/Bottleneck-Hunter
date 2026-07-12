@@ -667,11 +667,11 @@
         <div class="wl-footer-bar">
           <div class="wl-pipe-status" id="wl-pipe-summary"></div>
           <div class="wl-budget-bar" id="wl-budget-bar">
-            <span class="wl-budget-label">LLM 预算</span>
+            <span class="wl-budget-label">LLM 用量</span>
             <div class="wl-budget-gauge">
               <div class="wl-budget-fill" id="wl-budget-fill"></div>
             </div>
-            <span class="wl-budget-text" id="wl-budget-text">$0.00 / $2.00</span>
+            <span class="wl-budget-text" id="wl-budget-text">今日 0 次调用</span>
           </div>
         </div>
       </div>
@@ -692,6 +692,7 @@
             <button class="btn btn-sm" id="dc-btn-refresh" title="全量刷新 L1+L2+L3+L4+投委会">全量刷新</button>
             <button class="btn btn-sm" id="dc-btn-catalysts" title="扫描催化剂事件">催化剂扫描</button>
             <button class="btn btn-sm" id="dc-btn-export" title="导出各层决策总结报告 (HTML/PDF)">📄 导出报告</button>
+            <button class="btn btn-sm" id="dc-btn-oplog" title="查看本账户所有操作与自动更新的实时日志">📋 实时操作日志</button>
           </div>
         </div>
 
@@ -1191,6 +1192,7 @@
               <span class="aic-hint">6 维度评估: 连通性 / JSON / 中文分析 / 速度 / 评分力 / 指令遵循</span>
             </div>
             <div class="aic-test-controls">
+              <button class="btn btn-sm aic-incr-flash" id="aic-incr-test" style="display:none" title="只补测新增、还没测过的接口，省时">✨ 新接口增量测试</button>
               <button class="btn btn-sm btn-primary" id="aic-start-test">开始综合测试</button>
             </div>
             <div class="aic-test-progress">
@@ -1386,6 +1388,25 @@
   </div>
 </div>
 
+<!-- 实时操作日志抽屉 -->
+<div class="drawer-overlay" id="dc-oplog-drawer" style="display:none">
+  <div class="drawer-panel dc-oplog-panel">
+    <div class="drawer-header">
+      <h3>📋 实时操作日志 <span id="dc-oplog-live" class="dc-oplog-live" title="实时连接中">● 实时</span></h3>
+      <button class="drawer-close" id="dc-oplog-close">&#10005;</button>
+    </div>
+    <div class="dc-oplog-filters">
+      <button class="dc-oplog-filter active" data-cat="">全部</button>
+      <button class="dc-oplog-filter" data-cat="auto_update">系统自动更新</button>
+      <button class="dc-oplog-filter" data-cat="user_action">我的操作</button>
+      <button class="dc-oplog-filter" data-cat="error">错误/失败</button>
+      <span class="dc-oplog-hint">保留最近 30 天</span>
+    </div>
+    <div class="dc-oplog-list" id="dc-oplog-list"></div>
+    <div class="dc-oplog-more"><button class="btn btn-sm" id="dc-oplog-more">加载更早</button></div>
+  </div>
+</div>
+
 <div class="drawer-overlay" id="wiz-drawer" style="display:none">
   <div class="drawer-panel">
     <div class="drawer-header">
@@ -1430,6 +1451,7 @@
   <div class="syslog-bar" id="syslog-bar">
     <span class="syslog-dot" id="syslog-dot"></span>
     <div class="syslog-scroll" id="syslog-scroll"></div>
+    <span style="flex:none;margin-left:8px;font-size:11px;color:var(--muted);opacity:.75;white-space:nowrap">📋 点开日志 ▸</span>
   </div>
   <span class="app-disclaimer">本系统所有分析、评分、买卖计划均由 AI 生成，仅供研究参考，不构成投资建议；据此操作风险自负。</span>
   <span class="app-version">v0.4.0</span>
@@ -1647,21 +1669,21 @@
   </div>
   <div class="wl-drawer-tabs">
     <button class="wl-drawer-tab active" data-tab="info">基本信息</button>
-    <button class="wl-drawer-tab" data-tab="price">价格</button>
-    <button class="wl-drawer-tab" data-tab="news">新闻</button>
-    <button class="wl-drawer-tab" data-tab="capital">资金</button>
-    <button class="wl-drawer-tab" data-tab="intelligence">情报</button>
-    <button class="wl-drawer-tab" data-tab="strategy">策略</button>
-    <button class="wl-drawer-tab" data-tab="uzi">UZI 分析</button>
+    <button class="wl-drawer-tab" data-tab="score">系统评分</button>
+    <button class="wl-drawer-tab" data-tab="price">市场K线</button>
+    <button class="wl-drawer-tab" data-tab="news">最近新闻</button>
+    <button class="wl-drawer-tab" data-tab="capital">期权资金</button>
+    <button class="wl-drawer-tab" data-tab="intelligence">情报信息</button>
+    <button class="wl-drawer-tab" data-tab="strategy" data-wl-only="1">持仓策略</button>
   </div>
   <div class="drawer-body" id="wl-drawer-body">
     <div class="wl-tab-pane active" id="wl-tab-info"></div>
+    <div class="wl-tab-pane" id="wl-tab-score"></div>
     <div class="wl-tab-pane" id="wl-tab-price"></div>
     <div class="wl-tab-pane" id="wl-tab-news"></div>
     <div class="wl-tab-pane" id="wl-tab-capital"></div>
     <div class="wl-tab-pane" id="wl-tab-intelligence"></div>
     <div class="wl-tab-pane" id="wl-tab-strategy"></div>
-    <div class="wl-tab-pane" id="wl-tab-uzi"></div>
   </div>
 </div>
 

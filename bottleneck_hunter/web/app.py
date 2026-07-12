@@ -141,7 +141,21 @@ async def lifespan(app: FastAPI):
     set_stats_store(_wl_store)
     from bottleneck_hunter.data_provider.scheduler import set_store as ds_set_store
     ds_set_store(_wl_store)  # 供调度器 per-day 额度阀查 datasource_stats
+    from bottleneck_hunter.web.oplog import set_store as oplog_set_store
+    oplog_set_store(_wl_store)
+    from bottleneck_hunter.web.oplog_api import set_store as oplog_api_set_store
+    oplog_api_set_store(_wl_store)
+    from bottleneck_hunter.web.translate import set_store as translate_set_store
+    translate_set_store(_wl_store)
     init_broadcaster()
+    # 企业档案一次性回填（后台线程，不阻塞启动；幂等，只跑一次）
+    try:
+        import threading
+        from bottleneck_hunter.dataflows.store import AnalysisStore
+        threading.Thread(target=lambda: AnalysisStore().backfill_company_archive(),
+                         daemon=True, name="archive-backfill").start()
+    except Exception:  # noqa: BLE001
+        logger.debug("企业档案回填线程启动失败", exc_info=True)
     scheduler = init_scheduler(_wl_store, auth_store=_auth_store)
     if scheduler:
         scheduler.start()
@@ -269,7 +283,10 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=400, content={"detail": str(exc), "code": "missing_user_key"})
 
     # 中间件注册顺序：最后注册的最先执行
-    # AuthMiddleware → NoCacheStaticMiddleware → FastAPI
+    # AuthMiddleware → NoCacheStaticMiddleware → OpLogMiddleware → FastAPI
+    # OpLogMiddleware 放最内层：AuthMiddleware 已在 scope.state 注入 user，它才能按用户记操作日志
+    from bottleneck_hunter.web.oplog import OpLogMiddleware
+    app.add_middleware(OpLogMiddleware)
     app.add_middleware(NoCacheStaticMiddleware)
     app.add_middleware(AuthMiddleware)
 
@@ -289,6 +306,10 @@ def create_app() -> FastAPI:
     app.include_router(settings_router, prefix="/api/settings")
     from bottleneck_hunter.web.egress_api import router as egress_router
     app.include_router(egress_router, prefix="/api/egress")
+    from bottleneck_hunter.web.oplog_api import router as oplog_router
+    app.include_router(oplog_router, prefix="/api/oplog")
+    from bottleneck_hunter.web.translate_api import router as translate_router
+    app.include_router(translate_router, prefix="/api/translate")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

@@ -109,6 +109,14 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
 
     logger.info("Watchlist scheduler configured with %d jobs (含陈旧兜底刷新 + 全量刷新，可配可开关)",
                 len(_JOB_SPECS))
+    # 操作日志保留清理：每天 03:30 删 >30 天（不入可配时间表，固定后台维护）
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        _scheduler.add_job(job_oplog_prune, CronTrigger(hour=3, minute=30),
+                           id="oplog_prune", name="Operation log retention (30d)",
+                           replace_existing=True, max_instances=1, coalesce=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("注册操作日志清理任务失败: %s", e)
     return _scheduler
 
 
@@ -141,6 +149,21 @@ def shutdown_scheduler() -> None:
 # Scheduled jobs
 # ---------------------------------------------------------------------------
 
+def _oplog(uid: str, title: str, *, market: str = "", detail: str = "已完成",
+           result: str = "success", error: str = "") -> None:
+    """记一条「系统自动更新」操作日志（供用户在实时操作日志里看到）。失败不影响 job。"""
+    if not uid:
+        return
+    try:
+        from bottleneck_hunter.web.oplog import record_operation
+        if error:
+            record_operation(uid, title, category="error", detail=error[:200], result="fail", market=market)
+        else:
+            record_operation(uid, title, category="auto_update", detail=detail, result=result, market=market)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def job_price_update(market: str = "us_stock") -> dict[str, str]:
     """Fetch prices for watchlist tickers of a specific market (multi-user)."""
     all_results: dict[str, str] = {}
@@ -171,9 +194,12 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
                 stocks_total=len(tickers),
             )
             logger.info("Price update (%s/%s) done: %d/%d succeeded", market, label, ok_count, len(tickers))
+            _oplog(uid, "行情自动更新", market=market, result=("fail" if status == "error" else status),
+                   detail=f"成功 {ok_count}/{len(tickers)}" + (f"，失败 {fail_count}" if fail_count else ""))
             all_results.update(results)
         except Exception as e:
             logger.error("Price update (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
+            _oplog(uid, "行情自动更新", market=market, error=str(e))
     return all_results
 
 
@@ -480,8 +506,10 @@ async def job_daily_decision(market: str = "us_stock") -> None:
             from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
             await _drain_sse(run_daily_decision(store, budget, scope="full", market=market))
             logger.info("Daily decision (%s/%s) completed", market, label)
+            _oplog(uid, "日常决策", market=market, detail=f"{len(tickers)} 只标的完成 L1→L4+投委会")
         except Exception as e:
             logger.error("Daily decision (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
+            _oplog(uid, "日常决策", market=market, error=str(e))
 
 
 async def job_catalyst_scan() -> None:
@@ -495,8 +523,10 @@ async def job_catalyst_scan() -> None:
             await _drain_sse(judge_expired_catalysts(store))
             await _drain_sse(detect_catalysts(store, budget))
             logger.info("Catalyst scan (%s) completed", label)
+            _oplog(uid, "催化剂扫描", detail="已检测新催化剂并清理过期项")
         except Exception as e:
             logger.error("Catalyst scan (user=%s) failed: %s", uid[:8] if uid else "global", e)
+            _oplog(uid, "催化剂扫描", error=str(e))
 
 
 async def job_weekly_strategy(market: str = "us_stock") -> None:
@@ -509,8 +539,10 @@ async def job_weekly_strategy(market: str = "us_stock") -> None:
             await _drain_sse(run_macro_strategy(store, budget, market=market))
             await _drain_sse(run_strategic_plan(store, budget, market=market))
             logger.info("Weekly strategy refresh (%s/%s) completed", market, label)
+            _oplog(uid, "每周策略刷新", market=market, detail="L1 宏观 + L2 组合策略已更新")
         except Exception as e:
             logger.error("Weekly strategy refresh (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
+            _oplog(uid, "每周策略刷新", market=market, error=str(e))
 
 
 async def job_auto_review(market: str = "us_stock") -> None:
@@ -865,6 +897,16 @@ async def job_full_refresh(market: str = "us_stock") -> None:
 # 定义在文件末尾——此时所有 job 函数已定义。
 # kind: "daily"(mon-fri) | "weekly"(day_of_week 来自配置) | "interval"(interval_hours)
 # ---------------------------------------------------------------------------
+async def job_oplog_prune() -> None:
+    """操作日志保留清理：删除超过 30 天的记录。"""
+    try:
+        n = _wl_store.prune_operations(30) if _wl_store else 0
+        if n:
+            logger.info("操作日志清理：删除 %d 条(>30天)", n)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("操作日志清理失败: %s", e)
+
+
 _JOB_SPECS = [
     ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "US pre-market price update"),
     ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "US post-market price update"),

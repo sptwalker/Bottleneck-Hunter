@@ -822,6 +822,23 @@
   font-size: 11px;
   color: var(--muted);
 }
+/* 新闻中英对照译文行 */
+.wl-news-trans {
+  font-size: 12.5px;
+  color: var(--accent, #2563eb);
+  margin-top: 3px;
+  line-height: 1.5;
+}
+.wl-news-trans:empty { display: none; }
+.wl-news-trans-sm { font-size: 12px; color: var(--muted); }
+/* 公司概况中英对照译文 */
+.wl-profile-trans {
+  font-size: 12.5px; color: var(--accent, #2563eb); margin-top: 6px; line-height: 1.7;
+}
+.wl-profile-trans:empty { display: none; }
+/* 系统评分页签容器 */
+.wl-score-wrap { padding: 4px 2px; }
+
 
 /* ── Capital tab ─── */
 .wl-capital-section {

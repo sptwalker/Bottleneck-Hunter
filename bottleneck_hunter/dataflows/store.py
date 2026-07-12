@@ -54,8 +54,20 @@ _MIGRATIONS = [
     # Phase 16B: 多用户
     "ALTER TABLE analyses ADD COLUMN user_id TEXT DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_analyses_user ON analyses(user_id)",
-    # 进度级别从 4 级扩展到 5 级：瓶颈(1)/筛选(2)/评分(3)/验证(4)/会议(5)
-    "UPDATE analyses SET completed_phases = completed_phases + 1 WHERE completed_phases >= 3",
+    # 注意：非幂等的一次性数据迁移（如 completed_phases +1）不要放这里——
+    # _init_db 每次实例化都会重跑本列表。用 _run_once_migrations() 的 _meta 守卫单独跑。
+    # 企业数据档案：每个评选/入围/反查过的企业按 (user_id, ticker) 持久化最新评分卡(含简介)，
+    # 供观察池/决策中心按 ticker 直接调用，不再依赖易失的 source_analysis 反查。
+    """CREATE TABLE IF NOT EXISTS company_archive (
+        user_id        TEXT DEFAULT '',
+        ticker         TEXT NOT NULL,
+        market         TEXT DEFAULT '',
+        name           TEXT DEFAULT '',
+        scorecard_json TEXT DEFAULT '',
+        source         TEXT DEFAULT '',
+        updated_at     TEXT NOT NULL,
+        PRIMARY KEY (user_id, ticker)
+    )""",
 ]
 
 # 列表查询不返回 result_json（体积大），只返回摘要
@@ -104,6 +116,7 @@ class AnalysisStore:
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")  # 并发写(回填线程 vs 分析钩子)等锁 5s，避免立即 database is locked
         return conn
 
     def _init_db(self):
@@ -115,10 +128,27 @@ class AnalysisStore:
                     conn.execute(sql)
                 except sqlite3.OperationalError:
                     pass
+            self._run_once_migrations(conn)
             self._backfill_seq_no(conn)
             self._backfill_completed_phases(conn)
             conn.commit()
         logger.info(f"分析数据库已就绪: {self.db_path}")
+
+    def _run_once_migrations(self, conn: sqlite3.Connection) -> None:
+        """非幂等的一次性数据迁移，靠 _meta 标记确保每个 DB 只跑一次（多次实例化/重启都安全）。"""
+        conn.execute("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)")
+        once = [
+            # 进度级别从 4 级扩展到 5 级：瓶颈(1)/筛选(2)/评分(3)/验证(4)/会议(5)
+            ("phases_4to5_v1", "UPDATE analyses SET completed_phases = completed_phases + 1 WHERE completed_phases >= 3"),
+        ]
+        for key, sql in once:
+            if conn.execute("SELECT 1 FROM _meta WHERE key=?", (key,)).fetchone():
+                continue
+            try:
+                conn.execute(sql)
+                conn.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES (?, '1')", (key,))
+            except sqlite3.OperationalError:
+                pass
 
     def _backfill_seq_no(self, conn: sqlite3.Connection):
         """为缺少 seq_no 的旧记录补上递增编号。"""
@@ -249,6 +279,103 @@ class AnalysisStore:
             d["run_count"] = combo_count.get(key, 1)
             results.append(d)
         return results
+
+    def upsert_company_archives(self, items) -> int:
+        """批量持久化企业档案。items: [{ticker, market, name, scorecard, source}]。按 (user_id,ticker) 覆盖。"""
+        from datetime import timezone
+        uid = self._user_id or ""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        rows = []
+        for it in items or []:
+            tk = (it.get("ticker") or "").strip()
+            sc = it.get("scorecard")
+            if not tk or sc is None:
+                continue
+            rows.append((uid, tk, it.get("market", "") or "", it.get("name", "") or "",
+                         json.dumps(sc, ensure_ascii=False, default=str), it.get("source", "") or "", now))
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO company_archive "
+                "(user_id, ticker, market, name, scorecard_json, source, updated_at) VALUES (?,?,?,?,?,?,?)",
+                rows,
+            )
+        return len(rows)
+
+    def upsert_company_archive(self, ticker: str, scorecard, market: str = "",
+                               name: str = "", source: str = "") -> int:
+        return self.upsert_company_archives(
+            [{"ticker": ticker, "market": market, "name": name, "scorecard": scorecard, "source": source}])
+
+    def backfill_company_archive(self) -> int:
+        """一次性回填：扫历史分析的 supplier_scorecards → 为缺档的 (user_id,ticker) 建档。
+
+        幂等：靠 _meta 标记只跑一次；newest-first + INSERT OR IGNORE，只填缺、绝不覆盖
+        （新分析/反查钩子写入的最新档案不受影响）。返回回填条数。
+        """
+        from datetime import timezone
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        to_insert = []
+        with self._connect() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)")
+            if conn.execute("SELECT 1 FROM _meta WHERE key='archive_backfill_v1'").fetchone():
+                return 0
+            seen = {(r["user_id"], r["ticker"]) for r in
+                    conn.execute("SELECT user_id, ticker FROM company_archive").fetchall()}
+            rows = conn.execute(
+                "SELECT user_id, market, result_json FROM analyses "
+                "ORDER BY COALESCE(updated_at, created_at) DESC"
+            ).fetchall()
+            for row in rows:
+                uid = row["user_id"] or ""
+                try:
+                    rj = json.loads(row["result_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                for sc in rj.get("supplier_scorecards") or []:
+                    sup = sc.get("supplier") or {}
+                    tk = (sup.get("ticker") or sc.get("ticker") or "").strip()
+                    if not tk or (uid, tk) in seen:
+                        continue
+                    seen.add((uid, tk))
+                    name = sup.get("name") or tk
+                    # 用企业自身 market（supplier.market 可能是 enum 序列化后的 str），回退分析级
+                    smkt = sup.get("market")
+                    if isinstance(smkt, dict):
+                        smkt = smkt.get("value")
+                    mkt = smkt or row["market"] or ""
+                    to_insert.append((uid, tk, mkt, name,
+                                      json.dumps(sc, ensure_ascii=False, default=str), "backfill", now))
+            if to_insert:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO company_archive "
+                    "(user_id, ticker, market, name, scorecard_json, source, updated_at) VALUES (?,?,?,?,?,?,?)",
+                    to_insert,
+                )
+            conn.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('archive_backfill_v1', ?)", (now,))
+        if to_insert:
+            logger.info("企业档案回填：从历史分析补建 %d 份档案", len(to_insert))
+        return len(to_insert)
+
+    def get_company_archive(self, ticker: str) -> dict | None:
+        """按 ticker 取该用户的企业档案（含解析后的 scorecard）；无则 None。"""
+        tk = (ticker or "").strip()
+        if not tk:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM company_archive WHERE user_id = ? AND ticker = ?",
+                (self._user_id or "", tk),
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["scorecard"] = json.loads(d.get("scorecard_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            d["scorecard"] = None
+        return d
 
     def get(self, analysis_id: str) -> dict | None:
         """返回完整记录（含 result_json）。"""

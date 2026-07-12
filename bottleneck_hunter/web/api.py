@@ -522,6 +522,17 @@ async def list_history(user: dict = Depends(get_current_user)):
     return {"analyses": store.list_all()}
 
 
+@router.get("/company-archive")
+async def get_company_archive(ticker: str, user: dict = Depends(get_current_user)):
+    """按 ticker 取企业持久化档案（含 scorecard 的简介+五维/预期差评分）。
+
+    评选/入围(phase2/3)、反查(reverse)过的企业均有档案，观察池/决策中心据此直接展示"系统评分"，
+    不再依赖易失的 source_analysis 反查。
+    """
+    store = _user_analysis_store(user)
+    return {"archive": store.get_company_archive(ticker)}
+
+
 @router.get("/history/{analysis_id}")
 async def get_history(analysis_id: str, user: dict = Depends(get_current_user)):
     """返回完整分析结果（含 result_json）。"""

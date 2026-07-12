@@ -44,13 +44,13 @@ def _user_store(user: dict) -> WatchlistStore:
 
 
 def _maybe_json(v):
-    """若 v 是 JSON 字符串则解析，解析失败返回 {}；非字符串按原样返回。"""
-    if not isinstance(v, str):
-        return v
-    try:
-        return json.loads(v)
-    except (json.JSONDecodeError, TypeError):
-        return {}
+    """解析 JSON 字符串并保证返回 dict；解析失败或非 dict（None/list/"null"）一律返回 {}。"""
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return v if isinstance(v, dict) else {}
 
 
 def _user_budget(user: dict):

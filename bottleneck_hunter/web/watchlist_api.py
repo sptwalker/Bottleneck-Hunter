@@ -264,6 +264,23 @@ async def pipeline_health(user: dict = Depends(get_current_user)):
     return {"pipelines": statuses, "stale_tickers": stale}
 
 
+@router.get("/company-overview")
+async def company_overview(ticker: str, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """按 ticker 取企业概览（用于未加入观察池的企业，如入围/最终评选/交叉验证候选）。
+
+    返回库中已存的 profile/行情/财报（分析管线跑过即有）；无则返回空，由前端用 scorecard 兜底。
+    """
+    store = _user_store(user)
+    tk = (ticker or "").strip()
+    if not tk:
+        return {"latest_snapshot": None, "profile": {}, "earnings": None}
+    return {
+        "latest_snapshot": store.get_latest_snapshot(tk),
+        "profile": store.get_company_profile(tk) or {},
+        "earnings": store.get_earnings(tk),
+    }
+
+
 # ─────────────────────────────────────────────────────────────
 # Entry detail + sub-resources (parameterized /{entry_id})
 # ─────────────────────────────────────────────────────────────

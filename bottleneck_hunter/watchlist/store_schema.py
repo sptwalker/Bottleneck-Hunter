@@ -938,4 +938,25 @@ MIGRATIONS: list[str] = [
         UNIQUE(user_id, role_key)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_routing_policy_user ON ai_routing_policy(user_id)",
+    # 实时操作日志（按用户；自动更新/用户操作/错误；保留 ≥30 天，由清理 job 修剪）
+    """CREATE TABLE IF NOT EXISTS operation_log (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT DEFAULT '',
+        ts          TEXT NOT NULL,
+        category    TEXT DEFAULT 'user_action',    -- auto_update | user_action | error
+        title       TEXT NOT NULL,                 -- 白话标题
+        detail      TEXT DEFAULT '',               -- 白话详情
+        result      TEXT DEFAULT 'success',        -- success | partial | fail
+        market      TEXT DEFAULT '',
+        meta_json   TEXT DEFAULT ''
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_oplog_user_ts ON operation_log(user_id, ts DESC)",
+    # 翻译缓存（全局复用；key = md5(源文+目标语言)，新闻中英对照等按需翻译后缓存，避免重复花钱）
+    """CREATE TABLE IF NOT EXISTS translation_cache (
+        cache_key   TEXT PRIMARY KEY,
+        target      TEXT NOT NULL,
+        source_text TEXT NOT NULL,
+        translated  TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+    )""",
 ]

@@ -105,6 +105,27 @@ export function resetP2Selection() { _p2Selected.clear(); }
 
 function _getTicker(sc) { return sc.supplier?.ticker || sc.ticker || ''; }
 
+// 双击企业行 → 统一企业详情抽屉（系统评分/基本信息等，来自 scorecard）。覆盖 Phase2 入围 / Phase3 最终评分表。
+if (typeof document !== 'undefined') {
+  document.addEventListener('dblclick', (e) => {
+    const row = e.target.closest('.p2-summary-row');
+    if (!row || !window.openCompanyDrawer) return;
+    // 按 data-ticker 在评分卡里查找（行按 final_score 排序显示，data-idx 与未排序的 _p2Scorecards 不对应；
+    // 且反查表也复用 .p2-summary-row 但不在 _p2Scorecards 中，按 ticker 查找自然跳过 → 交其自身处理）。
+    const ticker = row.dataset.ticker;
+    if (!ticker || !Array.isArray(_p2Scorecards)) return;
+    const sc = _p2Scorecards.find(s => _getTicker(s) === ticker);
+    if (!sc) return;
+    const sup = sc.supplier || {};
+    window.openCompanyDrawer({
+      ticker: sup.ticker || ticker,
+      name: sup.name || sup.ticker || ticker,
+      market: sup.market || window.appState?.market || 'us_stock',
+      scorecard: sc,
+    });
+  });
+}
+
 function _fireSelectionChange() {
   const countEl = document.getElementById('manual-pick-count');
   if (countEl) countEl.textContent = `已选 ${_p2Selected.size} / ${(_p2Scorecards || []).length} 家`;
@@ -386,7 +407,7 @@ export function renderReverseTable(records, opts = {}) {
   if (onSelectionChange) onSelectionChange(getReverseSelected());
 }
 
-function buildDetailGrid(sc) {
+export function buildDetailGrid(sc) {
   const alpha = sc.alpha || {};
   const moat = sc.moat || {};
   const fin = sc.final || {};
@@ -1008,7 +1029,7 @@ export function renderPhase4Table(validations, recommendations, rankedResults) {
     const recommended = top3.has(ticker) || rec.pass_fail === 'pass';
     const analysisId = window.appState?.analysisId || '';
 
-    html += `<tr>
+    html += `<tr data-company-ticker="${ticker}" data-company-name="${name}" data-company-market="${ranked?.supplier?.market || ''}" title="双击查看企业详情">
       <td class="col-name">${name}</td>
       <td><span class="score-badge" style="background:${scoreColor(finalScore)}">${finalScore.toFixed(1)}</span></td>
       <td>${cred != null ? `<span class="score-badge score-badge--sm" style="background:${scoreColor(cred)}">${cred.toFixed(1)}</span>` : '—'}</td>

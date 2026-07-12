@@ -48,7 +48,7 @@ def test_compress_trigger(tmp_path, monkeypatch):
     class _LLM:
         def invoke(self, prompt):
             return _Resp()
-    monkeypatch.setattr(mc, "get_models_for_role", lambda role: [(_LLM(), "deepseek", "x")])
+    monkeypatch.setattr(mc, "get_models_for_role", lambda role, **kw: [(_LLM(), "deepseek", "x")])
 
     store = WatchlistStore(str(tmp_path / "t.db"))
     old_ts = _iso_days_ago(30)  # 远早于 14 天

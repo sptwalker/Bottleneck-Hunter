@@ -233,13 +233,19 @@ async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
 
 
 def _configured_provider_models() -> list[tuple[str, str]]:
-    """列出所有已配置 provider 及其默认模型（统一真源 custom_providers 运行时缓存）。"""
+    """列出所有已配置 provider 及其默认模型（统一真源 custom_providers 运行时缓存）。含已禁用。"""
     configured: list[tuple[str, str]] = []
     for cp_id in list_custom_provider_ids():
         cp_info = get_custom_provider(cp_id)
         cp_model = cp_info.get("default_model", "") if cp_info else ""
         configured.append((cp_id, cp_model or cp_id))
     return configured
+
+
+def _active_provider_models() -> list[tuple[str, str]]:
+    """仅启用中的 provider（admin 禁用的跳过）——综合测试用，不浪费时间测已禁用模型。"""
+    from bottleneck_hunter.llm_clients.factory import is_provider_active
+    return [(p, m) for p, m in _configured_provider_models() if is_provider_active(p)]
 
 
 @router.post("/test/connectivity")
@@ -264,12 +270,22 @@ async def test_connectivity(user: dict = Depends(get_current_user)):
 
 
 @router.post("/test/comprehensive")
-async def test_comprehensive(request: Request, user: dict = Depends(get_current_user)):
-    """SSE 综合能力测试。"""
+async def test_comprehensive(request: Request, incremental: bool = False,
+                             user: dict = Depends(get_current_user)):
+    """SSE 综合能力测试。incremental=True 只测「尚无测试结果」的接口(新增接口增量补测，省时)。"""
     store = _get_store(user)
     uid = user.get("sub", "")
 
-    configured = [(p, m) for p, m in _configured_provider_models() if m]
+    configured = [(p, m) for p, m in _active_provider_models() if m]
+    if incremental:
+        # 增量：只测「所有维度都还没测过」的接口；半途中断(仅部分维度)的仍会重测补齐
+        from bottleneck_hunter.web.model_tester import TEST_DIMENSIONS
+        need = len(TEST_DIMENSIONS)
+        dims_by_pm: dict[tuple, set] = {}
+        for r in store.get_test_results(user_id=uid):
+            dims_by_pm.setdefault((r["provider"], r["model"]), set()).add(r["test_type"])
+        fully_tested = {pm for pm, dims in dims_by_pm.items() if len(dims) >= need}
+        configured = [(p, m) for p, m in configured if (p, m) not in fully_tested]
 
     async def _stream():
         from bottleneck_hunter.web.model_tester import (

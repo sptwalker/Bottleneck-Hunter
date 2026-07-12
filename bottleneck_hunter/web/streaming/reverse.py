@@ -427,6 +427,16 @@ async def stream_reverse_analysis(
         except Exception:
             logger.exception("反向分析落库失败")
 
+    # 反查企业也建立/更新持久化档案（含简介+评分），供观察池/决策中心按 ticker 复用
+    if analysis_store is not None:
+        try:
+            mkt = getattr(getattr(supplier, "market", None), "value", None) or market
+            analysis_store.upsert_company_archive(
+                ticker=supplier.ticker, scorecard=_sanitize(sc.model_dump()),
+                market=mkt, name=supplier.name or supplier.ticker, source="reverse")
+        except Exception:
+            logger.warning("企业档案持久化失败(reverse)", exc_info=True)
+
     yield _sse("reverse_complete",
                scorecard=sc.model_dump(),
                meta={"id": record_id, "source": source, "market": resolved_market,

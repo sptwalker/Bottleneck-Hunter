@@ -110,10 +110,21 @@ async def update_provider(provider_id: str, req: CustomProviderRequest, user: di
 
     # 仅管理员可更新共享定义（不含密钥）
     if is_admin:
+        old_model = (existing.get("default_model") or "").strip()
         store.save_custom_provider(
             provider_id, req.display_name, req.base_url, "", "", req.default_model,
         )
         register_custom_provider(provider_id, req.base_url, default_model=req.default_model)
+        # 同步更新机制：默认模型变更时，把「钉着旧模型」的角色矩阵条目跟到新模型（矩阵是选型
+        # 最高优先级来源，不同步就一直用旧模型）。_CUSTOM_PROVIDERS 缓存已由上面 register 刷新。
+        if old_model and req.default_model and old_model != req.default_model:
+            try:
+                from bottleneck_hunter.watchlist.store import WatchlistStore
+                n = WatchlistStore().sync_role_config_model(provider_id, old_model, req.default_model)
+                logger.info("provider %s 默认模型 %s→%s，已同步 %d 条角色矩阵",
+                            provider_id, old_model, req.default_model, n)
+            except Exception:
+                logger.warning("同步角色矩阵模型失败", exc_info=True)
 
     # 所有用户：保存自己的 Key 到用户级存储
     if req.api_key and uid:

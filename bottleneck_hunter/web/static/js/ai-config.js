@@ -101,8 +101,9 @@ export function initAIConfig() {
     }
   });
 
-  // Test actions
-  container.querySelector('#aic-start-test')?.addEventListener('click', startComprehensiveTest);
+  // Test actions（用箭头包一层：addEventListener 会把 click 事件当首参传入，直接绑定会误触发增量）
+  container.querySelector('#aic-start-test')?.addEventListener('click', () => startComprehensiveTest(false));
+  container.querySelector('#aic-incr-test')?.addEventListener('click', () => startComprehensiveTest(true));
 
   // Matrix actions
   container.querySelector('#aic-save-matrix')?.addEventListener('click', saveMatrixConfig);
@@ -510,6 +511,9 @@ async function saveCustomProvider() {
       await loadCustomProviders();
       await loadRoles();
       setStatus('aic-provider-status', editId ? 'Provider 已更新' : 'Provider 已添加', 'ok');
+      // 新增/改动接口后：显示闪烁的「新接口增量测试」，点击只补测未测过的接口
+      const incrBtn = document.getElementById('aic-incr-test');
+      if (incrBtn) { incrBtn.style.display = ''; incrBtn.classList.add('aic-incr-flash'); }
     } else {
       const err = await resp.json().catch(() => ({}));
       alert(err.detail || '保存失败');
@@ -673,9 +677,13 @@ async function testConnectivity() {
 
 /* ── Section 2: Comprehensive Testing ──────────────────── */
 
-async function startComprehensiveTest() {
+async function startComprehensiveTest(incremental = false) {
   const btn = document.getElementById('aic-start-test');
-  if (btn) { btn.disabled = true; btn.textContent = '测试中...'; }
+  const incrBtn = document.getElementById('aic-incr-test');
+  if (btn) btn.disabled = true;
+  if (incrBtn) incrBtn.disabled = true;
+  const activeBtn = incremental ? incrBtn : btn;
+  if (activeBtn) activeBtn.textContent = incremental ? '增量测试中…' : '测试中...';
 
   const progressEl = document.querySelector('.aic-test-progress');
   const fillEl = document.getElementById('aic-test-progress-fill');
@@ -690,7 +698,7 @@ async function startComprehensiveTest() {
   renderTestResults();
 
   try {
-    const resp = await fetch(`${API}/test/comprehensive`, { method: 'POST' });
+    const resp = await fetch(`${API}/test/comprehensive${incremental ? '?incremental=true' : ''}`, { method: 'POST' });
     if (!resp.ok) {
       const errData = await resp.json().catch(() => ({}));
       const errMsg = errData.detail || `HTTP ${resp.status}`;
@@ -732,6 +740,10 @@ async function startComprehensiveTest() {
     if (textEl) textEl.textContent = `测试出错: ${e.message}`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '开始综合测试'; }
+    if (incrBtn) {
+      incrBtn.disabled = false; incrBtn.textContent = '✨ 新接口增量测试';
+      if (incremental) { incrBtn.style.display = 'none'; incrBtn.classList.remove('aic-incr-flash'); }  // 补测完即隐藏
+    }
     setTimeout(() => { if (progressEl) progressEl.classList.remove('active'); }, 2000);
     await loadTestResults();
   }

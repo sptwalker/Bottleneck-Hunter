@@ -49,14 +49,15 @@ class _BudgetMixin:
         conn = self._connect()
         try:
             q, p = self._user_filter(
-                """SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
+                """SELECT COUNT(*) AS calls,
+                          COALESCE(SUM(input_tokens),0) AS input_tokens,
                           COALESCE(SUM(output_tokens),0) AS output_tokens,
                           COALESCE(SUM(estimated_cost_usd),0.0) AS cost
                    FROM llm_budget WHERE date = ?""",
                 (date,),
             )
             row = conn.execute(q, p).fetchone()
-            return {"date": date, "input_tokens": row["input_tokens"],
+            return {"date": date, "calls": row["calls"], "input_tokens": row["input_tokens"],
                     "output_tokens": row["output_tokens"], "cost": row["cost"]}
         finally:
             conn.close()
@@ -70,14 +71,15 @@ class _BudgetMixin:
         conn = self._connect()
         try:
             q, p = self._user_filter(
-                """SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
+                """SELECT COUNT(*) AS calls,
+                          COALESCE(SUM(input_tokens),0) AS input_tokens,
                           COALESCE(SUM(output_tokens),0) AS output_tokens,
                           COALESCE(SUM(estimated_cost_usd),0.0) AS cost
                    FROM llm_budget WHERE date LIKE ?""",
                 (f"{prefix}%",),
             )
             row = conn.execute(q, p).fetchone()
-            return {"year": year, "month": month, "input_tokens": row["input_tokens"],
+            return {"year": year, "month": month, "calls": row["calls"], "input_tokens": row["input_tokens"],
                     "output_tokens": row["output_tokens"], "cost": row["cost"]}
         finally:
             conn.close()

@@ -400,7 +400,7 @@ function renderStrategic(plan) {
       html += '<ul class="dc-alloc-list">';
       for (const h of holdings) {
         const tag = core.includes(h) ? '核心' : '战术';
-        html += `<li><span>${escDC(h.ticker)} <small class="text-muted">${escDC(tag)}</small></span><span>${h.target_weight_pct}%</span></li>`;
+        html += `<li data-company-ticker="${escDC(h.ticker)}" data-company-market="${escDC(dcState.market)}" title="双击查看企业详情"><span>${escDC(h.ticker)} <small class="text-muted">${escDC(tag)}</small></span><span>${h.target_weight_pct}%</span></li>`;
       }
       html += '</ul>';
     }
@@ -452,7 +452,7 @@ function renderTactical(plans) {
     const takeProfit = targets.length > 0 ? targets[0].price : '--';
     const confidence = riskAss.confidence ?? rj.confidence ?? '--';
 
-    return `<tr>
+    return `<tr data-company-ticker="${escDC(p.ticker || rj.ticker || '')}" data-company-market="${escDC(dcState.market)}" title="双击查看企业详情">
       <td><strong>${escDC(p.ticker || rj.ticker)}</strong></td>
       <td>${actionBadge(action)}</td>
       <td>${entryPrice !== '--' ? fmtNum(entryPrice, 2) : '--'}</td>
@@ -881,6 +881,15 @@ export function initDecision() {
   document.getElementById('dc-btn-refresh')?.addEventListener('click', runFullRefresh);
   document.getElementById('dc-btn-catalysts')?.addEventListener('click', scanCatalysts);
   document.getElementById('dc-btn-export')?.addEventListener('click', exportDecisionReport);
+  document.getElementById('dc-btn-oplog')?.addEventListener('click', openOpLogDrawer);
+  document.getElementById('dc-oplog-close')?.addEventListener('click', closeOpLogDrawer);
+  document.getElementById('dc-oplog-more')?.addEventListener('click', () => loadOpLogHistory(false));
+  document.querySelectorAll('.dc-oplog-filter').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('.dc-oplog-filter').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    dcOpLog.category = b.dataset.cat || '';
+    loadOpLogHistory(true);
+  }));
 
   // 左列卡片折叠
   document.querySelectorAll('.dc-col-main .dc-card-header').forEach(header => {
@@ -1740,6 +1749,99 @@ function closeConsultDrawer() {
   const d = document.getElementById('dc-consult-drawer');
   if (d) d.style.display = 'none';
 }
+
+/* ── 实时操作日志抽屉 ───────────────────────────────────── */
+const dcOpLog = { category: '', oldestTs: '', es: null, seen: new Set() };
+const OPLOG_CAT = { auto_update: '🔄 自动更新', user_action: '👤 我的操作', error: '⚠ 错误' };
+const OPLOG_RESULT = { success: ['成功', 'ok'], partial: ['部分成功', 'warn'], fail: ['失败', 'fail'] };
+
+function _opFmtTs(ts) {
+  try {
+    const d = new Date(ts);
+    const p = n => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  } catch { return ts || ''; }
+}
+
+function _opLogRowEl(rec) {
+  const div = document.createElement('div');
+  const res = OPLOG_RESULT[rec.result] || OPLOG_RESULT.success;
+  div.className = `dc-oplog-row dc-oplog-${rec.category} dc-oplog-r-${res[1]}`;
+  const cat = OPLOG_CAT[rec.category] || rec.category;
+  div.innerHTML =
+    `<span class="dc-oplog-ts">${escDC(_opFmtTs(rec.ts))}</span>`
+    + `<span class="dc-oplog-cat">${escDC(cat)}</span>`
+    + `<span class="dc-oplog-title">${escDC(rec.title || '')}</span>`
+    + `<span class="dc-oplog-res dc-oplog-res-${res[1]}">${escDC(res[0])}</span>`
+    + (rec.detail ? `<div class="dc-oplog-detail">${escDC(rec.detail)}${rec.market ? ' · ' + escDC(rec.market) : ''}</div>` : '');
+  return div;
+}
+
+async function loadOpLogHistory(reset) {
+  const list = document.getElementById('dc-oplog-list');
+  if (!list) return;
+  if (reset) { list.innerHTML = ''; dcOpLog.oldestTs = ''; dcOpLog.seen = new Set(); }
+  const params = new URLSearchParams({ limit: '100' });
+  if (dcOpLog.category) params.set('category', dcOpLog.category);
+  if (!reset && dcOpLog.oldestTs) params.set('before_ts', dcOpLog.oldestTs);
+  try {
+    const resp = await dcFetch(`/oplog/history?${params}`);
+    const logs = (await resp.json()).logs || [];
+    for (const rec of logs) {
+      if (dcOpLog.seen.has(rec.id)) continue;
+      dcOpLog.seen.add(rec.id);
+      list.appendChild(_opLogRowEl(rec));
+      dcOpLog.oldestTs = rec.ts;
+    }
+    const more = document.getElementById('dc-oplog-more');
+    if (more) more.style.display = logs.length >= 100 ? '' : 'none';
+    if (reset && !logs.length) list.innerHTML = '<div class="dc-oplog-empty">暂无操作记录</div>';
+  } catch { list.innerHTML = '<div class="dc-oplog-empty">加载失败</div>'; }
+}
+
+function _opLogStartStream() {
+  _opLogStopStream();
+  try {
+    const es = new EventSource(`${DC_API}/oplog/stream`);
+    es.addEventListener('oplog', (e) => {
+      let rec; try { rec = JSON.parse(e.data); } catch { return; }
+      if (!rec || dcOpLog.seen.has(rec.id)) return;
+      if (dcOpLog.category && rec.category !== dcOpLog.category) return;  // 尊重当前筛选
+      if (dcOpLog.seen.size > 4000) dcOpLog.seen.clear();  // 长开抽屉防无界增长(清空仅影响去重，历史仍在DOM)
+      dcOpLog.seen.add(rec.id);
+      const list = document.getElementById('dc-oplog-list');
+      if (!list) return;
+      const empty = list.querySelector('.dc-oplog-empty');
+      if (empty) empty.remove();
+      const row = _opLogRowEl(rec);
+      row.classList.add('dc-oplog-new');
+      list.insertBefore(row, list.firstChild);  // 最新在最上
+    });
+    const live = document.getElementById('dc-oplog-live');
+    es.onerror = () => { if (live) live.classList.add('off'); };
+    es.onopen = () => { if (live) live.classList.remove('off'); };
+    dcOpLog.es = es;
+  } catch { /* SSE 不可用则仅历史 */ }
+}
+
+function _opLogStopStream() {
+  if (dcOpLog.es) { try { dcOpLog.es.close(); } catch {} dcOpLog.es = null; }
+}
+
+async function openOpLogDrawer() {
+  const d = document.getElementById('dc-oplog-drawer');
+  if (!d) return;
+  d.style.display = '';
+  await loadOpLogHistory(true);
+  _opLogStartStream();
+}
+
+function closeOpLogDrawer() {
+  const d = document.getElementById('dc-oplog-drawer');
+  if (d) d.style.display = 'none';
+  _opLogStopStream();
+}
+
 
 async function sendConsult() {
   const ta = document.getElementById('dc-consult-input');

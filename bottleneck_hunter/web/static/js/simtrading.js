@@ -236,7 +236,7 @@ function renderPositions(positions) {
     const cls = isZero ? 'st-pos-zero' : '';
     const pnl = p.unrealized_pnl || 0;
     const deleteBtn = isZero ? `<button class="st-btn-delete" data-pos-id="${esc(p.id)}" title="删除记录">✕</button>` : '';
-    return `<tr class="${cls}" data-ticker="${esc(p.ticker)}">` +
+    return `<tr class="${cls}" data-ticker="${esc(p.ticker)}" data-company-ticker="${esc(p.ticker)}" data-company-market="${esc(p.market || '')}" title="双击查看企业详情">` +
       `<td><span class="st-pos-expand" data-ticker="${esc(p.ticker)}">▶</span></td>` +
       `<td style="font-weight:600">${esc(p.ticker)}</td>` +
       `<td>${fmtNum(p.shares)}</td>` +

@@ -30,6 +30,8 @@ from bottleneck_hunter.watchlist.store_committee import _CommitteeMixin
 from bottleneck_hunter.watchlist.store_simtrading import _SimTradingMixin
 from bottleneck_hunter.watchlist.store_research import _ResearchMixin
 from bottleneck_hunter.watchlist.store_ai_models import _AIModelsMixin
+from bottleneck_hunter.watchlist.store_oplog import _OpLogMixin
+from bottleneck_hunter.watchlist.store_i18n import _I18nMixin
 
 
 class WatchlistStore(
@@ -42,6 +44,8 @@ class WatchlistStore(
     _SimTradingMixin,
     _ResearchMixin,
     _AIModelsMixin,
+    _OpLogMixin,
+    _I18nMixin,
 ):
     BLOCK_MARKER_SYSTEM = "[系统拦截]"
 
