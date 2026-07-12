@@ -494,9 +494,9 @@ async def update_history(user: dict = Depends(get_current_user)):
                 break
         except Exception as e:
             logger.warning("读取更新历史失败 (%s): %s", path, e)
-    # 按日期倒序（容错：无 date 的排后），取前 10
+    # 按日期倒序（容错：无 date 的排后），全部返回
     items.sort(key=lambda x: str(x.get("date", "")), reverse=True)
-    return {"updates": items[:10]}
+    return {"updates": items}
 
 
 @router.get("/report")
