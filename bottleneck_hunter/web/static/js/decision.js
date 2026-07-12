@@ -1434,8 +1434,56 @@ function _consultBubbleEl(m) {
       + `<span class="dc-bubble-model">${escDC(_modelLabel(m.provider, m.model))}</span>`;
     const c = document.createElement('div'); c.textContent = m.content || '';
     div.appendChild(head); div.appendChild(c);
+    div._content = c;
+    if (m.failed) _attachRetryBtn(div, m.role, m.round, m.fail_reason);
   }
   return div;
+}
+
+// 失败气泡挂「🔄 重试」条：网络波动/额度不足等中断后手动重试（原地替换该条）
+function _attachRetryBtn(div, role, round, failReason) {
+  if (div.querySelector('.dc-consult-retry')) return;  // 防重复
+  const bar = document.createElement('div');
+  bar.className = 'dc-consult-retry';
+  const hint = failReason ? `失败：${failReason}。` : '';
+  const span = document.createElement('span');
+  span.className = 'dc-retry-hint';
+  span.textContent = hint;
+  const btn = document.createElement('button');
+  btn.className = 'btn btn-xs';
+  btn.textContent = '🔄 重试';
+  btn.onclick = () => retryConsult(role, round, div);
+  bar.appendChild(span); bar.appendChild(btn);
+  div.appendChild(bar);
+}
+
+async function retryConsult(role, round, div) {
+  if (dcConsult.streaming) return;
+  const bar = div.querySelector('.dc-consult-retry');
+  const btn = bar && bar.querySelector('button');
+  if (btn) { btn.disabled = true; btn.textContent = '重试中…'; }
+  if (div._content) div._content.textContent = '';
+  setConsultSending(true);
+  await consultStream('/macro/consult/retry', { market: dcConsult.market, role }, {
+    onEvent: (data) => {
+      const evt = data.event || '';
+      if (evt === 'chunk') {
+        if (div._content) div._content.textContent += data.text || '';
+        const log = document.getElementById('dc-consult-log');
+        if (log) log.scrollTop = log.scrollHeight;
+      } else if (evt === 'msg_done') {
+        const mEl = div.querySelector('.dc-bubble-model');
+        if (mEl) mEl.textContent = _modelLabel(data.provider, data.model);
+        if (!data.failed) { if (bar) bar.remove(); }              // 成功→撤掉重试条
+        else if (btn) { btn.disabled = false; btn.textContent = '🔄 重试'; }  // 仍失败→可再试
+      } else if (evt === 'error') {
+        if (div._content) div._content.textContent += `（重试失败：${data.message || '出错'}）`;
+        if (btn) { btn.disabled = false; btn.textContent = '🔄 重试'; }
+      }
+    },
+    onDone: () => setConsultSending(false),
+    onError: () => { setConsultSending(false); if (btn) { btn.disabled = false; btn.textContent = '🔄 重试'; } },
+  });
 }
 
 // 时效分割抬头：自动更新跨天时插入，标注日期/时间 + 即时核心市场数据，便于识别历史信息时间
@@ -1630,6 +1678,7 @@ function handleConsultEvent(data) {
   if (evt === 'msg_done') {
     const el = dcConsult.bubbles[`${data.role}-${data.round}`];
     if (el && el._modelEl) el._modelEl.textContent = _modelLabel(data.provider, data.model);
+    if (el && data.failed) _attachRetryBtn(el, data.role, data.round, data.fail_reason);
     return;
   }
   // start / done：流式渲染无需额外处理

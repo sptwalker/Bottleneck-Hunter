@@ -344,6 +344,10 @@ def get_models_for_role(
         pass
     multi = bool(role_def and role_def.multi_model)
     n_slots = (role_def.max_slots if (multi and role_def.max_slots) else 1)
+    # 事前容量门：重上下文角色不选窗口不足的模型（本次 kimi-8k 踩坑）。仅作用于系统自动选的
+    # 优先级3(默认)/优先级4(调度)，用户手填矩阵(优先级1)尊重其显式选择。
+    from bottleneck_hunter.llm_clients.model_context import fits as _ctx_fits
+    role_min_ctx = getattr(role_def, "min_context", 0) if role_def else 0
 
     # 优先级1: 数据库矩阵（手动覆盖，最高优先）
     configs = _load_role_configs_from_db(role_key, uid)
@@ -372,7 +376,7 @@ def get_models_for_role(
             dp = role_def.default_provider
             if is_provider_active(dp) and not _health.is_open(uid, dp) and _user_has_llm_key(dp, uid):
                 model = role_def.default_model or resolve_provider_model(dp, uid)
-                if model:
+                if model and _ctx_fits(model, role_min_ctx):  # 默认模型容量不足→落到优先级4另选
                     try:
                         return [(create_llm(dp, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
                                  dp, model)]
@@ -402,6 +406,7 @@ def get_models_for_role(
         pass
     results = []
     seen_prov: set[str] = set()
+    deferred: list[tuple[str, str]] = []  # 容量不足者(provider, model)：够大的选完仍缺槽位才回填
     for provider in chain:
         if not is_provider_active(provider) or provider in seen_prov:
             continue
@@ -410,12 +415,15 @@ def get_models_for_role(
         model = resolve_provider_model(provider, uid)
         if not model:
             continue
+        seen_prov.add(provider)
+        if not _ctx_fits(model, role_min_ctx):
+            deferred.append((provider, model))  # 容量不足重角色，暂不选
+            continue
         try:
             llm = create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid)
         except Exception:
             continue
         results.append((llm, provider, model))
-        seen_prov.add(provider)
         # 免费→付费回落强提示（仅首个主选，且用户确有免费 provider 的 KEY——否则纯付费用户会被
         # 误报"免费不可用"并每次刷屏；只有"免费本可用但当前熔断/失效"才提示）。
         if (len(results) == 1 and tier_of and policy.get("prefer_tier") == "free"
@@ -430,6 +438,16 @@ def get_models_for_role(
                 pass
         if len(results) >= n_slots:
             break
+
+    # 够大的模型填不满槽位 → 回填容量不足者（绝不留空/少槽；此时靠运行时 fallback + 手动重试兜底）
+    for provider, model in deferred:
+        if len(results) >= n_slots:
+            break
+        try:
+            llm = create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid)
+        except Exception:
+            continue
+        results.append((llm, provider, model))
 
     return results
 

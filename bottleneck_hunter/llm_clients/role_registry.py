@@ -20,6 +20,7 @@ class RoleDefinition:
     default_model: str = ""  # 留空：由 factory.resolve_provider_model 按 provider_configs→种子解析，不写死
     capability_weights: dict[str, float] = field(default_factory=dict)
     slot_labels: list[str] = field(default_factory=list)  # 多槽角色各槽的语义标签（配置界面显示）
+    min_context: int = 0  # 该角色最低上下文窗口(tokens)需求；>0 时智能调度不选容量不足的模型（0=无要求）
 
 
 ROLE_REGISTRY: dict[str, RoleDefinition] = {}
@@ -73,42 +74,46 @@ _BOTTLENECK_WEIGHTS = {
     "scoring_variance": 0.40, "instruction_follow": 0.15,
 }
 
+# 重上下文角色的最低窗口需求：注入市场数据/新闻/多份评分卡的角色，8k 模型装不下（本次 kimi-8k 踩坑）。
+# 16384 只排除已知 8k 小模型，保留 16k/32k/64k/128k+。
+_HEAVY = 16_384
+
 _INIT_ROLES = [
     # 决策层级
     RoleDefinition("L1_macro", "L1 宏观策略", "decision",
                    multi_model=True, max_slots=2,
                    slot_labels=["宏观市场分析师", "产业动向分析师"],
-                   capability_weights=_DECISION_WEIGHTS),
+                   capability_weights=_DECISION_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("L2_strategic", "L2 组合策略", "decision",
-                   capability_weights=_DECISION_WEIGHTS),
+                   capability_weights=_DECISION_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("L3_tactical", "L3 战术计划", "decision",
-                   capability_weights=_DECISION_WEIGHTS),
+                   capability_weights=_DECISION_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("L4_execution", "L4 执行方案", "decision",
-                   capability_weights=_DECISION_WEIGHTS),
+                   capability_weights=_DECISION_WEIGHTS, min_context=_HEAVY),
     # 投委会
     RoleDefinition("committee_risk", "风险控制官", "committee",
                    default_provider="deepseek",
-                   capability_weights=_COMMITTEE_WEIGHTS),
+                   capability_weights=_COMMITTEE_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("committee_growth", "成长投资人", "committee",
                    default_provider="qwen",
-                   capability_weights=_COMMITTEE_WEIGHTS),
+                   capability_weights=_COMMITTEE_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("committee_value", "价值投资人", "committee",
                    default_provider="kimi",
-                   capability_weights=_COMMITTEE_WEIGHTS),
+                   capability_weights=_COMMITTEE_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("committee_contrarian", "逆向投资人", "committee",
                    default_provider="glm",
-                   capability_weights=_COMMITTEE_WEIGHTS),
+                   capability_weights=_COMMITTEE_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("committee_consensus", "圆桌讨论/共识", "committee",
-                   capability_weights=_COMMITTEE_WEIGHTS),
+                   capability_weights=_COMMITTEE_WEIGHTS, min_context=_HEAVY),
     # 产业链管线
     RoleDefinition("pipeline_decompose", "产业链拆解", "pipeline",
                    capability_weights=_PIPELINE_WEIGHTS),
     RoleDefinition("pipeline_eval", "供应商评估", "pipeline",
-                   capability_weights=_PIPELINE_WEIGHTS),
+                   capability_weights=_PIPELINE_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("pipeline_cross_val", "交叉验证", "pipeline",
-                   capability_weights=_PIPELINE_WEIGHTS),
+                   capability_weights=_PIPELINE_WEIGHTS, min_context=_HEAVY),
     RoleDefinition("pipeline_roundtable", "圆桌讨论", "pipeline",
-                   capability_weights=_PIPELINE_WEIGHTS),
+                   capability_weights=_PIPELINE_WEIGHTS, min_context=_HEAVY),
     # 看板模块
     RoleDefinition("watchlist_catalyst", "催化剂监控", "watchlist",
                    capability_weights=_WATCHLIST_WEIGHTS),
@@ -121,7 +126,7 @@ _INIT_ROLES = [
     RoleDefinition("watchlist_tuning", "参数调优", "watchlist",
                    capability_weights=_WATCHLIST_WEIGHTS),
     RoleDefinition("watchlist_uzi", "深度分析(UZI)", "watchlist",
-                   capability_weights=_WATCHLIST_WEIGHTS),
+                   capability_weights=_WATCHLIST_WEIGHTS, min_context=_HEAVY),
     # 瓶颈交叉评分
     RoleDefinition("bottleneck", "瓶颈分析", "bottleneck",
                    multi_model=True, max_slots=3,

@@ -2023,6 +2023,8 @@
   border-bottom-right-radius: 3px;
 }
 .dc-bubble-analyst { align-self: flex-start; border-bottom-left-radius: 3px; }
+.dc-consult-retry { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.dc-consult-retry .dc-retry-hint { font-size: 12px; color: var(--danger, #dc2626); }
 .dc-bubble-macro_market { background: rgba(59,130,246,.10); border-left: 3px solid #3b82f6; }
 .dc-bubble-industry_trend { background: rgba(16,185,129,.10); border-left: 3px solid #10b981; }
 .dc-bubble-summary {

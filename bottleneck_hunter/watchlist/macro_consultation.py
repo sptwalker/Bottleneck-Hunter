@@ -180,13 +180,16 @@ async def _run_analyst(a: dict, models: list, snapshot_text: str, ctx_text: str,
     llm, provider, model = _analyst_llm(models, a["slot"])
     prompt = _analyst_prompt(a, snapshot_text, ctx_text, question, peer_answer, round)
     full = ""
+    fail_reason = ""
     try:
         async for tok in _iter_tokens(llm, prompt):
             full += tok
             yield "chunk", tok
     except Exception as e:  # noqa: BLE001 单个分析师失败不应中断整条流
-        logger.warning("宏观咨询分析师 %s 生成失败: %s", a["role"], e)
-        err = f"（该分析师生成失败：{e}）"
+        from bottleneck_hunter.llm_clients.fallback import classify_reason
+        fail_reason = classify_reason(e)  # 网络/超时/额度/认证… 供前端判断是否给重试
+        logger.warning("宏观咨询分析师 %s 生成失败(%s): %s", a["role"], fail_reason, e)
+        err = f"（该分析师生成失败：{fail_reason}）"
         full = full + err if full else err
         yield "chunk", err
     if budget:
@@ -194,6 +197,9 @@ async def _run_analyst(a: dict, models: list, snapshot_text: str, ctx_text: str,
     entry = {"type": "analyst", "ts": _now_iso(), "round": round, "role": a["role"],
              "name": a["label"], "provider": provider, "model": model,
              "content": full, "reply_to": None}
+    if fail_reason:  # 打标记：前端据此在该气泡显示「🔄 重试」按钮
+        entry["failed"] = True
+        entry["fail_reason"] = fail_reason
     yield "done", (entry, provider, model)
 
 
@@ -264,7 +270,7 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
 
     当日已有 snapshot+开场则只回放历史、不重复调用模型（防重复烧钱）。
     """
-    models = get_models_for_role("L1_macro")
+    models = get_models_for_role("L1_macro", with_fallback=True)
     if not models:
         yield _sse("error", message="无可用 LLM（请在 AI 配置中为 L1_macro 配置模型）")
         return
@@ -319,7 +325,8 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
             else:
                 entry, provider, model = payload
                 transcript.append(entry)
-                yield _sse("msg_done", role=a["role"], round=0, provider=provider, model=model)
+                yield _sse("msg_done", role=a["role"], round=0, provider=provider, model=model,
+                           failed=entry.get("failed", False), fail_reason=entry.get("fail_reason", ""))
 
     meta["message_count"] = len(transcript)
     store.update_meeting_review(record_id, transcript_json=transcript, result_json=meta)
@@ -333,7 +340,7 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
     if not question:
         yield _sse("error", message="问题为空")
         return
-    models = get_models_for_role("L1_macro")
+    models = get_models_for_role("L1_macro", with_fallback=True)
     if not models:
         yield _sse("error", message="无可用 LLM（请在 AI 配置中为 L1_macro 配置模型）")
         return
@@ -378,7 +385,8 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
                 entry, provider, model = payload
                 transcript.append(entry)
                 round1[a["role"]] = entry["content"]
-                yield _sse("msg_done", role=a["role"], round=1, provider=provider, model=model)
+                yield _sse("msg_done", role=a["role"], round=1, provider=provider, model=model,
+                           failed=entry.get("failed", False), fail_reason=entry.get("fail_reason", ""))
 
     # ROUND 2：带入对方 round1 全文，互评辩论
     if do_round2 and len(active) >= 2:
@@ -394,7 +402,8 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
                     entry, provider, model = payload
                     entry["reply_to"] = peer["role"] if peer else None
                     transcript.append(entry)
-                    yield _sse("msg_done", role=a["role"], round=2, provider=provider, model=model)
+                    yield _sse("msg_done", role=a["role"], round=2, provider=provider, model=model,
+                               failed=entry.get("failed", False), fail_reason=entry.get("fail_reason", ""))
 
     # ponytail: 整条覆盖写；单用户单抽屉够用（前端 send 期间禁用输入是主防线），
     # 出现真并发再上行级 merge。
@@ -403,6 +412,82 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
 
     await _maybe_compress(store, budget, record_id)
     yield _sse("done", message_count=len(transcript))
+
+
+async def stream_retry(store: WatchlistStore, budget: BudgetTracker | None,
+                       market: str, role: str, provider: str = "", model: str = ""):
+    """手动重试某位分析师**最近一条**消息（网络波动/额度不足等中断后）。
+
+    重建该消息当轮的上下文重跑，**原位替换** transcript 里那条失败消息。
+    可选 provider/model：留空用该角色该槽的模型（网络类原地重试）；指定则换模型重试（容量/额度类）。
+    """
+    market = normalize_market(market)
+    session = _load_session(store, market)
+    if not session:
+        yield _sse("error", message="无历史会话可重试")
+        return
+    transcript = list(session.get("transcript_json") or [])
+    idx = next((i for i in range(len(transcript) - 1, -1, -1)
+                if transcript[i].get("type") == "analyst" and transcript[i].get("role") == role), None)
+    if idx is None:
+        yield _sse("error", message="未找到该分析师的消息")
+        return
+    a = next((x for x in ANALYSTS if x["role"] == role), None)
+    if not a:
+        yield _sse("error", message=f"未知分析师: {role}")
+        return
+    failed_msg = transcript[idx]
+    rnd = failed_msg.get("round", 0)
+
+    # 解析模型：指定 provider/model → 换模型重试；否则取该角色该槽模型（原地重试）
+    if provider and model:
+        from bottleneck_hunter.llm_clients.factory import create_llm
+        try:
+            model_tuple = (create_llm(provider, model, with_fallback=True), provider, model)
+        except Exception as e:  # noqa: BLE001
+            yield _sse("error", message=f"模型创建失败: {e}")
+            return
+    else:
+        models = get_models_for_role("L1_macro", with_fallback=True)
+        if not models:
+            yield _sse("error", message="无可用 LLM（请在 AI 配置中为 L1_macro 配置模型）")
+            return
+        model_tuple = _analyst_llm(models, a["slot"])
+
+    # 重建上下文：排除失败消息本身（避免"生成失败"文案污染），snapshot/上下文/提问/对方答复按轮复现
+    ctx_src = [m for i, m in enumerate(transcript) if i != idx]
+    snapshot_text = _latest_snapshot_text(ctx_src)
+    ctx_text = _context_for_prompt(ctx_src)
+    question = ""
+    if rnd >= 1:
+        question = next((m.get("content", "") for m in reversed(transcript[:idx])
+                         if m.get("type") == "user"), "")
+    peer_ans = ""
+    if rnd == 2:
+        peer = next((x for x in ANALYSTS if x["role"] != role), None)
+        if peer:
+            peer_ans = next((m.get("content", "") for m in transcript
+                             if m.get("type") == "analyst" and m.get("role") == peer["role"]
+                             and m.get("round") == 1), "")
+
+    yield _sse("retry_start", role=role, round=rnd)
+    new_entry = None
+    async for kind, payload in _run_analyst(a, [model_tuple], snapshot_text, ctx_text, question, peer_ans, rnd, budget):
+        if kind == "chunk":
+            yield _sse("chunk", role=role, round=rnd, text=payload)
+        else:
+            new_entry = payload[0]
+    if new_entry is None:
+        yield _sse("error", message="重试未产出结果")
+        return
+    new_entry["reply_to"] = failed_msg.get("reply_to")
+    transcript[idx] = new_entry  # 原位替换失败消息
+    store.update_meeting_review(session["id"], transcript_json=transcript,
+                                result_json=dict(session.get("result_json") or {}))
+    yield _sse("msg_done", role=role, round=rnd, provider=new_entry.get("provider", ""),
+               model=new_entry.get("model", ""), failed=bool(new_entry.get("failed")),
+               fail_reason=new_entry.get("fail_reason", ""))
+    yield _sse("retry_done", role=role, round=rnd)
 
 
 async def _maybe_compress(store: WatchlistStore, budget: BudgetTracker | None, record_id: str) -> None:
@@ -421,7 +506,7 @@ async def _maybe_compress(store: WatchlistStore, budget: BudgetTracker | None, r
     if len(pending) < SUMMARY_TRIGGER:
         return
 
-    models = get_models_for_role("L1_macro")
+    models = get_models_for_role("L1_macro", with_fallback=True)
     if not models:
         return
     llm, provider, model = models[0]

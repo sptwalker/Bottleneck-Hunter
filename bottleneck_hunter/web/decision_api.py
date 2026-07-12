@@ -133,6 +133,13 @@ class MacroConsultAsk(BaseModel):
     question: str = ""
 
 
+class MacroConsultRetry(BaseModel):
+    market: str = "us_stock"
+    role: str = ""
+    provider: str = ""   # 留空=原模型原地重试(网络类)；指定=换模型重试(容量/额度类)
+    model: str = ""
+
+
 @router.post("/macro/consult/open")
 async def macro_consult_open(request: Request, market: str = "us_stock",
                              user: dict = Depends(get_current_user)):
@@ -149,6 +156,18 @@ async def macro_consult_ask(request: Request, req: MacroConsultAsk,
     from bottleneck_hunter.watchlist.macro_consultation import stream_consult
     store = _user_store(user).for_market(req.market)
     return _sse_response(request, stream_consult(store, _user_budget(user), req.market, req.question))
+
+
+@router.post("/macro/consult/retry")
+async def macro_consult_retry(request: Request, req: MacroConsultRetry,
+                              user: dict = Depends(get_current_user)):
+    """手动重试某位分析师最近一条失败消息（网络波动/额度不足等中断后，SSE）。"""
+    from bottleneck_hunter.watchlist.macro_consultation import stream_retry
+    if not req.role:
+        raise HTTPException(status_code=400, detail="缺少 role")
+    store = _user_store(user).for_market(req.market)
+    return _sse_response(request, stream_retry(store, _user_budget(user), req.market,
+                                               req.role, req.provider, req.model))
 
 
 @router.get("/macro/consult/history")
