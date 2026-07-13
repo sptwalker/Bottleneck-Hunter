@@ -10,6 +10,18 @@ import { readSSEStream } from './sse.js';
 import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, exportMeeting, MEETING_ROLES } from './ai-features.js';
 import { openDrawer, closeDrawer } from './drawer.js';
 
+// 市值上限：美股用美元、A股用人民币；推荐默认值 美股300亿 / A股500亿
+const MAX_CAP_DEFAULTS = { us_stock: 300, a_stock: 500 };
+export function capUnit(market) { return market === 'a_stock' ? '亿人民币' : '亿美元'; }
+function syncMaxCapForMarket(market, { setDefault = false } = {}) {
+  const unitEl = document.getElementById('wiz-max-cap-unit');
+  if (unitEl) unitEl.textContent = capUnit(market);
+  if (setDefault) {
+    const capEl = document.getElementById('wiz-max-cap');
+    if (capEl) capEl.value = String(MAX_CAP_DEFAULTS[market] ?? 300);
+  }
+}
+
 // 最终评分/入围双击 → 统一企业详情抽屉（ranked 项已是完整 scorecard，直接传入用于系统评分页签）
 function openPhaseDrawer(r) {
   if (!r || !window.openCompanyDrawer) { openDrawer(r); return; }  // 兜底回旧抽屉
@@ -1233,6 +1245,7 @@ function applySectorConfig(s) {
   if (marketSel) marketSel.value = s.market || 'us_stock';
   const startMarketSel = document.getElementById('wiz-market');
   if (startMarketSel) startMarketSel.value = s.market || 'us_stock';
+  syncMaxCapForMarket(s.market || 'us_stock', { setDefault: true });
   const sectorEl = document.getElementById('wiz-sector');
   if (sectorEl) sectorEl.value = s.sector || '';
   const productEl = document.getElementById('wiz-product');
@@ -1350,6 +1363,11 @@ export function initWizard() {
   renderSectorButtons();
   initCtxMenu();
   initSidebar();
+
+  // 市场切换 → 同步市值上限的货币单位与推荐默认值
+  document.getElementById('wiz-market')?.addEventListener('change', (e) => {
+    syncMaxCapForMarket(e.target.value || 'us_stock', { setDefault: true });
+  });
 
   setP2SelectionCallback((selectedTickers) => {
     if (state.phase3) state.p3NeedsUpdate = true;
@@ -1623,7 +1641,7 @@ async function loadWizardHistory() {
       return `
       <tr data-id="${a.id}" class="company-row-clickable">
         <td>${buildAnalysisTag(a)}</td>
-        <td>${a.max_market_cap_yi ? '≤' + a.max_market_cap_yi + '亿' : '-'}</td>
+        <td>${a.max_market_cap_yi ? '≤' + a.max_market_cap_yi + capUnit(a.market) : '-'}</td>
         <td>${a.max_depth || '-'}层</td>
         <td>${a.supplier_count || 0}</td>
         <td>${_fmtHistDate(a)}</td>
@@ -1725,6 +1743,7 @@ async function loadWizardAnalysis(analysisId) {
       const p0Market = document.getElementById('wiz-market');
       if (p1Market) p1Market.value = data.market || 'us_stock';
       if (p0Market) p0Market.value = data.market || 'us_stock';
+      syncMaxCapForMarket(data.market || 'us_stock', { setDefault: false });
 
       // ── 恢复 Phase 0 表单 ──
       const sectorEl = document.getElementById('wiz-sector');
@@ -1886,7 +1905,7 @@ async function loadAllHistory() {
       return `
       <tr data-id="${a.id}">
         <td>${buildAnalysisTag(a)}</td>
-        <td>${a.max_market_cap_yi ? '≤' + a.max_market_cap_yi + '亿' : '-'}</td>
+        <td>${a.max_market_cap_yi ? '≤' + a.max_market_cap_yi + capUnit(a.market) : '-'}</td>
         <td>${a.max_depth || '-'}层</td>
         <td>${a.supplier_count || 0}</td>
         <td>${_fmtHistDate(a)}</td>

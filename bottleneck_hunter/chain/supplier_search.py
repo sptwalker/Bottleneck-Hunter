@@ -451,7 +451,8 @@ class SupplierSearcher:
 
         if self._is_us:
             cap_hint = (
-                f"Prefer companies with market cap under ${self.max_market_cap_yi}B"
+                f"Prefer companies with market cap under ${self.max_market_cap_yi / 10:.0f}B "
+                f"(i.e. {self.max_market_cap_yi}亿美元)"
                 if self.max_market_cap_yi else ""
             )
             sys_msg = (
@@ -466,7 +467,7 @@ class SupplierSearcher:
             )
         elif self._is_all:
             cap_hint = (
-                f"优先推荐市值在 {self.max_market_cap_yi} 亿元（或 ${self.max_market_cap_yi}B）以下的中小盘股"
+                f"优先推荐市值在 {self.max_market_cap_yi} 亿（A股按人民币、美股约 ${self.max_market_cap_yi / 10:.0f}B）以下的中小盘股"
                 if self.max_market_cap_yi else ""
             )
             sys_msg = "你是产业链供应商研究专家，精通 A 股和美股市场。股票代码必须是真实、当前仍在交易的代码。"
@@ -711,16 +712,19 @@ class SupplierSearcher:
         if not self.max_market_cap_yi or not candidates:
             return candidates
 
+        # 阈值单位统一为「亿(原生货币)」。美股候选 market_cap 存的是 $B，需 /10 换算（$1B = 10亿美元）
+        cap_threshold = self.max_market_cap_yi / 10 if self._is_us else self.max_market_cap_yi
+
         under_cap = [
             s for s in candidates
-            if s.market_cap is not None and s.market_cap <= self.max_market_cap_yi
+            if s.market_cap is not None and s.market_cap <= cap_threshold
         ]
         if under_cap:
             return under_cap
 
         sorted_by_cap = sorted(candidates, key=lambda s: s.market_cap if s.market_cap is not None else float("inf"))
         kept = sorted_by_cap[: self.max_results]
-        cap_unit = "$B" if self._is_us else "亿"
+        cap_unit = "亿美元" if self._is_us else "亿"
         logger.info(
             f"[{node_name}] 所有候选市值均超过 {self.max_market_cap_yi}{cap_unit}，"
             f"保留市值最小的 {len(kept)} 家"
