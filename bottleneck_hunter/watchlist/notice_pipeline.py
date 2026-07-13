@@ -73,7 +73,9 @@ def _fetch_notices_sync(ticker: str, limit: int = 15) -> list[dict]:
     code = _extract_code(ticker)
     if not code:
         return []
-    df = ak.stock_notice_report(symbol=code)
+    # stock_notice_report(symbol=公告类型, date) 是「全市场按日」接口，传股票代码会 KeyError；
+    # 个股公告用 stock_individual_notice_report(security=代码)。
+    df = ak.stock_individual_notice_report(security=code)
     if df is None or df.empty:
         return []
 
@@ -83,7 +85,7 @@ def _fetch_notices_sync(ticker: str, limit: int = 15) -> list[dict]:
         if not title:
             continue
         date_str = str(row.get("公告日期", row.get("日期", "")))[:10]
-        source_url = str(row.get("公告链接", row.get("链接", "")))
+        source_url = str(row.get("网址", row.get("公告链接", row.get("链接", ""))))
         fid = hashlib.md5(f"{ticker}:{title}:{date_str}".encode()).hexdigest()[:12]
         category = _classify_notice(title)
         results.append({

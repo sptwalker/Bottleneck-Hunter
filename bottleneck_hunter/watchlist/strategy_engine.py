@@ -110,7 +110,8 @@ async def refresh_intelligence_one(
             yield _sse("stock_intel_progress", ticker=ticker, step="llm_brief",
                        message=f"{ticker} 正在调用 LLM 生成情报简报...")
             try:
-                brief_text, key_signals = await _generate_brief(llm, ticker, aggregated, budget)
+                brief_text, key_signals = await _generate_brief(llm, ticker, aggregated, budget,
+                                                                provider=_sp_prov, model=_sp_model)
                 yield _sse("stock_intel_progress", ticker=ticker, step="brief_generated",
                            message=f"{ticker} 情报简报已生成")
             except Exception as e:
@@ -284,7 +285,8 @@ async def _aggregate_source_scorecard(entry_id: str, entry: dict) -> dict:
         return {}
 
 
-async def _generate_brief(llm, ticker: str, aggregated: dict, budget: BudgetTracker) -> tuple[str, list[dict]]:
+async def _generate_brief(llm, ticker: str, aggregated: dict, budget: BudgetTracker,
+                          provider: str = "", model: str = "") -> tuple[str, list[dict]]:
     """LLM 生成情报简报"""
     prompt = f"""你是资深投资分析师。请根据以下数据为股票 {ticker} 生成简明情报简报。
 
@@ -309,7 +311,7 @@ SEC与内部交易：{json.dumps(aggregated["sec"], ensure_ascii=False)}
 
         # 记录消耗
         if budget:
-            budget.record(_sp_prov or "unknown", _sp_model or "unknown", 800, 300, "intelligence_brief")
+            budget.record(provider or "unknown", model or "unknown", 800, 300, "intelligence_brief")
 
         # 解析
         parts = response.strip().split("---")

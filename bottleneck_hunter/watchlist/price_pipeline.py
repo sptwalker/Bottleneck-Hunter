@@ -112,14 +112,18 @@ def _extract_astock_code(ticker: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 @with_retry(max_retries=3, base_delay=1.0)
-def _fetch_daily_data(ticker: str, days: int = 180) -> list[dict]:
-    """Fetch OHLCV from yfinance and compute RSI/MACD/SMA. Synchronous."""
+def _fetch_daily_data(ticker: str, days: int = 180) -> tuple[list[dict], dict]:
+    """Fetch OHLCV from yfinance and compute RSI/MACD/SMA. Synchronous.
+
+    返回 (snapshots, company_info)——与 A 股路径一致的二元组，空数据也返回 ([], {})，
+    避免调用方解包失败。
+    """
     t = yf.Ticker(ticker)
     period = "1y" if days > 180 else "6mo"
     df: pd.DataFrame = t.history(period=period)
     if df is None or df.empty:
         logger.warning("No price data for %s", ticker)
-        return []
+        return [], {}
 
     closes = df["Close"].tolist()
     volumes = df["Volume"].tolist()
@@ -225,15 +229,19 @@ def _fetch_astock_fundamentals(code: str) -> dict:
 
 
 @with_retry(max_retries=3, base_delay=1.0)
-def _fetch_astock_daily(ticker: str, days: int = 180) -> list[dict]:
-    """Fetch A-stock OHLCV via akshare + compute RSI/MACD/SMA + PE/市值. Synchronous."""
+def _fetch_astock_daily(ticker: str, days: int = 180) -> tuple[list[dict], dict]:
+    """Fetch A-stock OHLCV via akshare + compute RSI/MACD/SMA + PE/市值. Synchronous.
+
+    返回 (snapshots, company_info)——与成功路径一致的二元组，避免调用方
+    `snapshots, company_info = fetch_fn(...)` 在空数据时 ValueError 解包失败。
+    """
     if ak is None:
         logger.warning("akshare not installed, cannot fetch A-stock data")
-        return []
+        return [], {}
     code = _extract_astock_code(ticker)
     if not code:
         logger.warning("Cannot extract A-stock code from %s", ticker)
-        return []
+        return [], {}
     start_date = (datetime.now() - timedelta(days=max(days, 365))).strftime("%Y%m%d")
     end_date = datetime.now().strftime("%Y%m%d")
     df = ak.stock_zh_a_hist(
@@ -243,7 +251,7 @@ def _fetch_astock_daily(ticker: str, days: int = 180) -> list[dict]:
     )
     if df is None or df.empty:
         logger.warning("No A-stock price data for %s", ticker)
-        return []
+        return [], {}
 
     closes = [float(v) for v in df["收盘"]]
     volumes = [int(v) for v in df["成交量"]]
