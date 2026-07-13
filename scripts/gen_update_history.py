@@ -24,8 +24,28 @@ import sys
 from pathlib import Path
 
 _MARKERS = ("📢", "[发布]")
+# 无 | 分隔时，在首个自然停顿处把整句切成「标题 + 摘要」，与既有两段式风格一致。
+# 仅用子句停顿（括号/逗号/顿号/分号）；冒号不算分隔（与 | 语义一致，见测试「中文冒号：不拆分」）。
+_SPLIT_SEPS = "（(，,、；;"
 ROOT = Path(__file__).resolve().parents[1]
 JSON_PATH = ROOT / "UPDATE_HISTORY.json"
+
+
+def _auto_split(text: str) -> tuple[str, str]:
+    """无竖线的白话整句 → (标题, 摘要)：在首个自然停顿处切分。纯函数、确定性（保证幂等）。
+
+    - 取首个出现的分隔符（且标题至少 4 字，避免开头就切）。
+    - 括号是补充说明 → 并入摘要；逗号/顿号/分号/冒号 → 作为分隔丢弃。
+    - 找不到合适停顿 → 整句作标题、摘要空（退化为原行为）。
+    """
+    cut = next((i for i, ch in enumerate(text) if ch in _SPLIT_SEPS and i >= 4), None)
+    if cut is None:
+        return text, ""
+    title = text[:cut].strip()
+    if not title:
+        return text, ""
+    summary = text[cut:].strip() if text[cut] in "（(" else text[cut + 1:].strip()
+    return title, summary
 
 
 def parse_marker_lines(body: str) -> list[tuple[str, str]]:
@@ -45,7 +65,7 @@ def parse_marker_lines(body: str) -> list[tuple[str, str]]:
                 out.append((t.strip(), sm.strip()))
                 break
         else:
-            out.append((text, ""))       # 无分隔 → 仅标题
+            out.append(_auto_split(text))  # 无竖线 → 自动切成标题+摘要
     return out
 
 

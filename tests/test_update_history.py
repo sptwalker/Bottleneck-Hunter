@@ -33,6 +33,46 @@ def test_parse_marker_lines(body, expected):
     assert guh.parse_marker_lines(body) == expected
 
 
+# ── 无竖线自动切分（标题+摘要，与两段式风格一致）─────────────
+@pytest.mark.parametrize("text,expected", [
+    ("首页更新历史改为按时间排序，修复同日沉底问题", ("首页更新历史改为按时间排序", "修复同日沉底问题")),
+    ("观察池上限改为各自独立（每市场24只）说明", ("观察池上限改为各自独立", "（每市场24只）说明")),  # 括号并入摘要
+    ("桌面借道启动不再被拦；已在观察池标签", ("桌面借道启动不再被拦", "已在观察池标签")),
+    ("一句没有任何停顿的话", ("一句没有任何停顿的话", "")),          # 无停顿 → 仅标题
+    ("中文冒号：不作分隔", ("中文冒号：不作分隔", "")),               # 冒号不切
+])
+def test_auto_split(text, expected):
+    assert guh._auto_split(text) == expected
+
+
+def test_auto_split_deterministic():
+    """确定性：同输入两次一致（保证生成器幂等）。"""
+    t = "瓶颈分析市值上限按市场显示货币单位（美股亿美元），推荐值300亿"
+    assert guh._auto_split(t) == guh._auto_split(t)
+
+
+def test_no_pipe_commit_becomes_title_plus_summary():
+    """整句 📢（无竖线）经 parse 后应切成标题+非空摘要。"""
+    out = guh.parse_marker_lines("📢 观察池上限改为各自独立（每市场24只），管理员可分市场查看")
+    assert len(out) == 1
+    title, summary = out[0]
+    assert title == "观察池上限改为各自独立"
+    assert summary and summary.startswith("（每市场24只）")
+
+
+def test_merge_sorts_by_ts_then_backfills():
+    """同日按 ts 精确排序；git 已知的旧条目（无 ts）被回填 ts。"""
+    existing = [{"date": "2026-07-13", "title": "早提交", "summary": "x"}]  # 无 ts
+    git = [
+        {"date": "2026-07-13", "ts": "2026-07-13 19:26", "title": "晚提交", "summary": "y"},
+        {"date": "2026-07-13", "ts": "2026-07-13 07:00", "title": "早提交", "summary": "x"},
+    ]
+    out = guh.merge(existing, git)
+    assert out[0]["title"] == "晚提交"                                   # 最新置顶
+    early = [e for e in out if e["title"] == "早提交"]
+    assert len(early) == 1 and early[0]["ts"] == "2026-07-13 07:00"       # 去重 + 回填 ts
+
+
 # ── 合并去重排序 ───────────────────────────────────────
 def test_merge_dedup_by_date_title_and_sorts():
     existing = [{"date": "2026-07-05", "title": "老条目", "summary": "手动写的"}]
