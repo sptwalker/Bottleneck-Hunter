@@ -1016,6 +1016,8 @@ export async function renderPhase4Table(validations, recommendations, rankedResu
   // 推荐加入观察池：推荐分 top3 或事实核查 PASS
   const sortedByFinal = [...recs].sort((a, b) => (b.final_score || 0) - (a.final_score || 0));
   const top3 = new Set(sortedByFinal.slice(0, 3).map(r => r.ticker));
+  // 本次分析所属市场（推荐结构不含 market，从 ranked 结果派生；同一分析所有推荐同市场）
+  const analysisMarket = (rankedResults || []).map(r => r.supplier?.market || r.market).find(Boolean) || '';
   const recLabel = { PASS: '通过', REVIEW: '存疑', REJECT: '否决' };
 
   let html = `<table class="data-table">
@@ -1050,6 +1052,7 @@ export async function renderPhase4Table(validations, recommendations, rankedResu
           data-score="${finalScore.toFixed(2)}"
           data-sector="${sector}"
           data-bottleneck="${bottleneck}"
+          data-market="${ranked?.supplier?.market || analysisMarket || ''}"
           data-analysis-id="${analysisId}">加入观察池</button>`}
       </td></tr>`;
   });
@@ -1065,6 +1068,7 @@ export async function renderPhase4Table(validations, recommendations, rankedResu
       const score = parseFloat(btn.dataset.score) || 0;
       const sector = btn.dataset.sector || '';
       const bottleneck_node = btn.dataset.bottleneck || '';
+      const market = btn.dataset.market || undefined;  // A股需带市场，否则后端按 us_stock 存错池
       const source_analysis_id = btn.dataset.analysisId || null;
       try {
         const res = await fetch('/api/watchlist', {
@@ -1072,7 +1076,7 @@ export async function renderPhase4Table(validations, recommendations, rankedResu
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             ticker, company_name: name, tier: 'track',
-            composite_score: score, sector, source: 'phase4',
+            composite_score: score, sector, source: 'phase4', market,
             source_analysis_id: source_analysis_id || undefined,
             bottleneck_node,
           }),

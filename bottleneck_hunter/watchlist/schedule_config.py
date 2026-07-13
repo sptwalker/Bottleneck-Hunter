@@ -30,7 +30,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "us_auto_review":         {"hour": 7,  "minute": 30},
     "us_institutional_update": {"day_of_week": "sat", "hour": 11, "minute": 0},
     "us_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
-    "cn_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
+    "cn_earnings_update":     {"day_of_week": "sat", "hour": 12, "minute": 0},   # 与美股财报错峰
     "datasource_report":      {"hour": 7, "minute": 30},
     "model_calibration":      {"day_of_week": "sun", "hour": 12, "minute": 0},
     "model_capability_refresh": {"hour": 3, "minute": 0},   # 月度(每月1号)：能力分重测
@@ -40,12 +40,13 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "cn_daily_scan":          {"hour": 18, "minute": 0},
     "cn_daily_decision":      {"hour": 18, "minute": 30},
     "cn_catalyst_scan":       {"hour": 8,  "minute": 0},
-    "cn_weekly_strategy":     {"day_of_week": "sat", "hour": 10, "minute": 0},
+    # A股周末任务与美股错峰半小时，避免两市同刻并发写导致的锁竞争
+    "cn_weekly_strategy":     {"day_of_week": "sat", "hour": 10, "minute": 30},
     "cn_auto_review":         {"hour": 20, "minute": 15},
     # 新增任务
     "stale_refresh":          {"interval_hours": 6},
     "us_full_refresh":        {"day_of_week": "sun", "hour": 7, "minute": 0},
-    "cn_full_refresh":        {"day_of_week": "sun", "hour": 7, "minute": 0},
+    "cn_full_refresh":        {"day_of_week": "sun", "hour": 8, "minute": 0},
 }
 
 

@@ -79,6 +79,21 @@ def test_labels_and_categories_cover_all_specs():
     assert ids - set(sch.list_job_categories()) == set()
 
 
+def test_no_us_cn_same_slot_collision():
+    """美股/A股任务不同刻触发——避免两市同时并发写导致的锁竞争。"""
+    from bottleneck_hunter.watchlist.schedule_config import GLOBAL_SCHEDULE_DEFAULTS as G
+    slots: dict = {}
+    for jid, v in G.items():
+        if "interval_hours" in v:
+            continue
+        key = (v.get("day_of_week", "weekday"), v.get("hour"), v.get("minute"))
+        slots.setdefault(key, []).append(jid)
+    for key, jids in slots.items():
+        us = [j for j in jids if j.startswith(("us_", "macro"))]
+        cn = [j for j in jids if j.startswith("cn_")]
+        assert not (us and cn), f"两市同刻冲突 {key}: {jids}"
+
+
 @pytest.mark.asyncio
 async def test_global_kill_switch_stops_macro_and_datasource(monkeypatch):
     """全局总开关关闭时，macro/datasource/calibration 应早退不动数据。"""
