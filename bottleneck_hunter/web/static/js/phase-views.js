@@ -995,9 +995,16 @@ function shortName(r) {
 }
 
 /* ── Phase 4: 交叉验证表 ─────────────────── */
-export function renderPhase4Table(validations, recommendations, rankedResults) {
+export async function renderPhase4Table(validations, recommendations, rankedResults) {
   const container = document.getElementById('wiz-p4-table');
   if (!container) return;
+
+  // 已在观察池的 ticker 集合 —— 用于把"加入"按钮替换为"已在观察池"标签
+  let inWatchlist = new Set();
+  try {
+    const wl = await fetch('/api/watchlist').then(r => r.ok ? r.json() : { entries: [] });
+    inWatchlist = new Set((wl.entries || []).map(e => e.ticker));
+  } catch (_) { /* 拉取失败则全部显示按钮，不阻塞渲染 */ }
 
   // Phase 4 已重构为 FactCheck Gate：数据在 recommendations（validations 字段已废弃、恒空）
   const recs = (recommendations && recommendations.length) ? recommendations : [];
@@ -1035,13 +1042,15 @@ export function renderPhase4Table(validations, recommendations, rankedResults) {
       <td>${cred != null ? `<span class="score-badge score-badge--sm" style="background:${scoreColor(cred)}">${cred.toFixed(1)}</span>` : '—'}</td>
       <td>${badge}${recTxt ? ` <span class="p4-rec-txt">${recTxt}</span>` : ''}</td>
       <td>
-        <button class="btn btn-sm wl-p4-add-btn ${recommended ? 'wl-p4-add-recommended' : 'wl-p4-add-normal'}"
+        ${inWatchlist.has(ticker)
+          ? '<span class="wl-p4-in-badge">已在观察池</span>'
+          : `<button class="btn btn-sm wl-p4-add-btn ${recommended ? 'wl-p4-add-recommended' : 'wl-p4-add-normal'}"
           data-ticker="${ticker}"
           data-name="${name}"
           data-score="${finalScore.toFixed(2)}"
           data-sector="${sector}"
           data-bottleneck="${bottleneck}"
-          data-analysis-id="${analysisId}">加入观察池</button>
+          data-analysis-id="${analysisId}">加入观察池</button>`}
       </td></tr>`;
   });
 

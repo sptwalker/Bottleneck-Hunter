@@ -16,7 +16,6 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from bottleneck_hunter.chain.graph import run_screening
-from bottleneck_hunter.chain.hot_sector import HotSectorDetector, HotSectorResult
 from bottleneck_hunter.chain.models import MarketRegion
 from bottleneck_hunter.chain.report import generate_report
 
@@ -112,6 +111,7 @@ def _show_hot_sectors() -> None:
     ))
 
     try:
+        from bottleneck_hunter.chain.hot_sector import HotSectorDetector
         detector = HotSectorDetector(top_n=20)
         result = detector.detect()
         _display_hot_sectors(result, console)
@@ -151,6 +151,7 @@ async def _screen_async():
     if mode == ENTRY_MODES[0]:
         # Auto-detect hot sectors first
         try:
+            from bottleneck_hunter.chain.hot_sector import HotSectorDetector
             detector = HotSectorDetector(top_n=15)
             result = detector.detect()
             _display_hot_sectors(result, console)
