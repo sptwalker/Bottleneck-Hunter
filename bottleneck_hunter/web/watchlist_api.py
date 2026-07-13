@@ -117,7 +117,7 @@ async def update_budget(req: UpdateBudgetRequest, user: dict = Depends(get_curre
 
 
 @router.post("/refresh")
-async def refresh_all(request: Request, user: dict = Depends(get_current_user)):
+async def refresh_all(request: Request, market: str | None = None, user: dict = Depends(get_current_user)):
     from bottleneck_hunter.watchlist.scheduler import run_manual_refresh
     store = _user_store(user)
 
@@ -126,7 +126,7 @@ async def refresh_all(request: Request, user: dict = Depends(get_current_user)):
             yield _busy_event()
             return
         try:
-            async for event in run_manual_refresh(user_store=store):
+            async for event in run_manual_refresh(user_store=store, market=market):
                 if await request.is_disconnected():
                     break
                 yield event
@@ -137,7 +137,8 @@ async def refresh_all(request: Request, user: dict = Depends(get_current_user)):
 
 
 @router.post("/refresh/{pipeline}")
-async def refresh_pipeline(pipeline: str, request: Request, user: dict = Depends(get_current_user)):
+async def refresh_pipeline(pipeline: str, request: Request, market: str | None = None,
+                           user: dict = Depends(get_current_user)):
     valid = {"price", "news", "sec", "options"}
     if pipeline not in valid:
         raise HTTPException(status_code=400, detail=f"Unknown pipeline: {pipeline}. Valid: {valid}")
@@ -150,7 +151,7 @@ async def refresh_pipeline(pipeline: str, request: Request, user: dict = Depends
             yield _busy_event()
             return
         try:
-            async for event in run_manual_refresh(pipeline, user_store=store):
+            async for event in run_manual_refresh(pipeline, user_store=store, market=market):
                 if await request.is_disconnected():
                     break
                 yield event

@@ -2094,7 +2094,9 @@ async function _doRefreshData(opts = {}) {
   _showRefreshBar(opts.label || '正在刷新市场数据...');
   let busy = false;
   try {
-    const res = await fetch(`${API}/refresh`, { method: 'POST' });
+    // 只刷新当前市场：避免刷 A股 时触发美股 SEC/期权等数据源
+    const _mkt = wlState.filterMarket || 'us_stock';
+    const res = await fetch(`${API}/refresh?market=${encodeURIComponent(_mkt)}`, { method: 'POST' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -2517,4 +2519,10 @@ export function initWatchlist() {
   loadBudget();
   loadPipelineStatus();
   loadStrategySummaries();
+}
+
+// 每次切换到观察池视图时调用：重新拉取列表，确保刚加入/删除的股票实时可见，无需手动刷新。
+export async function refreshWatchlistOnEnter() {
+  await loadWatchlist();
+  loadPipelineStatus();
 }

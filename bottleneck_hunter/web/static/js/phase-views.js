@@ -14,6 +14,14 @@ let scatterChart = null;
 let radarChart = null;
 let barChart = null;
 let stackChart = null;
+let _p4LastArgs = null;   // 最近一次 renderPhase4Table 入参，供返回视图时重渲染刷新观察池标签
+
+// 若 Phase4 表已渲染过，用缓存入参重渲染——观察池增删后标签保持最新（不残留"已在观察池"）
+export function refreshPhase4Watchlist() {
+  if (_p4LastArgs && document.getElementById('wiz-p4-table')) {
+    renderPhase4Table(..._p4LastArgs);
+  }
+}
 
 /* ── Phase 1: 产业链 + 瓶颈 ─────────────── */
 export function renderPhase1(data) {
@@ -998,6 +1006,8 @@ function shortName(r) {
 export async function renderPhase4Table(validations, recommendations, rankedResults) {
   const container = document.getElementById('wiz-p4-table');
   if (!container) return;
+  // 缓存本次入参，供返回分析视图时重渲染（观察池增删后标签保持最新，不残留"已在观察池"）
+  _p4LastArgs = [validations, recommendations, rankedResults];
 
   // 已在观察池的 ticker 集合 —— 用于把"加入"按钮替换为"已在观察池"标签
   let inWatchlist = new Set();

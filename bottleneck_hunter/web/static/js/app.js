@@ -4,8 +4,9 @@
 
 import { resizeAll, initChartFullscreen, initChainTabs, initWizChainTabs, initWizFullscreen } from './charts.js';
 import { initWizard } from './phases.js';
+import { refreshPhase4Watchlist } from './phase-views.js';
 import { initReverse } from './reverse.js';
-import { initWatchlist } from './watchlist.js';
+import { initWatchlist, refreshWatchlistOnEnter } from './watchlist.js';
 import { initDecision } from './decision.js';
 import { initSimTrading, ensureSimTradingLoaded } from './simtrading.js';
 import { initAIConfig } from './ai-config.js';
@@ -41,6 +42,14 @@ export function showView(viewName) {
       window.appState.tradingDirty = false;
       window.dispatchEvent(new CustomEvent('st-refresh'));
     }
+  }
+  // 进入观察池视图即刷新列表，确保刚加入/删除的股票实时可见（无需手动刷新）
+  if (viewName === 'watchlist') {
+    refreshWatchlistOnEnter();
+  }
+  // 返回产业链分析视图时，若交叉验证表已渲染，刷新其"已在观察池"标签（观察池删过后不再残留）
+  if (viewName === 'screen') {
+    refreshPhase4Watchlist();
   }
 }
 

@@ -333,10 +333,13 @@ async def job_daily_scan(market: str = "us_stock") -> dict:
 # Manual triggers
 # ---------------------------------------------------------------------------
 
-async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistStore | None = None):
+async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistStore | None = None,
+                             market: str | None = None):
     """Manual trigger for one or all pipelines. Yields SSE events.
 
     如果传入 user_store，则只刷新该用户的数据；否则用全局 store。
+    传入 market 时只刷新该市场：仅处理该市场的标的，且 SEC/期权/机构（美股专属）与
+    A股公告（A股专属）按市场跳过——避免刷新 A股 时误触 sec.gov 等美股数据源。
     """
     store = user_store or _wl_store
     budget = BudgetTracker(store) if store else None
@@ -351,16 +354,20 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
         return
 
     by_market = store.get_tickers_by_market()
+    # 按请求市场收敛（None = 全部，兼容旧行为）
+    target_markets = {market: by_market.get(market, [])} if market else by_market
+    _do_us = market in (None, "us_stock")   # 美股专属步骤是否执行
+    _do_cn = market in (None, "a_stock")     # A股专属步骤是否执行
 
     if pipeline is None or pipeline == "price":
         yield _sse("step_start", step="price", message="正在更新价格数据...")
         total_ok = 0
         total_count = 0
-        for market, tickers in by_market.items():
+        for mkt, tickers in target_markets.items():
             if not tickers:
                 continue
             from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
-            result = await fetch_price_batch(tickers, store, market=market)
+            result = await fetch_price_batch(tickers, store, market=mkt)
             total_ok += sum(1 for v in result.values() if v == "ok")
             total_count += len(result)
         store.update_pipeline_status(
@@ -375,15 +382,15 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
     if pipeline is None or pipeline == "news":
         yield _sse("step_start", step="news", message="正在抓取新闻...")
         total_news = 0
-        for market, tickers in by_market.items():
+        for mkt, tickers in target_markets.items():
             if not tickers:
                 continue
             from bottleneck_hunter.watchlist.news_pipeline import fetch_news_batch
-            result = await fetch_news_batch(tickers, store, budget=budget, market=market)
+            result = await fetch_news_batch(tickers, store, budget=budget, market=mkt)
             total_news += sum(result.values())
         yield _sse("step_done", step="news", message=f"新闻抓取完成: {total_news} 条")
 
-    if pipeline is None or pipeline == "sec":
+    if (pipeline is None or pipeline == "sec") and _do_us:
         yield _sse("step_start", step="sec", message="正在查询 SEC 文件...")
         us_tickers = by_market.get("us_stock", [])
         if us_tickers:
@@ -394,7 +401,7 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
         else:
             yield _sse("step_done", step="sec", message="无美股标的，跳过 SEC")
 
-    if pipeline is None or pipeline == "options":
+    if (pipeline is None or pipeline == "options") and _do_us:
         yield _sse("step_start", step="options", message="正在分析期权数据...")
         us_tickers = by_market.get("us_stock", [])
         if us_tickers:
@@ -405,7 +412,7 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
         else:
             yield _sse("step_done", step="options", message="无美股标的，跳过期权")
 
-    if pipeline is None or pipeline == "notice":
+    if (pipeline is None or pipeline == "notice") and _do_cn:
         yield _sse("step_start", step="notice", message="正在查询 A 股公告...")
         cn_tickers = by_market.get("a_stock", [])
         if cn_tickers:
@@ -416,7 +423,7 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
         else:
             yield _sse("step_done", step="notice", message="无 A 股标的，跳过公告")
 
-    if pipeline is None or pipeline == "institutional":
+    if (pipeline is None or pipeline == "institutional") and _do_us:
         yield _sse("step_start", step="institutional", message="正在获取机构持仓与分析师评级...")
         us_tickers = by_market.get("us_stock", [])
         if us_tickers:

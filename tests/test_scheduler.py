@@ -195,3 +195,48 @@ class TestJobDispatching:
         assert "news" in results
         assert "sec" in results
         assert "options" in results
+
+
+class TestManualRefreshMarketScope:
+    """run_manual_refresh 按市场收敛：刷新 A股 不触发美股专属数据源（SEC/期权/机构）。"""
+
+    async def test_a_stock_refresh_skips_sec(self, store):
+        import json as _json
+        from bottleneck_hunter.watchlist.scheduler import run_manual_refresh
+        steps = []
+        with patch("bottleneck_hunter.watchlist.price_pipeline.fetch_price_batch",
+                   new_callable=AsyncMock, return_value={}), \
+             patch("bottleneck_hunter.watchlist.news_pipeline.fetch_news_batch",
+                   new_callable=AsyncMock, return_value={}), \
+             patch("bottleneck_hunter.watchlist.sec_pipeline.fetch_sec_batch",
+                   new_callable=AsyncMock, return_value={}) as msec, \
+             patch("bottleneck_hunter.watchlist.notice_pipeline.fetch_notice_batch",
+                   new_callable=AsyncMock, return_value={}) as mnotice:
+            async for ev in run_manual_refresh(user_store=store, market="a_stock"):
+                if ev["event"] == "step_start":
+                    steps.append(_json.loads(ev["data"])["step"])
+        assert "sec" not in steps and "options" not in steps and "institutional" not in steps
+        assert not msec.called                 # 刷新 A股 绝不碰 SEC
+        assert mnotice.called                  # A股应查公告
+
+    async def test_us_stock_refresh_runs_sec(self, store):
+        import json as _json
+        from bottleneck_hunter.watchlist.scheduler import run_manual_refresh
+        steps = []
+        with patch("bottleneck_hunter.watchlist.price_pipeline.fetch_price_batch",
+                   new_callable=AsyncMock, return_value={}), \
+             patch("bottleneck_hunter.watchlist.news_pipeline.fetch_news_batch",
+                   new_callable=AsyncMock, return_value={}), \
+             patch("bottleneck_hunter.watchlist.sec_pipeline.fetch_sec_batch",
+                   new_callable=AsyncMock, return_value={}) as msec, \
+             patch("bottleneck_hunter.watchlist.options_pipeline.fetch_options_batch",
+                   new_callable=AsyncMock, return_value={}), \
+             patch("bottleneck_hunter.watchlist.institutional_pipeline.fetch_institutional_batch",
+                   new_callable=AsyncMock, return_value={}), \
+             patch("bottleneck_hunter.watchlist.institutional_pipeline.fetch_analyst_batch",
+                   new_callable=AsyncMock, return_value={}):
+            async for ev in run_manual_refresh(user_store=store, market="us_stock"):
+                if ev["event"] == "step_start":
+                    steps.append(_json.loads(ev["data"])["step"])
+        assert "sec" in steps and msec.called   # 美股仍查 SEC
+        assert "notice" not in steps            # 美股不查 A股公告
