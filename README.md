@@ -141,6 +141,18 @@ bottleneck-hunter hot
 
 ---
 
+## 部署（生产）
+
+Web 服务 + 内置定时任务为单容器 Docker 部署。首次部署、升级、回滚与数据源说明见
+**[docs/DEPLOY.md](docs/DEPLOY.md)**。升级只需：
+
+```bash
+git pull origin main
+HOST_PORT=8089 docker compose up -d --build
+```
+
+---
+
 ## 运行测试
 
 本项目配备了完整的单元测试，涵盖了数据结构、模型解析、评分逻辑以及东财热点扫描模块。在开发时可随时通过 pytest 运行：
