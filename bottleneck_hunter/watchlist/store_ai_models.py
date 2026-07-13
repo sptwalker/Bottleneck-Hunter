@@ -569,19 +569,20 @@ class _AIModelsMixin:
 
 
     def sync_role_config_model(self, provider: str, old_model: str, new_model: str) -> int:
-        """provider 默认模型变更时，把角色矩阵里钉着「该 provider + 旧模型」的条目同步到新模型（跨用户）。
+        """provider 默认模型变更时，把角色矩阵里钉着「该 provider + 旧模型」的条目同步到新模型。
 
-        用户改了某 provider 的默认模型后，此前手填矩阵里钉死旧模型的角色会一起跟上，避免"改了不生效"。
-        显式选了别的模型(≠旧默认)的条目不动。返回同步条数。
+        **仅同步本 store 绑定用户的矩阵**（经 _user_filter 收敛）——admin 改共享 provider 默认模型
+        不再改写其他用户的角色配置；各用户的钉选保持自己所有。显式选了别的模型的条目不动。返回同步条数。
         """
         if not provider or not old_model or not new_model or old_model == new_model:
             return 0
         with self._write_conn() as conn:
-            cur = conn.execute(
+            q, p = self._user_filter(
                 "UPDATE ai_role_config SET model = ?, updated_at = ? "
                 "WHERE provider = ? AND model = ? AND is_active = 1",
                 (new_model, _now_iso(), provider, old_model),
             )
+            cur = conn.execute(q, p)
             return cur.rowcount
 
 

@@ -557,8 +557,10 @@ async def llm_recommend_hot_sectors(
     """
     from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_position
     from langchain_core.messages import SystemMessage, HumanMessage
+    from bottleneck_hunter.auth.current_user import get_current_user_id
 
-    cache_key = f"{provider}::{model}"
+    # 缓存键含 user：热点榜由该用户自己的 key/预算生成，不跨用户复用
+    cache_key = f"{get_current_user_id()}::{provider}::{model}"
     if cache_key in _hot_scan_cache:
         ts, cached = _hot_scan_cache[cache_key]
         if time.time() - ts < _HOT_SCAN_TTL:

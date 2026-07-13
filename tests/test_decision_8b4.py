@@ -334,11 +334,12 @@ class TestDecisionAPIFeedback:
     def client(self, store):
         s, *_ = store
         from fastapi.testclient import TestClient
-        from bottleneck_hunter.web.decision_api import router, set_store
+        # 复盘/反馈/经验卡片端点已迁至 trading_api（挂载于 /api/trading）
+        from bottleneck_hunter.web.trading_api import router, set_store
         from fastapi import FastAPI
 
         app = FastAPI()
-        app.include_router(router, prefix="/api/decision")
+        app.include_router(router, prefix="/api/trading")
         set_store(s)
         from bottleneck_hunter.auth.dependencies import get_current_user
         app.dependency_overrides[get_current_user] = lambda: {"sub": "", "username": "test", "role": "admin"}
@@ -346,7 +347,7 @@ class TestDecisionAPIFeedback:
 
     def test_reviews_empty(self, client, store):
         c, s = client
-        resp = c.get("/api/decision/reviews")
+        resp = c.get("/api/trading/reviews")
         assert resp.status_code == 200
         assert resp.json()["reviews"] == []
 
@@ -355,7 +356,7 @@ class TestDecisionAPIFeedback:
         s.create_auto_review("t1", "AAPL", return_pct=5.0,
                              result_json={"trade_quality_score": 7})
 
-        resp = c.get("/api/decision/reviews")
+        resp = c.get("/api/trading/reviews")
         assert resp.status_code == 200
         reviews = resp.json()["reviews"]
         assert len(reviews) == 1
@@ -366,18 +367,18 @@ class TestDecisionAPIFeedback:
         rid = s.create_auto_review("t1", "AAPL", return_pct=5.0,
                                    result_json={"trade_quality_score": 7})
 
-        resp = c.get(f"/api/decision/reviews/{rid}")
+        resp = c.get(f"/api/trading/reviews/{rid}")
         assert resp.status_code == 200
         assert resp.json()["review"]["id"] == rid
 
     def test_review_detail_not_found(self, client, store):
         c, _ = client
-        resp = c.get("/api/decision/reviews/nonexistent")
+        resp = c.get("/api/trading/reviews/nonexistent")
         assert resp.status_code == 404
 
     def test_experience_empty(self, client, store):
         c, _ = client
-        resp = c.get("/api/decision/experience")
+        resp = c.get("/api/trading/experience")
         assert resp.status_code == 200
         assert resp.json()["cards"] == []
 
@@ -385,7 +386,7 @@ class TestDecisionAPIFeedback:
         c, s = client
         s.create_experience_card("global", "", "lesson", "测试卡片", "内容")
 
-        resp = c.get("/api/decision/experience")
+        resp = c.get("/api/trading/experience")
         assert resp.status_code == 200
         cards = resp.json()["cards"]
         assert len(cards) == 1
@@ -395,21 +396,21 @@ class TestDecisionAPIFeedback:
         c, s = client
         cid = s.create_experience_card("global", "", "lesson", "待删除", "内容")
 
-        resp = c.delete(f"/api/decision/experience/{cid}")
+        resp = c.delete(f"/api/trading/experience/{cid}")
         assert resp.status_code == 200
         assert resp.json()["status"] == "deleted"
 
-        resp2 = c.get("/api/decision/experience")
+        resp2 = c.get("/api/trading/experience")
         assert len(resp2.json()["cards"]) == 0
 
     def test_experience_delete_not_found(self, client, store):
         c, _ = client
-        resp = c.delete("/api/decision/experience/nonexistent")
+        resp = c.delete("/api/trading/experience/nonexistent")
         assert resp.status_code == 404
 
     def test_feedback_empty(self, client, store):
         c, _ = client
-        resp = c.get("/api/decision/feedback")
+        resp = c.get("/api/trading/feedback")
         assert resp.status_code == 200
         assert resp.json()["feedback"] == []
 
@@ -417,7 +418,7 @@ class TestDecisionAPIFeedback:
         c, s = client
         s.create_trade_feedback("plan_1", "AAPL", "rejection", "太贵了")
 
-        resp = c.get("/api/decision/feedback")
+        resp = c.get("/api/trading/feedback")
         assert resp.status_code == 200
         feedback = resp.json()["feedback"]
         assert len(feedback) == 1
@@ -429,7 +430,7 @@ class TestDecisionAPIFeedback:
         s.create_auto_review("t1", "AAPL", return_pct=5.0)
         s.create_auto_review("t2", "MSFT", return_pct=-2.0)
 
-        resp = c.get("/api/decision/reviews?ticker=AAPL")
+        resp = c.get("/api/trading/reviews?ticker=AAPL")
         assert resp.status_code == 200
         reviews = resp.json()["reviews"]
         assert len(reviews) == 1
@@ -440,6 +441,6 @@ class TestDecisionAPIFeedback:
         s.create_experience_card("global", "", "lesson", "全局", "内容")
         s.create_experience_card("ticker", "AAPL", "pattern", "个股", "内容")
 
-        resp = c.get("/api/decision/experience?scope=global")
+        resp = c.get("/api/trading/experience?scope=global")
         assert resp.status_code == 200
         assert len(resp.json()["cards"]) == 1

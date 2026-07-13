@@ -137,8 +137,10 @@ CREATE TABLE IF NOT EXISTS pipeline_status (
 );
 
 CREATE TABLE IF NOT EXISTS budget_config (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+    key   TEXT NOT NULL,
+    value TEXT NOT NULL,
+    user_id TEXT DEFAULT '',
+    PRIMARY KEY (key, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS uzi_analyses (

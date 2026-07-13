@@ -21,9 +21,13 @@ def _add_user_id_column(conn: sqlite3.Connection, table: str):
 
 
 def _bind_existing_data(conn: sqlite3.Connection, table: str, admin_id: str) -> int:
-    """将 user_id 为空的记录绑定到 admin 用户。返回影响行数。"""
+    """将 user_id 为空的记录绑定到 admin 用户。返回影响行数。
+
+    用 UPDATE OR IGNORE：budget_config 改为 (key,user_id) 复合主键后，若 admin 已有同 key 行，
+    绑定全局 '' 行会撞主键——IGNORE 跳过该行（admin 自己的值保留，'' 作全局默认留存），不崩启动。
+    """
     cur = conn.execute(
-        f"UPDATE {table} SET user_id = ? WHERE user_id = '' OR user_id IS NULL",
+        f"UPDATE OR IGNORE {table} SET user_id = ? WHERE user_id = '' OR user_id IS NULL",
         (admin_id,),
     )
     return cur.rowcount

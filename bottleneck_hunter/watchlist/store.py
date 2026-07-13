@@ -220,6 +220,7 @@ class WatchlistStore(
                 except sqlite3.OperationalError as e:
                     if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
                         logger.warning("迁移语句执行异常: %s — %s", sql[:80], e)
+            self._migrate_budget_config_pk(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -232,6 +233,33 @@ class WatchlistStore(
             conn.commit()
         finally:
             conn.close()
+
+    def _migrate_budget_config_pk(self, conn) -> None:
+        """budget_config 主键从「仅 key」重建为「(key, user_id)」复合主键。
+
+        旧 schema 下 INSERT OR REPLACE 会让不同用户的同名 key（如 daily_limit_usd）互相覆盖，
+        破坏每用户预算隔离。此处幂等重建（已是复合主键则跳过）。预算数据可再生，重建低风险。
+        """
+        try:
+            info = conn.execute("PRAGMA table_info(budget_config)").fetchall()
+            if not info:
+                return
+            pk_cols = [r["name"] for r in info if r["pk"]]
+            if "user_id" in pk_cols:  # 已是复合主键
+                return
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS budget_config_new "
+                "(key TEXT NOT NULL, value TEXT NOT NULL, user_id TEXT DEFAULT '', "
+                " PRIMARY KEY (key, user_id))"
+            )
+            has_uid = any(r["name"] == "user_id" for r in info)
+            src = "key, value, COALESCE(user_id,'')" if has_uid else "key, value, ''"
+            conn.execute(f"INSERT OR IGNORE INTO budget_config_new(key, value, user_id) SELECT {src} FROM budget_config")
+            conn.execute("DROP TABLE budget_config")
+            conn.execute("ALTER TABLE budget_config_new RENAME TO budget_config")
+            logger.info("budget_config 主键已重建为 (key, user_id)，修复跨用户预算覆盖")
+        except sqlite3.OperationalError as e:
+            logger.warning("budget_config 主键重建失败（可忽略，退回旧行为）: %s", e)
 
 
     def _parse_json_fields(self, d: dict, dict_fields: tuple = (),

@@ -555,8 +555,9 @@ async def reject_execution(plan_id: str, req: RejectRequest, user: dict = Depend
 
 
 @router.post("/executions/clear-all")
-async def clear_all_pending(user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def clear_all_pending(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    # 按市场 scope：只清当前市场的待确认队列，避免误清另一市场
+    store = _user_store(user).for_market(market)
     count = store.clear_pending_executions()
     return {"status": "ok", "cleared": count}
 

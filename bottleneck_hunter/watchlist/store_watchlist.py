@@ -133,13 +133,13 @@ class _WatchlistMixin:
         conn = self._connect()
         try:
             if tier:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM watchlist WHERE tier = ? ORDER BY composite_score DESC, tier_rank ASC",
                     (tier,),
                 )
                 rows = conn.execute(q, p).fetchall()
             else:
-                q, p = self._user_filter(
+                q, p = self._filtered(
                     "SELECT * FROM watchlist ORDER BY tier, composite_score DESC, tier_rank ASC"
                 )
                 rows = conn.execute(q, p).fetchall()
@@ -182,7 +182,7 @@ class _WatchlistMixin:
     def get_tickers(self) -> list[str]:
         conn = self._connect()
         try:
-            q, p = self._user_filter("SELECT ticker FROM watchlist WHERE is_active = 1")
+            q, p = self._filtered("SELECT ticker FROM watchlist WHERE is_active = 1")
             rows = conn.execute(q, p).fetchall()
             return [r["ticker"] for r in rows]
         finally:
@@ -205,7 +205,13 @@ class _WatchlistMixin:
             conn.close()
 
 
+    def _pref_key(self, key: str) -> str:
+        """偏好 key 按市场命名空间化：避免 A股/美股 偏好互相覆盖（user_preferences.key 全局 UNIQUE，
+        无法用独立 market 列区分同名 key）。未 scope 市场时保持原样。"""
+        return f"{self._market}::{key}" if self._market else key
+
     def save_preference(self, key: str, value: str, category: str = "general") -> str:
+        key = self._pref_key(key)
         conn = self._connect()
         try:
             q, p = self._user_filter(
@@ -234,6 +240,24 @@ class _WatchlistMixin:
     def get_preferences(self, category: str | None = None) -> list[dict]:
         conn = self._connect()
         try:
+            # 市场 scope 时只取本市场偏好（key 前缀 "market::"），并剥前缀返回
+            if self._market:
+                prefix = f"{self._market}::"
+                if category:
+                    q, p = self._user_filter(
+                        "SELECT * FROM user_preferences WHERE category = ?", (category,))
+                else:
+                    q, p = self._user_filter("SELECT * FROM user_preferences")
+                rows = conn.execute(q, p).fetchall()
+                out = []
+                for r in rows:
+                    k = str(r["key"] or "")
+                    if not k.startswith(prefix):  # 用 Python 前缀匹配，避开 LIKE 的 '_' 通配陷阱
+                        continue
+                    d = dict(r)
+                    d["key"] = k[len(prefix):]
+                    out.append(d)
+                return out
             if category:
                 q, p = self._user_filter(
                     "SELECT * FROM user_preferences WHERE category = ?", (category,)
@@ -248,6 +272,7 @@ class _WatchlistMixin:
 
 
     def get_preference(self, key: str, default: str = "") -> str:
+        key = self._pref_key(key)
         conn = self._connect()
         try:
             q, p = self._user_filter(

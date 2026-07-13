@@ -251,6 +251,7 @@ class TestMaybeJson:
 
     def test_non_string_passthrough(self):
         from bottleneck_hunter.web.decision_api import _maybe_json
+        # _maybe_json 契约：保证返回 dict；dict 原样，非 dict（list/None）一律 {}
         assert _maybe_json({"x": 2}) == {"x": 2}
-        assert _maybe_json([1, 2]) == [1, 2]
-        assert _maybe_json(None) is None
+        assert _maybe_json([1, 2]) == {}
+        assert _maybe_json(None) == {}

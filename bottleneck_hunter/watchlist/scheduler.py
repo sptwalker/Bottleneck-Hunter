@@ -568,7 +568,7 @@ async def job_auto_review(market: str = "us_stock") -> None:
             from bottleneck_hunter.watchlist.trade_reviewer import run_batch_review
             reviewed_count = 0
             error_count = 0
-            async for evt in run_batch_review(store, budget):
+            async for evt in run_batch_review(market_store, budget):
                 data = evt.get("data", {})
                 event_name = data.get("event", "")
                 if event_name == "review_done":
@@ -598,14 +598,16 @@ async def job_auto_review(market: str = "us_stock") -> None:
 
     # P1.6 用户偏好学习：从确认/拒绝历史归纳偏好写入 user_preferences，供 L4 参考。
     # 需累计足够样本才有意义（交易+反馈 ≥3），否则跳过避免噪声偏好。
+    # 按市场 scope：偏好按市场隔离学习，A股/美股互不污染。
     for uid, store, budget in _iter_users("auto_review"):
         try:
             from bottleneck_hunter.watchlist.preference_learner import learn_preferences
-            sample = len(store.get_sim_trades(limit=50)) + len(store.get_rejection_patterns(limit=50))
+            market_store = store.for_market(market)
+            sample = len(market_store.get_sim_trades(limit=50)) + len(market_store.get_rejection_patterns(limit=50))
             if sample < 3:
                 logger.debug("偏好学习 (user=%s) 跳过 — 样本不足 (%d<3)", uid[:8] if uid else "global", sample)
                 continue
-            prefs = learn_preferences(store)
+            prefs = learn_preferences(market_store)
             logger.info("偏好学习 (user=%s) 完成 — %d 项: %s",
                         uid[:8] if uid else "global", len(prefs), list(prefs.keys()))
         except Exception as e:
@@ -892,8 +894,8 @@ async def job_full_refresh(market: str = "us_stock") -> None:
     try:
         await job_price_update(market)
         await job_daily_scan(market)
-        if market == "us_stock":
-            await job_macro_update()
+        # 宏观刷新两市一致（job_macro_update 内部按有持仓的市场取数；不再仅美股触发）
+        await job_macro_update()
         await job_catalyst_scan()
         # 完整决策（L1→L4+投委会）
         from bottleneck_hunter.watchlist.decision_engine import run_daily_decision

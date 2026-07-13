@@ -59,11 +59,12 @@ class TestSchedulerInit:
     """测试 init_scheduler / shutdown_scheduler / get_job_statuses。"""
 
     @skip_no_apscheduler
-    async def test_init_creates_14_jobs(self, store):
-        """init_scheduler 后应注册 17 个定时任务（6 数据 + 1 institutional + 1 macro + 8 决策 + 1 校准）。"""
+    async def test_init_creates_all_jobs(self, store):
+        """init_scheduler 后应注册 _JOB_SPECS 全部任务 + oplog_prune 维护任务。"""
         from bottleneck_hunter.watchlist.scheduler import (
             get_job_statuses,
             init_scheduler,
+            _JOB_SPECS,
         )
 
         scheduler = init_scheduler(store)
@@ -74,32 +75,9 @@ class TestSchedulerInit:
         scheduler.start(paused=True)
         try:
             jobs = get_job_statuses()
-            assert len(jobs) == 20
-
-            # 验证所有预期 job id 都存在
-            expected_ids = {
-                "us_price_premarket",
-                "us_price_postmarket",
-                "us_daily_scan",
-                "cn_price_premarket",
-                "cn_price_postmarket",
-                "cn_daily_scan",
-                "us_daily_decision",
-                "us_catalyst_scan",
-                "us_weekly_strategy",
-                "us_auto_review",
-                "cn_daily_decision",
-                "cn_catalyst_scan",
-                "cn_weekly_strategy",
-                "cn_auto_review",
-                "macro_update",
-                "us_institutional_update",
-                "model_calibration",
-                # 自动更新方案新增
-                "stale_refresh",
-                "us_full_refresh",
-                "cn_full_refresh",
-            }
+            # 期望集合直接从 _JOB_SPECS 派生（+固定维护任务 oplog_prune），加新任务不用改测试
+            expected_ids = {spec[0] for spec in _JOB_SPECS} | {"oplog_prune"}
+            assert len(jobs) == len(expected_ids)
             actual_ids = {j["id"] for j in jobs}
             assert actual_ids == expected_ids
         finally:
@@ -112,12 +90,13 @@ class TestSchedulerInit:
             get_job_statuses,
             init_scheduler,
             shutdown_scheduler,
+            _JOB_SPECS,
         )
 
         scheduler = init_scheduler(store)
         scheduler.start(paused=True)
         # 关闭之前确认有 job
-        assert len(get_job_statuses()) == 20
+        assert len(get_job_statuses()) == len(_JOB_SPECS) + 1
 
         shutdown_scheduler()
         # 关闭之后应为空

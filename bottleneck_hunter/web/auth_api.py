@@ -124,7 +124,10 @@ async def register(req: RegisterRequest, response: Response):
         raise HTTPException(status_code=409, detail="该邮箱已被注册")
 
     # 生成验证码 + 预哈希密码，存 pending payload（不含明文密码）
+    # 分档比例在注册时从全局默认快照进用户自身，此后 admin 改全局默认不影响该用户
     default_limit = int(store.get_config("default_watchlist_limit", "24"))
+    default_focus = float(store.get_config("watchlist_tier_focus_pct", "0.25"))
+    default_normal = float(store.get_config("watchlist_tier_normal_pct", "0.25"))
     code = _gen_code()
     payload = {
         "username": req.username,
@@ -133,6 +136,8 @@ async def register(req: RegisterRequest, response: Response):
         "password_hash": AuthStore.hash_password(req.password),
         "invite_code": req.invite_code,
         "watchlist_limit": default_limit,
+        "watchlist_focus_pct": default_focus,
+        "watchlist_normal_pct": default_normal,
     }
     store.create_verification(req.email, code, "register", payload)
 
@@ -163,6 +168,8 @@ async def verify_registration(req: VerifyRegistrationRequest, response: Response
         email=payload.get("email", ""),
         password_hash=payload["password_hash"],
         watchlist_limit=int(payload.get("watchlist_limit", 24)),
+        focus_pct=float(payload.get("watchlist_focus_pct", 0.25)),
+        normal_pct=float(payload.get("watchlist_normal_pct", 0.25)),
     )
     invite = payload.get("invite_code")
     if invite:

@@ -61,6 +61,8 @@ class UserInfo(BaseModel):
     role: str = "user"
     is_active: bool = True
     watchlist_limit: int = 24
+    watchlist_focus_pct: float = 0.25
+    watchlist_normal_pct: float = 0.25
     created_at: Optional[str] = None
     last_login_at: Optional[str] = None
 

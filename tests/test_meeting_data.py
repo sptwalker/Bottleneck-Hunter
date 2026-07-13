@@ -27,23 +27,27 @@ class TestSafeFloat:
 class TestFetchAll:
     @pytest.mark.asyncio
     async def test_a_stock(self):
+        from unittest.mock import AsyncMock
         fetcher = MeetingDataFetcher()
-        with patch.object(fetcher, "_fetch_one", return_value={"price": {"latest": 100}}):
-            results = await fetcher.fetch_all(["600519.SH"], "a_stock")
+        with patch.object(fetcher, "_fetch_one", new_callable=AsyncMock,
+                          return_value={"price": {"latest": 100}}):
+            results = await fetcher.fetch_all({"600519.SH": "a_stock"})
             assert "600519.SH" in results
             assert results["600519.SH"]["price"]["latest"] == 100
 
     @pytest.mark.asyncio
     async def test_exception_returns_empty(self):
+        from unittest.mock import AsyncMock
         fetcher = MeetingDataFetcher()
-        with patch.object(fetcher, "_fetch_one", side_effect=RuntimeError("fail")):
-            results = await fetcher.fetch_all(["BAD"], "us_stock")
+        with patch.object(fetcher, "_fetch_one", new_callable=AsyncMock,
+                          side_effect=RuntimeError("fail")):
+            results = await fetcher.fetch_all({"BAD": "us_stock"})
             assert results["BAD"] == {}
 
     @pytest.mark.asyncio
     async def test_empty_tickers(self):
         fetcher = MeetingDataFetcher()
-        results = await fetcher.fetch_all([], "a_stock")
+        results = await fetcher.fetch_all({})
         assert results == {}
 
 

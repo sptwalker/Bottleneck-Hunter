@@ -500,15 +500,17 @@ class _DecisionMixin:
             )
             cur = conn.execute(q, p)
             if cur.rowcount > 0:
-                q2, p2 = self._filtered("SELECT ticker FROM execution_plans WHERE id = ?", (plan_id,))
+                q2, p2 = self._filtered("SELECT ticker, market FROM execution_plans WHERE id = ?", (plan_id,))
                 row = conn.execute(q2, p2).fetchone()
                 if row:
+                    # 反馈市场跟计划自身走（端点常以未 scope 的 store 调用，不能靠 self._market，否则误记默认 us_stock）
+                    plan_market = row["market"] or self._market or "us_stock"
                     conn.execute(
                         f"""INSERT INTO trade_feedback
-                           (id, execution_plan_id, ticker, feedback_type, reason, created_at{self._user_insert_cols()}{self._market_insert_cols()})
-                           VALUES (?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                           (id, execution_plan_id, ticker, feedback_type, reason, market, created_at{self._user_insert_cols()})
+                           VALUES (?,?,?,?,?,?,?{self._user_insert_vals()})""",
                         (uuid.uuid4().hex[:12], plan_id, row["ticker"], "rejection",
-                         reason, _now_iso()) + self._user_insert_params() + self._market_insert_params(),
+                         reason, plan_market, _now_iso()) + self._user_insert_params(),
                     )
             return cur.rowcount > 0
 

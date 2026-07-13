@@ -84,6 +84,25 @@ MARKET_INDEX_KEYS: dict[str, list[str]] = {
     "hk_stock": ["hsi", "hstech"],
 }
 
+# 各市场「专属」宏观指标 key（_GLOBAL_INDICATORS 与 FRED 为全球共享、任何市场都可用，不在此列）。
+# 用于缓存兜底时剔除「他市专属」指标，避免 sp500/北向资金 等串味进另一市场的 L1 宏观口径。
+_MARKET_EXCLUSIVE_KEYS: dict[str, set[str]] = {
+    "us_stock": {"sp500", "nasdaq"},
+    "a_stock": {"cny_usd", "sse_index", "csi300", "northbound_flow"},
+    "hk_stock": {"hsi", "hstech"},
+}
+
+
+def foreign_indicator_keys(markets: list[str]) -> set[str]:
+    """返回不属于给定市场的『他市专属』宏观指标 key 集合（缓存兜底应剔除，防串味）。"""
+    keep: set[str] = set()
+    for m in markets or []:
+        keep |= _MARKET_EXCLUSIVE_KEYS.get(m, set())
+    all_exclusive: set[str] = set()
+    for ks in _MARKET_EXCLUSIVE_KEYS.values():
+        all_exclusive |= ks
+    return all_exclusive - keep
+
 
 # ── FRED（美联储经济数据）：真宏观经济指标，补齐 yfinance 只有行情价格的缺口 ──
 # (显示名, FRED series_id, 是否需按 CPI 计算同比通胀)
@@ -201,8 +220,11 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
     await asyncio.gather(*tasks, return_exceptions=True)
 
     if not results:
+        foreign = foreign_indicator_keys(markets)  # 剔除他市专属指标，防缓存兜底串味
         cached = store.get_latest_macro_snapshots()
         for row in cached:
+            if row["indicator"] in foreign:
+                continue
             results[row["indicator"]] = {
                 "value": row["value"], "change_pct": row.get("change_pct", 0.0) or 0.0,
                 "label": row["indicator"],

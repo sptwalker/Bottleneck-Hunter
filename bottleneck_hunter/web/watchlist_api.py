@@ -66,8 +66,13 @@ def _resolve_tier_caps(user_id: str) -> dict[str, int]:
             total = int(u.watchlist_limit)
         else:
             total = int(_auth_store.get_config("default_watchlist_limit", str(DEFAULT_TOTAL)))
-        focus_pct = float(_auth_store.get_config("watchlist_tier_focus_pct", str(DEFAULT_FOCUS_PCT)))
-        normal_pct = float(_auth_store.get_config("watchlist_tier_normal_pct", str(DEFAULT_NORMAL_PCT)))
+        # 分档比例改为按用户（注册时从全局默认快照）；admin 改全局默认不影响现存用户
+        if u is not None and getattr(u, "watchlist_focus_pct", None) is not None:
+            focus_pct = float(u.watchlist_focus_pct)
+            normal_pct = float(u.watchlist_normal_pct)
+        else:
+            focus_pct = float(_auth_store.get_config("watchlist_tier_focus_pct", str(DEFAULT_FOCUS_PCT)))
+            normal_pct = float(_auth_store.get_config("watchlist_tier_normal_pct", str(DEFAULT_NORMAL_PCT)))
     except Exception:
         logger.warning("解析用户观察池上限失败，回退默认", exc_info=True)
         return derive_tier_caps()

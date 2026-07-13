@@ -142,6 +142,11 @@ class TestHealthEndpoint:
         set_store(store)
 
         _add_ticker(store, "AAPL")
+        # 端点用 include_never_fetched=False（刚加入未抓取的不算陈旧），故给 AAPL 一条 >48h 的旧快照
+        store.save_snapshots([{
+            "ticker": "AAPL", "date": "2020-01-01", "close": 180.0,
+            "fetched_at": "2020-01-01T00:00:00+00:00",
+        }])
         store.update_pipeline_status("price", last_status="success")
 
         client = TestClient(app)

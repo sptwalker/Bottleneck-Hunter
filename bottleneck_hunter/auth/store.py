@@ -55,6 +55,8 @@ class AuthStore:
                     role TEXT DEFAULT 'user',
                     is_active INTEGER DEFAULT 1,
                     watchlist_limit INTEGER DEFAULT 24,
+                    watchlist_focus_pct REAL DEFAULT 0.25,
+                    watchlist_normal_pct REAL DEFAULT 0.25,
                     created_at TEXT,
                     last_login_at TEXT,
                     settings_json TEXT DEFAULT '{}'
@@ -126,6 +128,11 @@ class AuthStore:
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
             if "email" not in cols:
                 conn.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
+            # 分档比例改为每用户（旧用户按当前默认 0.25 快照冻结，admin 改全局默认只影响新用户）
+            if "watchlist_focus_pct" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN watchlist_focus_pct REAL DEFAULT 0.25")
+            if "watchlist_normal_pct" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN watchlist_normal_pct REAL DEFAULT 0.25")
             ds_cols = {r["name"] for r in conn.execute("PRAGMA table_info(data_source_keys)").fetchall()}
             if ds_cols and "verified_at" not in ds_cols:
                 conn.execute("ALTER TABLE data_source_keys ADD COLUMN verified_at TEXT DEFAULT ''")
@@ -166,6 +173,8 @@ class AuthStore:
             role=row["role"] or "user",
             is_active=bool(row["is_active"]),
             watchlist_limit=row["watchlist_limit"] or 24,
+            watchlist_focus_pct=(row["watchlist_focus_pct"] if "watchlist_focus_pct" in keys and row["watchlist_focus_pct"] is not None else 0.25),
+            watchlist_normal_pct=(row["watchlist_normal_pct"] if "watchlist_normal_pct" in keys and row["watchlist_normal_pct"] is not None else 0.25),
             created_at=row["created_at"],
             last_login_at=row["last_login_at"],
             settings_json=row["settings_json"] or "{}",
@@ -195,6 +204,7 @@ class AuthStore:
         self, username: str, password: str = "", role: str = "user",
         display_name: str = "", watchlist_limit: int = 24,
         email: str = "", password_hash: str = "",
+        focus_pct: float = 0.25, normal_pct: float = 0.25,
     ) -> UserInDB:
         user_id = uuid.uuid4().hex[:16]
         pw_hash = password_hash or _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
@@ -202,8 +212,10 @@ class AuthStore:
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO users (id, username, display_name, email, password_hash, role, is_active, "
-                "watchlist_limit, created_at, settings_json) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, '{}')",
-                (user_id, username, display_name, email, pw_hash, role, watchlist_limit, now),
+                "watchlist_limit, watchlist_focus_pct, watchlist_normal_pct, created_at, settings_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, '{}')",
+                (user_id, username, display_name, email, pw_hash, role,
+                 watchlist_limit, focus_pct, normal_pct, now),
             )
         return self.get_user_by_id(user_id)  # type: ignore[return-value]
 

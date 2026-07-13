@@ -87,8 +87,8 @@
       "entry_plan": {
         "ideal_price": 920,
         "acceptable_range": [900, 940],
-        "technical_confirmation": "突破$920阻力位+放量确认",
-        "split_strategy": "60%即时 + 40%回调至$900"
+        "technical_confirmation": "突破关键阻力位+放量确认",
+        "split_strategy": "60%即时 + 40%回调至支撑位"
       },
       "exit_plan": {
         "target_prices": [

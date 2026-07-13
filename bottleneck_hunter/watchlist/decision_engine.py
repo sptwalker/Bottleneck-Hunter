@@ -1631,8 +1631,12 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
     except Exception as e:
         logger.warning("宏观数据采集失败，使用缓存: %s", e)
         macro = {}
+        from bottleneck_hunter.watchlist.macro_data import foreign_indicator_keys
+        foreign = foreign_indicator_keys(active_markets)  # 剔除他市专属指标，防缓存兜底串味
         cached = store.get_latest_macro_snapshots()
         for row in cached:
+            if row["indicator"] in foreign:
+                continue
             macro[row["indicator"]] = {"value": row["value"],
                                        "change_pct": row.get("change_pct", 0.0) or 0.0,
                                        "label": row["indicator"]}
@@ -1830,7 +1834,7 @@ def _get_latest_reviews_for_ticker(store: WatchlistStore, ticker: str) -> list[d
     """获取某 ticker 最近一批投委会评审。"""
     conn = store._connect()
     try:
-        q, p = store._user_filter(
+        q, p = store._filtered(
             """SELECT cr.score FROM committee_reviews cr
                JOIN execution_plans ep ON cr.execution_plan_id = ep.id
                WHERE ep.ticker = ?

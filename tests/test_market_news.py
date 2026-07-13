@@ -49,7 +49,9 @@ class TestFetchMarketNews:
     async def test_graceful_empty_on_failure(self):
         async def boom(query, limit=5, tag=""):
             raise RuntimeError("RSS down")
-        with patch.object(np, "_fetch_rss_news", side_effect=boom):
+        # RSS 全失败后会走 _fetch_cn_market_news 兜底（真实网络）——一并 mock 掉，验证纯降级路径
+        with patch.object(np, "_fetch_rss_news", side_effect=boom), \
+             patch.object(np, "_fetch_cn_market_news", return_value=[]):
             items = await np.fetch_market_news("us_stock")
         assert items == []  # 抓取全失败 → 优雅降级为空，不抛异常
 

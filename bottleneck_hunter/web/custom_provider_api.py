@@ -120,8 +120,9 @@ async def update_provider(provider_id: str, req: CustomProviderRequest, user: di
         if old_model and req.default_model and old_model != req.default_model:
             try:
                 from bottleneck_hunter.watchlist.store import WatchlistStore
-                n = WatchlistStore().sync_role_config_model(provider_id, old_model, req.default_model)
-                logger.info("provider %s 默认模型 %s→%s，已同步 %d 条角色矩阵",
+                # 仅同步 admin 自己的角色矩阵，不改写其他用户的 AI 配置
+                n = WatchlistStore().for_user(uid).sync_role_config_model(provider_id, old_model, req.default_model)
+                logger.info("provider %s 默认模型 %s→%s，已同步 admin 自身 %d 条角色矩阵",
                             provider_id, old_model, req.default_model, n)
             except Exception:
                 logger.warning("同步角色矩阵模型失败", exc_info=True)

@@ -161,8 +161,11 @@ class TestFetchOne:
     @pytest.mark.asyncio
     async def test_error(self):
         store = MagicMock()
-        with patch("bottleneck_hunter.watchlist.options_pipeline._analyze_options_chain",
-                    side_effect=RuntimeError("api down")):
+        store._user_id = ""
+        # _fetch_one 现走 DataHub（get_hub().fetch），异常时返回 "error: ..."
+        from unittest.mock import AsyncMock
+        with patch("bottleneck_hunter.data_provider.hub.DataHub.fetch",
+                   new_callable=AsyncMock, side_effect=RuntimeError("api down")):
             result = await _fetch_one("FAIL", store)
         assert result.startswith("error:")
         store.save_options.assert_not_called()

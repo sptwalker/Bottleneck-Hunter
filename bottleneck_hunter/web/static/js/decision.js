@@ -599,7 +599,7 @@ async function handlePendingAction(e) {
     clearBtn.disabled = true;
     clearBtn.textContent = '清空中...';
     try {
-      const res = await dcFetch('/executions/clear-all', { method: 'POST' });
+      const res = await dcFetch(`/executions/clear-all?market=${encodeURIComponent(dcState.market)}`, { method: 'POST' });
       alert(`已清空 ${res.cleared} 条操作`);
       await loadOverview();
     } catch (err) {

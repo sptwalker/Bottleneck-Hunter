@@ -23,6 +23,9 @@ def store(tmp_path):
         "target_allocation": [{"ticker": "AAPL", "weight": 0.15, "action": "buy"}],
     })
 
+    # execute_trade 现要求真实价快照（拒绝按 LLM 定价成交）；给 AAPL 一条收盘价快照
+    s.save_snapshots([{"ticker": "AAPL", "date": "2026-07-14", "close": 188.0}])
+
     return s, entry_id, macro_id, strat_id
 
 
@@ -181,6 +184,7 @@ class TestTradeExecutor:
             "amount": 9500, "reasoning": "加仓",
         })
         s.confirm_execution(plan_id)
+        s.save_snapshots([{"ticker": "AAPL", "date": "2026-07-14", "close": 190.0}])  # 加仓价快照
 
         from bottleneck_hunter.watchlist.trade_executor import execute_trade
         result = execute_trade(s, plan_id)
@@ -216,12 +220,16 @@ class TestDecisionAPITrade:
     def client(self, store):
         s, *_ = store
         from fastapi.testclient import TestClient
-        from bottleneck_hunter.web.decision_api import router, set_store
+        from bottleneck_hunter.web.decision_api import router as dc_router, set_store as dc_set_store
+        from bottleneck_hunter.web.trading_api import router as tr_router, set_store as tr_set_store
         from fastapi import FastAPI
 
         app = FastAPI()
-        app.include_router(router, prefix="/api/decision")
-        set_store(s)
+        # confirm/reject 在 decision_api；account/equity-history 在 trading_api，两者都挂
+        app.include_router(dc_router, prefix="/api/decision")
+        app.include_router(tr_router, prefix="/api/trading")
+        dc_set_store(s)
+        tr_set_store(s)
         from bottleneck_hunter.auth.dependencies import get_current_user
         app.dependency_overrides[get_current_user] = lambda: {"sub": "", "username": "test", "role": "admin"}
         return TestClient(app), s
@@ -258,7 +266,7 @@ class TestDecisionAPITrade:
 
     def test_equity_history_empty(self, client, store):
         c, s = client
-        resp = c.get("/api/decision/account/equity-history")
+        resp = c.get("/api/trading/account/equity-history")
         assert resp.status_code == 200
         assert resp.json()["history"] == []
 
@@ -271,7 +279,7 @@ class TestDecisionAPITrade:
         })
         c.post(f"/api/decision/executions/{plan_id}/confirm")
 
-        resp = c.get("/api/decision/account/equity-history")
+        resp = c.get("/api/trading/account/equity-history")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["history"]) >= 1
