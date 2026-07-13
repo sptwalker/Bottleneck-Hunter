@@ -11,7 +11,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -206,7 +206,7 @@ class AnalysisStore:
             (analysis_id, seq_no) 元组
         """
         analysis_id = str(uuid.uuid4())
-        now = datetime.now().isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         top_picks = result_dict.get("top_picks", [])
         bottleneck_count = len(result_dict.get("bottleneck_reports", []))
@@ -465,7 +465,7 @@ class AnalysisStore:
                 (
                     json.dumps(result, ensure_ascii=False, default=str),
                     json.dumps(top_picks, ensure_ascii=False),
-                    datetime.now().isoformat(timespec="seconds"),
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     analysis_id,
                 ),
             )
@@ -491,7 +491,7 @@ class AnalysisStore:
                        updated_at = ? WHERE id = ?""",
                 (
                     json.dumps(result, ensure_ascii=False, default=str),
-                    datetime.now().isoformat(timespec="seconds"),
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     analysis_id,
                 ),
             )
@@ -548,7 +548,7 @@ class AnalysisStore:
                     json.dumps(top_picks, ensure_ascii=False),
                     supplier_count,
                     max_market_cap_yi,
-                    datetime.now().isoformat(timespec="seconds"),
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     analysis_id,
                 ),
             )
@@ -592,7 +592,7 @@ class AnalysisStore:
             q, p = self._user_filter(
                 "UPDATE analyses SET result_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(result, ensure_ascii=False, default=str),
-                 datetime.now().isoformat(timespec="seconds"), analysis_id),
+                 datetime.now(timezone.utc).isoformat(timespec="seconds"), analysis_id),
             )
             conn.execute(q, p)
             conn.commit()
@@ -607,7 +607,7 @@ class AnalysisStore:
             return False
         result = record["result_json"]
         result["_phase_status"] = phase_status
-        now = datetime.now().isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._connect() as conn:
             q, p = self._user_filter(
                 "UPDATE analyses SET result_json = ?, updated_at = ? WHERE id = ?",

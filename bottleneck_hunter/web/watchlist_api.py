@@ -240,7 +240,9 @@ async def list_watchlist(tier: str | None = None, user: dict = Depends(get_curre
 
 @router.post("")
 async def add_to_watchlist(req: AddToWatchlistRequest, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+    from bottleneck_hunter.watchlist.store_base import normalize_market
+    # 按市场 scope：容量校验只数该市场，实现分市场独立限额
+    store = _user_store(user).for_market(normalize_market(req.market))
     try:
         data = req.model_dump()
         # 行业统一为细中文：用 company_profile 的 industry 映射，避免存入粗英文 "Technology"

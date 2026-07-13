@@ -3,6 +3,7 @@
  * L1 宏观 / L2 组合 / L3 战术 / L4 执行 / 投委会 / 模拟账户
  */
 import { showConfirm } from './utils/confirm.js';
+import { fmtBJ } from './wizard-state.js';
 import { openReport, buildMeetingReport, buildDecisionReport } from './report-export.js';
 
 const DC_API = '/api/decision';
@@ -316,7 +317,7 @@ function renderMacro(macro) {
     </div>`;
   }
   const ts = macro.created_at || '';
-  if (ts) html += `<div style="font-size:11px;color:var(--muted);margin-top:8px">更新于 ${escDC(ts.replace('T', ' ').slice(0, 16))}</div>`;
+  if (ts) html += `<div style="font-size:11px;color:var(--muted);margin-top:8px">更新于 ${escDC(fmtBJ(ts))}</div>`;
   html += '</div>';
   body.innerHTML = html;
 }
@@ -413,7 +414,7 @@ function renderStrategic(plan) {
     }
 
     const ts = plan.created_at || '';
-    if (ts) html += `<div style="font-size:11px;color:var(--muted);margin-top:8px">更新于 ${escDC(ts.replace('T', ' ').slice(0, 16))}</div>`;
+    if (ts) html += `<div style="font-size:11px;color:var(--muted);margin-top:8px">更新于 ${escDC(fmtBJ(ts))}</div>`;
 
     infoEl.innerHTML = html;
   }
@@ -723,7 +724,7 @@ function renderCommittee(reviews, meta) {
   let header = '';
   if (meta && (meta.ticker || meta.verdict)) {
     const vCls = voteClass(meta.verdict || '');
-    const date = (meta.created_at || '').replace('T', ' ').slice(0, 16);
+    const date = fmtBJ(meta.created_at);
     header = `<div class="dc-committee-meta">
       <span class="dc-committee-ticker">${escDC(meta.ticker || '')}</span>
       <span class="dc-member-decision ${vCls}">${escDC(verdictLabel(meta.verdict || '--'))}</span>
@@ -997,9 +998,7 @@ async function loadSchedulerStatus() {
       bar.style.display = 'none';
       return;
     }
-    const fmtTime = j => j.next_run_at ? new Date(j.next_run_at).toLocaleString('zh-CN', {
-      hour: '2-digit', minute: '2-digit', timeZone: 'UTC'
-    }) + ' UTC' : '--';
+    const fmtTime = j => j.next_run_at ? fmtBJ(j.next_run_at).slice(5) + ' (北京)' : '--';
 
     const usJobs = decisionJobs.filter(j => j.id.startsWith('us_'));
     const cnJobs = decisionJobs.filter(j => j.id.startsWith('cn_'));
@@ -1250,7 +1249,7 @@ function renderMeetings(meetings) {
   body.innerHTML = meetings.map(m => {
     const typeIcon = m.meeting_type === 'roundtable' ? '\u{1F535}' : '\u{1F7E2}';
     const typeLabel = m.meeting_type === 'roundtable' ? '圆桌' : '投委会';
-    const date = (m.created_at || '').replace('T', ' ').slice(0, 16);
+    const date = fmtBJ(m.created_at);
     const verdict = m.final_verdict || '';
 
     // 翻译结论（统一复用 verdictLabel / voteClass）
@@ -1500,9 +1499,7 @@ async function retryConsult(role, round, div) {
 function _consultDividerEl(snap) {
   const div = document.createElement('div');
   div.className = 'dc-consult-divider';
-  const d = new Date(Date.parse(snap.ts || '') || Date.now());
-  const pad = (n) => String(n).padStart(2, '0');
-  const when = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const when = fmtBJ(snap.ts) || _fmtSnapTs(snap.ts);
   // 即时核心市场数据：从 indices/sentiment/macro 精简取几项（名称+值+涨跌）
   const pick = [];
   const take = (obj, n) => Object.entries(obj || {})
@@ -1606,14 +1603,7 @@ function renderConsultSnapshot(snap) {
 }
 
 function _fmtSnapTs(ts) {
-  try {
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return String(ts).slice(0, 10);
-    return d.toLocaleString('zh-CN', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    });
-  } catch { return String(ts).slice(0, 10); }
+  return fmtBJ(ts) || String(ts).slice(0, 10);
 }
 
 function renderConsultLog(transcript) {
@@ -1757,10 +1747,16 @@ const OPLOG_CAT = { auto_update: '🔄 自动更新', user_action: '👤 我的�
 const OPLOG_RESULT = { success: ['成功', 'ok'], partial: ['部分成功', 'warn'], fail: ['失败', 'fail'] };
 
 function _opFmtTs(ts) {
+  if (!ts) return '';
   try {
-    const d = new Date(ts);
-    const p = n => String(n).padStart(2, '0');
-    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    let s = String(ts).trim().replace(' ', 'T');
+    if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) s += 'Z';  // 无时区后缀按 UTC 解析
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return ts;
+    return new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+      second: '2-digit', hour12: false, timeZone: 'Asia/Shanghai',
+    }).format(d).replace(/\//g, '-');
   } catch { return ts || ''; }
 }
 
@@ -1915,7 +1911,7 @@ function renderMeetingDetail(data, container) {
   }
 
   const typeLabel = data.meeting_type === 'roundtable' ? '圆桌会议' : '投委会审议';
-  const date = (data.created_at || '').replace('T', ' ').slice(0, 16);
+  const date = fmtBJ(data.created_at);
 
   let html = '';
 

@@ -2,6 +2,7 @@
  * admin.js — 管理后台面板（用户管理、邀请码、系统配置）
  */
 import { showConfirm } from './utils/confirm.js';
+import { fmtBJ } from './wizard-state.js';
 
 let _currentTab = 'users';
 
@@ -78,13 +79,14 @@ function renderUsers(users) {
     const statusBadge = frozen
       ? '<span class="admin-badge admin-badge-frozen">已冻结</span>'
       : '<span class="admin-badge admin-badge-active">活跃</span>';
-    const wlCount = u.watchlist_count ?? '—';
     const wlLimit = u.watchlist_limit ?? 24;
-    const wlDisplay = `${wlCount} / ${wlLimit}`;
+    // 分市场独立限额：并排显示美股/A股
+    const wlByMkt = u.watchlist_count_by_market || {};
+    const wlDisplay = `美股 ${wlByMkt.us_stock ?? 0}/${wlLimit} · A股 ${wlByMkt.a_stock ?? 0}/${wlLimit}`;
     const anaCount = u.analysis_count ?? '—';
     const aiCount = u.ai_config_count ?? '—';
-    const created = u.created_at ? u.created_at.slice(0, 10) : '—';
-    const lastLogin = u.last_login_at ? u.last_login_at.slice(0, 10) : '从未';
+    const created = u.created_at ? fmtBJ(u.created_at, false) : '—';
+    const lastLogin = u.last_login_at ? fmtBJ(u.last_login_at, false) : '从未';
 
     // 操作按钮
     let actions = `<button class="btn btn-xs admin-action-btn" onclick="window._adminOverview('${u.id}','${esc(u.username)}')">详情</button>`;
@@ -150,7 +152,7 @@ window._adminDelete = async (userId, username) => {
 };
 
 window._adminEditLimit = async (userId, username, current) => {
-  const val = prompt(`设置用户 "${username}" 的观察池上限（股票数）：`, String(current ?? 24));
+  const val = prompt(`设置用户 "${username}" 每个股市的观察池上限（美股、A股各自可容纳的股票数）：`, String(current ?? 24));
   if (val === null) return;
   const limit = parseInt(val, 10);
   if (!Number.isInteger(limit) || limit < 1 || limit > 500) { alert('请输入 1–500 之间的整数'); return; }
@@ -223,14 +225,14 @@ function renderInviteCodes(codes) {
       statusBadge = '<span class="admin-badge admin-badge-used">已使用</span>';
     } else if (!c.is_active) {
       statusBadge = '<span class="admin-badge admin-badge-revoked">已作废</span>';
-    } else if (c.expires_at && c.expires_at < new Date().toISOString()) {
+    } else if (c.expires_at && new Date(c.expires_at).getTime() < Date.now()) {
       statusBadge = '<span class="admin-badge admin-badge-expired">已过期</span>';
     } else {
       statusBadge = '<span class="admin-badge admin-badge-available">可用</span>';
     }
 
-    const created = c.created_at ? c.created_at.slice(0, 10) : '—';
-    const expires = c.expires_at ? c.expires_at.slice(0, 10) : '永不';
+    const created = c.created_at ? fmtBJ(c.created_at, false) : '—';
+    const expires = c.expires_at ? fmtBJ(c.expires_at, false) : '永不';
     const usedBy = c.used_by || '—';
     const canRevoke = !c.used_by && c.is_active;
     const revokeBtn = canRevoke
@@ -428,7 +430,7 @@ function updateTierPreview() {
   if (!el) return;
   if (fp + np >= 1) { el.textContent = '⚠ 重点+一般 需 < 100%'; el.className = 'admin-cfg-status error'; return; }
   const c = deriveTierCaps(total, fp, np);
-  el.textContent = `重点 ${c.focus} / 一般 ${c.normal} / 跟踪 ${c.track}`;
+  el.textContent = `每市场 重点 ${c.focus} / 一般 ${c.normal} / 跟踪 ${c.track}`;
   el.className = 'admin-cfg-status';
 }
 
@@ -512,16 +514,21 @@ function renderOverview(userId, ov, body) {
   let anaHtml = `<div class="admin-ov-sec"><h4>产业链分析文件 <span class="admin-ov-count">${ana.length}</span></h4>`;
   if (ana.length) {
     anaHtml += '<table class="admin-table admin-ov-table"><thead><tr><th>#</th><th>赛道</th><th>终端产品</th><th>市场</th><th>模型</th><th>深度</th><th>TopN</th><th>市值上限(亿)</th><th>进度</th><th>时间</th></tr></thead><tbody>' +
-      ana.map(a => `<tr><td>${a.seq_no ?? '—'}</td><td>${esc(a.sector)}</td><td>${esc(a.end_product)}</td><td>${_mkt(a.market)}</td><td>${esc(a.model || a.provider || '—')}</td><td>${a.max_depth ?? '—'}</td><td>${a.top_n ?? '—'}</td><td>${a.max_market_cap_yi ?? '—'}</td><td>${PHASE_LABEL[a.completed_phases] || a.completed_phases || '—'}</td><td>${(a.created_at || '').slice(0, 10)}</td></tr>`).join('') +
+      ana.map(a => `<tr><td>${a.seq_no ?? '—'}</td><td>${esc(a.sector)}</td><td>${esc(a.end_product)}</td><td>${_mkt(a.market)}</td><td>${esc(a.model || a.provider || '—')}</td><td>${a.max_depth ?? '—'}</td><td>${a.top_n ?? '—'}</td><td>${a.max_market_cap_yi ?? '—'}</td><td>${PHASE_LABEL[a.completed_phases] || a.completed_phases || '—'}</td><td>${fmtBJ(a.created_at, false)}</td></tr>`).join('') +
       '</tbody></table>';
   } else { anaHtml += '<p class="admin-empty">暂无分析记录</p>'; }
   sec.push(anaHtml + '</div>');
 
-  // 观察池
-  const wl = ov.watchlist || { count_by_tier: {}, items: [] };
-  const tc = wl.count_by_tier || {};
+  // 观察池（分市场独立限额 → 分市场展开）
+  const wl = ov.watchlist || { count_by_tier: {}, count_by_tier_by_market: {}, items: [] };
+  const byMkt = wl.count_by_tier_by_market || {};
+  const mktLabels = { us_stock: '美股', a_stock: 'A股' };
   let wlHtml = `<div class="admin-ov-sec"><h4>观察池 <span class="admin-ov-count">${(wl.items || []).length}</span></h4>`;
-  wlHtml += `<p class="admin-ov-sub">重点 ${tc.focus ?? 0} · 一般 ${tc.normal ?? 0} · 跟踪 ${tc.track ?? 0}</p>`;
+  for (const m of ['us_stock', 'a_stock']) {
+    const t = byMkt[m] || {};
+    const sub = (t.focus ?? 0) + (t.normal ?? 0) + (t.track ?? 0);
+    wlHtml += `<p class="admin-ov-sub">${mktLabels[m]} ${sub} — 重点 ${t.focus ?? 0} · 一般 ${t.normal ?? 0} · 跟踪 ${t.track ?? 0}</p>`;
+  }
   if ((wl.items || []).length) {
     wlHtml += '<div class="admin-ov-chips">' + wl.items.map(i => `<span class="admin-chip">${esc(i.ticker)}<small>${esc(i.sector || '')}</small></span>`).join('') + '</div>';
   }

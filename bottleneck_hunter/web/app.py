@@ -15,6 +15,16 @@ from fastapi.responses import FileResponse
 
 load_dotenv()
 
+# 全系统统一北京时间：设置进程时区，使所有 naive datetime.now()/date.today() 及日志时间按北京解析。
+# 显式 aware UTC 存储（_now_iso）与 APScheduler 的显式 Asia/Shanghai 触发器不受影响。
+# Linux（生产 Docker）经 tzset 生效；Windows 无 tzset，本地开发忽略。
+os.environ["TZ"] = "Asia/Shanghai"
+try:
+    import time as _time
+    _time.tzset()
+except AttributeError:
+    pass
+
 _log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
     level=_log_level,
@@ -155,11 +165,21 @@ async def lifespan(app: FastAPI):
         threading.Thread(target=lambda: AnalysisStore().backfill_company_archive(),
                          daemon=True, name="archive-backfill").start()
     except Exception:  # noqa: BLE001
-        logger.debug("企业档案回填线程启动失败", exc_info=True)
+        logging.getLogger(__name__).debug("企业档案回填线程启动失败", exc_info=True)
     scheduler = init_scheduler(_wl_store, auth_store=_auth_store)
     if scheduler:
         scheduler.start()
         logging.getLogger(__name__).info("Watchlist scheduler started")
+        # 启动补跑：重启后立即刷新数据源健康巡检（治「停机跨过巡检点 → 当次漏检」）
+        try:
+            from datetime import datetime, timedelta, timezone as _tz
+            from bottleneck_hunter.watchlist.scheduler import job_datasource_report
+            scheduler.add_job(job_datasource_report, "date",
+                              run_date=datetime.now(_tz.utc) + timedelta(seconds=30),
+                              id="datasource_report_startup", name="Datasource health (startup catch-up)",
+                              replace_existing=True)
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("数据源健康巡检启动补跑注册失败", exc_info=True)
     yield
     shutdown_scheduler()
     shutdown_broadcaster()

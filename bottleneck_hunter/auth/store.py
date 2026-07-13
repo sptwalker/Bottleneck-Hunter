@@ -5,13 +5,24 @@ from __future__ import annotations
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import bcrypt as _bcrypt
 
 from .models import InviteCode, UserInDB
+
+
+def _utcnow() -> datetime:
+    """当前时间（aware UTC）。isoformat 带 +00:00，前端可正确转北京。"""
+    return datetime.now(timezone.utc)
+
+
+def _parse_dt(s: str) -> datetime:
+    """解析存储时间戳；旧数据无时区后缀时按 UTC 处理，保证与 aware now 可比较。"""
+    dt = datetime.fromisoformat(s)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +198,7 @@ class AuthStore:
     ) -> UserInDB:
         user_id = uuid.uuid4().hex[:16]
         pw_hash = password_hash or _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO users (id, username, display_name, email, password_hash, role, is_active, "
@@ -205,7 +216,7 @@ class AuthStore:
         return _bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("utf-8"))
 
     def update_last_login(self, user_id: str):
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         with self._conn() as conn:
             conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now, user_id))
 
@@ -249,7 +260,7 @@ class AuthStore:
         """写入一条验证码记录（同 email+purpose 先清旧记录，保证只有最新一条有效）。"""
         import json
         from datetime import timedelta
-        now = datetime.utcnow()
+        now = _utcnow()
         expires = (now + timedelta(seconds=ttl_seconds)).isoformat()
         with self._conn() as conn:
             conn.execute("DELETE FROM email_verifications WHERE email = ? AND purpose = ?", (email, purpose))
@@ -269,7 +280,7 @@ class AuthStore:
         if not row or not row["created_at"]:
             return None
         try:
-            return (datetime.utcnow() - datetime.fromisoformat(row["created_at"])).total_seconds()
+            return (_utcnow() - _parse_dt(row["created_at"])).total_seconds()
         except (ValueError, TypeError):
             return None
 
@@ -288,7 +299,7 @@ class AuthStore:
                 return False, "验证码不存在或已使用，请重新获取", {}
             # 过期
             try:
-                if datetime.utcnow() > datetime.fromisoformat(row["expires_at"]):
+                if _utcnow() > _parse_dt(row["expires_at"]):
                     conn.execute("DELETE FROM email_verifications WHERE id = ?", (row["id"],))
                     return False, "验证码已过期，请重新获取", {}
             except (ValueError, TypeError):
@@ -326,7 +337,7 @@ class AuthStore:
 
     def create_invite_codes(self, count: int, created_by: str, expires_days: int = 30) -> list[str]:
         codes = []
-        now = datetime.utcnow()
+        now = _utcnow()
         expires = (now + timedelta(days=expires_days)).isoformat() if expires_days > 0 else None
         with self._conn() as conn:
             for _ in range(count):
@@ -353,12 +364,12 @@ class AuthStore:
             )
             if not ic.is_active or ic.used_by:
                 return None
-            if ic.expires_at and ic.expires_at < datetime.utcnow().isoformat():
+            if ic.expires_at and _parse_dt(ic.expires_at) < _utcnow():
                 return None
             return ic
 
     def consume_invite_code(self, code: str, user_id: str):
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         with self._conn() as conn:
             conn.execute(
                 "UPDATE invite_codes SET used_by = ?, used_at = ?, is_active = 0 WHERE code = ?",
@@ -387,7 +398,7 @@ class AuthStore:
     def save_user_api_key(self, user_id: str, provider: str,
                           encrypted_key: str, key_hint: str) -> str:
         """保存或更新用户的 API KEY（已加密）。返回 record id。"""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         record_id = uuid.uuid4().hex[:16]
         with self._conn() as conn:
             # UPSERT: 同一用户+provider 只保留一条
@@ -449,7 +460,7 @@ class AuthStore:
     def save_data_source_key(self, user_id: str, source_id: str, base_url: str,
                              encrypted_key: str, key_hint: str) -> str:
         """保存或更新用户的付费数据源 API KEY（已加密）。base_url 供自定义源。返回 record id。"""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         record_id = uuid.uuid4().hex[:16]
         with self._conn() as conn:
             existing = conn.execute(
@@ -527,7 +538,7 @@ class AuthStore:
         encrypted_key: str, key_hint: str, default_model: str,
     ) -> str:
         """保存或更新自定义 OpenAI 兼容 provider。返回 record id。"""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         record_id = uuid.uuid4().hex[:16]
         with self._conn() as conn:
             existing = conn.execute(

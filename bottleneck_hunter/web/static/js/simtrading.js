@@ -2,6 +2,7 @@
  * simtrading.js — 模拟交易独立模块
  */
 import { showConfirm } from './utils/confirm.js';
+import { fmtBJ } from './wizard-state.js';
 
 const ST_API = '/api/trading';
 
@@ -265,7 +266,7 @@ async function loadPositionHistory(ticker) {
     const parentRow = tbody.querySelector(`tr[data-ticker="${ticker}"]`);
     if (!parentRow) return;
     const html = trades.map(t => {
-      const ts = (t.created_at || '').replace('T', ' ').slice(0, 16);
+      const ts = fmtBJ(t.created_at);
       return `<tr class="st-pos-history" data-parent="${esc(ticker)}">` +
         `<td colspan="2">${ts}</td>` +
         `<td>${actionBadge(t.side)}</td>` +
@@ -319,7 +320,7 @@ function renderTrades(trades) {
   }
   if (empty) empty.style.display = 'none';
   tbody.innerHTML = trades.map(t => {
-    const ts = (t.created_at || '').replace('T', ' ').slice(0, 16);
+    const ts = fmtBJ(t.created_at);
     const reasoning = t.reasoning || '';
     const brief = reasoning.length > 40 ? reasoning.slice(0, 40) + '...' : reasoning;
     return `<tr>` +
@@ -387,7 +388,7 @@ async function loadFeedbackHistory() {
     const items = data.feedback || [];
     if (!items.length) { el.innerHTML = '<p class="st-empty-hint">暂无反馈记录</p>'; return; }
     el.innerHTML = items.map(f => {
-      const ts = (f.created_at || '').replace('T', ' ').slice(0, 16);
+      const ts = fmtBJ(f.created_at);
       const typeLabel = f.feedback_type === 'rejection' ? '否决' : '确认';
       return `<div class="st-review-item"><div class="st-review-header"><span>${esc(ts)} · <strong>${esc(f.ticker)}</strong> · ${typeLabel}</span></div><div class="st-review-body">${esc(f.reason || f.user_note || '无备注')}</div></div>`;
     }).join('');
@@ -427,7 +428,7 @@ async function loadFundHistory() {
     if (!ops.length) { el.innerHTML = '<p style="font-size:12px;color:var(--muted)">暂无资金操作记录</p>'; return; }
     el.innerHTML = '<h4 style="font-size:12px;font-weight:600;margin-bottom:8px">操作记录</h4>' +
       ops.map(o => {
-        const ts = (o.created_at || '').replace('T', ' ').slice(0, 16);
+        const ts = fmtBJ(o.created_at);
         const sign = o.op_type === 'deposit' ? '+' : '-';
         const cls = o.op_type === 'deposit' ? 'st-pnl-pos' : 'st-pnl-neg';
         return `<div class="st-fund-item"><span>${ts}</span><span class="${cls}">${sign}$${fmtNum(o.amount, 2)}</span><span>${esc(o.note || '')}</span></div>`;

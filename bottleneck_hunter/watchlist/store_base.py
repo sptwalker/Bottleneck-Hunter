@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 _DEFAULT_DB = Path(__file__).resolve().parents[2] / "data" / "watchlist.db"
@@ -15,7 +16,8 @@ def _now_iso() -> str:
 
 
 def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # "今天"按北京时间取（A股交易日/用户视角），避免 UTC 在北京凌晨算成昨天
+    return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
 
 # 规范市场枚举。历史数据曾出现裸 "us"，与 "us_stock" 无法跨表关联（导致 composite_score=0、

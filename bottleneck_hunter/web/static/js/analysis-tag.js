@@ -4,6 +4,8 @@
  * buildAnalysisTag(data, opts) → HTML 字符串
  */
 
+import { fmtBJ } from './wizard-state.js';
+
 /* ── 品牌色相映射 (OKLCH hue) ────────────────── */
 const PROVIDER_HUE = {
   deepseek: 220,
@@ -75,11 +77,7 @@ function _phaseDots(completed) {
 
 /* ── 日期格式化（精确到日） ───────────────────── */
 function _fmtDate(ts) {
-  if (!ts) return '';
-  const s = String(ts);
-  const m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
-  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-  return s.slice(0, 10);
+  return fmtBJ(ts, false);
 }
 
 /* ── Tooltip 文本 ─────────────────────────────── */
@@ -101,7 +99,7 @@ function _buildTooltip(data) {
   if (data.bottleneck_count) parts.push(`瓶颈: ${data.bottleneck_count}`);
   if (data.supplier_count) parts.push(`供应商: ${data.supplier_count}`);
   if (data.created_at) {
-    const ts = String(data.created_at).replace('T', ' ').slice(0, 16);
+    const ts = fmtBJ(data.created_at);
     parts.push(`创建: ${ts}`);
   }
   return parts.join('\n');

@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
-# 时区常量：APScheduler CronTrigger 使用本地时间 + timezone 参数，自动适应夏令时/冬令时
-_TZ_US_EASTERN = ZoneInfo("America/New_York")  # EDT (UTC-4) / EST (UTC-5)
+# 时区常量：全系统统一北京时间。APScheduler CronTrigger 使用本地时间 + timezone 参数。
+# 中国无夏令时（Asia/Shanghai 恒为 UTC+8），美股任务已在 schedule_config 里换算为对应北京时刻。
 _TZ_CN = ZoneInfo("Asia/Shanghai")              # CST (UTC+8)，无夏令时
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,12 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
         logger.warning("APScheduler not installed, scheduler disabled. pip install apscheduler")
         return None
 
-    _scheduler = AsyncIOScheduler(timezone="UTC")
+    # 调度器统一北京时区；misfire_grace_time=3600 覆盖事件循环晚点/短暂重启（默认仅 1 秒会漏跑），
+    # coalesce 防重启后堆积重复跑。
+    _scheduler = AsyncIOScheduler(
+        timezone="Asia/Shanghai",
+        job_defaults={"misfire_grace_time": 3600, "coalesce": True, "max_instances": 1},
+    )
 
     # 从全局时间表配置注册所有任务（无配置时回退默认时间）。触发时间可由管理员改后 reschedule。
     from bottleneck_hunter.watchlist.schedule_config import get_global_schedule
@@ -112,7 +117,7 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
     # 操作日志保留清理：每天 03:30 删 >30 天（不入可配时间表，固定后台维护）
     try:
         from apscheduler.triggers.cron import CronTrigger
-        _scheduler.add_job(job_oplog_prune, CronTrigger(hour=3, minute=30),
+        _scheduler.add_job(job_oplog_prune, CronTrigger(hour=3, minute=30, timezone=_TZ_CN),
                            id="oplog_prune", name="Operation log retention (30d)",
                            replace_existing=True, max_instances=1, coalesce=True)
     except Exception as e:  # noqa: BLE001
@@ -479,6 +484,10 @@ async def _drain_sse(gen: AsyncGenerator) -> None:
 
 async def job_macro_update() -> None:
     """定时采集宏观数据（VIX/美债/DXY/北向资金等），存入 macro_snapshots 表。"""
+    from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+    if not is_global_enabled(_auth_store):
+        logger.info("自动更新全局总开关关闭，跳过宏观数据更新")
+        return
     try:
         from bottleneck_hunter.watchlist.macro_data import fetch_macro_data
         if not _wl_store:
@@ -681,6 +690,10 @@ async def job_datasource_report() -> None:
     """每日数据源健康巡检：对已配置的 testable 付费源做连通探测，落 pipeline_status(ds_health:*)。"""
     if not _wl_store:
         return
+    from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+    if not is_global_enabled(_auth_store):
+        logger.info("自动更新全局总开关关闭，跳过数据源健康巡检")
+        return
     import asyncio as _asyncio
 
     from bottleneck_hunter.data_provider.data_source_catalog import (
@@ -713,6 +726,10 @@ async def job_datasource_report() -> None:
 async def job_model_calibration() -> None:
     """周度 AI 模型准确率校准。"""
     if not _wl_store:
+        return
+    from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+    if not is_global_enabled(_auth_store):
+        logger.info("自动更新全局总开关关闭，跳过模型准确率校准")
         return
     from bottleneck_hunter.watchlist.model_calibrator import ModelCalibrator
 
@@ -908,29 +925,29 @@ async def job_oplog_prune() -> None:
 
 
 _JOB_SPECS = [
-    ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "US pre-market price update"),
-    ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "US post-market price update"),
-    ("us_daily_scan",          job_daily_scan,          {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "US daily news/SEC/options scan"),
+    ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US pre-market price update"),
+    ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US post-market price update"),
+    ("us_daily_scan",          job_daily_scan,          {"market": "us_stock"}, _TZ_CN        , "daily",    "US daily news/SEC/options scan"),
     ("cn_price_premarket",     job_price_update,        {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock pre-market price update"),
     ("cn_price_postmarket",    job_price_update,        {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock post-market price update"),
     ("cn_daily_scan",          job_daily_scan,          {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock daily news scan"),
-    ("macro_update",           job_macro_update,        {},                     _TZ_US_EASTERN, "daily",    "Macro data update (VIX/Treasury/DXY)"),
-    ("us_daily_decision",      job_daily_decision,      {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "Daily decision (L1-L4+committee)"),
-    ("us_catalyst_scan",       job_catalyst_scan,       {},                     _TZ_US_EASTERN, "daily",    "Catalyst scan & expiry check"),
-    ("us_weekly_strategy",     job_weekly_strategy,     {"market": "us_stock"}, _TZ_US_EASTERN, "weekly",   "Weekly macro strategy (L1+L2)"),
-    ("us_auto_review",         job_auto_review,         {"market": "us_stock"}, _TZ_US_EASTERN, "daily",    "Auto review unreviewed sells"),
+    ("macro_update",           job_macro_update,        {},                     _TZ_CN        , "daily",    "Macro data update (VIX/Treasury/DXY)"),
+    ("us_daily_decision",      job_daily_decision,      {"market": "us_stock"}, _TZ_CN        , "daily",    "Daily decision (L1-L4+committee)"),
+    ("us_catalyst_scan",       job_catalyst_scan,       {},                     _TZ_CN        , "daily",    "Catalyst scan & expiry check"),
+    ("us_weekly_strategy",     job_weekly_strategy,     {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly macro strategy (L1+L2)"),
+    ("us_auto_review",         job_auto_review,         {"market": "us_stock"}, _TZ_CN        , "daily",    "Auto review unreviewed sells"),
     ("cn_daily_decision",      job_daily_decision,      {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock daily decision (L1-L4+committee)"),
     ("cn_catalyst_scan",       job_catalyst_scan,       {},                     _TZ_CN,         "daily",    "A-stock catalyst scan & expiry"),
     ("cn_weekly_strategy",     job_weekly_strategy,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly macro strategy (L1+L2)"),
     ("cn_auto_review",         job_auto_review,         {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock auto review unreviewed sells"),
-    ("us_institutional_update", job_institutional_update, {},                   _TZ_US_EASTERN, "weekly",   "Weekly institutional holders & analyst ratings"),
-    ("us_earnings_update",     job_earnings_update,     {"market": "us_stock"}, _TZ_US_EASTERN, "weekly",   "Weekly earnings update (FMP, incl. consensus)"),
+    ("us_institutional_update", job_institutional_update, {},                   _TZ_CN        , "weekly",   "Weekly institutional holders & analyst ratings"),
+    ("us_earnings_update",     job_earnings_update,     {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly earnings update (FMP, incl. consensus)"),
     ("cn_earnings_update",     job_earnings_update,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly earnings update (Tushare)"),
-    ("datasource_report",      job_datasource_report,   {},                     _TZ_US_EASTERN, "daily",    "Data source health check & usage report"),
-    ("model_calibration",      job_model_calibration,   {},                     _TZ_US_EASTERN, "weekly",   "Weekly AI model accuracy calibration"),
-    ("model_capability_refresh", job_model_capability_refresh, {},               _TZ_US_EASTERN, "monthly",  "Monthly AI model capability re-test (刷新能力分)"),
+    ("datasource_report",      job_datasource_report,   {},                     _TZ_CN,         "everyday", "Data source health check & usage report"),
+    ("model_calibration",      job_model_calibration,   {},                     _TZ_CN        , "weekly",   "Weekly AI model accuracy calibration"),
+    ("model_capability_refresh", job_model_capability_refresh, {},               _TZ_CN        , "monthly",  "Monthly AI model capability re-test (刷新能力分)"),
     ("stale_refresh",          job_stale_refresh,       {},                     None,           "interval", "Stale watchlist refresh (safety net)"),
-    ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_US_EASTERN, "weekly",   "US full refresh (data+decision)"),
+    ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_CN        , "weekly",   "US full refresh (data+decision)"),
     ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
 ]
 
@@ -948,6 +965,9 @@ def _make_trigger(spec, schedule):
     if kind == "monthly":
         # 每月 1 号（能力分保鲜等低频任务）
         return CronTrigger(day=1, hour=hour, minute=minute, timezone=tz)
+    if kind == "everyday":
+        # 每日含周末（数据源健康巡检：市场不开也要监控连通性）
+        return CronTrigger(hour=hour, minute=minute, timezone=tz)
     dow = s.get("day_of_week", "sat") if kind == "weekly" else "mon-fri"
     return CronTrigger(day_of_week=dow, hour=hour, minute=minute, timezone=tz)
 
@@ -968,26 +988,28 @@ def list_job_categories() -> dict[str, str]:
         "stale_refresh": "watchlist_data",
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
+        "model_capability_refresh": "",
     }
 
 
 def list_job_labels() -> dict[str, dict]:
     """job_id → 中文说明（前端时间配置逐项显示）。含名称/触发时机/时区/频率。"""
     return {
-        # 美股（美东时区，自动适应夏令时）
-        "us_price_premarket":  {"label": "美股·盘前行情更新",      "desc": "开盘前采集行情快照",           "tz": "美东", "freq": "工作日"},
-        "us_price_postmarket": {"label": "美股·盘后行情更新",      "desc": "收盘后更新行情与技术指标",     "tz": "美东", "freq": "工作日"},
-        "us_daily_scan":       {"label": "美股·日报扫描",          "desc": "新闻 / SEC 文件 / 期权异动",    "tz": "美东", "freq": "工作日"},
-        "macro_update":        {"label": "宏观数据更新",          "desc": "VIX / 美债 / 美元指数 / 北向资金", "tz": "美东", "freq": "工作日"},
-        "us_daily_decision":   {"label": "美股·日常决策",          "desc": "L1-L4 分层决策 + 投委会评审",   "tz": "美东", "freq": "工作日"},
-        "us_catalyst_scan":    {"label": "美股·催化剂扫描",        "desc": "检测/判定催化剂事件",           "tz": "美东", "freq": "工作日"},
-        "us_weekly_strategy":  {"label": "美股·每周策略重生成",    "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "美东", "freq": "每周"},
-        "us_auto_review":      {"label": "美股·自动复盘",          "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "美东", "freq": "工作日"},
-        "us_institutional_update": {"label": "机构持仓 & 分析师评级", "desc": "13F 机构持仓与评级（仅美股）", "tz": "美东", "freq": "每周"},
-        "us_earnings_update":  {"label": "美股·财报更新",          "desc": "FMP 财报（含机构一致预期）",   "tz": "美东", "freq": "每周"},
+        # 美股（北京时刻，已按美股时段前后换算；中国无夏令时故固定不漂移）
+        "us_price_premarket":  {"label": "美股·盘前行情更新",      "desc": "开盘前采集行情快照",           "tz": "北京", "freq": "工作日"},
+        "us_price_postmarket": {"label": "美股·盘后行情更新",      "desc": "收盘后更新行情与技术指标",     "tz": "北京", "freq": "工作日"},
+        "us_daily_scan":       {"label": "美股·日报扫描",          "desc": "新闻 / SEC 文件 / 期权异动",    "tz": "北京", "freq": "工作日"},
+        "macro_update":        {"label": "宏观数据更新",          "desc": "VIX / 美债 / 美元指数 / 北向资金", "tz": "北京", "freq": "工作日"},
+        "us_daily_decision":   {"label": "美股·日常决策",          "desc": "L1-L4 分层决策 + 投委会评审",   "tz": "北京", "freq": "工作日"},
+        "us_catalyst_scan":    {"label": "美股·催化剂扫描",        "desc": "检测/判定催化剂事件",           "tz": "北京", "freq": "工作日"},
+        "us_weekly_strategy":  {"label": "美股·每周策略重生成",    "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "北京", "freq": "每周"},
+        "us_auto_review":      {"label": "美股·自动复盘",          "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
+        "us_institutional_update": {"label": "机构持仓 & 分析师评级", "desc": "13F 机构持仓与评级（仅美股）", "tz": "北京", "freq": "每周"},
+        "us_earnings_update":  {"label": "美股·财报更新",          "desc": "FMP 财报（含机构一致预期）",   "tz": "北京", "freq": "每周"},
         "cn_earnings_update":  {"label": "A股·财报更新",           "desc": "Tushare 业绩快报/预告",        "tz": "北京", "freq": "每周"},
-        "datasource_report":   {"label": "数据源健康巡检",        "desc": "付费源连通探测 + 用量汇总",     "tz": "美东", "freq": "工作日"},
-        "model_calibration":   {"label": "AI 模型准确率校准",      "desc": "对比历史预测与实际，更新权重", "tz": "美东", "freq": "每周"},
+        "datasource_report":   {"label": "数据源健康巡检",        "desc": "付费源连通探测 + 用量汇总",     "tz": "北京", "freq": "每日"},
+        "model_calibration":   {"label": "AI 模型准确率校准",      "desc": "对比历史预测与实际，更新权重", "tz": "北京", "freq": "每周"},
+        "model_capability_refresh": {"label": "AI 模型能力分刷新", "desc": "月度重测各模型能力分",         "tz": "北京", "freq": "每月1号"},
         # A股（北京时区）
         "cn_price_premarket":  {"label": "A股·盘前行情更新",       "desc": "开盘前采集行情快照",           "tz": "北京", "freq": "工作日"},
         "cn_price_postmarket": {"label": "A股·盘后行情更新",       "desc": "收盘后更新行情与技术指标",     "tz": "北京", "freq": "工作日"},
@@ -998,7 +1020,7 @@ def list_job_labels() -> dict[str, dict]:
         "cn_auto_review":      {"label": "A股·自动复盘",           "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
         # 新增
         "stale_refresh":       {"label": "陈旧兜底刷新",           "desc": "刷新超过阈值未更新的观察池标的", "tz": "轮询", "freq": "每隔N小时"},
-        "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "美东", "freq": "每周"},
+        "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
     }
 

@@ -110,6 +110,25 @@ export function getMainModel() {
   return { provider, model };
 }
 
+/* ── 北京时间显示 ─────────────────────────── */
+// 把后端时间戳统一显示为北京时间。后端存的是 UTC（多数带 +00:00）；
+// 无时区后缀的旧串按 UTC 处理，避免被浏览器当本地时区。
+export function fmtBJ(iso, withTime = true) {
+  if (!iso) return '';
+  let s = String(iso).trim();
+  // 无 T 的纯日期直接返回
+  if (!s.includes('T') && !s.includes(' ')) return s;
+  s = s.replace(' ', 'T');
+  // 无时区标记（Z 或 ±hh:mm）→ 按 UTC 解析
+  if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) s += 'Z';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return String(iso);
+  const opt = withTime
+    ? { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' }
+    : { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Shanghai' };
+  return new Intl.DateTimeFormat('zh-CN', opt).format(d).replace(/\//g, '-');
+}
+
 /* ── Markdown 格式化 ─────────────────────── */
 export function formatMarkdown(text) {
   if (!text) return '';

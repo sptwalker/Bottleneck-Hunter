@@ -30,8 +30,10 @@
       const u = await resp.json();
       document.getElementById('acc-username').textContent = u.username || '—';
       document.getElementById('acc-email').textContent = u.email || '（未设置）';
+      const limit = u.watchlist_limit ?? 24;
+      const byMkt = u.watchlist_count_by_market || {};
       document.getElementById('acc-watchlist').textContent =
-        `${u.watchlist_count ?? 0} / ${u.watchlist_limit ?? 24}`;
+        `美股 ${byMkt.us_stock ?? 0}/${limit} · A股 ${byMkt.a_stock ?? 0}/${limit}`;
       document.getElementById('acc-role').textContent = u.role === 'admin' ? '管理员' : '普通用户';
     } catch (e) { console.warn('加载账户信息失败', e); }
   }

@@ -23,17 +23,17 @@ class _WatchlistMixin:
             caps = self._effective_tier_caps()
             tier_cap = caps.get(tier, caps.get("track", 12))
             total_cap = sum(caps.values())
-            # 检查分档容量
-            q, p = self._user_filter("SELECT COUNT(*) AS cnt FROM watchlist WHERE tier = ?", (tier,))
+            # 检查分档容量（_filtered = user + market，未 scope 市场时退化为仅 user）
+            q, p = self._filtered("SELECT COUNT(*) AS cnt FROM watchlist WHERE tier = ?", (tier,))
             row = conn.execute(q, p).fetchone()
             if row["cnt"] >= tier_cap:
                 raise ValueError(f"Tier '{tier}' is full (max {tier_cap})")
-            # 检查总容量
-            q, p = self._user_filter("SELECT COUNT(*) AS cnt FROM watchlist")
+            # 检查总容量（按市场，若已 scope）
+            q, p = self._filtered("SELECT COUNT(*) AS cnt FROM watchlist")
             total = conn.execute(q, p).fetchone()
             if total["cnt"] >= total_cap:
                 raise ValueError(f"Watchlist is full (max {total_cap})")
-            # 检查重复
+            # 检查重复（ticker 唯一，与市场无关）
             q, p = self._user_filter("SELECT id FROM watchlist WHERE ticker = ?", (entry["ticker"],))
             existing = conn.execute(q, p).fetchone()
             if existing:
@@ -169,7 +169,7 @@ class _WatchlistMixin:
     def count_by_tier(self) -> dict[str, int]:
         conn = self._connect()
         try:
-            q, p = self._user_filter("SELECT tier, COUNT(*) AS cnt FROM watchlist GROUP BY tier")
+            q, p = self._filtered("SELECT tier, COUNT(*) AS cnt FROM watchlist GROUP BY tier")
             rows = conn.execute(q, p).fetchall()
             result = {"focus": 0, "normal": 0, "track": 0}
             for r in rows:

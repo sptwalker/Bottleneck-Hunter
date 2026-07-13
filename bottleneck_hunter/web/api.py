@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from pathlib import Path
@@ -1041,7 +1041,7 @@ analysis='''请结合方法论背景和数据，对堆叠图进行系统解读�
                 for start in range(0, len(full_text), chunk_size):
                     yield {"event": "chunk", "data": json.dumps({"text": full_text[start:start + chunk_size]}, ensure_ascii=False)}
 
-            gen_at = datetime.now().isoformat(timespec="seconds")
+            gen_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             yield {"event": "done", "data": json.dumps({
                 "full_text": full_text.strip(),
                 "model": _model,

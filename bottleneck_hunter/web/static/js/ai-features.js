@@ -2,7 +2,7 @@
  * ai-features.js — AI 圆桌会议、图表解读、横向对比报告
  */
 
-import { state, logMsg, getMainModel, formatMarkdown } from './wizard-state.js';
+import { state, logMsg, getMainModel, formatMarkdown, fmtBJ } from './wizard-state.js';
 import { readSSEStream } from './sse.js';
 import { openReport, buildRoundtableReport } from './report-export.js';
 
@@ -394,7 +394,7 @@ function _updateExpandMeta(panel, data) {
   const timeEl = panel.querySelector('.ai-expand-time');
   if (modelEl && data.model) modelEl.textContent = data.model;
   if (timeEl && data.generated_at) {
-    const ts = data.generated_at.replace('T', ' ').slice(0, 19);
+    const ts = fmtBJ(data.generated_at);
     timeEl.textContent = ts;
   }
 }

@@ -85,12 +85,22 @@ async def list_users(user: dict = Depends(_require_admin)):
         uid = info["id"]
         # 轻量计数（明细在 /overview 按需拉，避免用户多时 N+1 卡顿）
         info["watchlist_count"] = 0
+        info["watchlist_count_by_market"] = {"us_stock": 0, "a_stock": 0}
         info["analysis_count"] = 0
         info["ai_config_count"] = 0
         if _wl_store:
             try:
+                from bottleneck_hunter.watchlist.store_base import normalize_market
                 us = _wl_store.for_user(uid)
-                info["watchlist_count"] = len(us.list_all())
+                entries = us.list_all()
+                info["watchlist_count"] = len(entries)
+                # 从已加载的 entries 在内存分市场计数，避免每用户再发 2 次 count_by_tier 查询
+                by_mkt = {"us_stock": 0, "a_stock": 0}
+                for e in entries:
+                    m = normalize_market(e.get("market"))
+                    if m in by_mkt:
+                        by_mkt[m] += 1
+                info["watchlist_count_by_market"] = by_mkt
                 info["ai_config_count"] = len(us.get_role_configs(user_id=uid))
             except Exception:
                 pass
@@ -215,7 +225,7 @@ async def get_user_overview(user_id: str, user: dict = Depends(_require_admin)):
     except Exception:
         logger.warning("读取用户 %s 分析记录失败", user_id, exc_info=True)
 
-    watchlist = {"count_by_tier": {}, "items": []}
+    watchlist = {"count_by_tier": {}, "count_by_tier_by_market": {}, "items": []}
     accounts: list[dict] = []
     positions: list[dict] = []
     ai_config: list[dict] = []
@@ -224,6 +234,9 @@ async def get_user_overview(user_id: str, user: dict = Depends(_require_admin)):
         us = _wl_store.for_user(user_id)
         try:
             watchlist["count_by_tier"] = us.count_by_tier()
+            watchlist["count_by_tier_by_market"] = {
+                m: us.for_market(m).count_by_tier() for m in ("us_stock", "a_stock")
+            }
             watchlist["items"] = [
                 {"ticker": e.get("ticker"), "tier": e.get("tier"),
                  "sector": e.get("sector"), "company_name": e.get("company_name")}

@@ -72,6 +72,19 @@ def _watchlist_count(user_id: str) -> int:
         return 0
 
 
+def _watchlist_count_by_market(user_id: str) -> dict[str, int]:
+    """分市场观察池数量（美股/A股），供账户小徽标分市场展示。"""
+    if _wl_store is None:
+        return {"us_stock": 0, "a_stock": 0}
+    try:
+        us = _wl_store.for_user(user_id)
+        return {m: sum(us.for_market(m).count_by_tier().values())
+                for m in ("us_stock", "a_stock")}
+    except Exception:
+        logger.warning("获取分市场观察池数量失败", exc_info=True)
+        return {"us_stock": 0, "a_stock": 0}
+
+
 # ── 登录 ──────────────────────────────────────────────────
 
 @router.post("/login")
@@ -210,6 +223,7 @@ async def me(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=401, detail="用户不存在")
     info = UserInfo(**db_user.model_dump()).model_dump()
     info["watchlist_count"] = _watchlist_count(db_user.id)
+    info["watchlist_count_by_market"] = _watchlist_count_by_market(db_user.id)
     return info
 
 

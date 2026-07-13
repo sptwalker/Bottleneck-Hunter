@@ -3,6 +3,7 @@
  * 表格/卡片双模式 + 搜索/筛选/排序 + 详情抽屉 + UZI 分析
  */
 import { showConfirm } from './utils/confirm.js';
+import { fmtBJ } from './wizard-state.js';
 import { buildDetailGrid } from './phase-views.js';
 
 const API = '/api/watchlist';
@@ -222,7 +223,9 @@ function render() {
   }
 
   const countBadge = document.getElementById('wl-count-badge');
-  if (countBadge) countBadge.textContent = `${wlState.total} / ${wlState.limits.total}`;
+  // 分市场独立限额：徽标只数当前切换市场的持仓
+  const mktEntries = wlState.entries.filter(e => (e.market || 'us_stock') === wlState.filterMarket);
+  if (countBadge) countBadge.textContent = `${mktEntries.length} / ${wlState.limits.total}`;
 
   const emptyEl = document.getElementById('wl-empty');
   const tableView = document.getElementById('wl-table-view');
@@ -323,7 +326,10 @@ function renderCards() {
     const countEl = document.getElementById(`wl-tier-count-${tier}`);
     if (!grid) continue;
 
-    const items = wlState.entries.filter(e => e.tier === tier);
+    // 分市场独立限额：卡片只显示当前切换市场的持仓与计数
+    const items = wlState.entries.filter(
+      e => e.tier === tier && (e.market || 'us_stock') === wlState.filterMarket
+    );
     if (countEl) countEl.textContent = `${items.length} / ${tierLimits[tier]}`;
 
     if (items.length === 0) {
@@ -659,7 +665,7 @@ async function loadInfoTab(entry) {
 
   /* ── 来源 & 加入时间：仅观察池条目显示（入围/最终评选等分析环节不显示）── */
   if (entry.id) {
-    const addedDate = entry.added_at ? new Date(entry.added_at).toLocaleString('zh-CN') : '未知';
+    const addedDate = entry.added_at ? fmtBJ(entry.added_at) : '未知';
     const sourceLabel = isPhase4 ? '系统推荐（Phase 4 产业链分析）' : '手动添加';
     html += `<div class="wl-info-meta">
       <div class="wl-info-meta-row"><span class="wl-info-meta-label">加入时间</span><span>${addedDate}</span></div>
@@ -943,7 +949,7 @@ async function loadDecisionTrace(ticker, market) {
     }
     let html = '<div class="wl-trace-chain">';
     layers.forEach((layer, i) => {
-      const ts = (layer.updated_at || '').replace('T', ' ').slice(0, 16);
+      const ts = fmtBJ(layer.updated_at);
       html += `<div class="wl-trace-layer">
         <div class="wl-trace-level">${escHtml(layer.level)}</div>
         <div class="wl-trace-content">
@@ -2375,7 +2381,7 @@ async function loadIntelligenceTab(entry) {
                 <span style="font-size:var(--fs-xs);opacity:0.6">${statusLabel} ${h.status}</span>
                 ${isLatest ? '<span style="font-size:var(--fs-xs);color:var(--primary);font-weight:600">当前</span>' : ''}
               </div>
-              <div style="font-size:var(--fs-xs);opacity:0.6;margin-top:4px">${new Date(h.created_at).toLocaleString('zh-CN')}</div>
+              <div style="font-size:var(--fs-xs);opacity:0.6;margin-top:4px">${fmtBJ(h.created_at)}</div>
               ${h.brief_text ? `<div style="font-size:var(--fs-sm);margin-top:6px;opacity:0.8">${escHtml(h.brief_text.substring(0, 100))}${h.brief_text.length > 100 ? '...' : ''}</div>` : ''}
             </div>
           </div>`;
@@ -2390,7 +2396,7 @@ async function loadIntelligenceTab(entry) {
       <div class="wl-intel-detail">
         <div class="wl-intel-header">
           <div style="font-size:var(--fs-lg);font-weight:600;color:var(--accent)">情报简报 <span style="opacity:0.6;font-size:var(--fs-sm)">v${intel.version}</span></div>
-          <div style="font-size:var(--fs-xs);opacity:0.6">${new Date(intel.created_at).toLocaleString('zh-CN')}</div>
+          <div style="font-size:var(--fs-xs);opacity:0.6">${fmtBJ(intel.created_at)}</div>
         </div>
         ${intel.brief_text ? `
           <div class="wl-intel-section">
@@ -2451,7 +2457,7 @@ async function loadStrategyTab(entry) {
                 <span style="font-size:var(--fs-xs);opacity:0.6">信心 ${h.confidence}/10</span>
                 ${isLatest ? '<span style="font-size:var(--fs-xs);color:var(--primary);font-weight:600">当前</span>' : ''}
               </div>
-              <div style="font-size:var(--fs-xs);opacity:0.6;margin-top:4px">${new Date(h.created_at).toLocaleString('zh-CN')}</div>
+              <div style="font-size:var(--fs-xs);opacity:0.6;margin-top:4px">${fmtBJ(h.created_at)}</div>
               ${h.core_logic ? `<div style="font-size:var(--fs-sm);margin-top:6px;opacity:0.8">${escHtml(h.core_logic.substring(0, 100))}${h.core_logic.length > 100 ? '...' : ''}</div>` : ''}
             </div>
           </div>`;

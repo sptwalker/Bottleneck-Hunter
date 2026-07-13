@@ -3,6 +3,8 @@
  * 纯 fetch 拉取 /api/data-report/overview 渲染健康/用量/覆盖矩阵。仿 auto-update.js。
  */
 
+import { fmtBJ } from './wizard-state.js';
+
 const DR_API = '/api/data-report';
 
 function esc(s) {
@@ -47,9 +49,9 @@ function _sourcesSection(sources) {
     const cfg = s.configured ? '已配置' : '<span style="color:var(--muted)">未配置</span>';
     const test = s.testable ? '' : '<span class="aic-hint">（无自助API）</span>';
     const err = s.last_error ? `<span style="color:var(--down,#dc2626)">${esc(s.last_error)}</span>` : '';
-    return `<tr><td>${dot} ${esc(s.name)} ${test}</td><td>${cfg}</td><td>${esc(s.health)}</td><td>${err}</td><td class="aic-hint">${esc((s.last_run_at || '').slice(0, 16).replace('T', ' '))}</td></tr>`;
+    return `<tr><td>${dot} ${esc(s.name)} ${test}</td><td>${cfg}</td><td>${esc(s.health)}</td><td>${err}</td><td class="aic-hint">${esc(fmtBJ(s.last_run_at))}</td></tr>`;
   }).join('');
-  return `<h4 style="margin:4px 0 8px">数据源健康</h4>
+  return `<h4 style="margin:4px 0 8px">数据源健康 <span class="aic-hint" style="font-weight:400">（时间为北京时间）</span></h4>
     <table class="aic-test-table"><thead><tr><th>数据源</th><th>配置</th><th>状态</th><th>错误</th><th>上次巡检</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="5" class="aic-hint">无数据源</td></tr>'}</tbody></table>`;
 }
@@ -75,7 +77,7 @@ function _pipelinesSection(pipelines) {
     const dot = HEALTH_DOT[p.last_status] || '⚪';
     return `<tr><td>${dot} ${esc(p.pipeline_name)}</td><td>${esc(p.last_status || '')}</td>
       <td>${p.stocks_processed || 0}/${p.stocks_total || 0}</td>
-      <td class="aic-hint">${esc((p.last_run_at || '').slice(0, 16).replace('T', ' '))}</td>
+      <td class="aic-hint">${esc(fmtBJ(p.last_run_at))}</td>
       <td style="color:var(--down,#dc2626)">${esc(p.last_error || '')}</td></tr>`;
   }).join('');
   return `<h4 style="margin:16px 0 8px">采集管线状态</h4>

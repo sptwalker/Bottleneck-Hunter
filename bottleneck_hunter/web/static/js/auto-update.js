@@ -3,13 +3,16 @@
  * 用户：总开关 + 分类开关 + 陈旧阈值 + 每类"立即刷新"。管理员：全局时间表编辑。
  */
 
+import { fmtBJ } from './wizard-state.js';
+
 const API = '/api/settings';
 const CATS = ['watchlist_data', 'daily_decision', 'weekly_strategy', 'auto_review', 'catalyst', 'full_refresh'];
 
 function _fmtNext(iso) {
   if (!iso) return '—';
-  try { return new Date(iso).toLocaleString('zh-CN', { hour12: false }).slice(5, 16); }
-  catch { return '—'; }
+  // 北京时间，去掉年份只留月-日 时:分
+  const s = fmtBJ(iso);
+  return s ? s.slice(5) : '—';
 }
 
 let _state = null;

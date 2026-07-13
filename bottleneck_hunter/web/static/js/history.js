@@ -3,6 +3,7 @@
  */
 
 import { showView } from './app.js';
+import { fmtBJ } from './wizard-state.js';
 import {
   renderChain, renderBottlenecks, renderSuppliers,
   renderValidation, renderPicks, renderShortlist,
@@ -183,12 +184,5 @@ function esc(str) {
 }
 
 function formatDate(isoStr) {
-  if (!isoStr) return '';
-  try {
-    const d = new Date(isoStr);
-    const pad = n => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  } catch {
-    return isoStr;
-  }
+  return fmtBJ(isoStr);
 }

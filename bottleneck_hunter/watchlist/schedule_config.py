@@ -15,25 +15,26 @@ logger = logging.getLogger(__name__)
 GLOBAL_ENABLED_KEY = "auto_update_global_enabled"
 SCHEDULE_KEY = "auto_update_schedule"
 
-# 各定时任务的默认触发时间（时/分为本地市场时区；weekly/interval 特殊字段）。
-# 与 scheduler.py 原硬编码保持一致，作为无配置时的回退。
+# 各定时任务的默认触发时间（时/分均为北京时间；weekly/interval 特殊字段）。
+# 全系统统一北京时区：美股任务按「美股时段前后」换算为固定北京时刻（中国无夏令时，全年不漂移）。
+# 依据：美股收盘 16:00ET=北京次日04:00(夏)/05:00(冬)，开盘09:30ET=北京21:30(夏)/22:30(冬)。
 GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
-    # 美股（America/New_York）
-    "us_price_premarket":     {"hour": 9,  "minute": 0},
-    "us_price_postmarket":    {"hour": 16, "minute": 30},
-    "us_daily_scan":          {"hour": 18, "minute": 0},
-    "macro_update":           {"hour": 18, "minute": 30},
-    "us_daily_decision":      {"hour": 19, "minute": 0},
-    "us_catalyst_scan":       {"hour": 8,  "minute": 0},
+    # 美股（北京时间；收盘后/开盘前留足余量）
+    "us_price_premarket":     {"hour": 21, "minute": 0},   # US 开盘前（<21:30）抓前收
+    "us_price_postmarket":    {"hour": 5,  "minute": 30},  # US 收盘后（>05:00）抓当日收盘
+    "us_daily_scan":          {"hour": 6,  "minute": 0},
+    "macro_update":           {"hour": 5,  "minute": 45},
+    "us_daily_decision":      {"hour": 6,  "minute": 30},  # 在数据 job 之后
+    "us_catalyst_scan":       {"hour": 7,  "minute": 0},
     "us_weekly_strategy":     {"day_of_week": "sat", "hour": 10, "minute": 0},
-    "us_auto_review":         {"hour": 20, "minute": 0},
+    "us_auto_review":         {"hour": 7,  "minute": 30},
     "us_institutional_update": {"day_of_week": "sat", "hour": 11, "minute": 0},
     "us_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
     "cn_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
     "datasource_report":      {"hour": 7, "minute": 30},
     "model_calibration":      {"day_of_week": "sun", "hour": 12, "minute": 0},
     "model_capability_refresh": {"hour": 3, "minute": 0},   # 月度(每月1号)：能力分重测
-    # A股（Asia/Shanghai）
+    # A股（北京时间）
     "cn_price_premarket":     {"hour": 9,  "minute": 0},
     "cn_price_postmarket":    {"hour": 16, "minute": 0},
     "cn_daily_scan":          {"hour": 18, "minute": 0},

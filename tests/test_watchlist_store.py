@@ -245,3 +245,36 @@ class TestUpcomingCatalysts:
 
         titles_90 = {c["title"] for c in store.get_upcoming_catalysts(days=90)}
         assert {"near event", "far event"} <= titles_90
+
+
+# ═════════════════════════════════════════════════════════
+# 分市场独立限额（美股/A股各自一份上限）
+# ═════════════════════════════════════════════════════════
+
+class TestPerMarketCap:
+    def test_cap_is_independent_per_market(self, store):
+        """限额分市场独立：美股 track 加满后，A股 track 仍可加。"""
+        from bottleneck_hunter.watchlist.tier_limits import derive_tier_caps
+        base = store.for_user("u1", tier_caps=derive_tier_caps(8, 0.25, 0.25))  # track=4
+        us = base.for_market("us_stock")
+        a = base.for_market("a_stock")
+        for i in range(4):
+            us.add(_make_entry(f"US{i}", "track", market="us_stock"))
+        with pytest.raises(ValueError, match="full"):
+            us.add(_make_entry("USX", "track", market="us_stock"))
+        # A股同档不受美股影响
+        for i in range(4):
+            a.add(_make_entry(f"A{i}", "track", market="a_stock"))
+        with pytest.raises(ValueError, match="full"):
+            a.add(_make_entry("AX", "track", market="a_stock"))
+
+    def test_count_by_tier_scoped_per_market(self, store):
+        """count_by_tier 按市场 scope 时互不含对方；未 scope 时为两市合计。"""
+        base = store.for_user("u2")
+        base.for_market("us_stock").add(_make_entry("US1", "focus", market="us_stock"))
+        base.for_market("a_stock").add(_make_entry("A1", "focus", market="a_stock"))
+        base.for_market("a_stock").add(_make_entry("A2", "track", market="a_stock"))
+        assert base.for_market("us_stock").count_by_tier() == {"focus": 1, "normal": 0, "track": 0}
+        assert base.for_market("a_stock").count_by_tier() == {"focus": 1, "normal": 0, "track": 1}
+        # 未 scope（_market=""）= 合计，向后兼容
+        assert base.count_by_tier() == {"focus": 2, "normal": 0, "track": 1}

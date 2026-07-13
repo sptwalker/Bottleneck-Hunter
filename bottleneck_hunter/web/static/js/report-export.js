@@ -5,6 +5,8 @@
  * 无后端依赖，数据来自前端已加载的会议记录 / 决策概览。
  */
 
+import { fmtBJ } from './wizard-state.js';
+
 /* ── 小工具 ─────────────────────────────────────── */
 const ROLE_LABELS = {
   risk_officer: '风险控制官', growth_investor: '成长投资人',
@@ -17,7 +19,7 @@ function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-function fmtDate(ts) { return String(ts || '').replace('T', ' ').slice(0, 16); }
+function fmtDate(ts) { return fmtBJ(ts); }
 function parseJSON(v) { if (typeof v === 'string') { try { return JSON.parse(v); } catch { return {}; } } return v || {}; }
 function asArr(v) { if (Array.isArray(v)) return v; if (v == null || v === '') return []; return [v]; }
 function num(v, d = 2) { const n = Number(v); return Number.isFinite(n) ? n.toLocaleString('zh-CN', { maximumFractionDigits: d }) : '--'; }
@@ -328,7 +330,7 @@ export function buildRoundtableReport(meeting) {
 export function buildDecisionReport(data, market) {
   const d = data || {};
   const mkt = MARKET_LABELS[market] || market || '';
-  const now = new Date().toLocaleString('zh-CN', { hour12: false });
+  const now = fmtBJ(new Date().toISOString());
 
   let html = `<div class="rpt-head"><h1>决策中心总结报告</h1>`
     + `<div class="sub">市场：${esc(mkt)} · 生成时间：${esc(now)}</div></div>`;
