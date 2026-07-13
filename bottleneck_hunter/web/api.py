@@ -494,8 +494,8 @@ async def update_history(user: dict = Depends(get_current_user)):
                 break
         except Exception as e:
             logger.warning("读取更新历史失败 (%s): %s", path, e)
-    # 按日期倒序（容错：无 date 的排后），全部返回
-    items.sort(key=lambda x: str(x.get("date", "")), reverse=True)
+    # 按提交时间倒序：优先完整 ts（YYYY-MM-DD HH:MM），无则按当日 00:00（容错排后）
+    items.sort(key=lambda x: x.get("ts") or (str(x.get("date", "")) + " 00:00"), reverse=True)
     return {"updates": items}
 
 

@@ -50,30 +50,41 @@ def parse_marker_lines(body: str) -> list[tuple[str, str]]:
 
 
 def merge(existing: list[dict], git_records: list[dict]) -> list[dict]:
-    """合并现有条目 + git 提取记录：按 (date, title) 去重（保留已有），按 date 倒序。纯函数。
+    """合并现有条目 + git 提取记录：按 (date, title) 去重（保留已有），按完整时间 ts 倒序。纯函数。
 
-    去重键含 date：同一 title 在不同日期视为不同更新，允许「改了 commit 里的白话文案」
-    在新日期下生效（旧条目仍保留，需要时手动删）。同日同 title 才算重复。
+    去重键含 date（天）：同一 title 在不同日期视为不同更新。
+    ts（YYYY-MM-DD HH:MM）用于同日内按提交时间精确排序——git 已知的旧条目会被回填 ts，
+    修正「同一天新条目沉底」的老问题。无 ts 的（超出扫描窗口/手动条目）按当日 00:00 排。
     """
     def key(e):
         return (str(e.get("date", "")), e.get("title"))
-    seen = {key(e) for e in existing if isinstance(e, dict)}
-    merged = [e for e in existing if isinstance(e, dict)]
+
+    by_key: dict = {}
+    merged: list[dict] = []
+    for e in existing:
+        if isinstance(e, dict):
+            merged.append(e)
+            by_key[key(e)] = e
     for r in git_records:
-        if key(r) in seen:
+        k = key(r)
+        if k in by_key:
+            ex = by_key[k]
+            if not ex.get("ts") and r.get("ts"):
+                ex["ts"] = r["ts"]  # 回填提交时间，修正同日排序
             continue
-        seen.add(key(r))
+        by_key[k] = r
         merged.append(r)
-    merged.sort(key=lambda x: str(x.get("date", "")), reverse=True)
+    merged.sort(key=lambda x: x.get("ts") or (str(x.get("date", "")) + " 00:00"), reverse=True)
     return merged
 
 
 def _git_commits(cwd: Path, limit: int = 500) -> list[tuple[str, str]]:
-    """返回 [(date, body), ...]，最新在前。非 git 仓库/无 git → []。
+    """返回 [(datetime, body), ...]，最新在前。datetime 为「YYYY-MM-DD HH:MM」（提交时区，即北京）。
+    非 git 仓库/无 git → []。
     limit：只扫最近 N 条（历史久远的 📢 已固化进 JSON，无需反复重扫，防大仓库变慢）。"""
     try:
         out = subprocess.run(
-            ["git", "log", f"-n{limit}", "--date=short", "--format=%ad%x1f%B%x1e"],
+            ["git", "log", f"-n{limit}", "--date=format:%Y-%m-%d %H:%M", "--format=%ad%x1f%B%x1e"],
             cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", check=True,
         ).stdout
     except Exception:  # noqa: BLE001
@@ -83,8 +94,8 @@ def _git_commits(cwd: Path, limit: int = 500) -> list[tuple[str, str]]:
         rec = rec.strip()
         if not rec or "\x1f" not in rec:
             continue
-        date, body = rec.split("\x1f", 1)
-        commits.append((date.strip(), body))
+        dt, body = rec.split("\x1f", 1)
+        commits.append((dt.strip(), body))
     return commits
 
 
@@ -98,9 +109,10 @@ def generate(root: Path = ROOT) -> list[dict]:
         except Exception:  # noqa: BLE001
             existing = []
     git_records = []
-    for date, body in _git_commits(root):
+    for dt, body in _git_commits(root):
+        day = dt[:10]
         for title, summary in parse_marker_lines(body):
-            git_records.append({"date": date, "title": title, "summary": summary})
+            git_records.append({"date": day, "ts": dt, "title": title, "summary": summary})
     return merge(existing if isinstance(existing, list) else [], git_records)
 
 

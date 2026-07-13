@@ -1671,7 +1671,7 @@ async function loadUpdateHistory() {
     const data = await resp.json();
     const updates = data.updates || [];
     const latestEl = document.getElementById('uh-latest');
-    if (latestEl) latestEl.textContent = updates.length ? `最新更新时间：${updates[0].date || '—'}` : '暂无更新';
+    if (latestEl) latestEl.textContent = updates.length ? `最新更新时间：${updates[0].ts || updates[0].date || '—'}` : '暂无更新';
     if (!updates.length) {
       list.innerHTML = '<li class="uh-empty">暂无更新记录</li>';
       return;
@@ -1679,7 +1679,7 @@ async function loadUpdateHistory() {
     const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     list.innerHTML = updates.map(u => `
       <li class="uh-item">
-        <span class="uh-date">${esc(u.date)}</span>
+        <span class="uh-date">${esc(u.ts || u.date)}</span>
         <div class="uh-body">
           <div class="uh-title">${esc(u.title)}</div>
           <div class="uh-summary">${esc(u.summary)}</div>
