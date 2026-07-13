@@ -18,6 +18,7 @@ dependencies = [
     "networkx>=3.0",
     "yfinance>=0.2.0",
     "akshare>=1.14.0",
+    "baostock>=0.8.8",
     "pandas>=2.0",
     "rich>=13.0",
     "questionary>=2.0",
@@ -37,10 +38,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 额外数据源（增强/兜底）。baostock 已提升到主依赖——它是东财(akshare/efinance)挂掉时
+# 唯一可靠的 A股兜底源，纯 Python 体积小，保证 A股开箱即用。
 datasources = [
     "efinance>=0.5",
     "pytdx>=1.72",
-    "baostock>=0.8.8",
     "finnhub-python>=2.4.0",
 ]
 dev = [
