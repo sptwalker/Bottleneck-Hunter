@@ -73,10 +73,12 @@ def _create_manager() -> FetcherManager:
     except ImportError:
         logger.info("akshare 未安装，跳过美股兜底")
 
-    try:
+    # finnhub 惰性 import finnhub 包（try/except ImportError 拦不住，同 efinance/pytdx）→ 未装则显式跳过，
+    # 否则每次美股实时取数都白撞 "No module named 'finnhub'"、拖慢降级、误报"所有实时数据源均失败"。
+    if _installed("finnhub"):
         from bottleneck_hunter.data_provider.fetchers.finnhub_fetcher import FinnhubFetcher
         manager.register(FinnhubFetcher())
-    except ImportError:
+    else:
         logger.info("finnhub 未安装，跳过")
 
     return manager

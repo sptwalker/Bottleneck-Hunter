@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +20,23 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_DIR = Path("data")
 DEFAULT_DB_PATH = DEFAULT_DB_DIR / "analyses.db"
+
+
+def _nan_safe(obj):
+    """递归把 NaN/Inf 的 float 替换为 None。
+
+    档案里存过 NaN/Inf（某些指标算不出来），而 Starlette JSONResponse 用 allow_nan=False，
+    含 NaN/Inf 的 float 序列化会抛 "Out of range float values are not JSON compliant" → 500。
+    在读边界统一净化，覆盖已入库的坏数据与后续读取。
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _nan_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_nan_safe(v) for v in obj]
+    return obj
+
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS analyses (
@@ -375,7 +393,7 @@ class AnalysisStore:
             d["scorecard"] = json.loads(d.get("scorecard_json") or "{}")
         except (json.JSONDecodeError, TypeError):
             d["scorecard"] = None
-        return d
+        return _nan_safe(d)
 
     def get(self, analysis_id: str) -> dict | None:
         """返回完整记录（含 result_json）。"""
