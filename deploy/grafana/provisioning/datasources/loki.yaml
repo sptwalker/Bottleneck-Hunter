@@ -1,0 +1,15 @@
+# Grafana 自动装 Loki 数据源。uid 固定为 "loki"，供 Claude 的数据源代理 URL 使用：
+#   /grafana/api/datasources/proxy/uid/loki/loki/api/v1/query_range
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    jsonData:
+      # 单机 Loki，最多回看 14 天（与 loki-config 的 retention 一致）
+      maxLines: 1000
+    editable: false

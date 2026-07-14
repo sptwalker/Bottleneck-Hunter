@@ -21,3 +21,66 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+
+  # ── 运维日志栈（Loki + Alloy + Grafana）──────────────────────────────
+  # 采集 bottleneck-hunter 容器 stdout → Loki 存储 → Grafana 查看/告警。
+  # 应用零改动（日志已在 stdout）。详见 docs/OBSERVABILITY.md。
+
+  # 日志存储/查询（仅内网，不映射主机端口）
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: bh-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./deploy/loki/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    environment:
+      - TZ=Asia/Shanghai
+
+  # 日志采集器：抓 Docker 容器 stdout 推给 Loki（仅内网）
+  alloy:
+    image: grafana/alloy:v1.5.1
+    container_name: bh-alloy
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - alloy-data:/var/lib/alloy/data
+    environment:
+      - TZ=Asia/Shanghai
+    depends_on:
+      - loki
+
+  # 日志 UI / 告警：仅绑定 127.0.0.1，由主机 nginx 反代 /grafana/（不直接公网暴露）
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: bh-grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - TZ=Asia/Shanghai
+      # 子路径部署：nginx 反代 https://bh.youdoogo.com/grafana/
+      - GF_SERVER_ROOT_URL=https://bh.youdoogo.com/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+    depends_on:
+      - loki
+
+volumes:
+  loki-data:
+  alloy-data:
+  grafana-data:

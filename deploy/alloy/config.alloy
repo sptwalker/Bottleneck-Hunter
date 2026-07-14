@@ -1,0 +1,41 @@
+// Alloy 采集配置 — 抓本机所有 Docker 容器 stdout/stderr，打上 container 标签推给 Loki。
+// 采集 bottleneck-hunter 及其它容器；应用无需改动（日志已在 stdout）。
+// 文档：https://grafana.com/docs/alloy/latest/reference/components/loki/loki.source.docker/
+
+// 1) 发现本机 Docker 容器
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+}
+
+// 2) relabel 规则：把 Docker 容器名（形如 "/bottleneck-hunter"）落成 container 标签
+discovery.relabel "containers" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+// 3) 读取容器日志并转发
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  labels        = { job = "docker" }
+  forward_to    = [loki.write.default.receiver]
+}
+
+// 4) 推送到 Loki
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

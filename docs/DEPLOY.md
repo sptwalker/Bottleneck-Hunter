@@ -3,6 +3,8 @@
 生产为**单容器 Docker** 部署（web + 内置 scheduler，SQLite 持久化）。
 本机开发用 `bottleneck-hunter serve` 即可，不需要 Docker。
 
+> 运维日志（实时/检索/告警，Grafana+Loki+Alloy）：见 [OBSERVABILITY.md](OBSERVABILITY.md)。
+
 ## 一、目录与端口
 
 - 生产：`bh.youdoogo.com`，容器名 `bottleneck-hunter`，主机端口 **8089** → 容器 8000。
