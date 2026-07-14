@@ -2,8 +2,8 @@
 # SQLite 持久化，数据/报告/.env 通过挂卷保留。
 FROM python:3.11-slim
 
-# 国内构建加速：默认用清华 PyPI 镜像（可 --build-arg PIP_INDEX_URL=... 覆盖为官方源）
-ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# 国内构建加速：默认用华为云 PyPI 镜像（可 --build-arg PIP_INDEX_URL=... 覆盖为官方源）
+ARG PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/simple
 
 # 时区数据（scheduler 使用 Asia/Shanghai）+ 构建期编译器（akshare/lxml 等源码依赖）
 ENV TZ=Asia/Shanghai \
@@ -11,6 +11,15 @@ ENV TZ=Asia/Shanghai \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_INDEX_URL=${PIP_INDEX_URL}
+
+# 华为云 Debian apt 镜像加速（华为云 ECS 上构建更快；兼容 bookworm 新旧两种源格式）
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's|deb.debian.org|mirrors.huaweicloud.com|g; s|security.debian.org|mirrors.huaweicloud.com|g' /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's|deb.debian.org|mirrors.huaweicloud.com|g; s|security.debian.org|mirrors.huaweicloud.com|g' /etc/apt/sources.list; \
+    fi
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata build-essential curl \
