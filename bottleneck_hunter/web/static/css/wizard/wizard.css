@@ -840,14 +840,15 @@
    背景横向平移 = 斜纹周期 × √2，才能无缝滚动（同 decision.css 的 dc-zebra-move） */
 @keyframes wiz-zebra-scroll { from { background-position: 0 0; } to { background-position: 8.49px 0; } }
 .wiz-step.running .wiz-step-dot {
-  background-color: #fff;
+  --zebra-light: oklch(0.9 0.05 250);   /* 与 --accent 同色相(250)的浅蓝，斑马纹用蓝/浅蓝而非蓝白 */
+  background-color: var(--zebra-light);
   background-image: repeating-linear-gradient(45deg,
-    var(--accent) 0, var(--accent) 3px, #fff 3px, #fff 6px);
+    var(--accent) 0, var(--accent) 3px, var(--zebra-light) 3px, var(--zebra-light) 6px);
   background-size: 8.49px 100%;   /* 6px 斜纹周期 × √2 */
   background-repeat: repeat;
   background-position: 0 0;
   color: var(--accent);
-  border-color: #fff;
+  border-color: var(--zebra-light);
   text-shadow: 0 0 3px rgba(255,255,255,.95);
   animation: wiz-zebra-scroll .6s linear infinite;
 }
