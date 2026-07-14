@@ -26,6 +26,4 @@ build
 .claude
 .idea
 .vscode
-docs/*
-!docs/新用户使用指南V2.3.md
 tests
