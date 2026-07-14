@@ -428,3 +428,84 @@
 .admin-ov-copy { margin-top: 10px; display: flex; align-items: center; gap: 10px; }
 .admin-pos { color: oklch(0.6 0.18 145); }
 .admin-neg { color: oklch(0.6 0.2 25); }
+
+/* ── 不活跃状态徽章（派生：>30天未登录，仅显示）── */
+.admin-badge-inactive {
+  background: rgba(217, 119, 6, 0.15);
+  color: #d97706;
+}
+
+/* ── 可排序表头 ── */
+.admin-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.admin-sortable:hover { color: var(--accent); }
+.admin-sort-arrow { color: var(--accent); font-size: 11px; }
+
+/* ── 实时通知滚动区（仅 admin 用户管理页，固定右侧覆盖，不 reflow 现有布局）── */
+#admin-notify-rail {
+  position: fixed;
+  top: 72px;
+  right: 16px;
+  bottom: 16px;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  z-index: 50;
+  overflow: hidden;
+}
+.admin-notify-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  font-weight: 600;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.admin-notify-toggle {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 6px;
+}
+.admin-notify-toggle:hover { color: var(--accent); }
+.admin-notify-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#admin-notify-rail.collapsed { bottom: auto; }
+#admin-notify-rail.collapsed .admin-notify-feed { display: none; }
+
+.admin-notify-card {
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  animation: admin-notify-slidedown 0.28s ease;
+}
+.admin-notify-icon { font-size: 16px; line-height: 1.3; flex-shrink: 0; }
+.admin-notify-body { min-width: 0; flex: 1; }
+.admin-notify-title { font-size: 13px; font-weight: 600; word-break: break-word; }
+.admin-notify-detail { font-size: 12px; color: var(--muted); margin-top: 2px; word-break: break-word; }
+.admin-notify-time { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+@keyframes admin-notify-slidedown {
+  from { opacity: 0; transform: translateY(-16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-notify-card { animation-duration: 0.01ms; }
+}

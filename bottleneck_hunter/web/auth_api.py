@@ -100,6 +100,8 @@ async def login(req: LoginRequest, response: Response):
     set_auth_cookie(response, token)
     store.update_last_login(user.id)
     logger.info(f"用户登录: {user.username}")
+    from bottleneck_hunter.web.admin_events import notify_admins
+    notify_admins("login", f"{user.username} 登录", username=user.username)
     return {"ok": True, "user": UserInfo(**user.model_dump()).model_dump()}
 
 

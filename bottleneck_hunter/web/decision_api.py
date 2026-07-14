@@ -243,6 +243,9 @@ async def full_refresh(request: Request, market: str = "us_stock", user: dict = 
     """全量刷新 L1+L2+L3+L4+投委会（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_full_refresh
     from bottleneck_hunter.web import refresh_guard
+    from bottleneck_hunter.web.admin_events import notify_admins
+    uname = user.get("username") or user.get("sub", "")
+    notify_admins("full_refresh", f"{uname} 全量更新（{market}）", username=uname)
     store = _user_store(user).for_market(market)
     return _sse_response(request, refresh_guard.guarded(
         user["sub"], run_full_refresh(store, _user_budget(user), market=market)))

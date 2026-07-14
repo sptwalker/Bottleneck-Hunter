@@ -233,6 +233,11 @@ class Phase4Request(BaseModel):
 async def phase1(request: Request, req: Phase1Request, user: dict = Depends(get_current_user)):
     store = _user_analysis_store(user)
 
+    from bottleneck_hunter.web.admin_events import notify_admins
+    uname = user.get("username") or user.get("sub", "")
+    notify_admins("analysis", f"{uname} 开始产业链分析", username=uname,
+                  detail=req.end_product or req.sector or "")
+
     async def event_generator():
         async for event in stream_phase1(
             sector=req.sector, end_product=req.end_product,

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.auth.dependencies import get_current_user
+from bottleneck_hunter.web.admin_events import get_admin_broadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,34 @@ def _require_admin(user: dict = Depends(get_current_user)):
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
+
+
+# ── 实时通知（admin 面板右侧滚动区）─────────────────────
+
+@router.get("/events/stream")
+async def stream_admin_events(request: Request, user: dict = Depends(_require_admin)):
+    """SSE：把管理员事件（登录/产业链分析/全量更新）实时推给已连接的 admin 面板。
+
+    照 syslog_api.stream_logs 的形状：30s 无事件发 ping 保活，客户端断开即退订。
+    连上时自动回放最近 MAX_HISTORY 条历史。cookie 鉴权，EventSource 自带 cookie。
+    """
+    bc = get_admin_broadcaster()
+    q = bc.subscribe()
+
+    async def generate():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    rec = await asyncio.wait_for(q.get(), timeout=30)
+                    yield {"event": "admin_event", "data": json.dumps(rec, ensure_ascii=False)}
+                except asyncio.TimeoutError:
+                    yield {"event": "ping", "data": "{}"}
+        finally:
+            bc.unsubscribe(q)
+
+    return EventSourceResponse(generate())
 
 
 # ── 请求模型 ──────────────────────────────────────────

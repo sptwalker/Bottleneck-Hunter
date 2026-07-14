@@ -6,6 +6,63 @@ import { fmtBJ } from './wizard-state.js';
 
 let _currentTab = 'users';
 
+// 用户表：缓存 + 排序状态；邀请码：缓存（供"只看可用"过滤）
+let _users = [];
+let _userSort = { key: null, dir: 'asc' };
+let _inviteCodes = [];
+const INACTIVE_DAYS = 30;   // 超此天数未登录 → 派生"不活跃"（仅显示，不落库/不拦登录）
+
+// 实时通知（SSE → 右侧滚动区）
+let _adminES = null;
+const _notifySeen = new Set();
+const NOTIFY_KINDS = {
+  login: { icon: '🔑', label: '登录' },
+  analysis: { icon: '🔗', label: '产业链分析' },
+  full_refresh: { icon: '🔄', label: '全量更新' },
+};
+
+function connectAdminEvents() {
+  // 折叠开关（一次性绑定）
+  const tg = document.getElementById('admin-notify-toggle');
+  const rail = document.getElementById('admin-notify-rail');
+  if (tg && rail && !tg._bound) {
+    tg._bound = true;
+    tg.addEventListener('click', () => {
+      const collapsed = rail.classList.toggle('collapsed');
+      tg.textContent = collapsed ? '+' : '–';
+    });
+  }
+  if (_adminES) return;   // 只连一次；浏览器会自动重连
+  try {
+    _adminES = new EventSource('/api/admin/events/stream');
+    _adminES.addEventListener('admin_event', (e) => {
+      try { pushNotifyCard(JSON.parse(e.data)); } catch { /* 忽略坏帧 */ }
+    });
+  } catch { /* EventSource 不可用则静默 */ }
+}
+
+function pushNotifyCard(rec) {
+  const feed = document.getElementById('admin-notify-feed');
+  if (!feed || !rec) return;
+  if (rec.id != null) {
+    if (_notifySeen.has(rec.id)) return;   // 去重（含重连回放）
+    _notifySeen.add(rec.id);
+  }
+  const k = NOTIFY_KINDS[rec.kind] || { icon: '•', label: rec.kind || '' };
+  const time = rec.ts ? fmtBJ(rec.ts) : '';
+  const detail = rec.detail ? `<div class="admin-notify-detail">${esc(rec.detail)}</div>` : '';
+  const card = document.createElement('div');
+  card.className = 'admin-notify-card';
+  card.innerHTML = `<span class="admin-notify-icon">${k.icon}</span>
+    <div class="admin-notify-body">
+      <div class="admin-notify-title">${esc(rec.title || '')}</div>
+      ${detail}
+      <div class="admin-notify-time">${esc(time)}</div>
+    </div>`;
+  feed.insertBefore(card, feed.firstChild);   // 新卡在上，旧卡下移保留
+  while (feed.children.length > 100) feed.removeChild(feed.lastChild);  // 上限裁剪
+}
+
 export function initAdmin() {
   const btn = document.getElementById('btn-admin');
   if (!btn) return;
@@ -19,7 +76,7 @@ export function initAdmin() {
   setTimeout(checkRole, 1000);
 
   // 进入用户管理视图即加载当前子标签数据
-  btn.addEventListener('click', () => switchTab(_currentTab || 'users'));
+  btn.addEventListener('click', () => { switchTab(_currentTab || 'users'); connectAdminEvents(); });
 
   // 视图内子标签切换
   document.querySelectorAll('#view-admin .admin-tab').forEach(tab => {
@@ -50,27 +107,84 @@ function switchTab(tab) {
 async function loadUsers() {
   const body = document.getElementById('admin-users-body');
   if (!body) return;
-  body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted)">加载中...</td></tr>';
+  body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted)">加载中...</td></tr>';
 
   try {
     const res = await fetch('/api/admin/users');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    renderUsers(data.users || []);
+    _users = data.users || [];
+    bindUserSort();
+    renderUsers();
   } catch (err) {
-    body.innerHTML = `<tr><td colspan="9" style="color:var(--danger)">${esc(err.message)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" style="color:var(--danger)">${esc(err.message)}</td></tr>`;
   }
 }
 
-function renderUsers(users) {
+// 观察池总数（排序用）：优先后端 watchlist_count，回退两市场之和
+function _wlTotal(u) {
+  if (typeof u.watchlist_count === 'number') return u.watchlist_count;
+  const m = u.watchlist_count_by_market || {};
+  return (m.us_stock || 0) + (m.a_stock || 0);
+}
+
+// 派生"不活跃"：从未登录 或 距今超过 INACTIVE_DAYS 天未登录
+function _isInactive(u) {
+  if (!u.last_login_at) return true;
+  const t = new Date(u.last_login_at).getTime();
+  return isFinite(t) && (Date.now() - t) > INACTIVE_DAYS * 86400 * 1000;
+}
+
+function _sortedUsers() {
+  const { key, dir } = _userSort;
+  if (!key) return _users;
+  const val = (u) => {
+    if (key === 'created') return u.created_at || '';
+    if (key === 'last_login') return u.last_login_at || '';
+    if (key === 'watchlist') return _wlTotal(u);
+    if (key === 'ai') return u.ai_config_count ?? 0;
+    return '';
+  };
+  const sign = dir === 'asc' ? 1 : -1;
+  return _users.slice().sort((a, b) => {
+    const va = val(a), vb = val(b);
+    if (va < vb) return -sign;
+    if (va > vb) return sign;
+    return 0;
+  });
+}
+
+function bindUserSort() {
+  document.querySelectorAll('#admin-tab-users .admin-sortable').forEach(th => {
+    if (th._bound) return;
+    th._bound = true;
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (_userSort.key === key) _userSort.dir = _userSort.dir === 'asc' ? 'desc' : 'asc';
+      else { _userSort.key = key; _userSort.dir = 'asc'; }
+      renderUsers();
+    });
+  });
+}
+
+function _updateSortArrows() {
+  document.querySelectorAll('#admin-tab-users .admin-sortable').forEach(th => {
+    const arrow = th.querySelector('.admin-sort-arrow');
+    if (arrow) arrow.textContent = _userSort.key === th.dataset.sort
+      ? (_userSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+  });
+}
+
+function renderUsers() {
   const body = document.getElementById('admin-users-body');
   if (!body) return;
-  if (!users.length) {
-    body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted)">暂无用户</td></tr>';
+  _updateSortArrows();
+  if (!_users.length) {
+    body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted)">暂无用户</td></tr>';
     return;
   }
 
-  body.innerHTML = users.map(u => {
+  body.innerHTML = _sortedUsers().map(u => {
     const isAdmin = u.role === 'admin';
     const frozen = u.is_active === false || u.is_active === 0;
     const roleBadge = isAdmin
@@ -78,7 +192,9 @@ function renderUsers(users) {
       : '<span class="admin-badge admin-badge-user">用户</span>';
     const statusBadge = frozen
       ? '<span class="admin-badge admin-badge-frozen">已冻结</span>'
-      : '<span class="admin-badge admin-badge-active">活跃</span>';
+      : _isInactive(u)
+        ? '<span class="admin-badge admin-badge-inactive">不活跃</span>'
+        : '<span class="admin-badge admin-badge-active">活跃</span>';
     const wlLimit = u.watchlist_limit ?? 24;
     // 分市场独立限额：并排显示美股/A股
     const wlByMkt = u.watchlist_count_by_market || {};
@@ -109,7 +225,8 @@ function renderUsers(users) {
       <td style="text-align:center">${wlDisplay}</td>
       <td style="text-align:center">${anaCount}</td>
       <td style="text-align:center">${aiCount}</td>
-      <td>${created}<br><span style="font-size:11px;color:var(--muted)">最近: ${lastLogin}</span></td>
+      <td>${created}</td>
+      <td>${lastLogin}</td>
       <td class="admin-actions-cell">${actions}</td>
     </tr>`;
   }).join('');
@@ -117,9 +234,9 @@ function renderUsers(users) {
   // 统计
   const statsEl = document.getElementById('admin-user-stats');
   if (statsEl) {
-    const total = users.length;
-    const active = users.filter(u => u.is_active !== false && u.is_active !== 0).length;
-    const admins = users.filter(u => u.role === 'admin').length;
+    const total = _users.length;
+    const active = _users.filter(u => u.is_active !== false && u.is_active !== 0).length;
+    const admins = _users.filter(u => u.role === 'admin').length;
     statsEl.textContent = `共 ${total} 用户 · ${active} 活跃 · ${admins} 管理员`;
   }
 }
@@ -179,10 +296,15 @@ async function loadInviteCodes() {
     const res = await fetch('/api/admin/invite-codes');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    renderInviteCodes(data.codes || []);
+    _inviteCodes = data.codes || [];
+    renderInviteCodes();
   } catch (err) {
     body.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">${esc(err.message)}</td></tr>`;
   }
+
+  // "只看可用"过滤 checkbox（一次性绑定）
+  const cb = document.getElementById('admin-invite-only-available');
+  if (cb && !cb._bound) { cb._bound = true; cb.addEventListener('change', renderInviteCodes); }
 
   // 生成按钮
   const genBtn = document.getElementById('admin-gen-invites');
@@ -211,15 +333,19 @@ async function loadInviteCodes() {
   }
 }
 
-function renderInviteCodes(codes) {
+function _codeAvailable(c) {
+  return c.is_active && !c.used_by && (!c.expires_at || new Date(c.expires_at).getTime() >= Date.now());
+}
+
+function renderInviteCodes() {
   const body = document.getElementById('admin-invites-body');
   if (!body) return;
+  const onlyAvail = document.getElementById('admin-invite-only-available')?.checked;
+  const codes = onlyAvail ? _inviteCodes.filter(_codeAvailable) : _inviteCodes;
   if (!codes.length) {
-    body.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted)">暂无邀请码</td></tr>';
-    return;
-  }
-
-  body.innerHTML = codes.map(c => {
+    body.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--muted)">${onlyAvail ? '暂无可用邀请码' : '暂无邀请码'}</td></tr>`;
+  } else {
+    body.innerHTML = codes.map(c => {
     let statusBadge;
     if (c.used_by) {
       statusBadge = '<span class="admin-badge admin-badge-used">已使用</span>';
@@ -246,14 +372,15 @@ function renderInviteCodes(codes) {
       <td>${usedBy}</td>
       <td>${revokeBtn}</td>
     </tr>`;
-  }).join('');
+    }).join('');
+  }
 
-  // 统计
+  // 统计（始终基于全量，不受过滤影响）
   const statsEl = document.getElementById('admin-invite-stats');
   if (statsEl) {
-    const total = codes.length;
-    const available = codes.filter(c => c.is_active && !c.used_by).length;
-    const used = codes.filter(c => c.used_by).length;
+    const total = _inviteCodes.length;
+    const available = _inviteCodes.filter(c => c.is_active && !c.used_by).length;
+    const used = _inviteCodes.filter(c => c.used_by).length;
     statsEl.textContent = `共 ${total} 个 · ${available} 可用 · ${used} 已使用`;
   }
 }

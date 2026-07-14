@@ -1459,6 +1459,14 @@
 
 <!-- Admin Modal -->
 <div id="view-admin" class="view">
+  <!-- 实时通知滚动区（仅 admin 用户管理页；position:fixed 靠右，不影响其它界面）-->
+  <aside id="admin-notify-rail" aria-label="实时动态">
+    <div class="admin-notify-head">
+      <span>🔔 实时动态</span>
+      <button id="admin-notify-toggle" class="admin-notify-toggle" title="折叠/展开">–</button>
+    </div>
+    <div class="admin-notify-feed" id="admin-notify-feed"></div>
+  </aside>
   <div class="wl-container">
     <div class="st-header">
       <h2 class="wl-page-title">用户管理中心</h2>
@@ -1484,10 +1492,11 @@
               <th>显示名</th>
               <th>角色</th>
               <th>状态</th>
-              <th style="text-align:center">观察池</th>
+              <th class="admin-sortable" data-sort="watchlist" style="text-align:center">观察池<span class="admin-sort-arrow"></span></th>
               <th style="text-align:center">分析</th>
-              <th style="text-align:center">AI配置</th>
-              <th>创建时间</th>
+              <th class="admin-sortable" data-sort="ai" style="text-align:center">AI配置<span class="admin-sort-arrow"></span></th>
+              <th class="admin-sortable" data-sort="created">创建时间<span class="admin-sort-arrow"></span></th>
+              <th class="admin-sortable" data-sort="last_login">最后登录<span class="admin-sort-arrow"></span></th>
               <th>操作</th>
             </tr>
           </thead>
@@ -1501,6 +1510,7 @@
           <span style="font-weight:600;font-size:14px">邀请码管理</span>
           <label style="font-size:13px">数量 <input type="number" id="admin-invite-count" value="5" min="1" max="50"></label>
           <button class="btn btn-sm btn-primary" id="admin-gen-invites">批量生成</button>
+          <label style="font-size:13px"><input type="checkbox" id="admin-invite-only-available"> 只看可用</label>
           <span class="admin-section-stats" id="admin-invite-stats"></span>
         </div>
         <table class="admin-table">
