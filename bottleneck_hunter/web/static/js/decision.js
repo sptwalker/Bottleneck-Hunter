@@ -170,6 +170,11 @@ async function dcFetch(path, opts = {}) {
 
 async function dcSSE(url, { onEvent, onDone, onError, method = 'POST', body = null }) {
   showProgress('连接中...');
+  // 多数 SSE 端点从 query 读 market(裸 str 参数)，放进 body 会被 FastAPI 忽略→永远 us_stock。
+  // 统一在此把 body.market 补进 query：query 型端点即取到；body 模型型端点(如 /daily)忽略多余 query。
+  if (body && body.market) {
+    url += (url.includes('?') ? '&' : '?') + `market=${encodeURIComponent(body.market)}`;
+  }
   try {
     const res = await fetch(`${DC_API}${url}`, {
       method,
@@ -1735,7 +1740,7 @@ async function openConsultDrawer() {
   if (snapEl) snapEl.innerHTML = '<div class="dc-snap-row">加载中…</div>';
   dcConsult.bubbles = {};
   setConsultSending(true);
-  await consultStream('/macro/consult/open', { market: dcConsult.market }, {
+  await consultStream(`/macro/consult/open?market=${encodeURIComponent(dcConsult.market)}`, { market: dcConsult.market }, {
     onEvent: handleConsultEvent,
     onDone: () => setConsultSending(false),
     onError: (e) => { appendConsultBubble({ type: 'system', content: '⚠ 打开失败: ' + e.message }); setConsultSending(false); },
@@ -2317,7 +2322,7 @@ async function runCalibration() {
   btn.textContent = '校准中...';
 
   try {
-    const data = await dcFetch('/model-accuracy/calibrate', { method: 'POST', body: JSON.stringify({ market: dcState.market }) });
+    const data = await dcFetch(`/model-accuracy/calibrate?market=${encodeURIComponent(dcState.market)}`, { method: 'POST', body: JSON.stringify({ market: dcState.market }) });
     btn.textContent = `已校准 ${data.calibrated || 0} 个`;
     await loadModelRatings();
   } catch (e) {
