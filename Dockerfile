@@ -2,11 +2,15 @@
 # SQLite 持久化，数据/报告/.env 通过挂卷保留。
 FROM python:3.11-slim
 
+# 国内构建加速：默认用清华 PyPI 镜像（可 --build-arg PIP_INDEX_URL=... 覆盖为官方源）
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
 # 时区数据（scheduler 使用 Asia/Shanghai）+ 构建期编译器（akshare/lxml 等源码依赖）
 ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=${PIP_INDEX_URL}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata build-essential curl \
@@ -14,17 +18,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 先只拷贝依赖清单，利用镜像层缓存（依赖不变则跳过重装）
+# ── 依赖层：只随 pyproject.toml 变化而失效 ──────────────────────────────
+# 关键：只用 pyproject + 一个最小包壳先装依赖 → 【改业务代码不再重装依赖】。
+# 旧写法把源码 COPY 放在 pip install 之前，每次改码都让该层缓存失效 → 全量重装
+# akshare/pandas/langchain 等重依赖 → 构建严重超时。这里把重依赖安装与源码解耦。
 COPY pyproject.toml README.md ./
+RUN mkdir -p bottleneck_hunter && touch bottleneck_hunter/__init__.py \
+    && pip install -e . \
+    && rm -rf bottleneck_hunter bottleneck_hunter.egg-info
+
+# ── 源码/非包文件层：改动只影响这之后，依赖层命中缓存（秒级重建）──────────
 COPY bottleneck_hunter/ ./bottleneck_hunter/
-# 运行时按仓库根定位的非包文件：更新历史 + 新手必读指南
-# （否则容器内 /app 下读不到 → 首页「更新历史」与「新手必读」为空）
+# 运行时按仓库根定位的非包文件：更新历史 + 新手必读指南（docs/ 整目录随镜像发布）
 COPY UPDATE_HISTORY.json ./
 COPY docs/ ./docs/
-RUN pip install -e .
-
-# 构建期编译器不进运行时镜像的必要性不高（单阶段简单优先）；
-# 如需精简，改多阶段构建。ponytail: 单阶段够用，体积敏感时再拆。
+# 源码就位后仅重链接包（--no-deps 不重装依赖）：注册 console_scripts、editable 指向真实源码
+RUN pip install -e . --no-deps
 
 EXPOSE 8000
 
