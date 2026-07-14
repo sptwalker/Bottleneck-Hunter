@@ -12,15 +12,8 @@ ENV TZ=Asia/Shanghai \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_INDEX_URL=${PIP_INDEX_URL}
 
-# 华为云 Debian apt 镜像加速（华为云 ECS 上构建更快；兼容 bookworm 新旧两种源格式）
-RUN set -eux; \
-    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's|deb.debian.org|mirrors.huaweicloud.com|g; s|security.debian.org|mirrors.huaweicloud.com|g' /etc/apt/sources.list.d/debian.sources; \
-    fi; \
-    if [ -f /etc/apt/sources.list ]; then \
-        sed -i 's|deb.debian.org|mirrors.huaweicloud.com|g; s|security.debian.org|mirrors.huaweicloud.com|g' /etc/apt/sources.list; \
-    fi
-
+# apt 用默认 Debian 源（deb.debian.org，历次构建可用）。
+# 注：曾试华为云 apt 镜像但 apt-get update 报 exit 100，暂回退；apt 层已缓存、仅首次构建跑，影响小。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata build-essential curl \
     && rm -rf /var/lib/apt/lists/*
