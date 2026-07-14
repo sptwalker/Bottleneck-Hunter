@@ -92,6 +92,30 @@ class TestExtractJsonObject:
         result = extract_json_object(text)
         assert result["分数"] == 9
 
+    # ── 回归：投委会深层嵌套 / 未闭合围栏 / 结尾逗号（曾致评审反复解析失败）──
+    def test_deep_nested_with_surrounding_text(self):
+        text = ('评审如下：{"vote":"approve","assessment":{"risk":{"level":"high"},'
+                '"score":7},"concerns":["a","b"]} 完毕')
+        r = extract_json_object(text)
+        assert r["assessment"]["risk"]["level"] == "high"
+        assert r["concerns"] == ["a", "b"]
+
+    def test_unclosed_fence_deep_nested(self):
+        # 模型输出被 ```json 包裹但截断/忘记收尾，无闭合 ```
+        text = '```json\n{"vote":"reject","detail":{"why":{"k":"v"}}}'
+        r = extract_json_object(text)
+        assert r["vote"] == "reject"
+        assert r["detail"]["why"]["k"] == "v"
+
+    def test_trailing_comma(self):
+        assert extract_json_object('{"a": 1, "b": 2,}') == {"a": 1, "b": 2}
+
+    def test_braces_inside_string_not_confused(self):
+        text = '结果：{"note": "含 } 右括号与 { 左括号", "n": {"m": 1}} 末尾'
+        r = extract_json_object(text)
+        assert r["n"]["m"] == 1
+        assert "}" in r["note"]
+
 
 class TestExtractJsonArray:
     def test_plain_array(self):
