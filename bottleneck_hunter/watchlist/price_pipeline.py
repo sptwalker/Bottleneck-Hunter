@@ -181,6 +181,97 @@ def _fetch_company_info_us(ticker: str) -> dict:
         return {}
 
 
+def _fetch_astock_profile(ticker: str) -> dict:
+    """通过 baostock 获取 A 股基本面，映射成 yfinance 风格 info dict——基本信息页遂能复用
+    与美股同一套字段(估值/盈利/财务/成长)。baostock 走独立服务器，东财系(akshare/efinance)
+    挂掉时仍可用。baostock 的 roe/margin/growth 已是分数(0.32=32%)，与 yfinance 约定一致，原样存。
+
+    ponytail: 每次刷新都重新拉(与美股 .info 一致，非高频)；若吞吐吃紧再按季度缓存。
+    """
+    try:
+        import baostock as bs
+    except ImportError:
+        return {}
+    from bottleneck_hunter.data_provider.fetchers.baostock_fetcher import _bs_code, _bs_lock
+
+    bcode = _bs_code(ticker)
+    if not bcode:
+        return {}
+
+    def _query(fn, **kw):
+        rs = fn(**kw)
+        if rs.error_code != "0":
+            return {}
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+        return dict(zip(rs.fields, rows[0])) if rows else {}
+
+    def _rows_latest(fn, **kw):
+        rs = fn(**kw)
+        if rs.error_code != "0":
+            return {}
+        last = None
+        while rs.next():
+            last = rs.get_row_data()
+        return dict(zip(rs.fields, last)) if last else {}
+
+    info: dict = {}
+    now = datetime.now()
+    with _bs_lock:  # baostock 全局会话非线程安全，复用 K线 fetcher 的同一把锁
+        if bs.login().error_code != "0":
+            return {}
+        try:
+            # 估值(日频最新)：peTTM/pbMRQ/psTTM + close(算市值)
+            start = (now - timedelta(days=15)).strftime("%Y-%m-%d")
+            v = _rows_latest(bs.query_history_k_data_plus, code=bcode,
+                             fields="close,peTTM,pbMRQ,psTTM",
+                             start_date=start, end_date=now.strftime("%Y-%m-%d"),
+                             frequency="d", adjustflag="3")
+            close = _safe(v.get("close"))
+            info["trailingPE"] = _safe(v.get("peTTM"))
+            info["priceToBook"] = _safe(v.get("pbMRQ"))
+            info["priceToSalesTrailing12Months"] = _safe(v.get("psTTM"))
+
+            # 盈利/成长/偿债(季频)：从当前季度回溯，找到最近一期已披露
+            y, q = now.year, (now.month - 1) // 3 + 1
+            prof = {}
+            for _ in range(6):
+                prof = _query(bs.query_profit_data, code=bcode, year=y, quarter=q)
+                if prof:
+                    break
+                q -= 1
+                if q == 0:
+                    q, y = 4, y - 1
+            if prof:
+                info["returnOnEquity"] = _safe(prof.get("roeAvg"))
+                info["profitMargins"] = _safe(prof.get("npMargin"))
+                info["grossMargins"] = _safe(prof.get("gpMargin"))
+                info["trailingEps"] = _safe(prof.get("epsTTM"))
+                shares = _safe(prof.get("totalShare"))
+                if close and shares:
+                    info["marketCap"] = close * shares
+
+                growth = _query(bs.query_growth_data, code=bcode, year=y, quarter=q)
+                info["earningsGrowth"] = _safe(growth.get("YOYNI"))
+
+                bal = _query(bs.query_balance_data, code=bcode, year=y, quarter=q)
+                info["currentRatio"] = _safe(bal.get("currentRatio"))
+                info["quickRatio"] = _safe(bal.get("quickRatio"))
+                a2e = _safe(bal.get("assetToEquity"))
+                if a2e and a2e > 0:  # 资产负债率% = 1 - 权益/资产；存进 debtToEquity 槽(前端标签即"资产负债率")
+                    info["debtToEquity"] = round((1 - 1 / a2e) * 100, 1)
+        finally:
+            bs.logout()
+
+    if info:
+        info["currency"] = "CNY"
+        info["country"] = "中国"
+        info["exchange"] = "上交所" if bcode.startswith("sh") else "深交所"
+    # 全空(None)视为无数据，避免写入空 profile
+    return info if any(v is not None for v in info.values()) else {}
+
+
 def _fetch_astock_fundamentals(code: str) -> dict:
     """通过 akshare 获取 A 股基本面数据（PE/PB/总市值）。
 
@@ -311,8 +402,9 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market
                 fetch_fn = _fetch_astock_daily if market == "a_stock" else _fetch_daily_data
                 snapshots, company_info = await asyncio.to_thread(fetch_fn, ticker, days)
 
-            if not company_info and market != "a_stock":
-                company_info = await asyncio.to_thread(_fetch_company_info_us, ticker)
+            if not company_info:
+                info_fn = _fetch_astock_profile if market == "a_stock" else _fetch_company_info_us
+                company_info = await asyncio.to_thread(info_fn, ticker)
 
             if company_info:
                 try:
