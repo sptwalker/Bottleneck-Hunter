@@ -1,6 +1,8 @@
 # BottleneckHunter — 单容器部署（web + 内置 scheduler）
 # SQLite 持久化，数据/报告/.env 通过挂卷保留。
-FROM python:3.11-slim
+# 基础镜像固定 bookworm：python:3.11-slim 会浮动到新 Debian(trixie)，而华为云镜像对
+# 刚发布的 trixie-updates 尚未同步好 → apt-get update exit 100。bookworm 成熟且已完整同步。
+FROM python:3.11-slim-bookworm
 
 # 国内构建加速：默认用华为云 PyPI 镜像（可 --build-arg PIP_INDEX_URL=... 覆盖为官方源）
 ARG PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/simple
@@ -12,8 +14,14 @@ ENV TZ=Asia/Shanghai \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_INDEX_URL=${PIP_INDEX_URL}
 
-# apt 用默认 Debian 源（deb.debian.org，历次构建可用）。
-# 注：曾试华为云 apt 镜像但 apt-get update 报 exit 100，暂回退；apt 层已缓存、仅首次构建跑，影响小。
+# 华为云 Debian apt 镜像加速（bookworm 已完整同步；兼容 deb822 与旧 sources.list）
+RUN set -eux; \
+    for f in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+        if [ -f "$f" ]; then \
+            sed -i 's|deb.debian.org|mirrors.huaweicloud.com|g; s|security.debian.org|mirrors.huaweicloud.com|g' "$f"; \
+        fi; \
+    done
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata build-essential curl \
     && rm -rf /var/lib/apt/lists/*
