@@ -592,7 +592,7 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
     committee = []
     committee_meta = None
     try:
-        recs = store.get_meeting_records(meeting_type="committee", limit=1)
+        recs = store.get_meeting_records(meeting_type="committee", market=market, limit=1)
         if recs:
             rec = recs[0]
             transcript = rec.get("transcript_json", []) or []
