@@ -5,11 +5,18 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 
 from bottleneck_hunter.data_provider.manager import FetcherManager
 
 logger = logging.getLogger(__name__)
+
+
+def _installed(module: str) -> bool:
+    """底层库是否已安装。fetcher 都是惰性 import，ImportError 不会在注册期抛出，
+    故在此显式探测——避免把不可用源注册进降级链、白占优先级槽并触发假熔断。"""
+    return importlib.util.find_spec(module) is not None
 
 _manager: FetcherManager | None = None
 
@@ -26,10 +33,10 @@ def _create_manager() -> FetcherManager:
     manager = FetcherManager()
 
     # A股：efinance (priority=0) > akshare (1) > pytdx (2)
-    try:
+    if _installed("efinance"):
         from bottleneck_hunter.data_provider.fetchers.efinance_fetcher import EfinanceFetcher
         manager.register(EfinanceFetcher())
-    except ImportError:
+    else:
         logger.info("efinance 未安装，跳过")
 
     try:
@@ -38,10 +45,10 @@ def _create_manager() -> FetcherManager:
     except ImportError:
         logger.info("akshare 未安装，跳过")
 
-    try:
+    if _installed("pytdx"):
         from bottleneck_hunter.data_provider.fetchers.pytdx_fetcher import PytdxFetcher
         manager.register(PytdxFetcher())
-    except ImportError:
+    else:
         logger.info("pytdx 未安装，跳过")
 
     # A股可靠兜底：baostock (priority=3)，走独立服务器，不依赖东方财富接口
