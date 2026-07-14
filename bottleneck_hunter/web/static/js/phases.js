@@ -655,6 +655,19 @@ async function runPhase1(sector, product) {
 }
 
 function handlePhase1Event(data) {
+  // 终止性错误事件（拆解/瓶颈超时或失败）：停表、收起遮罩、置错误态、允许重来，
+  // 避免错误被当成普通进度消息、流结束后界面卡死（计时停、遮罩不消、无从重试）。
+  if (data._sseEvent === 'error') {
+    _stopP1Timer();
+    hideP1Overlay();
+    showP1Info(`错误: ${data.message || '产业链分析失败'}`);
+    logMsg(`Phase 1 错误: ${data.message || ''}`, 'error');
+    state.p1Error = true;
+    state.autoMode = false;
+    setTriState('p1-tristate', 'p1TriState', 'restart');
+    return;
+  }
+
   // step_start: 有 index 和 step 字段
   if (data.index !== undefined && data.step && !data.result) {
     _p1Step = data.step;

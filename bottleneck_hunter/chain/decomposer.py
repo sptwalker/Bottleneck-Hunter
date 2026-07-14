@@ -85,6 +85,10 @@ class ChainDecomposer:
     LLM_TIMEOUT = 120  # 单次 LLM 调用超时（秒）
     MAX_CONCURRENCY = 4  # 同层并发数量上限
     MAX_RETRIES = 2  # LLM 调用失败重试次数
+    # 广度上限：防止逐层指数爆炸（曾出现单层 283 节点 → 整体拆解 >30min 超时卡死）。
+    # 每层只展开最关键的 N 个父节点；每个父节点只保留 K 个最关键子节点。
+    MAX_NODES_PER_LAYER = 24
+    MAX_CHILDREN_PER_NODE = 6
 
     def __init__(
         self,
@@ -135,6 +139,14 @@ class ChainDecomposer:
 
         for depth in range(1, self.max_depth + 1):
             parent_nodes = graph.get_nodes_at_layer(depth - 1)
+            # 广度上限：父节点过多时只展开最关键的前 N 个（按其对下游的 dependency 排序），
+            # 其余节点仍保留在图中作为叶子，只是不再向上钻取——避免指数爆炸导致整体超时。
+            if len(parent_nodes) > self.MAX_NODES_PER_LAYER:
+                skipped = len(parent_nodes) - self.MAX_NODES_PER_LAYER
+                parent_nodes = self._top_parents(graph, parent_nodes, self.MAX_NODES_PER_LAYER)
+                logger.info(f"层 {depth} 父节点 {len(parent_nodes) + skipped} 个，按重要度只展开前 {self.MAX_NODES_PER_LAYER} 个")
+                if on_progress:
+                    await on_progress(f"⚠ 第 {depth} 层节点过多，按重要度只展开前 {self.MAX_NODES_PER_LAYER} 个（略过 {skipped} 个）")
             if on_layer_start:
                 await on_layer_start(depth, self.max_depth, len(parent_nodes))
 
@@ -160,6 +172,12 @@ class ChainDecomposer:
                         await on_progress(f"✗ 层 {depth} 异常: {result}")
                     continue
                 parent, children = result
+                # 每个父节点只保留 K 个最关键子节点（按 dependency 降序），控制节点总量
+                children = sorted(
+                    children,
+                    key=lambda c: _safe_float(c.get("dependency", 0.5), 0.5),
+                    reverse=True,
+                )[:self.MAX_CHILDREN_PER_NODE]
                 for child_data in children:
                     child_name = child_data["name"]
 
@@ -315,6 +333,18 @@ class ChainDecomposer:
         return extract_json_array(response.content) or []
 
     # ── 本地规则去重 ─────────────────────────────────────
+
+    @staticmethod
+    def _top_parents(graph: ChainGraph, parents: list, limit: int) -> list:
+        """按节点重要度取前 limit 个父节点展开。
+
+        重要度 = 该节点作为上游时、对下游链接的最大 dependency（越关键越优先钻取）。
+        """
+        importance: dict[str, float] = {}
+        for link in graph.links:
+            if link.dependency > importance.get(link.upstream, -1.0):
+                importance[link.upstream] = link.dependency
+        return sorted(parents, key=lambda n: importance.get(n.name, 0.5), reverse=True)[:limit]
 
     @staticmethod
     def _find_similar_node(new_name: str, existing_names: list[str]) -> str | None:
