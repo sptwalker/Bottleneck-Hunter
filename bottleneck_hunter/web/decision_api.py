@@ -582,6 +582,12 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     tactical_plans = store.get_tactical_plans_by_date(today)
 
+    # ticker→公司名映射，供前端把 L2 组合(圆环图/持仓表)的股票代码显示为公司名
+    company_names = {
+        e["ticker"]: (e.get("company_name") or e["ticker"])
+        for e in store.list_all() if e.get("ticker")
+    }
+
     # 最近一次投委会评审（从会议 transcript 提取各委员投票，供投委会面板展示）
     committee = []
     committee_meta = None
@@ -664,6 +670,7 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
         "positions": positions,
         "committee": committee,
         "committee_meta": committee_meta,
+        "company_names": company_names,
     }
 
 

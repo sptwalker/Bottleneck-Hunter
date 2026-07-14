@@ -324,6 +324,12 @@ function renderMacro(macro) {
 
 /* ── L2 组合 ──────────────────────────────────────── */
 
+// ticker→公司名（A股代码无意义，展示公司名；缺失回退代码）
+function dcName(ticker) {
+  const m = dcState.overview?.company_names;
+  return (m && m[ticker]) || ticker;
+}
+
 function renderStrategic(plan) {
   const empty = document.getElementById('dc-strategic-empty');
   const chartEl = document.getElementById('dc-alloc-chart');
@@ -356,7 +362,7 @@ function renderStrategic(plan) {
     const chart = dcState.chartAlloc || echarts.init(chartEl);
     dcState.chartAlloc = chart;
     const pieData = holdings.map(h => ({
-      name: h.ticker,
+      name: dcName(h.ticker),
       value: h.target_weight_pct,
     }));
     const usedPct = pieData.reduce((s, d) => s + d.value, 0);
@@ -402,7 +408,7 @@ function renderStrategic(plan) {
       html += '<ul class="dc-alloc-list">';
       for (const h of holdings) {
         const tag = core.includes(h) ? '核心' : '战术';
-        html += `<li data-company-ticker="${escDC(h.ticker)}" data-company-market="${escDC(dcState.market)}" title="双击查看企业详情"><span>${escDC(h.ticker)} <small class="text-muted">${escDC(tag)}</small></span><span>${h.target_weight_pct}%</span></li>`;
+        html += `<li data-company-ticker="${escDC(h.ticker)}" data-company-market="${escDC(dcState.market)}" title="双击查看企业详情"><span>${escDC(dcName(h.ticker))} <small class="text-muted">${escDC(tag)}</small></span><span>${h.target_weight_pct}%</span></li>`;
       }
       html += '</ul>';
     }
