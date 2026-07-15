@@ -122,7 +122,7 @@ class TestStaleRefresh:
 class TestGlobalSchedule:
     def test_defaults(self):
         sch = SC.get_global_schedule(None)
-        assert sch["us_daily_decision"]["hour"] == 19
+        assert sch["us_daily_decision"]["hour"] == 6      # 在数据 job 之后
         assert sch["stale_refresh"]["interval_hours"] == 6
 
     def test_override_merge(self):
@@ -134,7 +134,7 @@ class TestGlobalSchedule:
         SC.set_global_schedule(a, {"us_daily_decision": {"hour": 20}})
         sch = SC.get_global_schedule(a)
         assert sch["us_daily_decision"]["hour"] == 20
-        assert sch["us_daily_decision"]["minute"] == 0  # 未覆盖保留默认
+        assert sch["us_daily_decision"]["minute"] == 30  # 未覆盖 → 保留默认(30)
 
 
 # ── 操作后实时刷新 ─────────────────────────────────────────

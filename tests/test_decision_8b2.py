@@ -454,11 +454,14 @@ class TestDecisionAPI:
         s, *_ = store
         from fastapi.testclient import TestClient
         from bottleneck_hunter.web.decision_api import router, set_store
+        from bottleneck_hunter.web.trading_api import router as trading_router, set_store as trading_set_store
         from fastapi import FastAPI
 
         app = FastAPI()
         app.include_router(router, prefix="/api/decision")
+        app.include_router(trading_router, prefix="/api/trading")  # 模拟账户等端点已迁到此
         set_store(s)
+        trading_set_store(s)
         from bottleneck_hunter.auth.dependencies import get_current_user
         app.dependency_overrides[get_current_user] = lambda: {"sub": "", "username": "test", "role": "admin"}
         return TestClient(app)
@@ -484,7 +487,8 @@ class TestDecisionAPI:
         assert resp.status_code == 200
 
     def test_account(self, client):
-        resp = client.get("/api/decision/account")
+        # 模拟账户端点已迁移到 trading_api（/api/trading/account）
+        resp = client.get("/api/trading/account")
         assert resp.status_code == 200
         data = resp.json()
         assert "account" in data
