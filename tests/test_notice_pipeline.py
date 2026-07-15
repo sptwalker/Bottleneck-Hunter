@@ -84,7 +84,7 @@ class TestFetchNoticesSync:
             {"公告标题": "关于2024年度业绩预告的公告", "公告日期": "2024-12-15", "公告链接": "http://example.com/1"},
             {"公告标题": "关于控股股东减持计划", "公告日期": "2024-12-10", "公告链接": "http://example.com/2"},
         ])
-        mock_ak.stock_notice_report.return_value = df
+        mock_ak.stock_individual_notice_report.return_value = df
         result = _fetch_notices_sync("SH600000")
         assert len(result) == 2
         assert result[0]["filing_type"] == "earnings_preview"
@@ -94,13 +94,13 @@ class TestFetchNoticesSync:
 
     @patch("bottleneck_hunter.watchlist.notice_pipeline.ak")
     def test_empty_df(self, mock_ak):
-        mock_ak.stock_notice_report.return_value = pd.DataFrame()
+        mock_ak.stock_individual_notice_report.return_value = pd.DataFrame()
         result = _fetch_notices_sync("SH600000")
         assert result == []
 
     @patch("bottleneck_hunter.watchlist.notice_pipeline.ak")
     def test_none_df(self, mock_ak):
-        mock_ak.stock_notice_report.return_value = None
+        mock_ak.stock_individual_notice_report.return_value = None
         result = _fetch_notices_sync("SH600000")
         assert result == []
 
@@ -116,7 +116,7 @@ class TestFetchNoticesSync:
     @patch("bottleneck_hunter.watchlist.notice_pipeline.ak")
     def test_limit_respected(self, mock_ak):
         rows = [{"公告标题": f"公告{i}", "公告日期": f"2024-12-{i:02d}", "公告链接": ""} for i in range(1, 21)]
-        mock_ak.stock_notice_report.return_value = self._make_df(rows)
+        mock_ak.stock_individual_notice_report.return_value = self._make_df(rows)
         result = _fetch_notices_sync("600000", limit=5)
         assert len(result) == 5
 
@@ -126,7 +126,7 @@ class TestFetchNoticesSync:
             {"公告标题": "", "公告日期": "2024-12-15", "公告链接": ""},
             {"公告标题": "有效公告", "公告日期": "2024-12-14", "公告链接": ""},
         ])
-        mock_ak.stock_notice_report.return_value = df
+        mock_ak.stock_individual_notice_report.return_value = df
         result = _fetch_notices_sync("600000")
         assert len(result) == 1
         assert result[0]["title"] == "有效公告"
@@ -134,7 +134,7 @@ class TestFetchNoticesSync:
     @patch("bottleneck_hunter.watchlist.notice_pipeline.ak")
     def test_id_is_md5(self, mock_ak):
         df = self._make_df([{"公告标题": "测试公告", "公告日期": "2024-12-15", "公告链接": ""}])
-        mock_ak.stock_notice_report.return_value = df
+        mock_ak.stock_individual_notice_report.return_value = df
         result = _fetch_notices_sync("600000")
         expected_id = hashlib.md5("600000:测试公告:2024-12-15".encode()).hexdigest()[:12]
         assert result[0]["id"] == expected_id
@@ -202,7 +202,7 @@ class TestFetchNoticeBatch:
         store = MagicMock()
         call_count = 0
 
-        async def side_effect(ticker, s):
+        async def side_effect(ticker, s, cache=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

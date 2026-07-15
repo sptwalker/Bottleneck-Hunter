@@ -286,7 +286,7 @@ class TestFetchSecBatch:
         store = MagicMock()
         call_count = 0
 
-        async def side_effect(ticker, s):
+        async def side_effect(ticker, s, cache=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
