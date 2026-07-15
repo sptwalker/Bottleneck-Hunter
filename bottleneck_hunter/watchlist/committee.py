@@ -124,16 +124,21 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
     返回 (content, provider, model)；全部失败则抛出最后一个异常。
     """
     last_err: Exception | None = None
+    from bottleneck_hunter.auth.current_user import get_current_user_id
+    from bottleneck_hunter.llm_clients.health import health
+    from bottleneck_hunter.llm_clients.fallback import classify_reason
+    uid = get_current_user_id()
     for idx, (llm, provider, model) in enumerate(chain):
         for attempt in range(max_retry):
             try:
                 content = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+                health.record_success(uid, provider)  # 恢复：清该 provider 的失败计数
                 if idx > 0 or attempt > 0:
                     logger.info("委员 %s 经重试/降级成功（%s/%s, 第%d次）",
                                 role, provider, model, attempt + 1)
                 if idx > 0:
                     # 真正切到了备用模型 → 提示用户
-                    from bottleneck_hunter.llm_clients.fallback import classify_reason, push_notice, _build_message
+                    from bottleneck_hunter.llm_clients.fallback import push_notice, _build_message
                     fp, fm = chain[0][1], chain[0][2]
                     reason = classify_reason(last_err) if last_err else "调用异常"
                     push_notice(_build_message(fp, fm, reason, provider, model))
@@ -142,6 +147,12 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
                 last_err = e
                 msg = str(e).lower()
                 transient = any(k in msg for k in _TRANSIENT_KEYS)
+                # 记入健康熔断：委员链取裸模型自管重试，此前从不记账 → 402/额度失效的 provider
+                # 永不熔断、每个委员每轮都重撞。记账后累计到阈值即 is_open，_build_llm_chain 会跳过它。
+                try:
+                    health.record_failure(uid, provider, classify_reason(e))
+                except Exception:  # noqa: BLE001
+                    pass
                 logger.warning("委员 %s 调用 %s/%s 失败(%s): %s",
                                role, provider, model,
                                "瞬态" if transient else "非瞬态", e)

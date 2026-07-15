@@ -466,7 +466,7 @@ function renderTactical(plans) {
     const confidence = riskAss.confidence ?? rj.confidence ?? '--';
 
     return `<tr data-company-ticker="${escDC(p.ticker || rj.ticker || '')}" data-company-market="${escDC(dcState.market)}" title="双击查看企业详情">
-      <td><strong>${escDC(p.ticker || rj.ticker)}</strong></td>
+      <td><strong>${escDC(dcName(p.ticker || rj.ticker))}</strong></td>
       <td>${actionBadge(action)}</td>
       <td>${entryPrice !== '--' ? fmtNum(entryPrice, 2) : '--'}</td>
       <td>${stopLoss !== '--' ? fmtNum(stopLoss, 2) : '--'}</td>
@@ -510,7 +510,7 @@ function renderPending(executions) {
 
     return `<div class="dc-pending-item" data-plan-id="${escDC(ex.id)}">
       <div class="dc-pending-header">
-        <span class="dc-pending-ticker">${escDC(ex.ticker)} ${actionBadge(action)} ${flags}</span>
+        <span class="dc-pending-ticker">${escDC(dcName(ex.ticker))} ${actionBadge(action)} ${flags}</span>
         <span style="font-size:12px;color:var(--muted)">${shares}股 @ ${price !== '--' ? fmtNum(Number(price), 2) : '--'}</span>
       </div>
       ${reasoning ? `<div class="dc-pending-detail">${escDC(reasoning)}</div>` : ''}
@@ -565,7 +565,7 @@ function renderBlocked(executions) {
     const cleanReason = reason.replace(/^\[(系统拦截|投委会否决)\]\s*/, '');
     return `<div class="dc-blocked-item" data-plan-id="${escDC(ex.id)}">
       <div class="dc-pending-header">
-        <span class="dc-pending-ticker">${escDC(ex.ticker)} ${actionBadge(action)} ${tag}</span>
+        <span class="dc-pending-ticker">${escDC(dcName(ex.ticker))} ${actionBadge(action)} ${tag}</span>
         <span style="font-size:12px;color:var(--muted)">${shares}股 @ ${price !== '--' ? fmtNum(Number(price), 2) : '--'}</span>
       </div>
       <div class="dc-blocked-reason">${escDC(cleanReason)}</div>
@@ -648,6 +648,9 @@ async function handlePendingAction(e) {
     if (window.appState) window.appState.tradingDirty = true;
   } catch (e) {
     alert('操作失败: ' + e.message);
+  } finally {
+    // 无论成功/业务错误(200 带 error)/网络异常，都恢复按钮，避免卡在"执行中"不可再点。
+    // 若成功，loadOverview 会重渲染换掉整卡；若失败(已回滚 pending)，按钮恢复可再点/可取消。
     btn.disabled = false;
     btn.textContent = action === 'confirm' ? '确认执行' : '拒绝';
   }
@@ -669,7 +672,7 @@ function renderCatalysts(catalysts) {
     return `<div class="dc-catalyst-item">
       <span class="dc-catalyst-date">${escDC(date)}</span>
       <span class="dc-catalyst-text">
-        <span class="dc-catalyst-ticker">${escDC(c.ticker)}</span>
+        <span class="dc-catalyst-ticker">${escDC(dcName(c.ticker))}</span>
         ${escDC(c.event_type || c.catalyst_type || '')} — ${escDC(c.description || '')}
       </span>
     </div>`;
@@ -737,7 +740,7 @@ function renderCommittee(reviews, meta) {
     const vCls = voteClass(meta.verdict || '');
     const date = fmtBJ(meta.created_at);
     header = `<div class="dc-committee-meta">
-      <span class="dc-committee-ticker">${escDC(meta.ticker || '')}</span>
+      <span class="dc-committee-ticker">${escDC(dcName(meta.ticker || ''))}</span>
       <span class="dc-member-decision ${vCls}">${escDC(verdictLabel(meta.verdict || '--'))}</span>
       ${meta.approval_rate != null ? `<span class="dc-tr-conf">通过率 ${Math.round(meta.approval_rate)}%</span>` : ''}
       <span class="dc-tr-conf">${escDC(date)}</span>
@@ -1179,7 +1182,7 @@ function renderCatalystCalendar(data) {
     html += `<div class="${cellClass}">
       <span class="dc-cal-day">${d}</span>`;
     for (const evt of dayEvents.slice(0, 3)) {
-      html += `<div class="dc-cal-event" title="${escDC(evt.title)}">${escDC(evt.ticker)}</div>`;
+      html += `<div class="dc-cal-event" title="${escDC(evt.title)}">${escDC(dcName(evt.ticker))}</div>`;
     }
     if (dayEvents.length > 3) {
       html += `<div class="dc-cal-event dc-cal-more">+${dayEvents.length - 3}</div>`;
@@ -1289,7 +1292,7 @@ function renderMeetings(meetings) {
           <div class="dc-meeting-meta">
             <span class="dc-meeting-date">${escDC(date)}</span>
             <span class="dc-meeting-participants">${participants.length}位参会</span>
-            ${tickers.length ? `<span class="dc-meeting-tickers">${tickers.map(t => escDC(t)).join(', ')}</span>` : ''}
+            ${tickers.length ? `<span class="dc-meeting-tickers">${tickers.map(t => escDC(dcName(t))).join(', ')}</span>` : ''}
           </div>
         </div>
         <span class="dc-meeting-verdict ${verdictCls}">${escDC(verdictZh)}</span>
@@ -1584,7 +1587,7 @@ function renderConsultSnapshot(snap) {
   const pos = snap.positions;
   if (Array.isArray(pos)) {
     push('持仓', pos.length
-      ? pos.map(p => `${escDC(p.ticker)}${p.pnl_pct != null ? ` <span style="color:${p.pnl_pct >= 0 ? 'var(--up,#16a34a)' : 'var(--down,#dc2626)'}">${p.pnl_pct > 0 ? '+' : ''}${p.pnl_pct}%</span>` : ''}`).join(' · ')
+      ? pos.map(p => `${escDC(dcName(p.ticker))}${p.pnl_pct != null ? ` <span style="color:${p.pnl_pct >= 0 ? 'var(--up,#16a34a)' : 'var(--down,#dc2626)'}">${p.pnl_pct > 0 ? '+' : ''}${p.pnl_pct}%</span>` : ''}`).join(' · ')
       : '空仓');
   }
   // 观察池数据已按需去除；新闻置于最后，展开显示中文摘要
