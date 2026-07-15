@@ -961,4 +961,13 @@ MIGRATIONS: list[str] = [
         translated  TEXT NOT NULL,
         created_at  TEXT NOT NULL
     )""",
+    # 阶段2 公共信息层：把既有每用户的客观市场数据折叠进共享桶 user_id='__shared__'。
+    # 单行表(UNIQUE 已排除 user_id，无冲突)——直接重贴标签；company_profiles(PK 含 user_id，
+    # 每用户一份)在 _migrate_shared_market_data() 里按 ticker 保留最新一条后再折叠。幂等。
+    "UPDATE market_snapshots     SET user_id='__shared__' WHERE user_id!='__shared__'",
+    "UPDATE sec_filings          SET user_id='__shared__' WHERE user_id!='__shared__'",
+    "UPDATE insider_trades       SET user_id='__shared__' WHERE user_id!='__shared__'",
+    "UPDATE institutional_holders SET user_id='__shared__' WHERE user_id!='__shared__'",
+    "UPDATE analyst_ratings      SET user_id='__shared__' WHERE user_id!='__shared__'",
+    "CREATE INDEX IF NOT EXISTS idx_snapshots_shared ON market_snapshots(user_id, ticker, date DESC)",
 ]

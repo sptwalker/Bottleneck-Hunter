@@ -221,6 +221,7 @@ class WatchlistStore(
                     if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
                         logger.warning("迁移语句执行异常: %s — %s", sql[:80], e)
             self._migrate_budget_config_pk(conn)
+            self._migrate_shared_company_profiles(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -260,6 +261,31 @@ class WatchlistStore(
             logger.info("budget_config 主键已重建为 (key, user_id)，修复跨用户预算覆盖")
         except sqlite3.OperationalError as e:
             logger.warning("budget_config 主键重建失败（可忽略，退回旧行为）: %s", e)
+
+
+    def _migrate_shared_company_profiles(self, conn) -> None:
+        """阶段2 公共信息层：company_profiles(PK 含 user_id, 每用户一份) 折叠进共享桶 __shared__。
+
+        每 ticker 只保留 fetched_at 最新的一行 → 删其余 → 该行 user_id 改 __shared__。
+        PK 安全(折叠后每 ticker 仅一行)、幂等(已折叠则无非共享行, 均为 no-op)。基本面可再拉, 低风险。
+        """
+        try:
+            if not conn.execute("SELECT 1 FROM company_profiles WHERE user_id!='__shared__' LIMIT 1").fetchone():
+                return  # 已折叠或无数据
+            # 每 ticker 保留 fetched_at 最新的一条(rowid 最大做次级去重), 删掉其余
+            conn.execute("""
+                DELETE FROM company_profiles
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM company_profiles cp
+                    WHERE fetched_at = (SELECT MAX(fetched_at) FROM company_profiles WHERE ticker = cp.ticker)
+                    GROUP BY ticker HAVING rowid = MAX(rowid)
+                )
+            """)
+            # 存活行重贴共享标签(若某 ticker 已有 __shared__ 行且又留了个非共享的, 上一步已只留一行, 安全)
+            conn.execute("UPDATE company_profiles SET user_id='__shared__' WHERE user_id!='__shared__'")
+            logger.info("company_profiles 已折叠进共享桶 __shared__（每 ticker 保留最新一条）")
+        except sqlite3.OperationalError as e:
+            logger.warning("company_profiles 共享折叠失败（可忽略）: %s", e)
 
 
     def _parse_json_fields(self, d: dict, dict_fields: tuple = (),

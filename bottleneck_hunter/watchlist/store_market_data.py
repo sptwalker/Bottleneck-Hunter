@@ -7,8 +7,37 @@ import uuid
 
 from bottleneck_hunter.watchlist.store_base import _now_iso
 
+# 公共信息层阶段2：客观市场数据(价格/基本面/SEC/公告/机构/评级)全体用户共用一份，
+# 固定存/读 user_id=SHARED_UID，不经各用户 user_id。免费源、无 LLM、对所有人相同。
+# keyed 源/按用户 LLM 的表(news/options/earnings)不在此列，仍按各用户隔离。
+SHARED_UID = "__shared__"
+
 
 class _MarketDataMixin:
+
+    # ── 共享桶助手（复用 _user_filter/_user_insert_* 的拼接逻辑，只把 uid 固定成 SHARED_UID）──
+    @staticmethod
+    def _shared_insert_cols() -> str:
+        return ", user_id"
+
+    @staticmethod
+    def _shared_insert_vals() -> str:
+        return ", ?"
+
+    @staticmethod
+    def _shared_insert_params() -> tuple:
+        return (SHARED_UID,)
+
+    def _shared_filter(self, query: str, params: tuple = ()) -> tuple[str, tuple]:
+        """把 user_id=SHARED_UID 注入 WHERE。临时置换 _user_id 复用已验证的 _user_filter 拼接；
+        方法体全同步(无 await)，asyncio 单线程下 swap→restore 原子，安全。"""
+        saved = self._user_id
+        self._user_id = SHARED_UID
+        try:
+            return self._user_filter(query, params)
+        finally:
+            self._user_id = saved
+
     def save_snapshots(self, snapshots: list[dict]) -> int:
         if not snapshots:
             return 0
@@ -20,8 +49,8 @@ class _MarketDataMixin:
                        (ticker, date, open, high, low, close, volume, market_cap,
                         pe_ratio, change_pct, rsi_14, macd, macd_signal, macd_hist,
                         sma_20, sma_50, fetched_at, market,
-                        data_quality, quality_notes{self._user_insert_cols()})
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                        data_quality, quality_notes{self._shared_insert_cols()})
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._shared_insert_vals()})""",
                     (
                         s["ticker"], s["date"], s.get("open"), s.get("high"),
                         s.get("low"), s.get("close"), s.get("volume"),
@@ -32,7 +61,7 @@ class _MarketDataMixin:
                         s.get("market", "us_stock"),
                         s.get("data_quality", "normal"),
                         s.get("quality_notes", ""),
-                    ) + self._user_insert_params(),
+                    ) + self._shared_insert_params(),
                 )
                 count += 1
             return count
@@ -41,7 +70,7 @@ class _MarketDataMixin:
     def get_snapshots(self, ticker: str, days: int = 90) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._shared_filter(
                 "SELECT * FROM market_snapshots WHERE ticker = ? ORDER BY date DESC LIMIT ?",
                 (ticker, days),
             )
@@ -54,7 +83,7 @@ class _MarketDataMixin:
     def get_latest_snapshot(self, ticker: str) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._shared_filter(
                 "SELECT * FROM market_snapshots WHERE ticker = ? ORDER BY date DESC LIMIT 1",
                 (ticker,),
             )
@@ -69,7 +98,7 @@ class _MarketDataMixin:
         """获取基准指数在指定时段的收益率百分比"""
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._shared_filter(
                 """SELECT date, close FROM market_snapshots
                    WHERE ticker = ? AND date >= ? AND date <= ?
                    ORDER BY date ASC""",
@@ -139,14 +168,14 @@ class _MarketDataMixin:
                 conn.execute(
                     f"""INSERT OR IGNORE INTO sec_filings
                        (id, ticker, filing_type, filed_date, title, summary, url,
-                        is_insider_trade, fetched_at{self._user_insert_cols()})
-                       VALUES (?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                        is_insider_trade, fetched_at{self._shared_insert_cols()})
+                       VALUES (?,?,?,?,?,?,?,?,?{self._shared_insert_vals()})""",
                     (
                         fid, f["ticker"], f["filing_type"], f["filed_date"],
                         f.get("title", ""), f.get("summary", ""), f.get("url", ""),
                         1 if f.get("is_insider_trade") else 0,
                         f.get("fetched_at", _now_iso()),
-                    ) + self._user_insert_params(),
+                    ) + self._shared_insert_params(),
                 )
                 count += 1
             conn.commit()
@@ -159,13 +188,13 @@ class _MarketDataMixin:
         conn = self._connect()
         try:
             if filing_type:
-                q, p = self._user_filter(
+                q, p = self._shared_filter(
                     "SELECT * FROM sec_filings WHERE ticker = ? AND filing_type = ? ORDER BY filed_date DESC LIMIT ?",
                     (ticker, filing_type, limit),
                 )
                 rows = conn.execute(q, p).fetchall()
             else:
-                q, p = self._user_filter(
+                q, p = self._shared_filter(
                     "SELECT * FROM sec_filings WHERE ticker = ? ORDER BY filed_date DESC LIMIT ?",
                     (ticker, limit),
                 )
@@ -186,14 +215,14 @@ class _MarketDataMixin:
                 conn.execute(
                     f"""INSERT OR IGNORE INTO insider_trades
                        (id, ticker, insider_name, insider_title, transaction_type,
-                        shares, price, total_value, date, source_filing_id, fetched_at{self._user_insert_cols()})
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                        shares, price, total_value, date, source_filing_id, fetched_at{self._shared_insert_cols()})
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?{self._shared_insert_vals()})""",
                     (
                         tid, t["ticker"], t["insider_name"], t.get("insider_title", ""),
                         t.get("transaction_type", ""), t.get("shares", 0),
                         t.get("price"), t.get("total_value"), t["date"],
                         t.get("source_filing_id", ""), t.get("fetched_at", _now_iso()),
-                    ) + self._user_insert_params(),
+                    ) + self._shared_insert_params(),
                 )
                 count += 1
             conn.commit()
@@ -205,7 +234,7 @@ class _MarketDataMixin:
     def get_insider_trades(self, ticker: str, limit: int = 20) -> list[dict]:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._shared_filter(
                 "SELECT * FROM insider_trades WHERE ticker = ? ORDER BY date DESC LIMIT ?",
                 (ticker, limit),
             )
@@ -320,8 +349,8 @@ class _MarketDataMixin:
             for h in holders:
                 conn.execute(
                     f"""INSERT OR REPLACE INTO institutional_holders
-                       (ticker, holder_name, shares, value, pct_held, date, fetched_at{self._user_insert_cols()})
-                       VALUES (?,?,?,?,?,?,?{self._user_insert_vals()})""",
+                       (ticker, holder_name, shares, value, pct_held, date, fetched_at{self._shared_insert_cols()})
+                       VALUES (?,?,?,?,?,?,?{self._shared_insert_vals()})""",
                     (
                         ticker,
                         h.get("holder_name", ""),
@@ -330,7 +359,7 @@ class _MarketDataMixin:
                         h.get("pct_held", 0.0),
                         h.get("date", ""),
                         h.get("fetched_at", _now_iso()),
-                    ) + self._user_insert_params(),
+                    ) + self._shared_insert_params(),
                 )
                 count += 1
             return count
@@ -340,7 +369,7 @@ class _MarketDataMixin:
         """获取指定 ticker 的机构持仓，按持仓比例降序。"""
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._shared_filter(
                 "SELECT * FROM institutional_holders WHERE ticker = ? ORDER BY pct_held DESC LIMIT ?",
                 (ticker, limit),
             )
@@ -359,8 +388,8 @@ class _MarketDataMixin:
             for r in ratings:
                 conn.execute(
                     f"""INSERT OR REPLACE INTO analyst_ratings
-                       (ticker, firm, rating, target_price, date, fetched_at{self._user_insert_cols()})
-                       VALUES (?,?,?,?,?,?{self._user_insert_vals()})""",
+                       (ticker, firm, rating, target_price, date, fetched_at{self._shared_insert_cols()})
+                       VALUES (?,?,?,?,?,?{self._shared_insert_vals()})""",
                     (
                         ticker,
                         r.get("firm", ""),
@@ -368,7 +397,7 @@ class _MarketDataMixin:
                         r.get("target_price"),
                         r.get("date", ""),
                         r.get("fetched_at", _now_iso()),
-                    ) + self._user_insert_params(),
+                    ) + self._shared_insert_params(),
                 )
                 count += 1
             return count
@@ -378,7 +407,7 @@ class _MarketDataMixin:
         """获取指定 ticker 的分析师评级，按日期降序。"""
         conn = self._connect()
         try:
-            q, p = self._user_filter(
+            q, p = self._shared_filter(
                 "SELECT * FROM analyst_ratings WHERE ticker = ? ORDER BY date DESC LIMIT ?",
                 (ticker, limit),
             )
@@ -410,7 +439,7 @@ class _MarketDataMixin:
                     info.get("exchange", ""),
                     info.get("currency", ""),
                     _now_iso(),
-                    self._user_id or "",
+                    SHARED_UID,
                 ),
             )
 
@@ -419,11 +448,8 @@ class _MarketDataMixin:
         """获取企业基本面，返回结构化 dict。"""
         conn = self._connect()
         try:
-            q = "SELECT * FROM company_profiles WHERE ticker = ?"
-            p: tuple = (ticker,)
-            if self._user_id:
-                q += " AND user_id = ?"
-                p = (ticker, self._user_id)
+            q = "SELECT * FROM company_profiles WHERE ticker = ? AND user_id = ?"
+            p: tuple = (ticker, SHARED_UID)
             row = conn.execute(q, p).fetchone()
             if not row:
                 return None
