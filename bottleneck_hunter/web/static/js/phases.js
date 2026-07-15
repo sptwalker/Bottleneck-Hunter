@@ -950,6 +950,7 @@ function handlePhase2Event(data, progress) {
     renderPhase2Table(data.scorecards, state.failedTickers);
     showP2WeightCtrl();
     _updateP2Progress(100, '筛选完成');
+    loadWizardHistory();   // 环节完成即刷新首页"最近分析"列表（供应商数等随之更新）
 
     const stats = data.stats || {};
     const statsEl = document.getElementById('wiz-p2-stats');
@@ -1053,6 +1054,7 @@ function runPhase3(wQ, wA) {
   const allRanked = recalcPhase3(scorecards, wQ, wA);
   const ranked = allRanked.slice(0, topN);
   state.phase3 = { ranked_results: ranked, scoring_config: { quality_weight: wQ, alpha_weight: wA, top_n: topN } };
+  loadWizardHistory();   // 环节完成即刷新首页"最近分析"列表
 
   renderPhase3Table(ranked, openPhaseDrawer);
   renderScatterPlot(ranked);
@@ -1186,6 +1188,7 @@ function handlePhase4Event(data, progress) {
     state.p4Error = false;
     if (data.completed_phases) state.config.completed_phases = data.completed_phases;
     renderPhase4Table(data.validations || [], data.recommendations || [], state.phase3?.ranked_results || []);
+    loadWizardHistory();   // 环节完成即刷新首页"最近分析"列表
     const vCount = (data.recommendations || data.validations || []).length;
     logMsg(`Phase 4 完成 — 交叉验证 ${vCount} 家公司`, 'done');
     progress.innerHTML = '<div class="progress-msg progress-done">交叉验证完成</div>';
