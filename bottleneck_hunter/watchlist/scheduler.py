@@ -220,12 +220,18 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
 async def job_daily_scan(market: str = "us_stock") -> dict:
     """Daily scan: news (+ SEC/options for US), iterates all users."""
     all_results: dict[str, dict] = {}
+    # 公共信息层：周期内多用户共享免费源新闻/SEC 的网络拉取（按 (类型,market,ticker) 去重）
+    cache: dict = {}
+    user_count = 0
+    ticker_requests = 0
     for uid, store, budget in _iter_users("watchlist_data"):
         try:
             by_market = store.get_tickers_by_market()
             tickers = by_market.get(market, [])
             if not tickers:
                 continue
+            user_count += 1
+            ticker_requests += len(tickers)
 
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Daily scan (%s/%s) starting for %d tickers", market, label, len(tickers))
@@ -235,7 +241,7 @@ async def job_daily_scan(market: str = "us_stock") -> dict:
             try:
                 store.update_pipeline_status("news", last_status="running", stocks_total=len(tickers))
                 from bottleneck_hunter.watchlist.news_pipeline import fetch_news_batch
-                news_results = await fetch_news_batch(tickers, store, budget=budget, market=market)
+                news_results = await fetch_news_batch(tickers, store, budget=budget, market=market, cache=cache)
                 results["news"] = news_results
                 ok_count = sum(1 for v in news_results.values() if isinstance(v, int) and v >= 0)
                 fail_count = sum(1 for v in news_results.values() if isinstance(v, int) and v < 0)
@@ -267,7 +273,7 @@ async def job_daily_scan(market: str = "us_stock") -> dict:
                 try:
                     store.update_pipeline_status("sec", last_status="running", stocks_total=len(tickers))
                     from bottleneck_hunter.watchlist.sec_pipeline import fetch_sec_batch
-                    sec_results = await fetch_sec_batch(tickers, store)
+                    sec_results = await fetch_sec_batch(tickers, store, cache=cache)
                     results["sec"] = sec_results
                     ok_count = sum(1 for v in sec_results.values() if isinstance(v, dict) and v.get("filings", 0) >= 0)
                     fail_count = len(sec_results) - ok_count
@@ -312,7 +318,7 @@ async def job_daily_scan(market: str = "us_stock") -> dict:
                 try:
                     store.update_pipeline_status("notice", last_status="running", stocks_total=len(tickers))
                     from bottleneck_hunter.watchlist.notice_pipeline import fetch_notice_batch
-                    notice_results = await fetch_notice_batch(tickers, store)
+                    notice_results = await fetch_notice_batch(tickers, store, cache=cache)
                     results["notice"] = notice_results
                     ok_count = sum(1 for v in notice_results.values() if isinstance(v, dict) and v.get("filings", 0) >= 0)
                     fail_count = sum(1 for v in notice_results.values() if isinstance(v, dict) and v.get("filings", 0) < 0)
@@ -335,6 +341,9 @@ async def job_daily_scan(market: str = "us_stock") -> dict:
         except Exception as e:
             logger.error("Daily scan (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
 
+    if user_count:
+        logger.info("每日扫描去重(%s): %d 用户 / %d 用户-票请求 / 唯一(类型,票) %d 次网络拉取",
+                    market, user_count, ticker_requests, len(cache))
     return all_results
 
 

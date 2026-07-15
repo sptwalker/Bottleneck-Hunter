@@ -278,18 +278,26 @@ async def _summarize_market_items(items: list[dict], llm, budget: BudgetTracker)
 # Batch pipeline
 # ---------------------------------------------------------------------------
 
-async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTracker, market: str = "us_stock") -> int:
+async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTracker, market: str = "us_stock",
+                     cache: dict | None = None) -> int:
     async with _get_sem():
-        if market == "a_stock":
-            articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+        # 免费源文章拉取(RSS/yfinance/akshare)可共享；DataHub keyed 新闻 + LLM 情绪按用户
+        _ck = ("news_full", market, ticker)
+        if cache is not None and _ck in cache:
+            articles = [dict(a) for a in cache[_ck]]
         else:
-            articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
-            rss = await _fetch_rss_news(f"{ticker} stock", tag=ticker)
-            seen = {a["id"] for a in articles}
-            for r in rss:
-                if r["id"] not in seen:
-                    articles.append(r)
-                    seen.add(r["id"])
+            if market == "a_stock":
+                articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+            else:
+                articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
+                rss = await _fetch_rss_news(f"{ticker} stock", tag=ticker)
+                seen = {a["id"] for a in articles}
+                for r in rss:
+                    if r["id"] not in seen:
+                        articles.append(r)
+                        seen.add(r["id"])
+            if cache is not None:
+                cache[_ck] = [dict(a) for a in articles]
 
         # 并入 DataHub 多源 keyed 新闻（finnhub/tiingo/fmp/av 按质量梯队+额度均衡；无 key 返 None）
         try:
@@ -326,8 +334,12 @@ async def fetch_news_batch(
     llm=None,
     budget: BudgetTracker | None = None,
     market: str = "us_stock",
+    cache: dict | None = None,
 ) -> dict[str, int]:
-    """Batch-fetch and summarize news. Returns {ticker: article_count}."""
+    """Batch-fetch and summarize news. Returns {ticker: article_count}.
+
+    cache: 周期内多用户共享免费源新闻拉取（RSS/yfinance/akshare）；按用户的 LLM 情绪不共享。
+    """
     if not tickers:
         return {}
     results = {}
@@ -337,12 +349,19 @@ async def fetch_news_batch(
             from bottleneck_hunter.data_provider.hub import CAP_NEWS, get_hub
             async with get_hub().track(src, CAP_NEWS, market) as _sink:
                 if llm and budget:
-                    count = await _fetch_one(ticker, store, llm, budget, market=market)
+                    count = await _fetch_one(ticker, store, llm, budget, market=market, cache=cache)
                 else:
-                    if market == "a_stock":
-                        articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+                    # 调度器无 LLM 路径：纯免费源拉取，可周期内去重
+                    _ck = ("news_sched", market, ticker)
+                    if cache is not None and _ck in cache:
+                        articles = [dict(a) for a in cache[_ck]]
                     else:
-                        articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
+                        if market == "a_stock":
+                            articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+                        else:
+                            articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
+                        if cache is not None:
+                            cache[_ck] = [dict(a) for a in (articles or [])]
                     count = store.save_news(articles) if articles else 0
                 _sink["rows"] = max(count, 0)
             results[ticker] = count

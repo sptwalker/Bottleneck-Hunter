@@ -101,22 +101,40 @@ def _fetch_notices_sync(ticker: str, limit: int = 15) -> list[dict]:
     return results
 
 
-async def _fetch_one(ticker: str, store: WatchlistStore) -> dict:
-    """异步获取单只 A 股的公告并存储。"""
+async def _fetch_notice_raw(ticker: str) -> list[dict]:
+    """拉取一只 A 股的公告（akshare 免费公开数据，无 key/LLM）。返回 filings 列表。"""
+    from bottleneck_hunter.data_provider.hub import CAP_NOTICE, get_hub
+    async with get_hub().track("akshare", CAP_NOTICE, "a_stock") as _sink:
+        filings = await asyncio.to_thread(_fetch_notices_sync, ticker)
+        if not filings:
+            return []
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for f in filings:
+            f["fetched_at"] = now_iso
+        _sink["rows"] = len(filings)
+        return filings
+
+
+async def _fetch_one(ticker: str, store: WatchlistStore, cache: dict | None = None) -> dict:
+    """异步获取单只 A 股的公告并存储。
+
+    cache: 周期内共享缓存 key=("notice", ticker)，命中则跳过网络、直接为本用户落库。
+    """
     async with _get_sem():
-        from bottleneck_hunter.data_provider.hub import CAP_NOTICE, get_hub
-        async with get_hub().track("akshare", CAP_NOTICE, "a_stock") as _sink:
-            filings = await asyncio.to_thread(_fetch_notices_sync, ticker)
-            if not filings:
-                return {"filings": 0, "trades": 0}
+        ck = ("notice", ticker)
+        if cache is not None and ck in cache:
+            filings = cache[ck]
+        else:
+            filings = await _fetch_notice_raw(ticker)
+            if cache is not None:
+                cache[ck] = filings
+        if not filings:
+            return {"filings": 0, "trades": 0}
 
-            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            for f in filings:
-                f["fetched_at"] = now_iso
+        # 每用户落库（拷贝，避免共享 dict 被 save 改写）
+        fcount = store.save_filings([dict(f) for f in filings])
 
-            fcount = store.save_filings(filings)
-            _sink["rows"] = fcount
-
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         insider_filings = [f for f in filings if f.get("is_insider_trade")]
         trades = []
         for f in insider_filings:
@@ -139,14 +157,14 @@ async def _fetch_one(ticker: str, store: WatchlistStore) -> dict:
         return {"filings": fcount, "trades": tcount}
 
 
-async def fetch_notice_batch(tickers: list[str], store: WatchlistStore) -> dict[str, dict]:
+async def fetch_notice_batch(tickers: list[str], store: WatchlistStore, cache: dict | None = None) -> dict[str, dict]:
     """批量获取 A 股公告。返回 {ticker: {filings, trades}}。"""
     if not tickers:
         return {}
     results = {}
     for ticker in tickers:
         try:
-            results[ticker] = await _fetch_one(ticker, store)
+            results[ticker] = await _fetch_one(ticker, store, cache=cache)
         except Exception as e:
             logger.error("A 股公告管道错误 %s: %s", ticker, e)
             results[ticker] = {"filings": -1, "trades": 0, "error": str(e)}

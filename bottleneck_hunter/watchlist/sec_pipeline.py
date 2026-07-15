@@ -357,43 +357,53 @@ async def _parse_insider_trades_from_filings(cik: str, ticker: str, filings: lis
 # Batch pipeline
 # ---------------------------------------------------------------------------
 
-async def _fetch_one(ticker: str, store: WatchlistStore) -> dict:
-    """Fetch SEC data for one ticker."""
+async def _fetch_sec_raw(ticker: str) -> tuple[list[dict], list[dict]]:
+    """从 EDGAR 拉取一支票的 filings + insider trades（纯公开数据，无 key/LLM）。返回 (filing_dicts, trades)。"""
+    from bottleneck_hunter.data_provider.hub import CAP_SEC, get_hub
+    async with get_hub().track("sec_edgar", CAP_SEC, "us_stock") as _sink:
+        cik = await _get_cik(ticker)
+        if not cik:
+            return [], []
+        filings = await _fetch_filings(cik, ["4", "4/A", "8-K", "10-Q", "10-K"], limit=15)
+        if not filings:
+            return [], []
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        filing_dicts = [{**f, "ticker": ticker, "fetched_at": now_iso} for f in filings]
+        trades = await _parse_insider_trades_from_filings(cik, ticker, filings)
+        for t in trades:
+            t["fetched_at"] = now_iso
+        _sink["rows"] = len(filing_dicts) + len(trades)
+        return filing_dicts, trades
+
+
+async def _fetch_one(ticker: str, store: WatchlistStore, cache: dict | None = None) -> dict:
+    """Fetch SEC data for one ticker.
+
+    cache: 可选周期内共享缓存，key=("sec", ticker)。命中则跳过 EDGAR 网络拉取，
+    直接用缓存数据为本用户落库——公共信息层：多用户共享同一支票的 SEC 拉取（纯公开数据）。
+    """
     async with _get_sem():
-        from bottleneck_hunter.data_provider.hub import CAP_SEC, get_hub
-        async with get_hub().track("sec_edgar", CAP_SEC, "us_stock") as _sink:
-            cik = await _get_cik(ticker)
-            if not cik:
-                return {"filings": 0, "trades": 0}
-
-            filings = await _fetch_filings(cik, ["4", "4/A", "8-K", "10-Q", "10-K"], limit=15)
-            if not filings:
-                return {"filings": 0, "trades": 0}
-
-            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            filing_dicts = [
-                {**f, "ticker": ticker, "fetched_at": now_iso}
-                for f in filings
-            ]
-            fcount = store.save_filings(filing_dicts)
-
-            trades = await _parse_insider_trades_from_filings(cik, ticker, filings)
-            for t in trades:
-                t["fetched_at"] = now_iso
-            tcount = store.save_insider_trades(trades)
-
-            _sink["rows"] = fcount + tcount
-            return {"filings": fcount, "trades": tcount}
+        ck = ("sec", ticker)
+        if cache is not None and ck in cache:
+            filing_dicts, trades = cache[ck]
+        else:
+            filing_dicts, trades = await _fetch_sec_raw(ticker)
+            if cache is not None:
+                cache[ck] = (filing_dicts, trades)
+        # 每用户落库（拷贝，避免共享 dict 被 save 改写）
+        fcount = store.save_filings([dict(f) for f in filing_dicts]) if filing_dicts else 0
+        tcount = store.save_insider_trades([dict(t) for t in trades]) if trades else 0
+        return {"filings": fcount, "trades": tcount}
 
 
-async def fetch_sec_batch(tickers: list[str], store: WatchlistStore) -> dict[str, dict]:
+async def fetch_sec_batch(tickers: list[str], store: WatchlistStore, cache: dict | None = None) -> dict[str, dict]:
     """Batch-fetch SEC filings for US stock tickers. Returns {ticker: {filings, trades}}."""
     if not tickers:
         return {}
     results = {}
     for ticker in tickers:
         try:
-            results[ticker] = await _fetch_one(ticker, store)
+            results[ticker] = await _fetch_one(ticker, store, cache=cache)
         except Exception as e:
             logger.error("SEC pipeline error for %s: %s", ticker, e)
             results[ticker] = {"filings": 0, "trades": 0}
