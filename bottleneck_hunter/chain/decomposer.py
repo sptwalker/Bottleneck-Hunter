@@ -86,11 +86,11 @@ class ChainDecomposer:
     MAX_CONCURRENCY = 4  # 同层并发数量上限
     MAX_RETRIES = 2  # LLM 调用失败重试次数
     # 广度上限：防止逐层指数爆炸（曾单层 283 节点 → 整体 >30min 超时）。
-    # 调优记录：初版 24/6 过紧导致产业数偏少。放宽——LLM 调用数只由「每层展开的父节点数」决定
-    # (MAX_NODES_PER_LAYER)，与每父子节点数无关(一次调用返回全部子节点)，故 MAX_CHILDREN 放宽近乎零成本；
-    # 40/10 在 1800s 预算内仍很宽裕(约百次调用 vs 预算~360)，产业链更丰富。
-    MAX_NODES_PER_LAYER = 40
-    MAX_CHILDREN_PER_NODE = 10
+    # 调优记录：24/6 过紧→偏少；40/10 健康(人形机器人 depth4 用~70次调用/9min/88节点)。
+    # 用户要「质量优先」再放宽：60/12。LLM 调用数只由每层展开父节点数决定，仍在 1800s 预算内
+    # (预算约容 360 次)；注意节点变多会拉长下游瓶颈打分(约 10s/环节)，属预期取舍。
+    MAX_NODES_PER_LAYER = 60
+    MAX_CHILDREN_PER_NODE = 12
 
     def __init__(
         self,

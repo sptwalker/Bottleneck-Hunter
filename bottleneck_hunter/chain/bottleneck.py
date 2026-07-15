@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
@@ -238,6 +239,7 @@ class BottleneckAnalyzer:
         self._failed_nodes = []
         self._on_progress = on_progress
         use_cross = self.use_cross_scoring
+        _t0 = time.time()
 
         candidates = [n for n in graph.nodes if n.layer > 0]
         total = len(candidates)
@@ -294,6 +296,12 @@ class BottleneckAnalyzer:
 
         if self._timeout_count > 0:
             logger.warning(f"瓶颈分析: {self._timeout_count} 次超时放弃, {self._retry_count} 次重试")
+
+        # ASCII 汇总，便于 Loki 检索(|= "bottleneck done")核对环节数/模型数/耗时
+        _top = reports[0].overall_score if reports else 0.0
+        logger.info("bottleneck done: nodes=%d scored=%d failed=%d models=%d cross=%s timeouts=%d top=%.1f elapsed=%ds",
+                    total, len(reports), len(self._failed_nodes), len(self.llms), use_cross,
+                    self._timeout_count, _top, int(time.time() - _t0))
 
         self._on_progress = None
         return reports
