@@ -69,3 +69,6 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "slow: 真实网络/外部依赖的慢测试(如实拉宏观数据)；快子集用 `pytest -m \"not slow\"` 排除",
+]

@@ -138,6 +138,7 @@ class TestL1MacroStrategy:
         assert any(e["event"] == "decision_error" for e in events)
         llm.invoke.assert_not_called()
 
+    @pytest.mark.slow  # 真实拉宏观数据(FRED/指数)，~8min；fast 子集用 -m "not slow" 排除
     @pytest.mark.asyncio
     async def test_run_macro_check_valid(self, store_with_macro):
         s, _, macro_id = store_with_macro
@@ -183,6 +184,7 @@ class TestL1MacroStrategy:
         assert any(e["data"].get("layer") == "L1" and e["data"].get("regime")
                    for e in done_events)
 
+    @pytest.mark.slow
     @pytest.mark.asyncio
     async def test_run_macro_check_no_existing(self, store):
         s, _ = store
@@ -372,6 +374,7 @@ class TestE2EDecisionFlow:
             return _mock_llm_response(responses[i]), "deepseek", "deepseek-chat"
         return mock_get_llm
 
+    @pytest.mark.slow
     @pytest.mark.asyncio
     async def test_run_daily_decision_full(self, store_with_strategic):
         s, entry_id, macro_id, strat_id = store_with_strategic
