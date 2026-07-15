@@ -202,6 +202,9 @@ class TestSchedulerNoticeIntegration:
             new_callable=AsyncMock,
             return_value={"SH600519": 3},
         ), patch(
+            "bottleneck_hunter.watchlist.news_pipeline.refresh_market_news",
+            new_callable=AsyncMock, return_value=0,
+        ), patch(
             "bottleneck_hunter.watchlist.notice_pipeline.fetch_notice_batch",
             new_callable=AsyncMock,
             return_value={"SH600519": {"filings": 2, "trades": 1}},
@@ -223,6 +226,9 @@ class TestSchedulerNoticeIntegration:
             "bottleneck_hunter.watchlist.news_pipeline.fetch_news_batch",
             new_callable=AsyncMock,
             return_value={"AAPL": 5},
+        ), patch(
+            "bottleneck_hunter.watchlist.news_pipeline.refresh_market_news",
+            new_callable=AsyncMock, return_value=0,
         ), patch(
             "bottleneck_hunter.watchlist.sec_pipeline.fetch_sec_batch",
             new_callable=AsyncMock,

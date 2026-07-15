@@ -73,7 +73,7 @@ async def upload_user_guide(req: GuideUpload, user: dict = Depends(require_admin
 
 # 分类展示标签
 CATEGORY_LABELS = {
-    "watchlist_data": "观察池数据（行情/新闻/公告/期权/机构）",
+    "keyed_data": "付费数据源（财报/期权，用你的 Key）",
     "daily_decision": "日常决策（L1-L4 + 投委会）",
     "weekly_strategy": "每周策略重生成",
     "auto_review": "自动复盘与偏好学习",
@@ -85,7 +85,7 @@ CATEGORY_LABELS = {
 # ── 用户设置 ────────────────────────────────────────────────
 class AutoUpdatePatch(BaseModel):
     master_enabled: bool | None = None
-    watchlist_data: bool | None = None
+    keyed_data: bool | None = None
     daily_decision: bool | None = None
     weekly_strategy: bool | None = None
     auto_review: bool | None = None
@@ -129,14 +129,15 @@ async def patch_auto_update(req: AutoUpdatePatch, user: dict = Depends(get_curre
     return {"status": "ok", "config": store.get_auto_update_config()}
 
 
-# category → 立即执行时触发的 job 协程工厂（全局 job，内部按用户门控）
+# category → 立即执行时触发的 job 协程工厂。客观数据(价格/新闻/SEC/公告/机构)已归服务器全局、
+# 不在每用户"立即刷新"里(观察池一键刷新另有入口)；这里只留每用户可控的类别。
 def _run_map(category: str):
     from bottleneck_hunter.watchlist import scheduler as S
     return {
-        "watchlist_data": [lambda: S.job_price_update("us_stock"), lambda: S.job_price_update("a_stock"),
-                           lambda: S.job_daily_scan("us_stock"), lambda: S.job_daily_scan("a_stock"),
+        "keyed_data": [lambda: S.job_earnings_update("us_stock"), lambda: S.job_earnings_update("a_stock"),
+                       lambda: S.job_daily_scan("us_stock")],  # daily_scan 内含每用户 options 段
+        "daily_decision": [lambda: S.job_daily_decision("us_stock"), lambda: S.job_daily_decision("a_stock"),
                            lambda: S.job_stale_refresh()],
-        "daily_decision": [lambda: S.job_daily_decision("us_stock"), lambda: S.job_daily_decision("a_stock")],
         "weekly_strategy": [lambda: S.job_weekly_strategy("us_stock"), lambda: S.job_weekly_strategy("a_stock")],
         "auto_review": [lambda: S.job_auto_review("us_stock"), lambda: S.job_auto_review("a_stock")],
         "catalyst": [lambda: S.job_catalyst_scan()],

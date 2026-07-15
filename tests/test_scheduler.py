@@ -150,6 +150,9 @@ class TestJobDispatching:
             new_callable=AsyncMock,
             return_value={"SH600519": 3},
         ) as mock_news, patch(
+            "bottleneck_hunter.watchlist.news_pipeline.refresh_market_news",
+            new_callable=AsyncMock, return_value=0,
+        ), patch(
             "bottleneck_hunter.watchlist.sec_pipeline.fetch_sec_batch",
             new_callable=AsyncMock,
         ) as mock_sec, patch(
@@ -176,6 +179,9 @@ class TestJobDispatching:
             new_callable=AsyncMock,
             return_value={"AAPL": 5, "MSFT": 3},
         ) as mock_news, patch(
+            "bottleneck_hunter.watchlist.news_pipeline.refresh_market_news",
+            new_callable=AsyncMock, return_value=0,
+        ), patch(
             "bottleneck_hunter.watchlist.sec_pipeline.fetch_sec_batch",
             new_callable=AsyncMock,
             return_value={"AAPL": {"filings": 2}, "MSFT": {"filings": 1}},
@@ -186,15 +192,14 @@ class TestJobDispatching:
         ) as mock_options:
             results = await job_daily_scan(market="us_stock")
 
-        # 美股应同时调用三个管道
+        # 美股：全局段调 news+sec，每用户段(keyed_data)调 options
         mock_news.assert_called_once()
         mock_sec.assert_called_once()
         mock_options.assert_called_once()
 
-        # 验证结果包含三个管道的数据
+        # 全局段结果含 news + sec（options 在每用户段，不并入全局 results）
         assert "news" in results
         assert "sec" in results
-        assert "options" in results
 
 
 class TestManualRefreshMarketScope:

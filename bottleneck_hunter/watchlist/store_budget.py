@@ -14,7 +14,7 @@ def _days_ago(days: int) -> str:
 # 自动更新配置默认值（用户未显式设置时的回退）。总开关 + 各分类开关默认全开，陈旧阈值 24h。
 AUTO_UPDATE_DEFAULTS: dict[str, str] = {
     "master_enabled": "1",
-    "watchlist_data": "1",    # 行情/新闻/公告/期权/机构等数据管道
+    "keyed_data": "1",        # 付费数据源(财报/期权，用各自 Key)——客观免费数据已归全局，无每用户开关
     "daily_decision": "1",    # L1-L4 + 投委会日常决策
     "weekly_strategy": "1",   # 周度 L1/L2 策略重生成
     "auto_review": "1",       # 卖出复盘 + 机会成本 + 偏好学习

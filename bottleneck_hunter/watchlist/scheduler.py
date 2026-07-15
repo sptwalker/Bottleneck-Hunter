@@ -80,6 +80,24 @@ def _iter_users(category: str | None = None):
             reset_current_user(tok)
 
 
+def _global_store() -> WatchlistStore | None:
+    """客观数据全局拉取用的 unbound store（_user_id=''）：其读写走共享桶、观察池票取全体并集。
+
+    只受管理员全局总开关(kill-switch)控制，不看任何用户的 category 开关——客观免费数据对所有人相同、
+    无 Key 归属，由系统统一保障。总开关关闭或未初始化 → 返回 None(不跑)。
+    """
+    if not _wl_store:
+        return None
+    try:
+        from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+        if not is_global_enabled(_auth_store):
+            logger.info("自动更新全局总开关关闭，跳过客观数据全局拉取")
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+    return _wl_store  # unbound：get_tickers_by_market 返回全体并集；save/read 走共享桶
+
+
 def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
     """Create and configure scheduler. Returns the scheduler or None if APScheduler not installed."""
     global _scheduler, _wl_store, _budget, _auth_store
@@ -170,180 +188,143 @@ def _oplog(uid: str, title: str, *, market: str = "", detail: str = "已完成",
 
 
 async def job_price_update(market: str = "us_stock") -> dict[str, str]:
-    """Fetch prices for watchlist tickers of a specific market (multi-user)."""
-    all_results: dict[str, str] = {}
-    # 公共信息层阶段1：本次周期内多用户共享同一支票的网络拉取（去重，缓解限流/提速）
-    cache: dict = {}
-    user_count = 0
-    ticker_requests = 0
-    for uid, store, budget in _iter_users("watchlist_data"):
-        try:
-            from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+    """全局拉取全体用户观察池并集的价格（客观免费数据，落共享层，只受全局总开关控制）。"""
+    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
 
-            by_market = store.get_tickers_by_market()
-            tickers = by_market.get(market, [])
-            if not tickers:
-                continue
-            user_count += 1
-            ticker_requests += len(tickers)
+    store = _global_store()
+    if store is None:
+        return {}
+    tickers = store.get_tickers_by_market().get(market, [])  # unbound → 全体并集
+    if not tickers:
+        return {}
 
-            label = f"user={uid[:8]}" if uid else "global"
-            logger.info("Price update (%s/%s) starting for %d tickers", market, label, len(tickers))
-            store.update_pipeline_status("price", last_status="running", stocks_total=len(tickers))
-
-            results = await fetch_price_batch(tickers, store, market=market, cache=cache)
-            ok_count = sum(1 for v in results.values() if v == "ok")
-            fail_count = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("error"))
-            status = "success" if fail_count == 0 else ("partial" if ok_count > 0 else "error")
-            error_msg = f"{fail_count}/{len(results)} tickers failed" if fail_count > 0 else ""
-            store.update_pipeline_status(
-                "price",
-                last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                last_status=status,
-                last_error=error_msg,
-                stocks_processed=ok_count,
-                stocks_total=len(tickers),
-            )
-            logger.info("Price update (%s/%s) done: %d/%d succeeded", market, label, ok_count, len(tickers))
-            _oplog(uid, "行情自动更新", market=market, result=("fail" if status == "error" else status),
-                   detail=f"成功 {ok_count}/{len(tickers)}" + (f"，失败 {fail_count}" if fail_count else ""))
-            all_results.update(results)
-        except Exception as e:
-            logger.error("Price update (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
-            _oplog(uid, "行情自动更新", market=market, error=str(e))
-    if user_count:
-        logger.info("行情去重(%s): %d 用户 / 唯一票 %d / 网络拉取 %d 次(原需 %d 次, 省 %d)",
-                    market, user_count, len(cache), len(cache), ticker_requests, ticker_requests - len(cache))
-    return all_results
+    logger.info("Price update (%s/global) starting for %d tickers(并集)", market, len(tickers))
+    store.update_pipeline_status("price", last_status="running", stocks_total=len(tickers))
+    try:
+        results = await fetch_price_batch(tickers, store, market=market)
+        ok_count = sum(1 for v in results.values() if v == "ok")
+        fail_count = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("error"))
+        status = "success" if fail_count == 0 else ("partial" if ok_count > 0 else "error")
+        error_msg = f"{fail_count}/{len(results)} tickers failed" if fail_count > 0 else ""
+        store.update_pipeline_status(
+            "price",
+            last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            last_status=status, last_error=error_msg,
+            stocks_processed=ok_count, stocks_total=len(tickers),
+        )
+        logger.info("Price update (%s/global) done: %d/%d 并集票(全体共享一次)", market, ok_count, len(tickers))
+        _oplog("", "行情自动更新(全局)", market=market, result=("fail" if status == "error" else status),
+               detail=f"并集 {len(tickers)} 票，成功 {ok_count}" + (f"，失败 {fail_count}" if fail_count else ""))
+        return results
+    except Exception as e:
+        logger.error("Price update (%s/global) failed: %s", market, e)
+        _oplog("", "行情自动更新(全局)", market=market, error=str(e))
+        return {}
 
 
 async def job_daily_scan(market: str = "us_stock") -> dict:
-    """Daily scan: news (+ SEC/options for US), iterates all users."""
+    """每日扫描。
+
+    全局段(客观免费、落共享层、只受全局总开关)：新闻(免费源) + market_news + SEC(美股) + 公告(A股)。
+    每用户段(keyed_data 门控、各自 Key)：options(polygon 付费，美股)。
+    """
     all_results: dict[str, dict] = {}
-    # 公共信息层：周期内多用户共享免费源新闻/SEC 的网络拉取（按 (类型,market,ticker) 去重）
-    cache: dict = {}
-    user_count = 0
-    ticker_requests = 0
-    for uid, store, budget in _iter_users("watchlist_data"):
-        try:
-            by_market = store.get_tickers_by_market()
-            tickers = by_market.get(market, [])
-            if not tickers:
-                continue
-            user_count += 1
-            ticker_requests += len(tickers)
 
-            label = f"user={uid[:8]}" if uid else "global"
-            logger.info("Daily scan (%s/%s) starting for %d tickers", market, label, len(tickers))
+    # ── 全局段：全体并集一次拉取 ──────────────────────────────
+    store = _global_store()
+    if store is not None:
+        tickers = store.get_tickers_by_market().get(market, [])
+        if tickers:
+            logger.info("Daily scan (%s/global) starting for %d tickers(并集)", market, len(tickers))
             results: dict[str, dict] = {"news": {}}
+            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-            # News
+            # News（免费源，无 LLM）
             try:
                 store.update_pipeline_status("news", last_status="running", stocks_total=len(tickers))
                 from bottleneck_hunter.watchlist.news_pipeline import fetch_news_batch
-                news_results = await fetch_news_batch(tickers, store, budget=budget, market=market, cache=cache)
+                news_results = await fetch_news_batch(tickers, store, market=market)
                 results["news"] = news_results
                 ok_count = sum(1 for v in news_results.values() if isinstance(v, int) and v >= 0)
                 fail_count = sum(1 for v in news_results.values() if isinstance(v, int) and v < 0)
                 status = "success" if fail_count == 0 else ("partial" if ok_count > 0 else "error")
-                error_msg = f"{fail_count}/{len(news_results)} tickers failed" if fail_count > 0 else ""
                 store.update_pipeline_status(
-                    "news",
-                    last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    last_status=status,
-                    last_error=error_msg,
-                    stocks_processed=ok_count,
-                    stocks_total=len(tickers),
-                )
+                    "news", last_run_at=now_iso, last_status=status,
+                    last_error=(f"{fail_count}/{len(news_results)} tickers failed" if fail_count else ""),
+                    stocks_processed=ok_count, stocks_total=len(tickers))
             except Exception as e:
                 store.update_pipeline_status("news", last_status="error", last_error=str(e))
-                logger.error("News scan (%s/%s) failed: %s", market, label, e)
+                logger.error("News scan (%s/global) failed: %s", market, e)
 
-            # 市场/主题级新闻（供 L1 宏观决策读库；失败不影响个股新闻结果）
+            # 市场/主题级新闻（供 L1 宏观读库）
             try:
                 from bottleneck_hunter.watchlist.news_pipeline import refresh_market_news
-                mkt_n = await refresh_market_news(store, market, budget=budget)
-                logger.info("Market news (%s/%s): %d 条已落库", market, label, mkt_n)
+                mkt_n = await refresh_market_news(store, market)
+                logger.info("Market news (%s/global): %d 条已落库", market, mkt_n)
             except Exception as e:
-                logger.warning("Market news scan (%s/%s) failed: %s", market, label, e)
+                logger.warning("Market news scan (%s/global) failed: %s", market, e)
 
-            # SEC + Options only for US stocks
+            # SEC（美股，EDGAR 免费）
             if market == "us_stock":
-                # SEC
                 try:
                     store.update_pipeline_status("sec", last_status="running", stocks_total=len(tickers))
                     from bottleneck_hunter.watchlist.sec_pipeline import fetch_sec_batch
-                    sec_results = await fetch_sec_batch(tickers, store, cache=cache)
+                    sec_results = await fetch_sec_batch(tickers, store)
                     results["sec"] = sec_results
                     ok_count = sum(1 for v in sec_results.values() if isinstance(v, dict) and v.get("filings", 0) >= 0)
                     fail_count = len(sec_results) - ok_count
                     status = "success" if fail_count == 0 else ("partial" if ok_count > 0 else "error")
-                    error_msg = f"{fail_count}/{len(sec_results)} tickers failed" if fail_count > 0 else ""
                     store.update_pipeline_status(
-                        "sec",
-                        last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        last_status=status,
-                        last_error=error_msg,
-                        stocks_processed=ok_count,
-                        stocks_total=len(tickers),
-                    )
+                        "sec", last_run_at=now_iso, last_status=status,
+                        last_error=(f"{fail_count}/{len(sec_results)} tickers failed" if fail_count else ""),
+                        stocks_processed=ok_count, stocks_total=len(tickers))
                 except Exception as e:
                     store.update_pipeline_status("sec", last_status="error", last_error=str(e))
-                    logger.error("SEC scan (%s/%s) failed: %s", market, label, e)
+                    logger.error("SEC scan (%s/global) failed: %s", market, e)
 
-                # Options
-                try:
-                    store.update_pipeline_status("options", last_status="running", stocks_total=len(tickers))
-                    from bottleneck_hunter.watchlist.options_pipeline import fetch_options_batch
-                    opt_results = await fetch_options_batch(tickers, store)
-                    results["options"] = opt_results
-                    ok_count = sum(1 for v in opt_results.values() if v in ("ok", "no_data"))
-                    fail_count = sum(1 for v in opt_results.values() if isinstance(v, str) and v.startswith("error"))
-                    status = "success" if fail_count == 0 else ("partial" if ok_count > 0 else "error")
-                    error_msg = f"{fail_count}/{len(opt_results)} tickers failed" if fail_count > 0 else ""
-                    store.update_pipeline_status(
-                        "options",
-                        last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        last_status=status,
-                        last_error=error_msg,
-                        stocks_processed=ok_count,
-                        stocks_total=len(tickers),
-                    )
-                except Exception as e:
-                    store.update_pipeline_status("options", last_status="error", last_error=str(e))
-                    logger.error("Options scan (%s/%s) failed: %s", market, label, e)
-
-            # A 股公告（对标 SEC EDGAR）
+            # A 股公告（akshare 免费，对标 SEC）
             if market == "a_stock":
                 try:
                     store.update_pipeline_status("notice", last_status="running", stocks_total=len(tickers))
                     from bottleneck_hunter.watchlist.notice_pipeline import fetch_notice_batch
-                    notice_results = await fetch_notice_batch(tickers, store, cache=cache)
+                    notice_results = await fetch_notice_batch(tickers, store)
                     results["notice"] = notice_results
                     ok_count = sum(1 for v in notice_results.values() if isinstance(v, dict) and v.get("filings", 0) >= 0)
                     fail_count = sum(1 for v in notice_results.values() if isinstance(v, dict) and v.get("filings", 0) < 0)
                     status = "success" if fail_count == 0 else ("partial" if ok_count > 0 else "error")
-                    error_msg = f"{fail_count}/{len(notice_results)} tickers failed" if fail_count > 0 else ""
                     store.update_pipeline_status(
-                        "notice",
-                        last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        last_status=status,
-                        last_error=error_msg,
-                        stocks_processed=ok_count,
-                        stocks_total=len(tickers),
-                    )
+                        "notice", last_run_at=now_iso, last_status=status,
+                        last_error=(f"{fail_count}/{len(notice_results)} tickers failed" if fail_count else ""),
+                        stocks_processed=ok_count, stocks_total=len(tickers))
                 except Exception as e:
                     store.update_pipeline_status("notice", last_status="error", last_error=str(e))
-                    logger.error("A-stock notice scan (%s) failed: %s", label, e)
+                    logger.error("A-stock notice scan (global) failed: %s", e)
 
-            logger.info("Daily scan (%s/%s) complete", market, label)
+            logger.info("Daily scan (%s/global) complete: %d 并集票", market, len(tickers))
             all_results.update(results)
-        except Exception as e:
-            logger.error("Daily scan (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
 
-    if user_count:
-        logger.info("每日扫描去重(%s): %d 用户 / %d 用户-票请求 / 唯一(类型,票) %d 次网络拉取",
-                    market, user_count, ticker_requests, len(cache))
+    # ── 每用户段：options（polygon 付费 keyed，各自 Key，keyed_data 门控）──
+    if market == "us_stock":
+        for uid, ustore, _budget in _iter_users("keyed_data"):
+            try:
+                us_tickers = ustore.get_tickers_by_market().get("us_stock", [])
+                if not us_tickers:
+                    continue
+                ustore.update_pipeline_status("options", last_status="running", stocks_total=len(us_tickers))
+                from bottleneck_hunter.watchlist.options_pipeline import fetch_options_batch
+                opt_results = await fetch_options_batch(us_tickers, ustore)
+                ok_count = sum(1 for v in opt_results.values() if v in ("ok", "no_data"))
+                fail_count = sum(1 for v in opt_results.values() if isinstance(v, str) and v.startswith("error"))
+                status = "success" if fail_count == 0 else ("partial" if ok_count > 0 else "error")
+                ustore.update_pipeline_status(
+                    "options", last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    last_status=status,
+                    last_error=(f"{fail_count}/{len(opt_results)} tickers failed" if fail_count else ""),
+                    stocks_processed=ok_count, stocks_total=len(us_tickers))
+            except Exception as e:
+                ustore.update_pipeline_status("options", last_status="error", last_error=str(e))
+                logger.error("Options scan (user=%s) failed: %s", uid[:8] if uid else "global", e)
+
     return all_results
 
 
@@ -640,53 +621,46 @@ async def job_auto_review(market: str = "us_stock") -> None:
 
 
 async def job_institutional_update() -> None:
-    """每周更新美股机构持仓 & 分析师评级数据（多用户）。"""
-    for uid, store, budget in _iter_users("watchlist_data"):
-        try:
-            by_market = store.get_tickers_by_market()
-            us_tickers = by_market.get("us_stock", [])
-            if not us_tickers:
-                continue
-
-            label = f"user={uid[:8]}" if uid else "global"
-            logger.info("Institutional update (%s) starting for %d tickers", label, len(us_tickers))
-            store.update_pipeline_status("institutional", last_status="running", stocks_total=len(us_tickers))
-
-            from bottleneck_hunter.watchlist.institutional_pipeline import (
-                fetch_institutional_batch,
-                fetch_analyst_batch,
-            )
-
-            inst_results = await fetch_institutional_batch(us_tickers, store)
-            analyst_results = await fetch_analyst_batch(us_tickers, store)
-
-            ok_inst = sum(1 for v in inst_results.values() if v == "ok")
-            ok_analyst = sum(1 for v in analyst_results.values() if v == "ok")
-            total = len(us_tickers)
-            fail_count = total - max(ok_inst, ok_analyst)
-            status = "success" if fail_count == 0 else ("partial" if (ok_inst + ok_analyst) > 0 else "error")
-            error_msg = ""
-            if fail_count > 0:
-                error_msg = f"inst: {ok_inst}/{total}, analyst: {ok_analyst}/{total}"
-            store.update_pipeline_status(
-                "institutional",
-                last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                last_status=status,
-                last_error=error_msg,
-                stocks_processed=max(ok_inst, ok_analyst),
-                stocks_total=total,
-            )
-            logger.info(
-                "Institutional update (%s) done: inst %d/%d, analyst %d/%d",
-                label, ok_inst, total, ok_analyst, total,
-            )
-        except Exception as e:
-            logger.error("Institutional update (user=%s) failed: %s", uid[:8] if uid else "global", e)
+    """每周全局更新美股机构持仓 & 分析师评级（yfinance 免费，落共享层，只受全局总开关）。"""
+    store = _global_store()
+    if store is None:
+        return
+    us_tickers = store.get_tickers_by_market().get("us_stock", [])  # 全体并集
+    if not us_tickers:
+        return
+    logger.info("Institutional update (global) starting for %d tickers(并集)", len(us_tickers))
+    store.update_pipeline_status("institutional", last_status="running", stocks_total=len(us_tickers))
+    try:
+        from bottleneck_hunter.watchlist.institutional_pipeline import (
+            fetch_institutional_batch,
+            fetch_analyst_batch,
+        )
+        inst_results = await fetch_institutional_batch(us_tickers, store)
+        analyst_results = await fetch_analyst_batch(us_tickers, store)
+        ok_inst = sum(1 for v in inst_results.values() if v == "ok")
+        ok_analyst = sum(1 for v in analyst_results.values() if v == "ok")
+        total = len(us_tickers)
+        fail_count = total - max(ok_inst, ok_analyst)
+        status = "success" if fail_count == 0 else ("partial" if (ok_inst + ok_analyst) > 0 else "error")
+        store.update_pipeline_status(
+            "institutional",
+            last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            last_status=status,
+            last_error=(f"inst: {ok_inst}/{total}, analyst: {ok_analyst}/{total}" if fail_count else ""),
+            stocks_processed=max(ok_inst, ok_analyst), stocks_total=total,
+        )
+        logger.info("Institutional update (global) done: inst %d/%d, analyst %d/%d", ok_inst, total, ok_analyst, total)
+    except Exception as e:
+        store.update_pipeline_status("institutional", last_status="error", last_error=str(e))
+        logger.error("Institutional update (global) failed: %s", e)
 
 
 async def job_earnings_update(market: str = "us_stock") -> None:
-    """周度更新财报数据（经 DataHub：FMP 美股含一致预期 / Tushare A股），填 earnings_reports。"""
-    for uid, store, budget in _iter_users("watchlist_data"):
+    """周度更新财报数据（经 DataHub：FMP 美股含一致预期 / Tushare A股），填 earnings_reports。
+
+    keyed 付费源(各用户自己的 Key)→ 每用户 keyed_data 门控。
+    """
+    for uid, store, budget in _iter_users("keyed_data"):
         try:
             by_market = store.get_tickers_by_market()
             tickers = by_market.get(market, [])
@@ -864,11 +838,12 @@ async def job_stale_refresh() -> None:
     """陈旧兜底刷新：刷新每个用户超过其阈值(默认24h)未更新的观察池标的。
 
     安全网——覆盖"当天定时任务没跑成/新加入/临时停用后恢复"的标的。
-    刷价 + 逐只刷情报与策略（受预算门控）。category=watchlist_data。
+    价格已由全局价格 job 保鲜(落共享层)，此处重点是逐只刷情报与策略(**每用户 LLM，花预算**)，
+    故归 daily_decision 每用户门控（用户关了自动决策即不再自动烧其预算）。
     """
     from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
     from bottleneck_hunter.watchlist.strategy_engine import refresh_intelligence_one, refresh_strategy_one
-    for uid, store, budget in _iter_users("watchlist_data"):
+    for uid, store, budget in _iter_users("daily_decision"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
             threshold = int(store.get_auto_update_config().get("stale_threshold_hours", "24") or 24)
@@ -1000,19 +975,22 @@ def _make_trigger(spec, schedule):
 
 
 def list_job_categories() -> dict[str, str]:
-    """job_id → 所属自动更新分类（供前端展示分组）。"""
+    """job_id → 所属自动更新分类（供前端展示分组）。空串=服务器全局(客观数据，无每用户开关)。"""
     return {
-        "us_price_premarket": "watchlist_data", "us_price_postmarket": "watchlist_data",
-        "us_daily_scan": "watchlist_data", "cn_price_premarket": "watchlist_data",
-        "cn_price_postmarket": "watchlist_data", "cn_daily_scan": "watchlist_data",
-        "macro_update": "watchlist_data", "us_institutional_update": "watchlist_data",
-        "us_earnings_update": "watchlist_data", "cn_earnings_update": "watchlist_data",
+        # 客观免费数据 → 全局(只受管理员总开关)，不作每用户开关
+        "us_price_premarket": "", "us_price_postmarket": "",
+        "us_daily_scan": "", "cn_price_premarket": "",
+        "cn_price_postmarket": "", "cn_daily_scan": "",
+        "macro_update": "", "us_institutional_update": "",
         "datasource_report": "",
+        # keyed 付费源(各自 Key) → 每用户
+        "us_earnings_update": "keyed_data", "cn_earnings_update": "keyed_data",
+        # LLM 决策类 → 每用户
         "us_daily_decision": "daily_decision", "cn_daily_decision": "daily_decision",
         "us_catalyst_scan": "catalyst", "cn_catalyst_scan": "catalyst",
         "us_weekly_strategy": "weekly_strategy", "cn_weekly_strategy": "weekly_strategy",
         "us_auto_review": "auto_review", "cn_auto_review": "auto_review",
-        "stale_refresh": "watchlist_data",
+        "stale_refresh": "daily_decision",  # 情报/策略 LLM 兜底，随自动决策开关
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
         "model_capability_refresh": "",

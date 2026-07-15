@@ -6,7 +6,7 @@
 import { fmtBJ } from './wizard-state.js';
 
 const API = '/api/settings';
-const CATS = ['watchlist_data', 'daily_decision', 'weekly_strategy', 'auto_review', 'catalyst', 'full_refresh'];
+const CATS = ['keyed_data', 'daily_decision', 'weekly_strategy', 'auto_review', 'catalyst', 'full_refresh'];
 
 function _fmtNext(iso) {
   if (!iso) return '—';
