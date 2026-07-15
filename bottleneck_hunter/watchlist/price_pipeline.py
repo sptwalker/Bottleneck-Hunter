@@ -272,6 +272,89 @@ def _fetch_astock_profile(ticker: str) -> dict:
     return info if any(v is not None for v in info.values()) else {}
 
 
+def _is_empty(v) -> bool:
+    """字段视空：None / 空串 / 占位符 '-'。"""
+    return v is None or (isinstance(v, str) and v.strip() in ("", "-", "—", "N/A"))
+
+
+def _merge_fill(*sources: dict, prefer: dict | None = None) -> dict:
+    """免费源智能融合：每个字段取"第一个非空来源"，某些字段可用 prefer 指定优先源。
+
+    纯函数、确定性。sources 顺序=默认优先级(前者优先)；prefer[field]=某个源 dict → 该字段
+    优先取该源(仍要求非空)。任一源可用即产出，全空→{}。见方案A：免费源补缺。
+    """
+    prefer = prefer or {}
+    out: dict = {}
+    keys: list = []
+    for s in sources:
+        for k in (s or {}):
+            if k not in out:
+                keys.append(k)
+    for k in keys:
+        # prefer 指定源优先(非空才用)，否则按 sources 顺序取首个非空
+        pv = prefer.get(k, {}).get(k) if isinstance(prefer.get(k), dict) else None
+        if not _is_empty(pv):
+            out[k] = pv
+            continue
+        for s in sources:
+            v = (s or {}).get(k)
+            if not _is_empty(v):
+                out[k] = v
+                break
+    return out
+
+
+def _fetch_astock_extras(code: str) -> dict:
+    """akshare stock_individual_info_em 里 baostock 缺的字段 → yfinance 风格。best-effort。
+
+    补 baostock 没有的：行业(sector/industry)、总市值(marketCap，东财实时)、员工(fullTimeEmployees)、
+    上市时间(ipoDate)、动态PE(trailingPE 兜底)。东财挂/无 akshare → {}。
+    """
+    if ak is None or not code:
+        return {}
+    try:
+        df = ak.stock_individual_info_em(symbol=code)
+        if df is None or df.empty:
+            return {}
+        m = dict(zip(df["item"], df["value"]))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("A股 extras(%s) akshare 失败: %s", code, e)
+        return {}
+
+    out: dict = {}
+    mc = _safe(m.get("总市值"))
+    if mc is not None:
+        out["marketCap"] = mc
+    ind = m.get("行业")
+    if ind and str(ind).strip() not in ("", "-", "—"):
+        out["sector"] = str(ind).strip()
+        out["industry"] = str(ind).strip()
+    emp = _safe(m.get("员工人数"))
+    if emp is not None:
+        out["fullTimeEmployees"] = int(emp)
+    ipo = m.get("上市时间")
+    if ipo and str(ipo).strip() not in ("", "-", "0"):
+        out["ipoDate"] = str(ipo).strip()
+    pe = _safe(m.get("市盈率(动态)"))
+    if pe is not None:
+        out["trailingPE"] = pe
+    return out
+
+
+def _fetch_astock_profile_fused(ticker: str) -> dict:
+    """A股基本面多免费源融合：baostock(比率/盈利/成长，精确) ⊕ akshare(行业/市值/员工/上市，补缺)。
+
+    每字段取有值的最优来源；marketCap 优先 akshare(东财实时)而非 baostock(close×股本估算)。
+    任一源可用即产出——比原来 baostock 单源更全更稳(某源抖动时另一源兜底)。
+    """
+    code = _extract_astock_code(ticker)
+    baostock = _fetch_astock_profile(ticker)   # 主：比率/盈利/成长
+    extras = _fetch_astock_extras(code) if code else {}  # 补：行业/市值/员工/上市
+    if not baostock and not extras:
+        return {}
+    return _merge_fill(baostock, extras, prefer={"marketCap": extras})
+
+
 def _fetch_astock_fundamentals(code: str) -> dict:
     """通过 akshare 获取 A 股基本面数据（PE/PB/总市值）。
 
@@ -412,7 +495,7 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market
                     snapshots, company_info = await asyncio.to_thread(fetch_fn, ticker, days)
 
                 if not company_info:
-                    info_fn = _fetch_astock_profile if market == "a_stock" else _fetch_company_info_us
+                    info_fn = _fetch_astock_profile_fused if market == "a_stock" else _fetch_company_info_us
                     company_info = await asyncio.to_thread(info_fn, ticker)
                 if cache is not None:
                     cache[ck] = (snapshots, company_info)

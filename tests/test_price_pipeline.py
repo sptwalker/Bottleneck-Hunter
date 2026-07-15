@@ -11,6 +11,7 @@ from bottleneck_hunter.watchlist.price_pipeline import (
     _compute_rsi,
     _compute_sma,
     _extract_astock_code,
+    _merge_fill,
 )
 
 
@@ -107,3 +108,31 @@ class TestAStockCodeExtraction:
     def test_non_astock_codes(self, ticker: str):
         """非 A 股代码 → None。"""
         assert _extract_astock_code(ticker) is None
+
+
+# ---------------------------------------------------------------------------
+# 免费源智能融合 _merge_fill（方案A）
+# ---------------------------------------------------------------------------
+
+class TestMergeFill:
+    def test_fill_missing_from_later(self):
+        """base 缺的字段从后续源补，base 有的不被覆盖。"""
+        assert _merge_fill({"a": 1, "b": None}, {"b": 2, "c": 3}) == {"a": 1, "b": 2, "c": 3}
+
+    def test_empty_placeholders_treated_missing(self):
+        """None/''/'-'/'—'/'N/A' 视为空，被后续源补上。"""
+        assert _merge_fill({"x": "-", "y": ""}, {"x": "电子", "y": "v"}) == {"x": "电子", "y": "v"}
+
+    def test_prefer_overrides_order(self):
+        """prefer 指定源优先(非空)。"""
+        extras = {"marketCap": 999}
+        assert _merge_fill({"marketCap": 100}, extras, prefer={"marketCap": extras})["marketCap"] == 999
+
+    def test_prefer_empty_falls_back(self):
+        """prefer 源该字段为空 → 退回顺序取。"""
+        assert _merge_fill({"marketCap": 100}, {"marketCap": None},
+                           prefer={"marketCap": {"marketCap": None}})["marketCap"] == 100
+
+    def test_all_empty_returns_empty(self):
+        assert _merge_fill({}, {}) == {}
+        assert _merge_fill({"a": None}, {"a": ""}) == {}
