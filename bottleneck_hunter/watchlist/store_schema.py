@@ -8,7 +8,7 @@ from __future__ import annotations
 CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS watchlist (
     id              TEXT PRIMARY KEY,
-    ticker          TEXT NOT NULL UNIQUE,
+    ticker          TEXT NOT NULL,
     company_name    TEXT NOT NULL,
     company_name_cn TEXT DEFAULT '',
     market          TEXT DEFAULT 'us_stock',
@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     added_at        TEXT NOT NULL,
     updated_at      TEXT,
     notes           TEXT DEFAULT '',
-    is_active       INTEGER DEFAULT 1
+    is_active       INTEGER DEFAULT 1,
+    user_id         TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS market_snapshots (

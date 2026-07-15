@@ -222,6 +222,7 @@ class WatchlistStore(
                         logger.warning("迁移语句执行异常: %s — %s", sql[:80], e)
             self._migrate_budget_config_pk(conn)
             self._migrate_shared_company_profiles(conn)
+            self._migrate_watchlist_drop_global_unique(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -261,6 +262,53 @@ class WatchlistStore(
             logger.info("budget_config 主键已重建为 (key, user_id)，修复跨用户预算覆盖")
         except sqlite3.OperationalError as e:
             logger.warning("budget_config 主键重建失败（可忽略，退回旧行为）: %s", e)
+
+
+    def _migrate_watchlist_drop_global_unique(self, conn) -> None:
+        """去掉 watchlist 旧的全局 `ticker UNIQUE`，改为 (user_id, ticker) 复合唯一。
+
+        旧基表列级 `ticker TEXT NOT NULL UNIQUE` 是全局唯一 → 两个用户无法观察同一支票
+        (第二个 INSERT 撞 UNIQUE 失败)，破坏多用户 + 与公共信息层"同票全员共享数据"相悖。
+        列级 UNIQUE 无法 ALTER 掉，只能重建表。幂等：已无全局 UNIQUE 则跳过。观察池是用户核心
+        数据——重建全程搬迁所有列、保留 user_id，且外层 _init_db 在单事务里，失败回滚不丢数据。
+        """
+        try:
+            row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone()
+            if not row or not row["sql"]:
+                return
+            ddl = row["sql"]
+            # 仅 ticker 列带列级 UNIQUE；已重建过(无该约束)则跳过
+            if "UNIQUE" not in ddl.upper():
+                return
+
+            cols = [r["name"] for r in conn.execute("PRAGMA table_info(watchlist)").fetchall()]
+            has_uid = "user_id" in cols
+            # 目标表：与 store_schema 基表一致(无全局 UNIQUE、含 user_id)
+            conn.execute("""
+                CREATE TABLE watchlist_new (
+                    id TEXT PRIMARY KEY, ticker TEXT NOT NULL, company_name TEXT NOT NULL,
+                    company_name_cn TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
+                    tier TEXT NOT NULL CHECK(tier IN ('focus','normal','track')),
+                    tier_rank INTEGER DEFAULT 0, composite_score REAL DEFAULT 0.0,
+                    source TEXT DEFAULT 'manual', source_analysis_id TEXT, sector TEXT DEFAULT '',
+                    bottleneck_node TEXT DEFAULT '', added_at TEXT NOT NULL, updated_at TEXT,
+                    notes TEXT DEFAULT '', is_active INTEGER DEFAULT 1, user_id TEXT DEFAULT ''
+                )
+            """)
+            base = ("id, ticker, company_name, company_name_cn, market, tier, tier_rank, "
+                    "composite_score, source, source_analysis_id, sector, bottleneck_node, "
+                    "added_at, updated_at, notes, is_active")
+            uid_sel = "COALESCE(user_id,'')" if has_uid else "''"
+            conn.execute(f"INSERT INTO watchlist_new({base}, user_id) SELECT {base}, {uid_sel} FROM watchlist")
+            conn.execute("DROP TABLE watchlist")
+            conn.execute("ALTER TABLE watchlist_new RENAME TO watchlist")
+            # 重建索引（含 (user_id,ticker) 复合唯一 → 每用户内唯一，跨用户可共享同票）
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_tier ON watchlist(tier, composite_score DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_watchlist_user_ticker ON watchlist(user_id, ticker)")
+            logger.info("watchlist 已重建：去掉全局 ticker UNIQUE，改 (user_id,ticker) 复合唯一，多用户可共享同票")
+        except sqlite3.OperationalError as e:
+            logger.warning("watchlist 去全局 UNIQUE 重建失败（可忽略，退回旧行为）: %s", e)
 
 
     def _migrate_shared_company_profiles(self, conn) -> None:
