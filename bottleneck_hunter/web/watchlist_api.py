@@ -312,9 +312,21 @@ async def company_overview(ticker: str, market: str = "us_stock", user: dict = D
     tk = (ticker or "").strip()
     if not tk:
         return {"latest_snapshot": None, "profile": {}, "earnings": None}
+    snap = store.get_latest_snapshot(tk)
+    profile = store.get_company_profile(tk)
+    # 非观察池企业(入围/最终评选/交叉验证候选)库里没有行情/基本面 → 按需拉一次并落库，
+    # 让所有入围企业的"基本信息"都可见(下次直接读缓存)。best-effort：拉不到(如 yfinance 限流)则维持空。
+    if not snap or not profile:
+        try:
+            from bottleneck_hunter.watchlist.price_pipeline import _fetch_one
+            await _fetch_one(tk, store, market=market)
+            snap = store.get_latest_snapshot(tk)
+            profile = store.get_company_profile(tk)
+        except Exception:
+            logger.debug("按需拉取企业概览失败: %s", tk, exc_info=True)
     return {
-        "latest_snapshot": store.get_latest_snapshot(tk),
-        "profile": store.get_company_profile(tk) or {},
+        "latest_snapshot": snap,
+        "profile": profile or {},
         "earnings": store.get_earnings(tk),
     }
 
