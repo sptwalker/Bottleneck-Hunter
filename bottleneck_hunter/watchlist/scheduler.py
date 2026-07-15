@@ -172,6 +172,10 @@ def _oplog(uid: str, title: str, *, market: str = "", detail: str = "已完成",
 async def job_price_update(market: str = "us_stock") -> dict[str, str]:
     """Fetch prices for watchlist tickers of a specific market (multi-user)."""
     all_results: dict[str, str] = {}
+    # 公共信息层阶段1：本次周期内多用户共享同一支票的网络拉取（去重，缓解限流/提速）
+    cache: dict = {}
+    user_count = 0
+    ticker_requests = 0
     for uid, store, budget in _iter_users("watchlist_data"):
         try:
             from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
@@ -180,12 +184,14 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
             tickers = by_market.get(market, [])
             if not tickers:
                 continue
+            user_count += 1
+            ticker_requests += len(tickers)
 
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Price update (%s/%s) starting for %d tickers", market, label, len(tickers))
             store.update_pipeline_status("price", last_status="running", stocks_total=len(tickers))
 
-            results = await fetch_price_batch(tickers, store, market=market)
+            results = await fetch_price_batch(tickers, store, market=market, cache=cache)
             ok_count = sum(1 for v in results.values() if v == "ok")
             fail_count = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("error"))
             status = "success" if fail_count == 0 else ("partial" if ok_count > 0 else "error")
@@ -205,6 +211,9 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
         except Exception as e:
             logger.error("Price update (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
             _oplog(uid, "行情自动更新", market=market, error=str(e))
+    if user_count:
+        logger.info("行情去重(%s): %d 用户 / 唯一票 %d / 网络拉取 %d 次(原需 %d 次, 省 %d)",
+                    market, user_count, len(cache), len(cache), ticker_requests, ticker_requests - len(cache))
     return all_results
 
 

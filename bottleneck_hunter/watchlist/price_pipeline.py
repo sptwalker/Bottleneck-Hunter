@@ -387,24 +387,35 @@ def _fetch_astock_daily(ticker: str, days: int = 180) -> tuple[list[dict], dict]
     return result, {}
 
 
-async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market: str = "us_stock") -> str:
+async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market: str = "us_stock",
+                     cache: dict | None = None) -> str:
     """Fetch one ticker asynchronously with semaphore. Returns status string.
 
     优先通过 FetcherManager 获取（自动降级），若失败再走原有直连逻辑。
+
+    cache: 可选的「周期内拉取缓存」，key=(market, ticker)。命中则跳过网络拉取、
+    直接用缓存的 (snapshots, company_info) 做本用户的校验+落库——公共信息层阶段1：
+    多用户共享同一支票只拉一次网络（缓解限流、提速）。cache=None 时行为完全不变。
     """
     from bottleneck_hunter.watchlist.data_validator import validate_snapshot
 
     async with _get_sem():
         try:
-            company_info = {}
-            snapshots = await _fetch_via_manager(ticker, days, market)
-            if not snapshots:
-                fetch_fn = _fetch_astock_daily if market == "a_stock" else _fetch_daily_data
-                snapshots, company_info = await asyncio.to_thread(fetch_fn, ticker, days)
+            ck = (market, ticker)
+            if cache is not None and ck in cache:
+                snapshots, company_info = cache[ck]
+            else:
+                company_info = {}
+                snapshots = await _fetch_via_manager(ticker, days, market)
+                if not snapshots:
+                    fetch_fn = _fetch_astock_daily if market == "a_stock" else _fetch_daily_data
+                    snapshots, company_info = await asyncio.to_thread(fetch_fn, ticker, days)
 
-            if not company_info:
-                info_fn = _fetch_astock_profile if market == "a_stock" else _fetch_company_info_us
-                company_info = await asyncio.to_thread(info_fn, ticker)
+                if not company_info:
+                    info_fn = _fetch_astock_profile if market == "a_stock" else _fetch_company_info_us
+                    company_info = await asyncio.to_thread(info_fn, ticker)
+                if cache is not None:
+                    cache[ck] = (snapshots, company_info)
 
             if company_info:
                 try:
@@ -413,6 +424,9 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market
                     logger.debug("保存 %s company profile 失败: %s", ticker, e)
 
             if snapshots:
+                # 浅拷贝每条快照：校验会往 snap 里写 market/data_quality/quality_notes，
+                # 缓存被多用户共享时不能就地改同一份 dict（否则互相污染）。
+                snapshots = [dict(s) for s in snapshots]
                 prev_snap = None
                 valid_snaps = []
                 is_st = False
@@ -507,11 +521,15 @@ async def _fetch_via_manager(ticker: str, days: int, market: str) -> list[dict]:
     return result
 
 
-async def fetch_price_batch(tickers: list[str], store: WatchlistStore, days: int = 180, market: str = "us_stock") -> dict[str, str]:
-    """Batch-fetch daily prices for all watchlist tickers. Returns {ticker: status}."""
+async def fetch_price_batch(tickers: list[str], store: WatchlistStore, days: int = 180, market: str = "us_stock",
+                            cache: dict | None = None) -> dict[str, str]:
+    """Batch-fetch daily prices for all watchlist tickers. Returns {ticker: status}.
+
+    cache: 传入则多用户共享同一支票的网络拉取（周期内去重，见 _fetch_one）。
+    """
     if not tickers:
         return {}
-    tasks = {t: asyncio.create_task(_fetch_one(t, store, days, market)) for t in tickers}
+    tasks = {t: asyncio.create_task(_fetch_one(t, store, days, market, cache=cache)) for t in tickers}
     results = {}
     for ticker, task in tasks.items():
         results[ticker] = await task
