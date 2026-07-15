@@ -114,6 +114,16 @@ class TestWatchlistCRUD:
         assert set(result["us_stock"]) == {"AAPL", "GOOG"}
         assert result["a_stock"] == ["600519"]
 
+    def test_get_tickers_by_market_dedups_multiuser(self, store):
+        """多用户观察同一支票时，unbound(全局) get_tickers_by_market 去重，不返回重复票。"""
+        base = store  # 无 user 绑定 = 全局并集视图
+        base.for_user("u1").add(_make_entry("AAPL", market="us_stock"))
+        base.for_user("u2").add(_make_entry("AAPL", market="us_stock"))  # 同票不同用户
+        base.for_user("u2").add(_make_entry("NVDA", market="us_stock"))
+        us = base.get_tickers_by_market().get("us_stock", [])
+        assert sorted(us) == ["AAPL", "NVDA"], us
+        assert us.count("AAPL") == 1, "AAPL 不应重复"
+
 
 # ═════════════════════════════════════════════════════════
 # 2. Market Snapshots

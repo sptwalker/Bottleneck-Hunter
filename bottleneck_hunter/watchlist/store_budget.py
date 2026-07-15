@@ -145,12 +145,11 @@ class _BudgetMixin:
 
 
     def update_pipeline_status(self, name: str, **fields) -> None:
+        """更新管线状态。pipeline_status 主键是 pipeline_name（全局单例，非每用户——user_id 列
+        因 PK 未含它而从不生效），故按 name 全局 upsert，不做用户过滤。"""
         conn = self._connect()
         try:
-            conn.execute(
-                f"INSERT OR IGNORE INTO pipeline_status(pipeline_name{self._user_insert_cols()}) VALUES (?{self._user_insert_vals()})",
-                (name,) + self._user_insert_params(),
-            )
+            conn.execute("INSERT OR IGNORE INTO pipeline_status(pipeline_name) VALUES (?)", (name,))
             allowed = {"last_run_at", "last_status", "last_error", "next_run_at",
                         "stocks_processed", "stocks_total"}
             parts, vals = [], []
@@ -160,21 +159,21 @@ class _BudgetMixin:
                     vals.append(v)
             if parts:
                 vals.append(name)
-                q, p = self._user_filter(
-                    f"UPDATE pipeline_status SET {', '.join(parts)} WHERE pipeline_name = ?", tuple(vals)
-                )
-                conn.execute(q, p)
+                conn.execute(f"UPDATE pipeline_status SET {', '.join(parts)} WHERE pipeline_name = ?", tuple(vals))
             conn.commit()
         finally:
             conn.close()
 
 
     def get_pipeline_statuses(self) -> list[dict]:
+        """管线状态（全局单例：PK=pipeline_name，一行一管线，全体用户共见）。
+
+        客观数据由全局 job 拉取、状态全局可见；options/earnings 等每用户管线也写同一行(全局
+        单例)——即状态反映"最近一次跑"（谁触发的都一样），符合全局数据保障的语义。
+        """
         conn = self._connect()
         try:
-            q, p = self._user_filter("SELECT * FROM pipeline_status")
-            rows = conn.execute(q, p).fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in conn.execute("SELECT * FROM pipeline_status").fetchall()]
         finally:
             conn.close()
 

@@ -190,16 +190,26 @@ class _WatchlistMixin:
 
 
     def get_tickers_by_market(self) -> dict[str, list[str]]:
-        """按市场分组返回活跃 ticker。"""
+        """按市场分组返回活跃 ticker（去重）。
+
+        unbound store(全局 job)取全体并集时，多个用户观察同一支票会出现重复行——
+        用 DISTINCT 去重，避免全局拉取的 stocks_total 虚高、下游拿到重复票。
+        """
         conn = self._connect()
         try:
             q, p = self._user_filter(
-                "SELECT ticker, market FROM watchlist WHERE is_active = 1"
+                "SELECT DISTINCT ticker, market FROM watchlist WHERE is_active = 1"
             )
             rows = conn.execute(q, p).fetchall()
             result: dict[str, list[str]] = {}
+            seen: set = set()
             for r in rows:
-                result.setdefault(r["market"] or "us_stock", []).append(r["ticker"])
+                mkt = r["market"] or "us_stock"
+                key = (mkt, r["ticker"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.setdefault(mkt, []).append(r["ticker"])
             return result
         finally:
             conn.close()
