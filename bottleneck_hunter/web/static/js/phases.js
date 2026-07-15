@@ -740,6 +740,7 @@ function handlePhase1Event(data) {
     _updateAnalysisTags();
 
     renderPhase1(data);
+    loadWizardHistory();   // 分析完成即刷新首页"最近分析"列表（此前需进"查看全部历史"才见到新记录）
 
     const nextBtn = document.getElementById('wiz-p1-next');
     nextBtn.disabled = false;
