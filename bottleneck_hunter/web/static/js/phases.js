@@ -568,6 +568,7 @@ function hideP1Overlay() {
 
 /* ── Phase 1: SSE 连接 ──────────────────── */
 async function runPhase1(sector, product) {
+  if (state.running) return;   // 防重入：已有环节在跑就忽略(避免重复触发/并发)
   state.config.sector = sector;
   state.config.product = product;
   state.running = true;
@@ -785,6 +786,7 @@ function _p2IsDuplicate(msg) {
 /* ── Phase 2: SSE 连接 ──────────────────── */
 async function runPhase2() {
   if (!state.analysisId) return;
+  if (state.running) return;   // 防重入：已有环节在跑就忽略
   state.running = true;
   state.p2Error = false;
   state.p2NeedsUpdate = false;
@@ -1111,6 +1113,7 @@ function recalcPhase3(scorecards, wQ, wA) {
 /* ── Phase 4: SSE 连接 ──────────────────── */
 async function runPhase4() {
   if (!state.analysisId) return;
+  if (state.running) return;   // 防重入：已有环节在跑就忽略
   state.running = true;
   state.p4Error = false;
   state.p4NeedsUpdate = false;

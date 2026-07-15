@@ -238,17 +238,27 @@ async def phase1(request: Request, req: Phase1Request, user: dict = Depends(get_
     notify_admins("analysis", f"{uname} 开始产业链分析", username=uname,
                   detail=req.end_product or req.sector or "")
 
+    from bottleneck_hunter.web import refresh_guard
+    _gk = f"pipeline:{user.get('sub', '')}"
+
     async def event_generator():
-        async for event in stream_phase1(
-            sector=req.sector, end_product=req.end_product,
-            max_depth=req.max_depth, top_n=req.top_n,
-            language=req.language, provider=req.provider, model=req.model,
-            market=req.market, max_market_cap_yi=req.max_market_cap_yi,
-            store=store,
-        ):
-            if await request.is_disconnected():
-                break
-            yield event
+        # 并发闸：同一用户已有向导环节在跑就拒绝，防重复触发/断线重发导致同一分析并发跑(双倍算力)
+        if not refresh_guard.acquire(_gk):
+            yield _sse("error", step="init", message="已有分析任务在进行中，请等其完成后再试")
+            return
+        try:
+            async for event in stream_phase1(
+                sector=req.sector, end_product=req.end_product,
+                max_depth=req.max_depth, top_n=req.top_n,
+                language=req.language, provider=req.provider, model=req.model,
+                market=req.market, max_market_cap_yi=req.max_market_cap_yi,
+                store=store,
+            ):
+                if await request.is_disconnected():
+                    break
+                yield event
+        finally:
+            refresh_guard.release(_gk)
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
@@ -256,21 +266,30 @@ async def phase1(request: Request, req: Phase1Request, user: dict = Depends(get_
 async def phase2(request: Request, req: Phase2Request, user: dict = Depends(get_current_user)):
     store = _user_analysis_store(user)
 
+    from bottleneck_hunter.web import refresh_guard
+    _gk = f"pipeline:{user.get('sub', '')}"
+
     async def event_generator():
-        async for event in stream_phase2(
-            analysis_id=req.analysis_id,
-            per_layer_top_n=req.shortlist_config.per_layer_top_n,
-            layer_top_n=req.shortlist_config.layer_top_n,
-            min_overall_score=req.shortlist_config.min_overall_score,
-            max_shortlist_count=req.shortlist_config.max_shortlist_count,
-            market=req.market, max_market_cap_yi=req.max_market_cap_yi,
-            max_suppliers=req.max_suppliers,
-            language=req.language, provider=req.provider, model=req.model,
-            store=store,
-        ):
-            if await request.is_disconnected():
-                break
-            yield event
+        if not refresh_guard.acquire(_gk):
+            yield _sse("error", step="init", message="已有分析任务在进行中，请等其完成后再试")
+            return
+        try:
+            async for event in stream_phase2(
+                analysis_id=req.analysis_id,
+                per_layer_top_n=req.shortlist_config.per_layer_top_n,
+                layer_top_n=req.shortlist_config.layer_top_n,
+                min_overall_score=req.shortlist_config.min_overall_score,
+                max_shortlist_count=req.shortlist_config.max_shortlist_count,
+                market=req.market, max_market_cap_yi=req.max_market_cap_yi,
+                max_suppliers=req.max_suppliers,
+                language=req.language, provider=req.provider, model=req.model,
+                store=store,
+            ):
+                if await request.is_disconnected():
+                    break
+                yield event
+        finally:
+            refresh_guard.release(_gk)
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
@@ -341,16 +360,25 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
 async def phase4(request: Request, req: Phase4Request, user: dict = Depends(get_current_user)):
     store = _user_analysis_store(user)
 
+    from bottleneck_hunter.web import refresh_guard
+    _gk = f"pipeline:{user.get('sub', '')}"
+
     async def event_generator():
-        vm = [{"provider": m.provider, "model": m.model} for m in req.validation_models]
-        async for event in stream_phase4(
-            analysis_id=req.analysis_id, top_n=req.top_n,
-            validation_models=vm, language=req.language,
-            store=store,
-        ):
-            if await request.is_disconnected():
-                break
-            yield event
+        if not refresh_guard.acquire(_gk):
+            yield _sse("error", step="init", message="已有分析任务在进行中，请等其完成后再试")
+            return
+        try:
+            vm = [{"provider": m.provider, "model": m.model} for m in req.validation_models]
+            async for event in stream_phase4(
+                analysis_id=req.analysis_id, top_n=req.top_n,
+                validation_models=vm, language=req.language,
+                store=store,
+            ):
+                if await request.is_disconnected():
+                    break
+                yield event
+        finally:
+            refresh_guard.release(_gk)
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
 
