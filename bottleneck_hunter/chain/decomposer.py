@@ -227,6 +227,11 @@ class ChainDecomposer:
         if on_progress:
             await on_progress("▸ 语义去重合并中...")
         graph = await self._merge_similar_nodes(graph)
+        # 去重后各层节点数 + 总计，ASCII 标记便于 Loki 检索(|= "decompose done")定位产业数量
+        _layer_nodes = {L: len(graph.get_nodes_at_layer(L)) for L in range(self.max_depth + 1)}
+        logger.info("decompose done: product=%s depth=%d caps=%d/%d layer_nodes=%s total=%d",
+                    end_product, self.max_depth, self.MAX_NODES_PER_LAYER, self.MAX_CHILDREN_PER_NODE,
+                    _layer_nodes, len(graph.nodes))
         if on_progress:
             await on_progress(f"✓ 去重完成，最终 {len(graph.nodes)} 个节点")
 
