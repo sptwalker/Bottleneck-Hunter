@@ -157,25 +157,30 @@ class TestNoticePipeline:
     def test_fetch_notices_sync(self, mock_ak):
         from bottleneck_hunter.watchlist.notice_pipeline import _fetch_notices_sync
 
+        # 真实 akshare stock_individual_notice_report 列：代码/名称/公告标题/公告类型/公告日期/网址
         df = pd.DataFrame({
+            "代码": ["600519", "600519"],
+            "名称": ["贵州茅台", "贵州茅台"],
             "公告标题": ["关于业绩预告的公告", "关于回购股份的公告"],
+            "公告类型": ["财报", "股份回购"],
             "公告日期": ["2024-06-15", "2024-06-14"],
-            "公告链接": ["https://example.com/1", "https://example.com/2"],
+            "网址": ["https://example.com/1", "https://example.com/2"],
         })
-        mock_ak.stock_notice_report.return_value = df
+        mock_ak.stock_individual_notice_report.return_value = df
 
         results = _fetch_notices_sync("SH600519")
         assert len(results) == 2
         assert results[0]["filing_type"] == "earnings_preview"
         assert results[1]["filing_type"] == "buyback"
         assert results[0]["ticker"] == "SH600519"
+        assert results[0]["url"] == "https://example.com/1"
 
     @patch("bottleneck_hunter.watchlist.notice_pipeline.ak")
     def test_fetch_notices_invalid_ticker(self, mock_ak):
         from bottleneck_hunter.watchlist.notice_pipeline import _fetch_notices_sync
         results = _fetch_notices_sync("INVALID")
         assert results == []
-        mock_ak.stock_notice_report.assert_not_called()
+        mock_ak.stock_individual_notice_report.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
