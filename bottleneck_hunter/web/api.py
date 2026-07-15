@@ -393,20 +393,29 @@ class MeetingRequest(BaseModel):
 async def phase4_meeting(request: Request, req: MeetingRequest, user: dict = Depends(get_current_user)):
     store = _user_analysis_store(user)
 
+    from bottleneck_hunter.web import refresh_guard
+    _gk = f"pipeline:{user.get('sub', '')}"
+
     async def event_generator():
-        vm = [{"provider": m.provider, "model": m.model} for m in req.validation_models]
-        ra = None
-        if req.role_assignments:
-            ra = {k: {"provider": v.provider, "model": v.model} for k, v in req.role_assignments.items()}
-        async for event in stream_roundtable(
-            analysis_id=req.analysis_id,
-            validation_models=vm, language=req.language,
-            role_assignments=ra,
-            store=store,
-        ):
-            if await request.is_disconnected():
-                break
-            yield event
+        if not refresh_guard.acquire(_gk):
+            yield _sse("error", step="init", message="已有分析任务在进行中，请等其完成后再试")
+            return
+        try:
+            vm = [{"provider": m.provider, "model": m.model} for m in req.validation_models]
+            ra = None
+            if req.role_assignments:
+                ra = {k: {"provider": v.provider, "model": v.model} for k, v in req.role_assignments.items()}
+            async for event in stream_roundtable(
+                analysis_id=req.analysis_id,
+                validation_models=vm, language=req.language,
+                role_assignments=ra,
+                store=store,
+            ):
+                if await request.is_disconnected():
+                    break
+                yield event
+        finally:
+            refresh_guard.release(_gk)
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
 

@@ -16,8 +16,19 @@ from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.auth.dependencies import get_current_user
 from bottleneck_hunter.web.streaming._common import _sse
 from bottleneck_hunter.web.streaming._notice import with_notices
+from bottleneck_hunter.web import refresh_guard
 
 logger = logging.getLogger(__name__)
+
+
+async def _release_after(gk, gen):
+    """透传 gen 事件，结束(含断开/异常)时释放并发闸。"""
+    try:
+        async for e in gen:
+            yield e
+    finally:
+        refresh_guard.release(gk)
+
 
 router = APIRouter(tags=["trading"])
 
@@ -238,7 +249,12 @@ async def run_batch_review_endpoint(request: Request, market: str = "us_stock", 
             data = json.dumps(evt.get("data", evt), ensure_ascii=False)
             yield {"event": event_name, "data": data}
 
-    return EventSourceResponse(with_notices(generate(), _sse))
+    _gk = f"trading:{user['sub']}"
+    if not refresh_guard.acquire(_gk):
+        async def _busy():
+            yield _sse("error", step="init", message="已有任务在进行中，请等其完成后再试")
+        return EventSourceResponse(with_notices(_busy(), _sse))
+    return EventSourceResponse(with_notices(_release_after(_gk, generate()), _sse))
 
 
 @router.get("/feedback")
@@ -317,7 +333,12 @@ async def generate_tuning(request: Request, market: str = "us_stock", user: dict
             data = json.dumps(evt.get("data", evt), ensure_ascii=False)
             yield {"event": event_name, "data": data}
 
-    return EventSourceResponse(with_notices(generate(), _sse))
+    _gk = f"trading:{user['sub']}"
+    if not refresh_guard.acquire(_gk):
+        async def _busy():
+            yield _sse("error", step="init", message="已有任务在进行中，请等其完成后再试")
+        return EventSourceResponse(with_notices(_busy(), _sse))
+    return EventSourceResponse(with_notices(_release_after(_gk, generate()), _sse))
 
 
 @router.post("/tuning/{tuning_id}/approve")

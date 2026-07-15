@@ -23,10 +23,20 @@ from bottleneck_hunter.web.streaming._common import _sanitize
 from bottleneck_hunter.web.streaming.reverse import stream_reverse_analysis
 from bottleneck_hunter.web.streaming._common import _sse
 from bottleneck_hunter.web.streaming._notice import with_notices
+from bottleneck_hunter.web import refresh_guard
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["reverse"])
+
+async def _release_after(gk, gen):
+    """透传 gen 事件，结束(含断开/异常)时释放并发闸。"""
+    try:
+        async for e in gen:
+            yield e
+    finally:
+        refresh_guard.release(gk)
+
 
 _store: WatchlistStore | None = None
 
@@ -71,6 +81,11 @@ async def reverse_analyze(request: Request, req: ReverseAnalyzeRequest,
                           user: dict = Depends(get_current_user)):
     analysis_store = _user_analysis_store(user)
     wl_store = _user_store(user).for_market(req.market)
+    _gk = f"reverse:{user['sub']}"
+    if not refresh_guard.acquire(_gk):
+        async def _busy():
+            yield _sse("error", step="init", message="已有反向分析在进行中，请等其完成后再试")
+        return EventSourceResponse(with_notices(_busy(), _sse))
 
     async def event_generator():
         async for event in stream_reverse_analysis(
@@ -82,7 +97,7 @@ async def reverse_analyze(request: Request, req: ReverseAnalyzeRequest,
             if await request.is_disconnected():
                 break
             yield event
-    return EventSourceResponse(with_notices(event_generator(), _sse))
+    return EventSourceResponse(with_notices(_release_after(_gk, event_generator()), _sse))
 
 
 @router.get("/list")
@@ -118,6 +133,12 @@ async def reverse_cross_analyze(request: Request, req: ReverseCrossRequest,
             except Exception:
                 logger.warning("反向交叉分析：解析 scorecard 失败 id=%s", rid)
 
+    _gk = f"reverse:{user['sub']}"
+    if not refresh_guard.acquire(_gk):
+        async def _busy():
+            yield _sse("error", step="init", message="已有反向分析在进行中，请等其完成后再试")
+        return EventSourceResponse(with_notices(_busy(), _sse))
+
     async def event_generator():
         if not scorecards:
             yield _sse("error", step="init", message="没有可交叉验证的企业")
@@ -150,7 +171,7 @@ async def reverse_cross_analyze(request: Request, req: ReverseCrossRequest,
                                     "ticker": s.supplier.ticker,
                                     "final_score": s.final.final_score if s.final else s.overall_score,
                                     "bottleneck_node": s.bottleneck_node} for s in scorecards])
-    return EventSourceResponse(with_notices(event_generator(), _sse))
+    return EventSourceResponse(with_notices(_release_after(_gk, event_generator()), _sse))
 
 
 # ── 参数化路由 ───────────────────────────────────────────

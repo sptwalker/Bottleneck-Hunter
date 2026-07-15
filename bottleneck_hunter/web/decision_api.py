@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.llm_clients.factory import PROVIDER_MODELS
+from bottleneck_hunter.web import refresh_guard  # 每用户并发闸：决策各重活互斥，防重复触发/断线重发双跑
 
 from bottleneck_hunter.auth.dependencies import get_current_user
 
@@ -97,7 +98,7 @@ async def generate_macro_strategy(request: Request, market: str = "us_stock", us
     """全面生成 L1 宏观策略（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_macro_strategy
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_macro_strategy(store, _user_budget(user), market=market))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], run_macro_strategy(store, _user_budget(user), market=market)))
 
 
 @router.post("/macro/check")
@@ -105,7 +106,7 @@ async def check_macro_strategy(request: Request, market: str = "us_stock", user:
     """L1 日常检查（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_macro_check
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_macro_check(store, _user_budget(user), market=market))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], run_macro_check(store, _user_budget(user), market=market)))
 
 
 @router.get("/macro/latest")
@@ -188,7 +189,7 @@ async def generate_strategic_plan(request: Request, market: str = "us_stock", us
     """全面生成 L2 组合策略（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_strategic_plan
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_strategic_plan(store, _user_budget(user), market=market))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], run_strategic_plan(store, _user_budget(user), market=market)))
 
 
 @router.post("/strategic/deviation-check")
@@ -196,7 +197,7 @@ async def deviation_check(request: Request, market: str = "us_stock", user: dict
     """L2 偏离检查（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_deviation_check
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_deviation_check(store, _user_budget(user), market=market))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], run_deviation_check(store, _user_budget(user), market=market)))
 
 
 @router.get("/strategic/latest")
@@ -260,7 +261,7 @@ async def generate_tactical(request: Request, market: str = "us_stock", user: di
     """生成 L3 战术计划（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_tactical_plans
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_tactical_plans(store, _user_budget(user), market=market))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], run_tactical_plans(store, _user_budget(user), market=market)))
 
 
 @router.get("/tactical/latest")
@@ -292,7 +293,7 @@ async def generate_execution(request: Request, market: str = "us_stock", user: d
     """生成 L4 执行方案（SSE 流）"""
     from bottleneck_hunter.watchlist.decision_engine import run_execution_plans
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_execution_plans(store, _user_budget(user), market=market))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], run_execution_plans(store, _user_budget(user), market=market)))
 
 
 @router.get("/execution/{plan_id}")
@@ -317,7 +318,7 @@ async def trigger_committee_review(request: Request, market: str = "us_stock", u
     if not pending:
         return {"message": "无待审执行计划"}
     from bottleneck_hunter.watchlist.committee import run_committee_review
-    return _sse_response(request, run_committee_review(store, pending, _user_budget(user), market=market))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], run_committee_review(store, pending, _user_budget(user), market=market)))
 
 
 @router.get("/committee/reviews/{plan_id}")
@@ -380,7 +381,7 @@ async def scan_catalysts(request: Request, market: str = "us_stock", user: dict 
     """扫描观察池提取催化剂（SSE 流）"""
     from bottleneck_hunter.watchlist.catalyst_monitor import detect_catalysts
     store = _user_store(user).for_market(market)
-    return _sse_response(request, detect_catalysts(store, _user_budget(user)))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], detect_catalysts(store, _user_budget(user))))
 
 
 @router.get("/catalysts/upcoming")
@@ -912,7 +913,7 @@ async def trigger_thesis_review(request: Request, market: str = "us_stock", user
     """触发全量论点审查（SSE 流）"""
     from bottleneck_hunter.watchlist.thesis_tracker import run_quarterly_review
     store = _user_store(user).for_market(market)
-    return _sse_response(request, run_quarterly_review(store, _user_budget(user)))
+    return _sse_response(request, refresh_guard.guarded(user["sub"], run_quarterly_review(store, _user_budget(user))))
 
 
 @router.get("/thesis/dashboard")
