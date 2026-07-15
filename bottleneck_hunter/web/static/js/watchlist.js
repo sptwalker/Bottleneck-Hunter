@@ -282,14 +282,16 @@ function renderTable() {
     const name = entry.company_name_cn || entry.company_name || entry.ticker;
     const checked = wlState.selectedIds.has(entry.id) ? 'checked' : '';
 
-    // 策略信号
+    // 策略信号：与详情页策略页签一致——显示 信号 + v版本号（此前列表显示的是 confidence，
+    // 与详情的 version 同位却是不同指标，易被误读为"版本不一致"）。信心移到 title 提示。
     const strat = wlState.strategyCache[entry.id];
     const stratSignal = strat ? strat.signal : '';
+    const stratVer = strat ? strat.version : '';
     const stratConf = strat ? strat.confidence : '';
     const stratBadge = stratSignal
-      ? `<span class="wl-strategy-badge wl-strategy-${stratSignal}">${
+      ? `<span class="wl-strategy-badge wl-strategy-${stratSignal}" title="信心 ${stratConf}/10">${
           stratSignal === 'bullish' ? '看多' : stratSignal === 'bearish' ? '看空' : '中性'
-        } <span style="opacity:0.7">${stratConf}</span></span>`
+        }${stratVer ? ` <span style="opacity:0.7">v${stratVer}</span>` : ''}</span>`
       : '<span style="color:var(--muted);font-size:var(--fs-xs)">--</span>';
 
     return `
