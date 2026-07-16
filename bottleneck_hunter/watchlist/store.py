@@ -223,6 +223,7 @@ class WatchlistStore(
             self._migrate_budget_config_pk(conn)
             self._migrate_shared_company_profiles(conn)
             self._migrate_watchlist_drop_global_unique(conn)
+            self._migrate_catalyst_market_from_entry(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -309,6 +310,26 @@ class WatchlistStore(
             logger.info("watchlist 已重建：去掉全局 ticker UNIQUE，改 (user_id,ticker) 复合唯一，多用户可共享同票")
         except sqlite3.OperationalError as e:
             logger.warning("watchlist 去全局 UNIQUE 重建失败（可忽略，退回旧行为）: %s", e)
+
+
+    def _migrate_catalyst_market_from_entry(self, conn) -> None:
+        """按关联 watchlist entry 的真实 market 回填纠正 catalyst_tracking.market。
+
+        catalyst_tracking.market 列是后加的(ALTER ADD COLUMN DEFAULT 'us_stock')——列存在之前
+        建的 A股催化剂被默认打成 us_stock，泄漏到美股视图看似"混在一起"。以 entry.market 为准
+        (加票时定的、可靠)纠错。孤儿催化剂(entry 已删)不动。幂等(只改 market≠entry.market 的行)。
+        """
+        try:
+            n = conn.execute("""
+                UPDATE catalyst_tracking
+                SET market = (SELECT w.market FROM watchlist w WHERE w.id = catalyst_tracking.entry_id)
+                WHERE entry_id IN (SELECT id FROM watchlist)
+                  AND market IS NOT (SELECT w.market FROM watchlist w WHERE w.id = catalyst_tracking.entry_id)
+            """).rowcount
+            if n:
+                logger.info("catalyst_tracking.market 按 entry 真实市场纠正 %d 行（修历史错标混市场）", n)
+        except sqlite3.OperationalError as e:
+            logger.warning("catalyst 市场纠正迁移失败（可忽略）: %s", e)
 
 
     def _migrate_shared_company_profiles(self, conn) -> None:

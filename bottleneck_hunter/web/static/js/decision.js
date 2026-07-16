@@ -922,6 +922,8 @@ export function initDecision() {
       dcState.overview = null;
       closeConsultDrawer();   // 抽屉绑定打开时的市场，切换市场即关闭
       loadOverview();
+      // 若催化剂当前在日历视图，loadOverview 只刷列表 → 额外重载日历，否则停留旧市场
+      if (dcState.catalystView === 'calendar') { dcState.calendarMonth = null; loadCatalystCalendar(); }
     });
   }
 
