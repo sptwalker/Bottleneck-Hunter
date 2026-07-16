@@ -603,11 +603,18 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     tactical_plans = store.get_tactical_plans_by_date(today)
 
-    # ticker→公司名映射，供前端把 L2 组合(圆环图/持仓表)的股票代码显示为公司名
-    company_names = {
-        e["ticker"]: (e.get("company_name") or e["ticker"])
-        for e in store.list_all() if e.get("ticker")
-    }
+    # ticker→公司名映射，供前端把 L2 组合(圆环图/持仓表)的股票代码显示为公司名。
+    # 同时按 6 位纯代码加别名键：观察池 A股票存 .SS/.SZ，L2 组合 holding 常用 .SH，
+    # 去后缀对齐才能匹配上（否则显示成代码）。
+    company_names = {}
+    for e in store.list_all():
+        tk = e.get("ticker")
+        if not tk:
+            continue
+        name = e.get("company_name") or tk
+        company_names[tk] = name
+        code = str(tk).split(".")[0].strip()
+        company_names.setdefault(code, name)  # 别名：纯代码
 
     # 最近一次投委会评审（从会议 transcript 提取各委员投票，供投委会面板展示）
     committee = []

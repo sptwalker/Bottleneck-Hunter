@@ -332,10 +332,20 @@ function renderMacro(macro) {
 
 /* ── L2 组合 ──────────────────────────────────────── */
 
-// ticker→公司名（A股代码无意义，展示公司名；缺失回退代码）
+// ticker→公司名（A股代码无意义，展示公司名；缺失回退代码）。
+// 对 A股交易所后缀容错：观察池存 .SS/.SZ，而 L2 组合 holding 常用 .SH → 精确匹配会 miss
+// 显示成代码。故先精确匹配，再退回按 6 位纯代码匹配（600900.SH ↔ 600900.SS 视为同一支）。
 function dcName(ticker) {
   const m = dcState.overview?.company_names;
-  return (m && m[ticker]) || ticker;
+  if (!m || !ticker) return ticker;
+  if (m[ticker]) return m[ticker];
+  const code = String(ticker).split('.')[0].trim();   // 去交易所后缀取纯代码
+  if (m[code]) return m[code];
+  // company_names 的键去后缀后再比（观察池键可能带 .SS/.SZ）
+  for (const k in m) {
+    if (String(k).split('.')[0].trim() === code) return m[k];
+  }
+  return ticker;
 }
 
 function renderStrategic(plan) {
