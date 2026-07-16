@@ -1,0 +1,74 @@
+# 运维日志栈（Loki + Alloy + Grafana）—— 可选叠加文件。
+# 采集 bottleneck-hunter 容器 stdout → Loki 存储 → Grafana 查看/告警。应用零改动（日志已在 stdout）。
+#
+# 单独放在叠加文件里的原因：Grafana 密码用 ${GRAFANA_ADMIN_PASSWORD:?} 做 fail-closed 校验，
+# 而 compose 会在加载时对**整个文件**做插值——若把它放主 compose，未设该变量会连累
+# 核心 app 的 build/up 一起失败。拆出来后：主 compose 无此依赖可自由构建；只有当你显式
+# 启用日志栈时才要求设置强密码。
+#
+# 启用（与主 compose 叠加）：
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+# 详见 docs/OBSERVABILITY.md。
+
+services:
+  # 日志存储/查询（仅内网，不映射主机端口）
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: bh-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./deploy/loki/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    environment:
+      - TZ=Asia/Shanghai
+
+  # 日志采集器：抓 Docker 容器 stdout 推给 Loki（仅内网）
+  alloy:
+    image: grafana/alloy:v1.5.1
+    container_name: bh-alloy
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - alloy-data:/var/lib/alloy/data
+    environment:
+      - TZ=Asia/Shanghai
+    depends_on:
+      - loki
+
+  # 日志 UI / 告警：仅绑定 127.0.0.1，由主机 nginx 反代 /grafana/（不直接公网暴露）
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: bh-grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - TZ=Asia/Shanghai
+      # 子路径部署：nginx 反代 https://bh.youdoogo.com/grafana/
+      - GF_SERVER_ROOT_URL=https://bh.youdoogo.com/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      # 无默认值：未在 .env 设置 GRAFANA_ADMIN_PASSWORD 时容器直接启动失败（fail-closed），
+      # 绝不静默落到弱默认 admin（Grafana 公网可达，弱口令=日志接管入口）。
+      # 只有启用本叠加文件（跑日志栈）时才要求它，不影响核心 app 构建。
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?必须在 .env 设置强密码}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+    depends_on:
+      - loki
+
+volumes:
+  loki-data:
+  alloy-data:
+  grafana-data:

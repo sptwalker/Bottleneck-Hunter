@@ -22,18 +22,19 @@
 cd /path/to/Bottleneck-Hunter
 git pull origin main
 
-# .env 里设 Grafana 管理员强密码
+# .env 里设 Grafana 管理员强密码（日志栈叠加文件强制要求，未设则 grafana 容器启动失败）
 echo 'GRAFANA_ADMIN_PASSWORD=<你的强密码>' >> .env   # 或编辑 .env
 
-# 拉起（含原有 bottleneck-hunter + 新增 loki/alloy/grafana）
-HOST_PORT=8089 docker compose up -d
+# 拉起（主 compose + 日志栈叠加文件：bottleneck-hunter + loki/alloy/grafana）
+# 日志栈拆到 docker-compose.observability.yml，避免其 Grafana 密码 fail-closed 校验连累核心 app 构建。
+HOST_PORT=8089 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 
 # nginx 反代 /grafana/：把片段 include 进 bh.youdoogo.com 的 server{} 块后 reload
 #   include /path/to/Bottleneck-Hunter/deploy/nginx-observability.conf;
 /usr/local/nginx/sbin/nginx -t && /usr/local/nginx/sbin/nginx -s reload
 ```
 
-验证四服务：`docker compose ps`（bottleneck-hunter / bh-loki / bh-alloy / bh-grafana 均 Up）。
+验证四服务：`docker compose -f docker-compose.yml -f docker-compose.observability.yml ps`（bottleneck-hunter / bh-loki / bh-alloy / bh-grafana 均 Up）。
 
 ## 二、用户怎么看日志
 
