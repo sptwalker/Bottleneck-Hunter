@@ -8,6 +8,10 @@ import { buildDetailGrid } from './phase-views.js';
 
 const API = '/api/watchlist';
 
+// A股 ticker 后缀不一（观察池 .SS vs 决策/评分卡 .SH）→ 去后缀取纯代码比较，避免抽屉/去重打不开。
+function _tickerCode(t) { return String(t == null ? '' : t).split('.')[0].trim().toUpperCase(); }
+function _sameTicker(a, b) { return _tickerCode(a) === _tickerCode(b) && _tickerCode(a) !== ''; }
+
 function _debounce(fn, ms) {
   let timer;
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
@@ -469,7 +473,7 @@ export function openCompanyDrawer(ctx) {
   if (ctx.scorecard) entry._scorecard = ctx.scorecard;
   // 无 entry_id 但有 ticker：匹配已入池的同标的 → 升级为全量视图
   if (!entry.id && entry.ticker) {
-    const hit = (wlState.entries || []).find(e => e.ticker === entry.ticker);
+    const hit = (wlState.entries || []).find(e => _sameTicker(e.ticker, entry.ticker));
     if (hit) {
       entry.id = hit.id; entry.tier = entry.tier || hit.tier;
       entry.latest_snapshot = entry.latest_snapshot || hit.latest_snapshot;

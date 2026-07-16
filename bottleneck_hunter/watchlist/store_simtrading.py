@@ -155,6 +155,8 @@ class _SimTradingMixin:
     def create_sim_position(self, account_id: str, ticker: str,
                             shares: int, avg_cost: float,
                             entry_id: str | None = None) -> str:
+        from bottleneck_hunter.watchlist.store_base import normalize_ticker
+        ticker = normalize_ticker(ticker, self._market)  # 归一：持仓 ticker 与执行计划/观察池对齐
         pid = uuid.uuid4().hex[:12]
         now = _now_iso()
         with self._write_conn() as conn:

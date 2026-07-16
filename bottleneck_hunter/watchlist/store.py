@@ -225,6 +225,7 @@ class WatchlistStore(
             self._migrate_watchlist_drop_global_unique(conn)
             self._migrate_catalyst_market_from_entry(conn)
             self._migrate_market_labels_from_source(conn)
+            self._migrate_normalize_astock_tickers(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -403,6 +404,62 @@ class WatchlistStore(
                 logger.info("历史市场错标全面纠正 %d 行（theses/plans/sim/committee/reviews 等，修 A股泄漏进美股视图）", total)
         except sqlite3.OperationalError as e:
             logger.warning("历史市场标签纠正迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_normalize_astock_tickers(self, conn) -> None:
+        """把历史 A股 ticker 归一为 canonical(.SS/.SZ/.BJ)，根治 .SH 与观察池 .SS 精确匹配失败。
+
+        普通 ticker 列表用 SQL 批量改（.SH→.SS）；strategic_plans.stock_selection 里嵌 JSON 的
+        holding ticker 用 Python 读出→normalize→写回。只动 A股(.SH 后缀/裸6位)，美股不动。幂等。
+        """
+        from bottleneck_hunter.watchlist.store_base import normalize_ticker
+        try:
+            # 1) 普通 ticker 列：上交所 .SH → .SS（其它后缀本已 canonical；裸码留给写入口/下次刷新归一）
+            plain = ("watchlist", "execution_plans", "tactical_plans", "sim_positions",
+                     "sim_trades", "catalyst_tracking", "market_snapshots",
+                     "investment_theses", "scenario_valuations", "auto_reviews", "trade_feedback")
+            total = 0
+            for t in plain:
+                try:
+                    n = conn.execute(
+                        f"UPDATE {t} SET ticker = substr(ticker,1,length(ticker)-3) || '.SS' "
+                        f"WHERE ticker LIKE '%.SH'"
+                    ).rowcount
+                    total += n or 0
+                except sqlite3.OperationalError:
+                    pass
+            # 2) strategic_plans.stock_selection 内嵌 holdings：JSON 读出→归一→写回
+            try:
+                rows = conn.execute("SELECT id, stock_selection FROM strategic_plans").fetchall()
+                for r in rows:
+                    raw = r["stock_selection"]
+                    if not raw or ".SH" not in str(raw):
+                        continue
+                    try:
+                        ss = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    changed = False
+                    for bucket in ("core_holdings", "tactical_holdings"):
+                        for h in (ss.get(bucket) or []):
+                            if isinstance(h, dict) and h.get("ticker"):
+                                nt = normalize_ticker(h["ticker"])
+                                if nt != h["ticker"]:
+                                    h["ticker"] = nt; changed = True
+                    if isinstance(ss.get("watchlist_only"), list):
+                        nw = [normalize_ticker(x) for x in ss["watchlist_only"]]
+                        if nw != ss["watchlist_only"]:
+                            ss["watchlist_only"] = nw; changed = True
+                    if changed:
+                        conn.execute("UPDATE strategic_plans SET stock_selection = ? WHERE id = ?",
+                                     (json.dumps(ss, ensure_ascii=False), r["id"]))
+                        total += 1
+            except sqlite3.OperationalError:
+                pass
+            if total:
+                logger.info("A股 ticker 归一 %d 处（.SH→.SS，统一 canonical，修 L2/L3/L4 连接漏配）", total)
+        except sqlite3.OperationalError as e:
+            logger.warning("A股 ticker 归一迁移失败（可忽略）: %s", e)
 
 
     def _migrate_shared_company_profiles(self, conn) -> None:

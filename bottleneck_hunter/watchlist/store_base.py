@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,40 @@ _MARKET_ALIASES = {"us": "us_stock", "usa": "us_stock", "cn": "a_stock",
 def normalize_market(market: str | None) -> str:
     m = (market or "us_stock").strip().lower()
     return _MARKET_ALIASES.get(m, m)
+
+
+# A股 ticker 全系统唯一 canonical：6位裸码 + 交易所后缀（.SS 上交所 / .SZ 深交所 / .BJ 北交所），
+# 与唯一 producer supplier_search._code_to_ticker 一致。历史上 LLM 自由发挥用 .SH → 与观察池存的
+# .SS 精确匹配失败，导致 L2/L3/L4 连接漏配、场景估值跳过、持仓重复/误报持仓不足、自进化反馈丢失。
+# 所有 ticker 写入/比较入口统一经此归一，杜绝跨来源后缀不一致。美股(字母 ticker)只做 upper。
+_ASTOCK_CODE_RE = re.compile(r"^\s*(?:(?:SH|SS|SZ|BJ)\.)?(\d{6})(?:\.(?:SH|SS|SZ|BJ))?\s*$", re.IGNORECASE)
+
+
+def _astock_suffix(code: str) -> str:
+    """6位码 → 交易所后缀。6/9→上交所(.SS)，0/2/3→深交所(.SZ)，4/8→北交所(.BJ)。"""
+    c0 = code[0]
+    if c0 in ("6", "9"):
+        return ".SS"
+    if c0 in ("4", "8"):
+        return ".BJ"
+    return ".SZ"  # 0/2/3 及其它默认深市
+
+
+def normalize_ticker(ticker: str | None, market: str = "") -> str:
+    """统一 ticker 规范形。A股 → 6位码 + .SS/.SZ/.BJ（.SH 归一为 .SS，裸码按首位补后缀）；
+    美股/其它 → strip+upper。空/无法解析 → 原样(strip)返回。幂等。"""
+    if not ticker:
+        return ticker or ""
+    t = str(ticker).strip()
+    if not t:
+        return t
+    # A股：形如 600519 / 600519.SH / 600519.SS / SH.600519 等 → 6位码 + canonical 后缀
+    m = _ASTOCK_CODE_RE.match(t)
+    if m:
+        code = m.group(1)
+        return code + _astock_suffix(code)
+    # 非 A股（美股字母 ticker 等）：仅规范大小写
+    return t.upper()
 
 
 _DB_LOCKS: dict[str, threading.Lock] = {}

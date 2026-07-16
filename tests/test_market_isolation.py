@@ -59,12 +59,12 @@ def test_list_all_and_get_tickers_respect_market(store):
     _add(store, "AAPL", "us_stock")
     _add(store, "600519.SH", "a_stock")
     # 未 scope → 两市都在（向后兼容，UI/admin 依赖）
-    assert {e["ticker"] for e in store.list_all()} == {"AAPL", "600519.SH"}
-    assert set(store.get_tickers()) == {"AAPL", "600519.SH"}
+    assert {e["ticker"] for e in store.list_all()} == {"AAPL", "600519.SS"}
+    assert set(store.get_tickers()) == {"AAPL", "600519.SS"}
     # scope 到某市 → 只返回该市
-    assert {e["ticker"] for e in store.for_market("a_stock").list_all()} == {"600519.SH"}
+    assert {e["ticker"] for e in store.for_market("a_stock").list_all()} == {"600519.SS"}
     assert {e["ticker"] for e in store.for_market("us_stock").list_all()} == {"AAPL"}
-    assert store.for_market("a_stock").get_tickers() == ["600519.SH"]
+    assert store.for_market("a_stock").get_tickers() == ["600519.SS"]
     assert store.for_market("us_stock").get_tickers() == ["AAPL"]
 
 
@@ -126,3 +126,18 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn) and not inspect.signature(fn).parameters:
             fn()
     print("market isolation self-check OK (无参用例; 完整覆盖用 pytest)")
+
+
+# ── A股 ticker canonical 归一 ──────────────────────────────
+def test_normalize_ticker_canonical():
+    from bottleneck_hunter.watchlist.store_base import normalize_ticker as n
+    assert n("600519.SH") == "600519.SS"   # 上交所 .SH → .SS
+    assert n("600519") == "600519.SS"       # 裸码补后缀
+    assert n("600519.SS") == "600519.SS"    # 幂等
+    assert n("000001") == "000001.SZ"       # 深市
+    assert n("300750.SH") == "300750.SZ"    # 创业板即便传 .SH 也归深市
+    assert n("430047") == "430047.BJ"       # 北交所
+    assert n("688981") == "688981.SS"       # 科创板→上交所
+    assert n("nvda") == "NVDA"               # 美股仅 upper
+    assert n("") == ""
+    assert n(None) == ""

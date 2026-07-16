@@ -112,7 +112,7 @@ class TestWatchlistCRUD:
 
         result = store.get_tickers_by_market()
         assert set(result["us_stock"]) == {"AAPL", "GOOG"}
-        assert result["a_stock"] == ["600519"]
+        assert result["a_stock"] == ["600519.SS"]  # A股 add 归一为 canonical 后缀
 
     def test_get_tickers_by_market_dedups_multiuser(self, store):
         """多用户观察同一支票时，unbound(全局) get_tickers_by_market 去重，不返回重复票。"""

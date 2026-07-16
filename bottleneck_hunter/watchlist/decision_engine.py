@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist.store_base import normalize_market
+from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.regime_mapper import get_allocation_bounds, format_bounds_for_prompt
 from bottleneck_hunter.chain.json_utils import extract_json_object
@@ -103,6 +103,26 @@ def _as_num(v, default):
         except ValueError:
             return default
     return default
+
+
+def _normalize_result_tickers(result: dict) -> None:
+    """就地把 LLM 决策结果里所有 ticker 字段归一为 canonical（A股 .SH→.SS 等）。
+    杜绝 LLM 输出 .SH 与观察池 .SS 精确匹配失败导致的 L2/L3/L4 连接漏配、场景估值跳过。"""
+    if not isinstance(result, dict):
+        return
+    ss = result.get("stock_selection")
+    if isinstance(ss, dict):
+        for bucket in ("core_holdings", "tactical_holdings"):
+            for h in ss.get(bucket, []) or []:
+                if isinstance(h, dict) and h.get("ticker"):
+                    h["ticker"] = normalize_ticker(h["ticker"])
+        wl = ss.get("watchlist_only")
+        if isinstance(wl, list):
+            ss["watchlist_only"] = [normalize_ticker(t) for t in wl if t]
+    for key in ("tactical_plans", "execution_plans"):
+        for p in result.get(key, []) or []:
+            if isinstance(p, dict) and p.get("ticker"):
+                p["ticker"] = normalize_ticker(p["ticker"])
 
 
 def _union_strs(lists: list) -> list:
@@ -644,6 +664,7 @@ async def run_strategic_plan(
             budget.record(provider, model, 8000, 3000, "strategic_plan")
 
         result = extract_json_object(response)
+        _normalize_result_tickers(result)  # 归一 holding ticker(.SH→.SS)，与观察池对齐
         # A4: 确定性钳制 L2 目标配置到 L1 alloc_bounds（防止 LLM 给出越界仓位/beta 后被下游放行）
         clamp_warnings = _clamp_target_allocation(result, alloc_bounds)
         if clamp_warnings:
@@ -948,6 +969,7 @@ async def run_tactical_plans(
             budget.record(provider, model, 8000, 3000, "tactical_plans")
 
         result = extract_json_object(response)
+        _normalize_result_tickers(result)  # 归一战术计划 ticker，与观察池/L2 对齐
         tactical_plans = result.get("tactical_plans", [])
 
         entry_map = {e["ticker"]: e["id"] for e in entries}
@@ -1197,6 +1219,7 @@ async def run_execution_plans(
             budget.record(provider, model, 5000, 2000, "execution_plans")
 
         result = extract_json_object(response)
+        _normalize_result_tickers(result)  # 归一执行计划 ticker，与观察池/持仓对齐
         exec_plans = result.get("execution_plans", [])
 
         entry_map = {e["ticker"]: e["id"] for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)}

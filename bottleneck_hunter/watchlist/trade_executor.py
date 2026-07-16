@@ -72,7 +72,8 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
         return {"error": "约束校验不通过", "violations": validation.violations, "plan_id": plan_id}
 
     action = plan.get("action") or result_json.get("action", "")
-    ticker = plan.get("ticker", "")
+    from bottleneck_hunter.watchlist.store_base import normalize_ticker
+    ticker = normalize_ticker(plan.get("ticker", ""), market)  # 归一：执行计划 .SH 与观察池/持仓 .SS 对齐，杜绝重复持仓/误报持仓不足
     shares = plan.get("shares") or result_json.get("shares", 0)
     planned_price = (plan.get("target_price")
                      or result_json.get("target_price")
