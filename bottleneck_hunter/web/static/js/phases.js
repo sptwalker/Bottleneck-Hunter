@@ -2068,6 +2068,12 @@ async function fetchHotScan(force = false) {
       body: JSON.stringify({ provider, model, top_n: 8 }),
     });
     const data = await resp.json();
+    if (!resp.ok || data.error) {
+      // 后端明确失败（缺 Key/超时/格式）：显示真因，而非静默"暂无推荐"
+      const msg = data.detail || data.error || `扫描失败 (HTTP ${resp.status})`;
+      body.innerHTML = `<p class="empty-msg">${msg}</p>`;
+      return;
+    }
     (data.fallback_notice || []).forEach(n => window.notifyFallback?.(n.message));
     _hotScanCache = data.recommendations || [];
     _hotScanTime = Date.now();

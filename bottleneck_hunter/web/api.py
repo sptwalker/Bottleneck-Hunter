@@ -519,10 +519,18 @@ class HotScanRequest(BaseModel):
 async def hot_scan(req: HotScanRequest, user: dict = Depends(get_current_user)):
     """LLM 智能热点赛道推荐 — 可靠替代纯 AKShare 方案。"""
     from bottleneck_hunter.chain.hot_sector import llm_recommend_hot_sectors
+    from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
     from bottleneck_hunter.llm_clients.fallback import begin_notices, drain_notices
 
     begin_notices()
-    results = await llm_recommend_hot_sectors(req.provider, req.model, req.top_n)
+    try:
+        results = await llm_recommend_hot_sectors(req.provider, req.model, req.top_n)
+    except MissingUserKeyError:
+        raise  # 交由顶层 handler 返回 400 + "请配置该模型 API Key"，前端弹提示
+    except Exception as e:
+        # 超时/格式/其它失败：带 error 返回，前端显示真因而非静默"暂无推荐"
+        logger.warning("热点扫描失败: %s", e)
+        return {"recommendations": [], "error": f"热点扫描失败：{e}", "fallback_notice": drain_notices()}
     return {"recommendations": results, "fallback_notice": drain_notices()}
 
 

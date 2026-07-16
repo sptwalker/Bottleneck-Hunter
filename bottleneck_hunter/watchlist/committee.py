@@ -91,11 +91,24 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     if llm:
         chain.append((llm, provider, model))
         seen.add(provider)
-    # 备用：选一个与主模型不同、且**未熔断**的可用 provider（避免把已知失效的 provider 选进链白耗一轮）
+    # 备用：选一个与主模型不同、且**未熔断**的可用 provider（避免把已知失效的 provider 选进链白耗一轮）。
+    # 候选池 = 用户全部已注册 provider + 应急链兜底，而非只试硬编码 4 家（否则用户配的其它模型拿不到备用多样性）。
     from bottleneck_hunter.auth.current_user import get_current_user_id
     from bottleneck_hunter.llm_clients.health import health
+    from bottleneck_hunter.llm_clients.factory import list_custom_provider_ids
     uid = get_current_user_id()
-    for hint in _FALLBACK_PROVIDERS:
+    try:
+        _universe = list_custom_provider_ids()
+    except Exception:
+        _universe = []
+    _bk_seen: set[str] = set()
+    backup_pool = []
+    for h in (list(_universe) + _FALLBACK_PROVIDERS):
+        hl = (h or "").lower().strip()
+        if hl and hl not in _bk_seen:
+            _bk_seen.add(hl)
+            backup_pool.append(hl)
+    for hint in backup_pool:
         if hint in seen or health.is_open(uid, hint):
             continue
         fl, fp, fm = get_llm_for_position(provider_hint=hint, with_fallback=False)

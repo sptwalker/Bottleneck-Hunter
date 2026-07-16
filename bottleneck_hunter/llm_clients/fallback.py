@@ -292,20 +292,26 @@ class FallbackChatModel(BaseChatModel):
 
 def build_fallback_candidates(primary_provider: str, primary_model: str,
                               user_id: str = "", temperature: float = 0.3) -> list:
-    """构造备选候选列表（不含主模型）：全局「主要」provider 前置，其后接 _FALLBACK_CHAIN；
-    仅取当前用户已配 KEY、启用中、且不同于主模型的 provider（严格隔离 + 跳过被禁用）。"""
+    """构造备选候选列表（不含主模型）：全局「主要」provider 前置，其后接用户全部已注册
+    provider + 应急链；仅取当前用户已配 KEY、启用中、且不同于主模型的 provider
+    （严格隔离 + 跳过被禁用）。不再只提供硬编码 4 家应急链——否则主模型失效时，
+    用户配的其它 provider 无法被自动替换。"""
     # 延迟导入避免与 factory 循环依赖
     from bottleneck_hunter.llm_clients.factory import (
         _FALLBACK_CHAIN, _user_has_llm_key, create_llm, resolve_provider_model,
-        is_provider_active, get_primary_provider,
+        is_provider_active, get_primary_provider, list_custom_provider_ids,
     )
     from bottleneck_hunter.auth.current_user import get_current_user_id
 
     uid = user_id or get_current_user_id()
     out = []
     primary = (primary_provider or "").lower().strip()
-    # 主要 provider 前置到备选链首，实现「其它模型失效自动替换为主要」
-    chain = ([get_primary_provider()] if get_primary_provider() else []) + [p for p, _ in _FALLBACK_CHAIN]
+    try:
+        universe = list_custom_provider_ids()
+    except Exception:
+        universe = []
+    # 备选链 = 全局主要 provider 前置 + 用户全部已注册 provider + 应急链兜底
+    chain = ([get_primary_provider()] if get_primary_provider() else []) + list(universe) + [p for p, _ in _FALLBACK_CHAIN]
     seen: set[str] = set()
     for provider in chain:
         provider = (provider or "").lower().strip()

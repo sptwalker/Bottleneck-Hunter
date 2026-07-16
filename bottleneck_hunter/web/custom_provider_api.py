@@ -18,6 +18,7 @@ from bottleneck_hunter.llm_clients.factory import (
     create_llm,
     get_custom_provider,
     is_provider_active,
+    list_custom_provider_ids,
     register_custom_provider,
     resolve_provider_model,
     set_provider_status,
@@ -275,8 +276,9 @@ async def toggle_active(provider_id: str, req: ToggleActiveRequest,
 def _reassign_role_configs(disabled_pid: str, primary_pid: str) -> int:
     """把所有用户 ai_role_config 中引用 disabled_pid 的行改写为可用替代模型。
 
-    每行按其所属用户单独选型：优先「主要」provider，其次 _FALLBACK_CHAIN 中该用户已配
-    KEY、启用中、非被禁的第一个；都不可用则删除该行（避免替换成一个也用不了的模型）。
+    每行按其所属用户单独选型：优先「主要」provider，其次该用户在**全部已注册 provider**中
+    已配 KEY、启用中、非被禁的第一个（含应急链兜底）；都不可用则删除该行
+    （避免替换成一个也用不了的模型）。
     返回受影响的角色配置条数。
     """
     from bottleneck_hunter.watchlist.store import WatchlistStore
@@ -289,7 +291,19 @@ def _reassign_role_configs(disabled_pid: str, primary_pid: str) -> int:
         return 0
 
     disabled = (disabled_pid or "").lower().strip()
-    candidates = ([primary_pid] if primary_pid else []) + [p for p, _ in _FALLBACK_CHAIN]
+    # 候选池 = 主模型 + 全部已注册 provider + 应急链（去重）；不再只试硬编码 4 家，
+    # 否则用户配的其它 provider 会被无视 → 角色配置被误删。
+    try:
+        universe = list_custom_provider_ids()
+    except Exception:
+        universe = []
+    _seen: set[str] = set()
+    candidates = []
+    for c in ([primary_pid] if primary_pid else []) + list(universe) + [p for p, _ in _FALLBACK_CHAIN]:
+        cl = (c or "").lower().strip()
+        if cl and cl not in _seen:
+            _seen.add(cl)
+            candidates.append(cl)
     replaced = 0
     for r in rows:
         uid = r.get("user_id", "") or ""

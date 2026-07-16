@@ -263,9 +263,11 @@ def _create_raw_llm(
     provider = provider.lower().strip()
     # 单点注入超时与重试上限：所有 provider 分支共享 **kwargs，故这里设默认即全链覆盖。
     # 根因修复——挂起的 provider 会占住线程池最长无限久，拖垮全应用的 to_thread，
-    # 且熔断器因“挂起不抛异常”永不触发。callers 可显式覆盖（如长文本任务传更大 timeout）。
+    # 且熔断器因“挂起不抛异常”永不触发。timeout 是防挂起的关键；每次尝试都受它约束。
+    # max_retries 保留 SDK 默认 2：对瞬时 429/5xx 仍有韧性（一次性调用如热点扫描无上层重试，
+    # retries=0 会因单次瞬时错误直接失败）；最坏 (2+1)×timeout 仍有界。callers 可覆盖。
     kwargs.setdefault("timeout", float(os.getenv("BH_LLM_TIMEOUT", "60")))
-    kwargs.setdefault("max_retries", int(os.getenv("BH_LLM_MAX_RETRIES", "0")))
+    kwargs.setdefault("max_retries", int(os.getenv("BH_LLM_MAX_RETRIES", "2")))
     # 严格按用户隔离的 KEY 解析：显式传入（测试端点）> 当前上下文用户的加密 KEY。
     # 绝不读 _CUSTOM_PROVIDERS 明文缓存、绝不读 os.getenv、绝不借他人 KEY。
     from bottleneck_hunter.auth.current_user import get_current_user_id
@@ -485,11 +487,13 @@ def get_llm_for_position(
             if model:
                 return create_llm(provider_hint, model, temperature=temperature, with_fallback=with_fallback, user_id=uid), provider_hint, model
 
-        for provider, _key_env in _FALLBACK_CHAIN:
-            if _user_has_llm_key(provider, uid):
-                model = resolve_provider_model(provider, uid)
-                if model:
-                    return create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid), provider, model
+        # 无 position / hint 未命中 → 统一智能调度。传一个未注册的通用 role_key，使
+        # get_models_for_role 跳过角色专属默认(优先级3)、直接落到优先级4 的全域调度：
+        # 主模型 + 用户所有已注册 provider + 应急链，按健康度排序取 top-1。
+        # 绝不再只试硬编码 4 条应急链(deepseek/qwen/kimi/glm)——用户配的其它 provider 会被无视。
+        results = get_models_for_role("__default__", user_id=uid, temperature=temperature, with_fallback=with_fallback)
+        if results:
+            return results[0]
     except Exception as e:
         logger.warning("get_llm_for_position 失败 (position=%s): %s", position, e)
     return None, "", ""

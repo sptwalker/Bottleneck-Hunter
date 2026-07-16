@@ -555,7 +555,7 @@ async def llm_recommend_hot_sectors(
     2. 用 LLM 生成结构化推荐（保证可靠输出）
     3. 结果缓存30分钟
     """
-    from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_position
+    from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_position, MissingUserKeyError
     from langchain_core.messages import SystemMessage, HumanMessage
     from bottleneck_hunter.auth.current_user import get_current_user_id
 
@@ -612,14 +612,16 @@ async def llm_recommend_hot_sectors(
         )
 
     try:
-        # provider 为空 = 主模型"跟随顶栏配置" → 走回退链解析，勿直接 create_llm('')（会被下方 except 吞掉→静默返回空）
+        # provider 为空 = 主模型"跟随顶栏配置"：按角色走统一解析(手填矩阵→注册默认→智能调度)，
+        # 候选池含用户全部已注册 provider。绝不能传 get_llm_for_position(None)——position=None 会
+        # 跳过角色解析、只试硬编码应急链(deepseek/qwen/kimi/glm)，用户配了其它 11 个模型也选不到。
         if provider:
             llm = create_llm(provider, model, temperature=0.3)
         else:
-            llm, provider, model = get_llm_for_position(None, temperature=0.3)
+            llm, provider, model = get_llm_for_position("pipeline_decompose", temperature=0.3)
             if llm is None:
                 logger.error("热点推荐：未配置可用 LLM provider")
-                return []
+                raise MissingUserKeyError("（跟随顶栏配置）请在 AI 配置中心为「产业链拆解」角色配置可用模型")
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
         resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30.0)
 
@@ -642,10 +644,14 @@ async def llm_recommend_hot_sectors(
 
     except asyncio.TimeoutError:
         logger.error("LLM 热点推荐超时")
-        return []
+        raise
     except json.JSONDecodeError as e:
         logger.error(f"LLM 返回非 JSON 格式: {e}")
-        return []
+        raise
     except Exception as e:
+        # MissingUserKeyError 等由上层 handler 转成明确提示，绝不吞成空 []（否则"未配置Key"
+        # 与"真无热点"表现一样，用户无从判断）。其余异常也原样抛，端点统一兜底带 error 返回。
+        if isinstance(e, MissingUserKeyError):
+            raise
         logger.error(f"LLM 热点推荐失败: {e}")
-        return []
+        raise
