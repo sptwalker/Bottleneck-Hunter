@@ -166,6 +166,13 @@ async def lifespan(app: FastAPI):
                          daemon=True, name="archive-backfill").start()
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).debug("企业档案回填线程启动失败", exc_info=True)
+    # 复位被上次异常退出（SIGKILL/OOM/重启）卡在 running 的管线状态，避免 UI/门控误判仍在跑。
+    try:
+        n = _wl_store.reconcile_running_pipelines()
+        if n:
+            logging.getLogger(__name__).warning("启动复位 %d 条中断的 running 管线状态 → interrupted", n)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug("管线状态复位失败", exc_info=True)
     scheduler = init_scheduler(_wl_store, auth_store=_auth_store)
     if scheduler:
         scheduler.start()
@@ -189,7 +196,7 @@ async def lifespan(app: FastAPI):
 # ── ASGI 认证中间件 ───────────────────────────────────────
 
 # 不需要认证的路径前缀
-_PUBLIC_PREFIXES = ("/login", "/static/", "/api/auth/")
+_PUBLIC_PREFIXES = ("/login", "/static/", "/api/auth/", "/healthz")
 
 
 class AuthMiddleware:
@@ -344,5 +351,29 @@ def create_app() -> FastAPI:
         resp = FileResponse(str(STATIC_DIR / "login.html"))
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
+
+    @app.get("/healthz")
+    async def healthz():
+        """就绪探针：验证调度器存活 + DB 可读，而非仅进程活着。
+
+        旧 healthcheck 打 /（静态文件）→ 调度器死了/DB 锁死仍返回绿灯，掩盖故障。
+        """
+        from fastapi.responses import JSONResponse
+        from bottleneck_hunter.watchlist.scheduler import is_scheduler_running
+        checks = {"scheduler": is_scheduler_running()}
+        try:
+            _wl_store.count_by_tier()  # watchlist.db 轻量读（COUNT，不全表拉取）
+            checks["db"] = True
+        except Exception:
+            checks["db"] = False
+        try:
+            # analyses.db 是独立文件——单独探一次，避免它锁死/损坏时 healthz 仍绿灯。
+            from bottleneck_hunter.dataflows.store import AnalysisStore
+            AnalysisStore().ping()
+            checks["analyses_db"] = True
+        except Exception:
+            checks["analyses_db"] = False
+        ok = all(checks.values())
+        return JSONResponse({"ok": ok, "checks": checks}, status_code=200 if ok else 503)
 
     return app

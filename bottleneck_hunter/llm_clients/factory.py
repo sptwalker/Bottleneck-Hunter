@@ -11,6 +11,7 @@ MissingUserKeyError。仅 KEYLESS 白名单（本地 ollama 等）无需 KEY。
 from __future__ import annotations
 
 import logging
+import os
 
 from langchain_core.language_models import BaseChatModel
 
@@ -260,6 +261,11 @@ def _create_raw_llm(
 ) -> BaseChatModel:
     """构建单个裸 LLM 实例（不含自动替换包装）。"""
     provider = provider.lower().strip()
+    # 单点注入超时与重试上限：所有 provider 分支共享 **kwargs，故这里设默认即全链覆盖。
+    # 根因修复——挂起的 provider 会占住线程池最长无限久，拖垮全应用的 to_thread，
+    # 且熔断器因“挂起不抛异常”永不触发。callers 可显式覆盖（如长文本任务传更大 timeout）。
+    kwargs.setdefault("timeout", float(os.getenv("BH_LLM_TIMEOUT", "60")))
+    kwargs.setdefault("max_retries", int(os.getenv("BH_LLM_MAX_RETRIES", "0")))
     # 严格按用户隔离的 KEY 解析：显式传入（测试端点）> 当前上下文用户的加密 KEY。
     # 绝不读 _CUSTOM_PROVIDERS 明文缓存、绝不读 os.getenv、绝不借他人 KEY。
     from bottleneck_hunter.auth.current_user import get_current_user_id

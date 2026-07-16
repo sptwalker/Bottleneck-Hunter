@@ -79,10 +79,21 @@ class TestUserEmail:
 
 class TestEmailSender:
     def test_no_smtp_fallback_returns_true(self, monkeypatch, caplog):
+        """SMTP 未配置：注册仍走通(返回 True)，但默认绝不把验证码写日志(防泄露接管)。"""
         monkeypatch.delenv("SMTP_HOST", raising=False)
+        monkeypatch.delenv("BH_DEV_LOG_CODES", raising=False)
         assert email_sender.smtp_configured() is False
         import logging
         with caplog.at_level(logging.WARNING):
             ok = email_sender.send_verification_email("x@e.com", "654321", "register")
         assert ok is True
-        assert "654321" in caplog.text  # 兜底把码打进日志
+        assert "654321" not in caplog.text  # 默认绝不把验证码写日志
+
+    def test_dev_opt_in_logs_code(self, monkeypatch, caplog):
+        """仅显式 BH_DEV_LOG_CODES=1（本地开发）才打印验证码。"""
+        monkeypatch.delenv("SMTP_HOST", raising=False)
+        monkeypatch.setenv("BH_DEV_LOG_CODES", "1")
+        import logging
+        with caplog.at_level(logging.WARNING):
+            email_sender.send_verification_email("x@e.com", "654321", "register")
+        assert "654321" in caplog.text

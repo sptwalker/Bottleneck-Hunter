@@ -85,10 +85,20 @@ async def screen(request: Request, config: ScreenRequest, user: dict = Depends(g
     store = _user_analysis_store(user)
 
     async def event_generator():
-        async for event in stream_screening(config, store=store):
-            if await request.is_disconnected():
-                break
-            yield event
+        # 单飞闸：同一用户已有筛选在跑就拒绝，避免并发拉起 N 条完整流水线爆内存/预算。
+        # 命名空间 key 与观察池刷新闸区分，互不阻塞。
+        from bottleneck_hunter.web import refresh_guard
+        gkey = f"screen:{user.get('sub', '')}"
+        if not refresh_guard.acquire(gkey):
+            yield _sse("error", step="init", message=refresh_guard.BUSY_MSG)
+            return
+        try:
+            async for event in stream_screening(config, store=store):
+                if await request.is_disconnected():
+                    break
+                yield event
+        finally:
+            refresh_guard.release(gkey)
 
     return EventSourceResponse(with_notices(event_generator(), _sse))
 
@@ -543,9 +553,28 @@ async def update_history(user: dict = Depends(get_current_user)):
 
 @router.get("/report")
 async def download_report(path: str, user: dict = Depends(get_current_user)):
-    """Download a generated report file."""
-    report_path = Path(path)
-    if not report_path.exists() or not report_path.suffix == ".md":
+    """Download a generated report file.
+
+    安全：报告只落在 output/ 目录，这里做路径穿越防护——把用户传入的 path 归一化后
+    必须落在 output/ 根内，否则拒绝（否则 ?path=/etc/x.md 或 ../ 可读任意 .md 文件）。
+    output/ 与写端共用锚定常量，且允许子目录（用 relative_to 判定包含，不拍平成 basename）。
+    """
+    from bottleneck_hunter.dataflows.store import OUTPUT_DIR
+    reports_root = OUTPUT_DIR.resolve()
+    try:
+        candidate = Path(path)
+        if candidate.is_absolute():
+            report_path = candidate.resolve()
+        else:
+            # 历史存储形如 "output/xxx.md"：去掉前导 output/ 再锚定到真实 output 根
+            parts = candidate.parts
+            if parts and parts[0] == "output":
+                candidate = Path(*parts[1:]) if len(parts) > 1 else Path()
+            report_path = (reports_root / candidate).resolve()
+        report_path.relative_to(reports_root)  # 越界即抛 ValueError
+    except (ValueError, OSError):
+        raise HTTPException(status_code=404, detail="Report not found")
+    if not report_path.exists() or report_path.suffix != ".md":
         raise HTTPException(status_code=404, detail="Report not found")
     return FileResponse(
         path=str(report_path),

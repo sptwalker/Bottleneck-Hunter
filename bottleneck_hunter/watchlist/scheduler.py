@@ -168,6 +168,11 @@ def shutdown_scheduler() -> None:
         _scheduler = None
 
 
+def is_scheduler_running() -> bool:
+    """调度器是否存活——供 /healthz 就绪探针判断后台任务线程未死。"""
+    return bool(_scheduler and getattr(_scheduler, "running", False))
+
+
 # ---------------------------------------------------------------------------
 # Scheduled jobs
 # ---------------------------------------------------------------------------

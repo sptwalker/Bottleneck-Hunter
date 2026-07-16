@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
+import socket
+from urllib.parse import urlparse
 
 import requests
 
@@ -22,6 +25,38 @@ _UA = {"User-Agent": "BottleneckHunter/1.0"}
 
 def _clip(msg: str, n: int = 140) -> str:
     return msg if len(msg) <= n else msg[:n] + "..."
+
+
+class SSRFError(ValueError):
+    """用户提供的 URL 指向内网/非法目标——拒绝出网（防 SSRF）。"""
+
+
+def _assert_public_url(url: str) -> None:
+    """校验用户可控的探测 URL 安全：仅 http(s)，且所有解析出的 IP 均为公网地址。
+
+    防 SSRF：拒绝 loopback / 私网 / 链路本地(169.254 云元数据) / 保留段。
+    对每一个 DNS 解析结果都校验，堵住 DNS-rebinding 到内网的单条记录。
+    调用方须在实际 GET 时禁用重定向，否则 3xx 可绕过本校验。
+    # ponytail: 残留 TOCTOU——requests 会再次解析 DNS，低 TTL 的 rebinding 攻击理论可绕过；
+    #   该端点需登录且仅用于探测连通，风险有限。如需彻底封堵：解析一次后把 IP 钉进连接
+    #   (自定义 requests HTTPAdapter 固定 IP + Host 头)，代价较大，暂按当前强度。
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise SSRFError(f"仅允许 http/https，收到 {parsed.scheme or '空'} 协议")
+    host = parsed.hostname
+    if not host:
+        raise SSRFError("URL 缺少主机名")
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or None)
+    except socket.gaierror as e:
+        raise SSRFError(f"域名无法解析：{host}") from e
+    for info in infos:
+        raw = info[4][0]
+        ip = ipaddress.ip_address(raw.split("%")[0])  # 去掉 IPv6 zone id
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise SSRFError(f"目标 {host} 解析到非公网地址 {ip}，已拒绝")
 
 
 # ── 各源探测函数：返回 (ok, msg) ──────────────────────────
@@ -126,7 +161,14 @@ def _probe_custom(key: str, base_url: str = "") -> tuple[bool, str]:
     if not base_url:
         return False, "请填写探测 URL（base_url）"
     url = base_url.replace("{KEY}", key)
-    r = requests.get(url, timeout=_TIMEOUT, headers=_UA)
+    try:
+        _assert_public_url(url)  # 防 SSRF：拒绝内网/元数据目标
+    except SSRFError as e:
+        return False, str(e)
+    # allow_redirects=False：3xx 重定向可绕过上面的 IP 校验（重定向目标未过校验）
+    r = requests.get(url, timeout=_TIMEOUT, headers=_UA, allow_redirects=False)
+    if r.status_code in (301, 302, 303, 307, 308):
+        return False, f"探测 URL 发生重定向（HTTP {r.status_code}），为防 SSRF 不跟随，请直接填最终地址"
     if r.status_code in (401, 403):
         return False, f"认证失败（HTTP {r.status_code}）"
     r.raise_for_status()

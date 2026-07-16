@@ -15,8 +15,18 @@ services:
       - ./.env:/app/.env
     environment:
       - TZ=Asia/Shanghai
+    # 资源上限：LLM 失控扇出/内存尖峰只打死本容器，不拖垮宿主（nginx/其它容器）。
+    # compose v2 单机部署用顶层 mem_limit/cpus（非 swarm 的 deploy.resources）。
+    mem_limit: 3g
+    cpus: 2.0
+    # 容器 stdout 日志轮转，避免 /var/lib/docker 无界增长（Alloy 也从这里采集）。
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/"]
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/healthz"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -73,7 +83,9 @@ services:
       # 子路径部署：nginx 反代 https://bh.youdoogo.com/grafana/
       - GF_SERVER_ROOT_URL=https://bh.youdoogo.com/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      # 无默认值：未在 .env 设置 GRAFANA_ADMIN_PASSWORD 时容器直接启动失败（fail-closed），
+      # 绝不静默落到弱默认 admin（Grafana 公网可达，弱口令=日志接管入口）。
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?必须在 .env 设置强密码}
       - GF_AUTH_ANONYMOUS_ENABLED=false
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false

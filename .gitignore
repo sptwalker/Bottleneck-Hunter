@@ -27,3 +27,6 @@ screenshot_dc_*.png
 *.log
 *.rar
 test_results.txt
+
+# 抓包 cookie（含 bearer token，绝不入库）
+cookies.txt

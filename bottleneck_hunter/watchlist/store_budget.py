@@ -177,6 +177,23 @@ class _BudgetMixin:
         finally:
             conn.close()
 
+    def reconcile_running_pipelines(self) -> int:
+        """启动时把卡在 running 的管线状态复位为 interrupted，返回复位条数。
+
+        进程被 SIGKILL/OOM/容器重启打断时，job 只在开头写了 running、没机会写 success/error，
+        该行会永久停在 running → UI/门控据此误判"仍在跑"。启动补跑前先复位。
+        前提：单进程/单实例部署（uvicorn.run(app) 强制单 worker）。若将来多实例并行，
+        本无差别 UPDATE 会误伤另一实例正在跑的 job——届时须改为按实例/心跳限定作用域。
+        """
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE pipeline_status SET last_status='interrupted' WHERE last_status='running'")
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
 
     # ── DataHub 数据源用量统计（全局表，不经 _user_filter） ──
 

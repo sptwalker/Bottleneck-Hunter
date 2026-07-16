@@ -21,7 +21,7 @@ except ImportError:
 
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.models import DegradationMode
-from bottleneck_hunter.watchlist.retry import with_retry, get_http_client
+from bottleneck_hunter.watchlist.retry import with_retry, get_http_client, fetch_with_timeout
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,18 @@ def _get_sem() -> asyncio.Semaphore:
 # ---------------------------------------------------------------------------
 # Raw news fetching
 # ---------------------------------------------------------------------------
+
+async def _news_in_thread(fn, ticker: str, timeout_sec: float = 20) -> list[dict]:
+    """在线程里跑阻塞新闻抓取并加超时兜底：挂起到点即放回线程/协程，返回空列表。
+
+    yfinance/akshare 新闻抓取阻塞无超时——不加会一路占住线程池令新闻批次死挂。
+    """
+    try:
+        return await fetch_with_timeout(asyncio.to_thread(fn, ticker), timeout_sec=timeout_sec)
+    except asyncio.TimeoutError:
+        logger.warning("抓取 %s 新闻超时(%ss)，跳过本轮", ticker, timeout_sec)
+        return []
+
 
 @with_retry(max_retries=3, base_delay=1.0)
 def _fetch_yfinance_news(ticker: str, limit: int = 10) -> list[dict]:
@@ -282,9 +294,9 @@ async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTrac
             articles = [dict(a) for a in cache[_ck]]
         else:
             if market == "a_stock":
-                articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+                articles = await _news_in_thread(_fetch_astock_news, ticker)
             else:
-                articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
+                articles = await _news_in_thread(_fetch_yfinance_news, ticker)
                 rss = await _fetch_rss_news(f"{ticker} stock", tag=ticker)
                 seen = {a["id"] for a in articles}
                 for r in rss:
@@ -352,9 +364,9 @@ async def fetch_news_batch(
                         articles = [dict(a) for a in cache[_ck]]
                     else:
                         if market == "a_stock":
-                            articles = await asyncio.to_thread(_fetch_astock_news, ticker)
+                            articles = await _news_in_thread(_fetch_astock_news, ticker)
                         else:
-                            articles = await asyncio.to_thread(_fetch_yfinance_news, ticker)
+                            articles = await _news_in_thread(_fetch_yfinance_news, ticker)
                         if cache is not None:
                             cache[_ck] = [dict(a) for a in (articles or [])]
                     count = store.save_news(articles) if articles else 0

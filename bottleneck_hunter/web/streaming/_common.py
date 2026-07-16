@@ -61,6 +61,48 @@ def _sse(event: str, **data) -> dict:
     return {"event": event, "data": json.dumps(_sanitize(data), ensure_ascii=False, default=str)}
 
 
+async def drain_task_queue(task, queue, *, deadline: float | None = None, poll: float = 30.0,
+                           timeout_msg: str = "pipeline step exceeded deadline"):
+    """驱动「后台 task + 进度 queue」：yield 进度事件，末尾 yield ('__result__', task结果)。
+
+    关键：无论正常结束、超时、还是消费者提前停止（客户端断开 → 生成器 aclose →
+    GeneratorExit 打进本协程的 yield 处），finally 都会取消未完成的 task——
+    杜绝孤儿任务在用户离页后继续烧 LLM 预算。替代此前散落各处、断开即泄漏的 drain 循环。
+    timeout_msg：超过 deadline 时抛出的中文提示（面向用户），调用方按步骤定制。
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        while True:
+            if deadline is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError(timeout_msg)
+                wait = min(poll, remaining)
+            else:
+                wait = poll
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=wait)
+                if event is None:
+                    break
+                yield event
+            except asyncio.TimeoutError:
+                if task.done():
+                    break
+        yield ("__result__", await task)
+    finally:
+        if not task.done():
+            task.cancel()
+            # 紧跟 task.cancel() 的 await 收到的 CancelledError 就是「我们刚触发的」这次取消，
+            # 吞掉它是对的（否则会盖住 try 体里真正要抛的 TimeoutError/业务异常）；
+            # 真实异常也在清理阶段忽略。
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+
 async def _run_decompose_with_progress(decomposer, end_product, queue):
     """运行拆解并通过 queue 发送进度事件。"""
     async def on_layer_start(depth, max_depth, parent_count):

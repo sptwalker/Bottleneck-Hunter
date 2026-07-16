@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
+from collections import defaultdict
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from bottleneck_hunter.auth.dependencies import get_current_user
 from bottleneck_hunter.auth.email_sender import resolve_smtp_config, send_verification_email
@@ -32,6 +34,73 @@ _auth_store: AuthStore | None = None
 _wl_store = None
 
 RESEND_COOLDOWN_SECONDS = 60
+
+# ── 登录防爆破：进程内滑动窗口限流（单 worker，无需外部依赖）──
+# 双键计数：(username|ip) 防单机撞库 + (username) 防 IP 轮换绕过（伪造 XFF 也锁得住账号）。
+# 连续失败达阈值即临时锁定。成功登录清零。
+# ponytail: in-memory, 单进程足够；若将来多实例部署需换 Redis/DB 计数。
+_LOGIN_MAX_FAILS = 5           # (username|ip) 窗口内最多失败次数
+_LOGIN_USER_MAX_FAILS = 10     # 单 username 跨 IP 的更宽松阈值（防 IP 轮换绕过）
+_LOGIN_WINDOW = 300           # 计数窗口（秒）
+_LOGIN_LOCKOUT = 900          # 触发后锁定时长（秒）
+_LOGIN_MAP_CAP = 10000        # 计数表容量上限，超过即清一次过期项，兜底防内存膨胀
+_login_fails: dict[str, list[float]] = defaultdict(list)
+_login_locked: dict[str, float] = {}
+
+
+def _login_sweep_expired(now: float) -> None:
+    """机会式清理过期计数/锁，防止 username/IP 轮换把字典撑爆（内存 DoS）。"""
+    if len(_login_fails) + len(_login_locked) < _LOGIN_MAP_CAP:
+        return
+    for k in [k for k, ts in _login_locked.items() if ts <= now]:
+        _login_locked.pop(k, None)
+    for k in [k for k, ts in _login_fails.items()
+              if not ts or now - ts[-1] >= _LOGIN_WINDOW]:
+        _login_fails.pop(k, None)
+
+
+def _login_key(username: str, request: Request) -> str:
+    ip = request.client.host if request.client else "?"
+    # X-Forwarded-For 首段（经 nginx 反代时取真实客户端）。注意：直连时客户端可伪造该头，
+    # 故仅靠它不足以防爆破——username 维度另有独立计数（_uk）兜底 IP 轮换绕过。
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        ip = xff.split(",")[0].strip()
+    return f"{(username or '').lower()}|{ip}"
+
+
+def _login_user_key(username: str) -> str:
+    return f"__user__|{(username or '').lower()}"
+
+
+def _login_check_locked(key: str, uk: str) -> None:
+    now = time.monotonic()
+    for k in (key, uk):
+        until = _login_locked.get(k)
+        if until and until > now:
+            wait = int(until - now)
+            raise HTTPException(status_code=429, detail=f"尝试过于频繁，请 {wait} 秒后再试")
+        if until:  # 锁已过期
+            _login_locked.pop(k, None)
+            _login_fails.pop(k, None)
+
+
+def _login_record_fail(key: str, uk: str) -> None:
+    now = time.monotonic()
+    _login_sweep_expired(now)
+    for k, cap in ((key, _LOGIN_MAX_FAILS), (uk, _LOGIN_USER_MAX_FAILS)):
+        fails = [t for t in _login_fails[k] if now - t < _LOGIN_WINDOW]
+        fails.append(now)
+        _login_fails[k] = fails
+        if len(fails) >= cap:
+            _login_locked[k] = now + _LOGIN_LOCKOUT
+            logger.warning("登录失败达阈值，临时锁定: %s", k)
+
+
+def _login_record_success(key: str, uk: str) -> None:
+    for k in (key, uk):
+        _login_fails.pop(k, None)
+        _login_locked.pop(k, None)
 
 
 def set_auth_store(store: AuthStore):
@@ -88,14 +157,19 @@ def _watchlist_count_by_market(user_id: str) -> dict[str, int]:
 # ── 登录 ──────────────────────────────────────────────────
 
 @router.post("/login")
-async def login(req: LoginRequest, response: Response):
+async def login(req: LoginRequest, request: Request, response: Response):
     store = _store()
+    key = _login_key(req.username, request)
+    uk = _login_user_key(req.username)
+    _login_check_locked(key, uk)  # 已锁定 → 429，直接拒绝（不查库、不比对密码）
     user = store.get_user_by_username(req.username)
     if not user or not store.verify_password(user, req.password):
+        _login_record_fail(key, uk)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="账号已被冻结")
 
+    _login_record_success(key, uk)
     token = create_token(user.id, user.username, user.role)
     set_auth_cookie(response, token)
     store.update_last_login(user.id)

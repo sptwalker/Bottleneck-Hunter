@@ -20,7 +20,7 @@ try:
 except ImportError:
     ak = None  # type: ignore[assignment]
 
-from bottleneck_hunter.watchlist.retry import with_retry
+from bottleneck_hunter.watchlist.retry import with_retry, fetch_with_timeout
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -488,11 +488,23 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market
                 snapshots = await _fetch_via_manager(ticker, days, market)
                 if not snapshots:
                     fetch_fn = _fetch_astock_daily if market == "a_stock" else _fetch_daily_data
-                    snapshots, company_info = await asyncio.to_thread(fetch_fn, ticker, days)
+                    # 超时兜底：yfinance/akshare 的阻塞抓取无超时，挂起会占住 Semaphore(4)
+                    # 令牌+线程，4 个卡死即整批死锁。fetch_with_timeout 到点释放令牌与协程。
+                    try:
+                        snapshots, company_info = await fetch_with_timeout(
+                            asyncio.to_thread(fetch_fn, ticker, days), timeout_sec=25)
+                    except asyncio.TimeoutError:
+                        logger.warning("抓取 %s 行情超时(25s)，跳过本轮", ticker)
+                        snapshots, company_info = [], {}
 
                 if not company_info:
                     info_fn = _fetch_astock_profile_fused if market == "a_stock" else _fetch_company_info_us
-                    company_info = await asyncio.to_thread(info_fn, ticker)
+                    try:
+                        company_info = await fetch_with_timeout(
+                            asyncio.to_thread(info_fn, ticker), timeout_sec=20)
+                    except asyncio.TimeoutError:
+                        logger.warning("抓取 %s 公司信息超时(20s)，跳过", ticker)
+                        company_info = {}
                 if cache is not None:
                     cache[ck] = (snapshots, company_info)
 

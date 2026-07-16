@@ -107,10 +107,20 @@ def send_verification_email(to_email: str, code: str, purpose: str, config: dict
     """
     cfg = config if config is not None else resolve_smtp_config()
     if not smtp_configured(cfg):
-        logger.warning(
-            "[邮件未配置-开发兜底] 发往 %s 的%s验证码：%s",
-            to_email, _PURPOSE_SUBJECT.get(purpose, ""), code,
-        )
+        # SMTP 未配置：默认绝不把验证码写日志（会经 stdout→Loki 存 14 天，任何能读日志者可接管账号）。
+        # 仅当显式设 BH_DEV_LOG_CODES=1（本地开发）才打码；生产永不设该变量。
+        import os
+        if os.getenv("BH_DEV_LOG_CODES") == "1":
+            logger.warning(
+                "[邮件未配置-开发兜底] 发往 %s 的%s验证码：%s",
+                to_email, _PURPOSE_SUBJECT.get(purpose, ""), code,
+            )
+        else:
+            logger.warning(
+                "[邮件未配置] 已为 %s 生成%s验证码但未发送（SMTP 未配置）；"
+                "如需本地调试可设 BH_DEV_LOG_CODES=1 打印验证码",
+                to_email, _PURPOSE_SUBJECT.get(purpose, ""),
+            )
         return True
     body = (
         f"您的验证码是：{code}\n\n"

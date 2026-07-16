@@ -43,7 +43,8 @@ def run_migration(admin_user_id: str):
         return
 
     # ── watchlist.db ──
-    wl_db = Path("data/watchlist.db")
+    from bottleneck_hunter.watchlist.store_base import _DEFAULT_DB as _WL_DB
+    wl_db = Path(_WL_DB)  # 锚定到仓库根 data/，避免 CWD 相对路径迁错文件
     if wl_db.exists():
         conn = sqlite3.connect(str(wl_db))
         conn.execute("PRAGMA journal_mode=WAL")
@@ -73,7 +74,8 @@ def run_migration(admin_user_id: str):
             conn.close()
 
     # ── analyses.db ──
-    an_db = Path("data/analyses.db")
+    from bottleneck_hunter.dataflows.store import DEFAULT_DB_PATH as _AN_DB
+    an_db = Path(_AN_DB)  # 锚定到仓库根 data/，与 AnalysisStore 读的是同一文件
     if an_db.exists():
         conn = sqlite3.connect(str(an_db))
         conn.execute("PRAGMA journal_mode=WAL")

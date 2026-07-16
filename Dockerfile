@@ -50,8 +50,13 @@ EXPOSE 8000
 # 运行时数据目录（挂卷点）——即使未挂卷也能启动
 RUN mkdir -p /app/data /app/output
 
-# 容器内 healthcheck：根路径 302→登录 即视为存活
+# 非 root 运行：容器逃逸/写 bug 不再以 root 触达宿主挂载卷。挂载目录归属该用户。
+RUN useradd --system --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# 容器内 healthcheck：/healthz 校验调度器存活 + DB 可读（非仅进程活着）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS -o /dev/null http://127.0.0.1:8000/ || exit 1
+    CMD curl -fsS -o /dev/null http://127.0.0.1:8000/healthz || exit 1
 
 CMD ["bottleneck-hunter", "serve", "--host", "0.0.0.0", "--port", "8000"]

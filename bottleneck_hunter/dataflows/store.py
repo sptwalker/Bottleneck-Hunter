@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -18,8 +19,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_DIR = Path("data")
+# 数据目录锚定到仓库根 data/（或 BH_DATA_DIR 覆盖），绝不用 CWD 相对路径。
+# 曾因 Path("data") 相对进程 CWD，从 bottleneck_hunter/web/ 启动时把 analyses 写到
+# 非挂载卷的 web/data/analyses.db → split-brain、重启丢数据。这里与 chain_store 一致锚定。
+DEFAULT_DB_DIR = Path(os.getenv("BH_DATA_DIR") or (Path(__file__).resolve().parent.parent.parent / "data"))
 DEFAULT_DB_PATH = DEFAULT_DB_DIR / "analyses.db"
+
+# 报告输出目录同样锚定仓库根 output/（或 BH_OUTPUT_DIR 覆盖），与 DB 一致不吃 CWD。
+# 写(streaming/cli)与读(download_report)共用此常量，避免 base 不一致致下载 404。
+OUTPUT_DIR = Path(os.getenv("BH_OUTPUT_DIR") or (Path(__file__).resolve().parent.parent.parent / "output"))
 
 
 def _nan_safe(obj):
@@ -136,6 +144,12 @@ class AnalysisStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")  # 并发写(回填线程 vs 分析钩子)等锁 5s，避免立即 database is locked
         return conn
+
+    def ping(self) -> bool:
+        """轻量可达性探针（SELECT 1），供 /healthz 判定 analyses.db 未锁死/损坏。"""
+        with self._connect() as conn:
+            conn.execute("SELECT 1")
+        return True
 
     def _init_db(self):
         with self._connect() as conn:

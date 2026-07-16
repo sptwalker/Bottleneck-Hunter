@@ -42,7 +42,34 @@ docker compose up -d --build    # 改代码后重建
 | `./output` | `/app/output` | 生成的 Markdown 报告 |
 | `./.env` | `/app/.env` | 全局配置 / API Key（应用可读写） |
 
-⚠️ **`./data/.encryption_key` 与 `.jwt_secret` 请勿删除**：前者丢失后已加密的用户 API Key 无法解密，后者丢失会使所有登录会话失效。备份即备份整个 `./data`。
+⚠️ **`./data/.encryption_key` 与 `.jwt_secret` 请勿删除**：前者丢失后已加密的用户 API Key 无法解密，后者丢失会使所有登录会话失效。
+
+## 备份与恢复（务必配置）
+
+`./data` 是唯一真源且默认无副本——卷损坏 = 所有用户/密钥/历史永久灭失。用内置脚本做
+WAL 安全的一致快照（裸 `cp` 会丢最近事务）：
+
+```bash
+# 库快照到异卷 + 密钥单独去另一处（一损不俱损），保留最近 14 份
+python scripts/backup.py --out /mnt/off/bh --keys-dir /mnt/vault --retain 14
+# 宿主 crontab（每天 03:17）
+17 3 * * * cd /path/to/Bottleneck-Hunter && python scripts/backup.py --out /mnt/off/bh --keys-dir /mnt/vault --retain 14
+```
+
+恢复：停容器 → 把某个快照目录里的 `*.db` 拷回 `./data/`，密钥文件去掉时间戳后缀拷回 → 起容器。
+
+## 非 root 运行：挂载目录属主
+
+容器以 uid `10001`（appuser）运行，宿主挂载的 `./data`、`./output`、`./.env` 须对该 uid 可写：
+
+```bash
+sudo chown -R 10001:10001 ./data ./output && sudo chown 10001:10001 ./.env
+```
+
+## Grafana 密码（日志栈）
+
+`GRAFANA_ADMIN_PASSWORD` 无默认值——未在 `.env` 设置则日志栈容器启动即失败（fail-closed，
+避免弱口令 admin 暴露公网 `/grafana/`）。启用日志栈前务必在 `.env` 设强密码。
 
 ## 说明
 
@@ -52,8 +79,8 @@ docker compose up -d --build    # 改代码后重建
 
 ## 邮箱验证（可选）
 
-新用户注册与修改邮箱需邮箱验证码。**SMTP 未配置时验证码会打印到容器日志**
-（`docker compose logs -f`），注册流程仍可走通——适合内网/测试。
+新用户注册与修改邮箱需邮箱验证码。**SMTP 未配置时默认不再把验证码写日志**（防日志泄露接管账号）；
+仅本地调试可设 `BH_DEV_LOG_CODES=1` 打印验证码。生产请配 SMTP 真发邮件。
 
 正式启用邮件发送，在 `.env` 配置：
 

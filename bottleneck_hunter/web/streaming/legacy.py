@@ -27,6 +27,7 @@ from ._common import (
     MARKET_MAP,
     _sanitize,
     _sse,
+    drain_task_queue,
     _run_decompose_with_progress,
     _run_bottleneck_with_progress,
     _run_supplier_search_with_progress,
@@ -78,21 +79,17 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
         total_timeout = min(total_timeout, 1800)  # 硬上限 30 分钟
         deadline = asyncio.get_event_loop().time() + total_timeout
 
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                task.cancel()
-                raise TimeoutError(f"产业链拆解超时（已等待 {total_timeout}s），请尝试减少拆解层数或更换模型")
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=min(30.0, remaining))
-                if event is None:
-                    break
+        chain = None
+        async for event in drain_task_queue(
+            task, queue, deadline=deadline,
+            timeout_msg=f"产业链拆解超时（已等待 {total_timeout}s），请尝试减少拆解层数或更换模型",
+        ):
+            if isinstance(event, tuple) and event[0] == "__result__":
+                chain = event[1]
+            else:
                 yield event
-            except asyncio.TimeoutError:
-                if task.done():
-                    break
-
-        chain = await task
+        if chain is None:  # 防御：正常路径必有结果；无则按失败处理而非 NoneType 崩溃
+            raise RuntimeError("产业链拆解未返回结果")
         # 提取失败统计
         decompose_failures = chain.metadata.get("total_failures", 0)
         decompose_retries = chain.metadata.get("llm_retries", 0)
@@ -123,17 +120,12 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
             _run_bottleneck_with_progress(analyzer, chain, config.top_n, bn_queue)
         )
 
-        while True:
-            try:
-                event = await asyncio.wait_for(bn_queue.get(), timeout=30.0)
-                if event is None:
-                    break
+        reports = None
+        async for event in drain_task_queue(bn_task, bn_queue):
+            if isinstance(event, tuple) and event[0] == "__result__":
+                reports = event[1]
+            else:
                 yield event
-            except asyncio.TimeoutError:
-                if bn_task.done():
-                    break
-
-        reports = await bn_task
 
         bn_failures = analyzer._timeout_count
         bn_retries = analyzer._retry_count
@@ -195,17 +187,12 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
             _run_supplier_search_with_progress(searcher, top_reports, ss_queue, chain_graph=chain)
         )
 
-        while True:
-            try:
-                event = await asyncio.wait_for(ss_queue.get(), timeout=30.0)
-                if event is None:
-                    break
+        supplier_map = None
+        async for event in drain_task_queue(ss_task, ss_queue):
+            if isinstance(event, tuple) and event[0] == "__result__":
+                supplier_map = event[1]
+            else:
                 yield event
-            except asyncio.TimeoutError:
-                if ss_task.done():
-                    break
-
-        supplier_map = await ss_task
         total_suppliers = sum(len(v) for v in supplier_map.values())
 
         # 记录供应商搜索的层级分布
@@ -283,17 +270,12 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
             _run_supplier_eval_with_progress(evaluator, supplier_map, top_reports, se_queue, financial_map=financial_map)
         )
 
-        while True:
-            try:
-                event = await asyncio.wait_for(se_queue.get(), timeout=30.0)
-                if event is None:
-                    break
+        scorecards = None
+        async for event in drain_task_queue(se_task, se_queue):
+            if isinstance(event, tuple) and event[0] == "__result__":
+                scorecards = event[1]
+            else:
                 yield event
-            except asyncio.TimeoutError:
-                if se_task.done():
-                    break
-
-        scorecards = await se_task
 
         # 挂载聪明钱信号
         if smart_money_map:
@@ -386,8 +368,8 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
             top_picks=top_picks,
         )
         report = generate_report(screening_result, config.language)
-        output_dir = Path("output")
-        output_dir.mkdir(exist_ok=True)
+        from bottleneck_hunter.dataflows.store import OUTPUT_DIR as output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe = config.sector.replace("/", "_").replace(" ", "")
         path = output_dir / f"{safe}_{ts}_report.md"
@@ -536,17 +518,12 @@ async def run_refresh_suppliers(
             _run_supplier_search_with_progress(searcher, reports, ss_queue)
         )
 
-        while True:
-            try:
-                event = await asyncio.wait_for(ss_queue.get(), timeout=30.0)
-                if event is None:
-                    break
+        supplier_map = None
+        async for event in drain_task_queue(ss_task, ss_queue):
+            if isinstance(event, tuple) and event[0] == "__result__":
+                supplier_map = event[1]
+            else:
                 yield event
-            except asyncio.TimeoutError:
-                if ss_task.done():
-                    break
-
-        supplier_map = await ss_task
         total_suppliers = sum(len(v) for v in supplier_map.values())
 
         # 记录供应商搜索的层级分布
@@ -616,17 +593,12 @@ async def run_refresh_suppliers(
             _run_supplier_eval_with_progress(evaluator, supplier_map, reports, se_queue, financial_map=financial_map)
         )
 
-        while True:
-            try:
-                event = await asyncio.wait_for(se_queue.get(), timeout=30.0)
-                if event is None:
-                    break
+        scorecards = None
+        async for event in drain_task_queue(se_task, se_queue):
+            if isinstance(event, tuple) and event[0] == "__result__":
+                scorecards = event[1]
+            else:
                 yield event
-            except asyncio.TimeoutError:
-                if se_task.done():
-                    break
-
-        scorecards = await se_task
 
         # 挂载聪明钱信号
         if smart_money_map:
@@ -700,17 +672,12 @@ async def run_retry_bottleneck(
 
     task = asyncio.create_task(_run())
 
-    while True:
-        try:
-            event = await asyncio.wait_for(queue.get(), timeout=30.0)
-            if event is None:
-                break
+    new_reports = None
+    async for event in drain_task_queue(task, queue):
+        if isinstance(event, tuple) and event[0] == "__result__":
+            new_reports = event[1]
+        else:
             yield event
-        except asyncio.TimeoutError:
-            if task.done():
-                break
-
-    new_reports = await task
     still_failed = analyzer.failed_nodes
 
     yield _sse("step_done", step="bottleneck",
