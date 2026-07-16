@@ -224,6 +224,7 @@ class WatchlistStore(
             self._migrate_shared_company_profiles(conn)
             self._migrate_watchlist_drop_global_unique(conn)
             self._migrate_catalyst_market_from_entry(conn)
+            self._migrate_market_labels_from_source(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -330,6 +331,78 @@ class WatchlistStore(
                 logger.info("catalyst_tracking.market 按 entry 真实市场纠正 %d 行（修历史错标混市场）", n)
         except sqlite3.OperationalError as e:
             logger.warning("catalyst 市场纠正迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_market_labels_from_source(self, conn) -> None:
+        """全面纠正历史错标市场：market 列后加(ALTER DEFAULT 'us_stock')，列存在前建的 A股行被误打
+        us_stock，泄漏进美股视图。按可靠来源回填(与 catalyst 同法)，依赖顺序：先纠父表再纠子表。
+
+        - entry_id → watchlist.market（entry 加票时定的，权威）：investment_theses / scenario_valuations /
+          tactical_plans / execution_plans / sim_positions / sim_trades。
+        - 无 entry_id 或孤儿：ticker 数字判 A股（6位数字/.SZ/.SS，与 options_pipeline 同规则）。
+        - 2 跳：committee_reviews/consensus ← execution_plans；auto_reviews ← sim_trades；sim_fund_ops ← sim_account。
+        全部幂等(WHERE market != 推导值)。孤儿(源缺失)保持原值。市场标签纠正、不删数据，低风险。
+        """
+        A_TICKER = "(ticker GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]*' OR ticker LIKE '%.SZ' OR ticker LIKE '%.SS')"
+        total = 0
+        try:
+            # 1) entry_id → watchlist.market（有 entry_id 列的表）
+            for t in ("investment_theses", "scenario_valuations", "tactical_plans",
+                      "execution_plans", "sim_positions", "sim_trades"):
+                try:
+                    n = conn.execute(f"""
+                        UPDATE {t} SET market = (SELECT w.market FROM watchlist w WHERE w.id = {t}.entry_id)
+                        WHERE entry_id IN (SELECT id FROM watchlist)
+                          AND market IS NOT (SELECT w.market FROM watchlist w WHERE w.id = {t}.entry_id)
+                    """).rowcount
+                    total += n or 0
+                except sqlite3.OperationalError:
+                    pass
+            # 2) ticker 兜底（entry_id 空/孤儿，但 ticker 判得出 A股）——只把误标 us_stock 的 A股票改回
+            for t in ("tactical_plans", "execution_plans", "sim_positions", "sim_trades",
+                      "trade_feedback", "auto_reviews"):
+                try:
+                    n = conn.execute(
+                        f"UPDATE {t} SET market='a_stock' WHERE market='us_stock' AND {A_TICKER}"
+                    ).rowcount
+                    total += n or 0
+                except sqlite3.OperationalError:
+                    pass
+            # 3) 2 跳：委员评审/共识 ← execution_plans（已在步骤1/2 纠正）
+            for t in ("committee_reviews", "committee_consensus"):
+                try:
+                    n = conn.execute(f"""
+                        UPDATE {t} SET market = (SELECT ep.market FROM execution_plans ep WHERE ep.id = {t}.execution_plan_id)
+                        WHERE execution_plan_id IN (SELECT id FROM execution_plans)
+                          AND market IS NOT (SELECT ep.market FROM execution_plans ep WHERE ep.id = {t}.execution_plan_id)
+                    """).rowcount
+                    total += n or 0
+                except sqlite3.OperationalError:
+                    pass
+            # 4) auto_reviews ← sim_trades（sim_trade_id）
+            try:
+                n = conn.execute("""
+                    UPDATE auto_reviews SET market = (SELECT st.market FROM sim_trades st WHERE st.id = auto_reviews.sim_trade_id)
+                    WHERE sim_trade_id IN (SELECT id FROM sim_trades)
+                      AND market IS NOT (SELECT st.market FROM sim_trades st WHERE st.id = auto_reviews.sim_trade_id)
+                """).rowcount
+                total += n or 0
+            except sqlite3.OperationalError:
+                pass
+            # 5) sim_fund_ops ← sim_account（account_id）
+            try:
+                n = conn.execute("""
+                    UPDATE sim_fund_ops SET market = (SELECT sa.market FROM sim_account sa WHERE sa.id = sim_fund_ops.account_id)
+                    WHERE account_id IN (SELECT id FROM sim_account)
+                      AND market IS NOT (SELECT sa.market FROM sim_account sa WHERE sa.id = sim_fund_ops.account_id)
+                """).rowcount
+                total += n or 0
+            except sqlite3.OperationalError:
+                pass
+            if total:
+                logger.info("历史市场错标全面纠正 %d 行（theses/plans/sim/committee/reviews 等，修 A股泄漏进美股视图）", total)
+        except sqlite3.OperationalError as e:
+            logger.warning("历史市场标签纠正迁移失败（可忽略）: %s", e)
 
 
     def _migrate_shared_company_profiles(self, conn) -> None:

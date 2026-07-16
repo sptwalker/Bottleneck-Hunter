@@ -121,8 +121,9 @@ async def delete_position(position_id: str, user: dict = Depends(get_current_use
 
 
 @router.get("/positions/{ticker}/trades")
-async def get_position_trades(ticker: str, limit: int = 50, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_position_trades(ticker: str, limit: int = 50, market: str = "us_stock",
+                              user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     trades = store.get_sim_trades(ticker=ticker, limit=limit)
     return {"trades": trades}
 
@@ -154,8 +155,9 @@ class AdjustFundsRequest(BaseModel):
 
 
 @router.post("/account/adjust-funds")
-async def adjust_funds(req: AdjustFundsRequest, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def adjust_funds(req: AdjustFundsRequest, market: str = "us_stock",
+                       user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)  # 必须绑市场：否则 get_sim_account LIMIT 1 命中任意账户，钱存错市场
     if req.type not in ("deposit", "withdraw"):
         raise HTTPException(status_code=400, detail="type 必须是 deposit 或 withdraw")
     if req.amount <= 0:
@@ -173,8 +175,8 @@ async def get_fund_ops(limit: int = 20, market: str = "us_stock", user: dict = D
 
 
 @router.post("/account/refresh-prices")
-async def refresh_prices(user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def refresh_prices(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     account = store.get_sim_account()
     positions = store.get_sim_positions(account.get("id"))
     if not positions:
@@ -222,8 +224,8 @@ async def refresh_prices(user: dict = Depends(get_current_user)):
 
 @router.get("/reviews")
 async def get_reviews(ticker: str | None = None, limit: int = 20,
-                      user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+                      market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     return {"reviews": store.get_auto_reviews(ticker=ticker, limit=limit)}
 
 
@@ -258,15 +260,15 @@ async def run_batch_review_endpoint(request: Request, market: str = "us_stock", 
 
 
 @router.get("/feedback")
-async def get_feedback_history(limit: int = 50, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+async def get_feedback_history(limit: int = 50, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     return {"feedback": store.get_trade_feedback_history(limit=limit)}
 
 
 @router.get("/experience")
 async def get_experience_cards(scope: str | None = None, scope_key: str | None = None,
-                               limit: int = 20, user: dict = Depends(get_current_user)):
-    store = _user_store(user)
+                               limit: int = 20, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
     return {"cards": store.get_experience_cards(scope=scope, scope_key=scope_key, limit=limit)}
 
 
@@ -284,9 +286,9 @@ async def delete_experience_card(card_id: str, user: dict = Depends(get_current_
 # ─────────────────────────────────────────────────────────
 
 @router.get("/performance")
-async def get_performance(user: dict = Depends(get_current_user)):
+async def get_performance(market: str = "us_stock", user: dict = Depends(get_current_user)):
     from bottleneck_hunter.watchlist.performance_stats import PerformanceCalculator
-    calc = PerformanceCalculator(_user_store(user))
+    calc = PerformanceCalculator(_user_store(user).for_market(market))
     return {
         "overview": calc.compute_overview(),
         "drawdown": calc.compute_drawdown(),
@@ -296,16 +298,16 @@ async def get_performance(user: dict = Depends(get_current_user)):
 
 
 @router.get("/performance/monthly")
-async def get_performance_monthly(months: int = 6, user: dict = Depends(get_current_user)):
+async def get_performance_monthly(months: int = 6, market: str = "us_stock", user: dict = Depends(get_current_user)):
     from bottleneck_hunter.watchlist.performance_stats import PerformanceCalculator
-    calc = PerformanceCalculator(_user_store(user))
+    calc = PerformanceCalculator(_user_store(user).for_market(market))
     return {"monthly": calc.compute_monthly_series(months=months)}
 
 
 @router.get("/performance/tickers")
-async def get_performance_tickers(user: dict = Depends(get_current_user)):
+async def get_performance_tickers(market: str = "us_stock", user: dict = Depends(get_current_user)):
     from bottleneck_hunter.watchlist.performance_stats import PerformanceCalculator
-    calc = PerformanceCalculator(_user_store(user))
+    calc = PerformanceCalculator(_user_store(user).for_market(market))
     return {"tickers": calc.compute_by_ticker()}
 
 

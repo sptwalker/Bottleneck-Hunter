@@ -270,7 +270,10 @@ function renderAll(data) {
   renderTactical(data.tactical_plans || []);
   renderPending(data.pending_executions || []);
   loadBlocked();
-  renderCatalysts(data.upcoming_catalysts || []);
+  // 催化剂：日历视图下不要用列表覆盖(否则 overview 每次返回都把日历清成列表)；
+  // 日历视图改为重载日历，保持当前视图。列表视图正常渲染列表。
+  if (dcState.catalystView === 'calendar') loadCatalystCalendar();
+  else renderCatalysts(data.upcoming_catalysts || []);
   renderCommittee(data.committee || [], data.committee_meta);
   loadRiskDashboard();
   loadMeetings();
@@ -921,9 +924,7 @@ export function initDecision() {
       dcState.market = e.target.value;
       dcState.overview = null;
       closeConsultDrawer();   // 抽屉绑定打开时的市场，切换市场即关闭
-      loadOverview();
-      // 若催化剂当前在日历视图，loadOverview 只刷列表 → 额外重载日历，否则停留旧市场
-      if (dcState.catalystView === 'calendar') { dcState.calendarMonth = null; loadCatalystCalendar(); }
+      loadOverview();  // renderAll 会按当前视图刷新催化剂(含日历)，且此时 overview 已含公司名
     });
   }
 
