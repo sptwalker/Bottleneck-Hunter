@@ -38,7 +38,17 @@ def normalize_market(market: str | None) -> str:
 # 与唯一 producer supplier_search._code_to_ticker 一致。历史上 LLM 自由发挥用 .SH → 与观察池存的
 # .SS 精确匹配失败，导致 L2/L3/L4 连接漏配、场景估值跳过、持仓重复/误报持仓不足、自进化反馈丢失。
 # 所有 ticker 写入/比较入口统一经此归一，杜绝跨来源后缀不一致。美股(字母 ticker)只做 upper。
-_ASTOCK_CODE_RE = re.compile(r"^\s*(?:(?:SH|SS|SZ|BJ)\.)?(\d{6})(?:\.(?:SH|SS|SZ|BJ))?\s*$", re.IGNORECASE)
+# 提取正则容纳全部输入形态：600519 / 600519.SH/.SS/.SZ / SH600519 / SH.600519（大小写不敏感）。
+_ASTOCK_CODE_RE = re.compile(r"^\s*(?:(?:SH|SS|SZ|BJ)\.?)?(\d{6})(?:\.(?:SH|SS|SZ|BJ))?\s*$", re.IGNORECASE)
+
+
+def extract_astock_code(ticker: str | None) -> str | None:
+    """从任意 A股 ticker 形态提取 6 位纯数字代码；非 A股(美股字母 ticker 等) → None。
+    全系统唯一的 A股代码提取器（此前分散在 ~7 处重复实现，且部分不认 SH600519 前缀形态）。"""
+    if not ticker:
+        return None
+    m = _ASTOCK_CODE_RE.match(str(ticker).strip())
+    return m.group(1) if m else None
 
 
 def _astock_suffix(code: str) -> str:
@@ -59,10 +69,8 @@ def normalize_ticker(ticker: str | None, market: str = "") -> str:
     t = str(ticker).strip()
     if not t:
         return t
-    # A股：形如 600519 / 600519.SH / 600519.SS / SH.600519 等 → 6位码 + canonical 后缀
-    m = _ASTOCK_CODE_RE.match(t)
-    if m:
-        code = m.group(1)
+    code = extract_astock_code(t)   # A股：6位码 + canonical 后缀
+    if code:
         return code + _astock_suffix(code)
     # 非 A股（美股字母 ticker 等）：仅规范大小写
     return t.upper()

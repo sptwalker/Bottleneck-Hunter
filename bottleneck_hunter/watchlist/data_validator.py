@@ -43,7 +43,9 @@ class ValidationResult:
 
 def _detect_board(ticker: str) -> str:
     """根据 A 股代码判断板块"""
-    code = ticker.split(".")[0] if "." in ticker else ticker
+    from bottleneck_hunter.watchlist.store_base import extract_astock_code
+    # 全系统唯一 A股代码提取器；容纳 600519 / 600519.SH/.SS / SH600519 前缀形态
+    code = extract_astock_code(ticker) or (ticker.split(".")[0] if "." in ticker else ticker)
     if code.startswith("688"):
         return "star"
     if code.startswith("300") or code.startswith("301"):

@@ -144,12 +144,6 @@ class PytdxFetcher(BaseFetcher):
 
     @staticmethod
     def _extract_code(ticker: str) -> str | None:
-        import re
-        ticker = ticker.strip().upper()
-        m = re.match(r"(\d{6})", ticker)
-        if m:
-            return m.group(1)
-        m = re.match(r"[A-Z]{2}(\d{6})", ticker)
-        if m:
-            return m.group(1)
-        return None
+        # 全系统唯一 A股代码提取器（见 store_base）；容纳 600519 / 600519.SH/.SS / SH600519 等全部形态
+        from bottleneck_hunter.watchlist.store_base import extract_astock_code
+        return extract_astock_code(ticker)

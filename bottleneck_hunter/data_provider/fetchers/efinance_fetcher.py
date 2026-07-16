@@ -122,15 +122,6 @@ class EfinanceFetcher(BaseFetcher):
 
     @staticmethod
     def _extract_code(ticker: str) -> str | None:
-        """从 ticker 中提取6位A股代码。"""
-        import re
-        ticker = ticker.strip().upper()
-        # 600519.SH -> 600519
-        m = re.match(r"(\d{6})", ticker)
-        if m:
-            return m.group(1)
-        # SH600519 -> 600519
-        m = re.match(r"[A-Z]{2}(\d{6})", ticker)
-        if m:
-            return m.group(1)
-        return None
+        """从 ticker 中提取6位A股代码。全系统唯一提取器（见 store_base）。"""
+        from bottleneck_hunter.watchlist.store_base import extract_astock_code
+        return extract_astock_code(ticker)

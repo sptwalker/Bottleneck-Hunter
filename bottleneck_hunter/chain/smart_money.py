@@ -242,10 +242,9 @@ def _track_us_stock(ticker: str) -> SmartMoneySignal:
 
 
 def _extract_astock_code(ticker: str) -> Optional[str]:
-    code = ticker.split(".")[0].strip()
-    if code.isdigit() and len(code) == 6:
-        return code
-    return None
+    # 全系统唯一 A股代码提取器（见 store_base）；容纳 600519 / 600519.SH/.SS / SH600519 等全部形态
+    from bottleneck_hunter.watchlist.store_base import extract_astock_code
+    return extract_astock_code(ticker)
 
 
 async def track_smart_money(supplier: SupplierInfo) -> Optional[SmartMoneySignal]:

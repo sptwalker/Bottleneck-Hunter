@@ -49,8 +49,9 @@ class MeetingDataFetcher:
         async with _SEMAPHORE:
             data: dict[str, Any] = {}
             if market == "a_stock":
-                code = ticker.split(".")[0].strip()
-                if code.isdigit() and len(code) == 6:
+                from bottleneck_hunter.watchlist.store_base import extract_astock_code
+                code = extract_astock_code(ticker)  # 全系统唯一 A股代码提取器
+                if code:
                     data["price"] = await asyncio.to_thread(self._fetch_a_price, code)
                     data["news"] = await asyncio.to_thread(self._fetch_a_news, code)
                     data["analyst"] = await asyncio.to_thread(self._fetch_a_analyst, code)

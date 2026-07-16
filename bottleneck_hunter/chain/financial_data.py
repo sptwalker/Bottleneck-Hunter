@@ -456,10 +456,9 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
 
 def _extract_astock_code(ticker: str) -> Optional[str]:
     """从 ticker (如 '600519.SH' 或 '688012') 中提取 6 位纯数字代码。"""
-    code = ticker.split(".")[0].strip()
-    if code.isdigit() and len(code) == 6:
-        return code
-    return None
+    # 全系统唯一 A股代码提取器（见 store_base）；容纳 600519 / 600519.SH/.SS / SH600519 等全部形态
+    from bottleneck_hunter.watchlist.store_base import extract_astock_code
+    return extract_astock_code(ticker)
 
 
 def _overlay_hub_financials(base: FinancialSnapshot, rec: dict) -> None:

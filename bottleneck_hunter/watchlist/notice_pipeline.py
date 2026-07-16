@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import re
 from datetime import datetime, timezone
 
 from bottleneck_hunter.watchlist.retry import with_retry
@@ -29,8 +28,6 @@ def _get_sem() -> asyncio.Semaphore:
     if _SEM is None:
         _SEM = asyncio.Semaphore(4)
     return _SEM
-
-_ASTOCK_RE = re.compile(r"^(?:SH|SZ|sh|sz)?(\d{6})")
 
 _NOTICE_CATEGORY_MAP = {
     "业绩预告": "earnings_preview",
@@ -60,9 +57,9 @@ def _classify_notice(title: str) -> str:
 
 
 def _extract_code(ticker: str) -> str | None:
-    code = ticker.split(".")[0].strip()
-    m = _ASTOCK_RE.match(code)
-    return m.group(1) if m else None
+    # 全系统唯一 A股代码提取器（见 store_base）；容纳 600519 / 600519.SH/.SS / SH600519 等全部形态
+    from bottleneck_hunter.watchlist.store_base import extract_astock_code
+    return extract_astock_code(ticker)
 
 
 @with_retry(max_retries=3, base_delay=1.0)

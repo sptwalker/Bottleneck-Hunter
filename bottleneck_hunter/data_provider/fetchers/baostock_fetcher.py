@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import threading
 from datetime import datetime, timedelta
 
@@ -22,7 +21,6 @@ from bottleneck_hunter.data_provider.base import BaseFetcher, StandardQuote
 
 logger = logging.getLogger(__name__)
 
-_ASTOCK_RE = re.compile(r"[A-Za-z]{0,2}(\d{6})")
 # baostock 全局会话非线程安全：全进程串行化 login→query→logout
 # ponytail: global lock，A股 K线非高频，够用；若吞吐成瓶颈再改连接池
 _bs_lock = threading.Lock()
@@ -30,10 +28,10 @@ _bs_lock = threading.Lock()
 
 def _bs_code(ticker: str) -> str | None:
     """6位代码 → baostock 格式 sh.600xxx / sz.000xxx / sz.30xxxx。"""
-    m = _ASTOCK_RE.match(ticker.split(".")[0].strip())
-    if not m:
+    from bottleneck_hunter.watchlist.store_base import extract_astock_code
+    code = extract_astock_code(ticker)  # 全系统唯一 A股代码提取器（见 store_base）
+    if not code:
         return None
-    code = m.group(1)
     prefix = "sh" if code[0] == "6" else "sz"  # 6=沪, 0/3=深, 688 科创也在沪(6)
     return f"{prefix}.{code}"
 

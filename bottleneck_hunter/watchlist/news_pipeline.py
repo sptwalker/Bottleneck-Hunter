@@ -9,7 +9,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -132,19 +131,15 @@ async def _fetch_rss_news(query: str, limit: int = 5, tag: str = "") -> list[dic
     return results
 
 
-_ASTOCK_RE = re.compile(r"^(?:SH|SZ|sh|sz)?(\d{6})")
-
-
 @with_retry(max_retries=3, base_delay=1.0)
 def _fetch_astock_news(ticker: str, limit: int = 10) -> list[dict]:
     """Fetch A-stock news from akshare stock_news_em (sync)."""
     if ak is None:
         return []
-    code = ticker.split(".")[0].strip()
-    m = _ASTOCK_RE.match(code)
-    if not m:
+    from bottleneck_hunter.watchlist.store_base import extract_astock_code
+    code_6 = extract_astock_code(ticker)  # 全系统唯一 A股代码提取器（见 store_base）
+    if not code_6:
         return []
-    code_6 = m.group(1)
     df = ak.stock_news_em(symbol=code_6)
     if df is None or df.empty:
         return []
