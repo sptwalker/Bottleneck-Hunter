@@ -50,10 +50,9 @@ EXPOSE 8000
 # 运行时数据目录（挂卷点）——即使未挂卷也能启动
 RUN mkdir -p /app/data /app/output
 
-# 非 root 运行：容器逃逸/写 bug 不再以 root 触达宿主挂载卷。挂载目录归属该用户。
-RUN useradd --system --create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /app
-USER appuser
+# 说明：曾尝试非 root（USER appuser, uid 10001）做安全硬化，但宿主 bind-mount 的
+# ./data/./output/./.env 属主为 root，容器降权后写不了 SQLite → 启动即崩。单租户自托管
+# 且在 nginx 之后，非 root 收益有限却带来部署摩擦，故以 root 运行（免挂载目录 chown）。
 
 # 容器内 healthcheck：/healthz 校验调度器存活 + DB 可读（非仅进程活着）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

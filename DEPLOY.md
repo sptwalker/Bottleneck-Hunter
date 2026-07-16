@@ -58,14 +58,6 @@ python scripts/backup.py --out /mnt/off/bh --keys-dir /mnt/vault --retain 14
 
 恢复：停容器 → 把某个快照目录里的 `*.db` 拷回 `./data/`，密钥文件去掉时间戳后缀拷回 → 起容器。
 
-## 非 root 运行：挂载目录属主
-
-容器以 uid `10001`（appuser）运行，宿主挂载的 `./data`、`./output`、`./.env` 须对该 uid 可写：
-
-```bash
-sudo chown -R 10001:10001 ./data ./output && sudo chown 10001:10001 ./.env
-```
-
 ## Grafana 密码（日志栈）
 
 `GRAFANA_ADMIN_PASSWORD` 无默认值——未在 `.env` 设置则日志栈容器启动即失败（fail-closed，
