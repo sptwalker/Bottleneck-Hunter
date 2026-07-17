@@ -609,8 +609,9 @@ async def run_strategic_plan(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
     market: str = "us_stock",
+    force: bool = False,
 ) -> AsyncGenerator[dict, None]:
-    """生成全新的 L2 组合策略"""
+    """生成全新的 L2 组合策略。force=True 忽略当日复用缓存强制重生成。"""
     store = store.for_market(market)
     yield _sse("decision_start", layer="L2", action="generate",
                message="开始生成 L2 组合策略...")
@@ -637,7 +638,7 @@ async def run_strategic_plan(
     # BH_DECISION_REUSE_HOURS=0 可关闭。
     import os as _os
     _reuse_h = float(_os.getenv("BH_DECISION_REUSE_HOURS", "20"))
-    if _reuse_h > 0:
+    if not force and _reuse_h > 0:
         try:
             _prev = store.get_latest_strategic_plan()
         except Exception:

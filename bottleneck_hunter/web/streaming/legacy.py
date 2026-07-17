@@ -266,7 +266,7 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
     # Step 5: Supplier Eval（带逐个评估进度）
     try:
         yield _sse("step_start", step="supplier_eval", index=4, message=STEP_LABELS["supplier_eval"])
-        evaluator = SupplierEvaluator(llm=deep_llm, language=config.language, store=store)
+        evaluator = SupplierEvaluator(llm=deep_llm, language=config.language)
 
         se_queue = asyncio.Queue()
         se_task = asyncio.create_task(
@@ -589,14 +589,7 @@ async def run_refresh_suppliers(
     try:
         yield _sse("step_start", step="supplier_eval", index=1,
                    message=f"正在评估 {total_suppliers} 个供应商...")
-        # 用 user_id 构造用户级 AnalysisStore，供评估器复用该用户的企业档案(省重复评估)
-        _eval_store = None
-        try:
-            from bottleneck_hunter.dataflows.store import AnalysisStore
-            _eval_store = AnalysisStore().for_user(user_id) if user_id else None
-        except Exception:
-            _eval_store = None
-        evaluator = SupplierEvaluator(llm=llm, language=language, store=_eval_store)
+        evaluator = SupplierEvaluator(llm=llm, language=language)
 
         se_queue: asyncio.Queue = asyncio.Queue()
         se_task = asyncio.create_task(

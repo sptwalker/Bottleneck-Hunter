@@ -135,17 +135,31 @@ class ChainStore:
         return self._row_to_dict(row) if row else None
 
     def get_fresh_chain(self, product_name: str, max_age_days: int = 14,
-                        min_depth: int = 0) -> dict[str, Any] | None:
-        """最新版本若够新(≤max_age_days)且深度足够(≥min_depth)则返回，否则 None。
+                        min_depth: int = 0, sector: str = "") -> dict[str, Any] | None:
+        """最新版本若够新(≤max_age_days)、深度足够(≥min_depth)、赛道匹配、且非部分结果，
+        则返回，否则 None。供筛选入口复用已拆解的产业链、跳过 70~360 次 LLM 拆解调用。
 
-        供筛选入口复用已拆解的产业链、跳过 70~360 次 LLM 拆解调用。产业链结构稳定，
-        14 天内的缓存足够；depth 门确保不会拿一个更浅的缓存冒充更深的请求。
+        安全门(缺一不可复用)：
+        - 赛道匹配：同 end_product 不同 sector(如"轴承"在汽车 vs 风电)拆出的链完全不同，
+          sector 不一致必须重拆，否则会拿错行业的链跑瓶颈/供应商。
+        - 非部分结果：拆解超时会 metadata.partial=True 但仍以「请求深度」存 max_depth，
+          若复用等于拿一个实际更浅的截断链冒充完整链，故 partial 一律重拆。
+        - 深度门：缓存链 max_depth ≥ 请求深度(且因上一条保证它是「实际达到」的深度)。
         """
         latest = self.get_latest_chain(product_name)
         if not latest:
             return None
-        # 深度门：缓存链的 max_depth 必须 ≥ 请求深度，否则重拆
-        cached_depth = (latest.get("chain_json") or {}).get("max_depth", 0) or 0
+        cj = latest.get("chain_json") or {}
+        if not isinstance(cj, dict):
+            return None
+        # 赛道必须匹配(sector 为空则不校验，兼容旧调用)
+        if sector and (cj.get("sector") or "") != sector:
+            return None
+        # 部分结果(拆解超时截断)不可复用——它的 max_depth 是请求深度而非实际达到深度
+        if (cj.get("metadata") or {}).get("partial"):
+            return None
+        # 深度门：缓存链的 max_depth 必须 ≥ 请求深度
+        cached_depth = cj.get("max_depth", 0) or 0
         if min_depth and cached_depth < min_depth:
             return None
         created_raw = latest.get("created_at", "")

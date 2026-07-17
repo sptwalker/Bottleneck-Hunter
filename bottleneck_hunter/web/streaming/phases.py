@@ -77,7 +77,8 @@ async def stream_phase1(
             try:
                 from bottleneck_hunter.chain.chain_store import ChainStore
                 from bottleneck_hunter.chain.models import ChainGraph
-                cached = ChainStore().get_fresh_chain(end_product, max_age_days=14, min_depth=max_depth)
+                cached = ChainStore().get_fresh_chain(end_product, max_age_days=14,
+                                                      min_depth=max_depth, sector=sector)
                 if cached:
                     chain = ChainGraph(**cached["chain_json"])
                     yield _sse("step_progress", step="decompose",
@@ -339,7 +340,7 @@ async def stream_phase2(
     scorecards = []
     try:
         yield _sse("step_start", step="supplier_eval", index=2, message=STEP_LABELS["supplier_eval"])
-        evaluator = SupplierEvaluator(llm=deep_llm, language=language, store=store)
+        evaluator = SupplierEvaluator(llm=deep_llm, language=language)
         se_queue = asyncio.Queue()
         se_task = asyncio.create_task(
             _run_supplier_eval_with_progress(evaluator, supplier_map, top_reports, se_queue, financial_map=financial_map)

@@ -185,11 +185,14 @@ async def macro_consult_history(market: str = "us_stock", user: dict = Depends(g
 # ─────────────────────────────────────────────────────────
 
 @router.post("/strategic/generate")
-async def generate_strategic_plan(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
-    """全面生成 L2 组合策略（SSE 流）"""
+async def generate_strategic_plan(request: Request, market: str = "us_stock",
+                                  force: bool = True, user: dict = Depends(get_current_user)):
+    """全面生成 L2 组合策略（SSE 流）。force 默认 True：用户点「全面生成」即明确要重算，
+    不被 20h 复用缓存短路；周期性调度(run_full_refresh)走默认 force=False 享受复用。"""
     from bottleneck_hunter.watchlist.decision_engine import run_strategic_plan
     store = _user_store(user).for_market(market)
-    return _sse_response(request, refresh_guard.guarded(user["sub"], run_strategic_plan(store, _user_budget(user), market=market)))
+    return _sse_response(request, refresh_guard.guarded(user["sub"],
+        run_strategic_plan(store, _user_budget(user), market=market, force=force)))
 
 
 @router.post("/strategic/deviation-check")
