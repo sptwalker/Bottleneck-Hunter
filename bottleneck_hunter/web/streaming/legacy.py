@@ -64,20 +64,10 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
 
         queue = asyncio.Queue()
 
-        # 整体超时: 每层假设最多 8 个并发批次，每批 LLM_TIMEOUT × (MAX_RETRIES+1)
-        # 5层 × 8批 × 120s × 3次 / 4并发 ≈ 3600s，再加语义去重的 120s
-        max_batches_per_layer = 8
-        total_timeout = (
-            config.max_depth * max_batches_per_layer
-            * decomposer.LLM_TIMEOUT * (decomposer.MAX_RETRIES + 1)
-            // decomposer.MAX_CONCURRENCY
-            + decomposer.LLM_TIMEOUT  # 语义去重
-        )
-        # 上限默认 3600s（旧 1800s 对深层/慢模型偏短，注释自算的 5 层预算就是 3720s），
-        # 可用 BH_DECOMPOSE_TIMEOUT 覆盖。
-        import os
-        _cap = int(os.getenv("BH_DECOMPOSE_TIMEOUT", "3600"))
-        total_timeout = min(total_timeout, _cap)
+        # 整体超时按拆解层数给预算（4层4200s / 5层6400s，见 decompose_timeout_for_depth）。
+        # BH_DECOMPOSE_TIMEOUT 可覆盖。层数越深越慢，故非线性放宽而非写死一个上限。
+        from bottleneck_hunter.chain.decomposer import decompose_timeout_for_depth
+        total_timeout = decompose_timeout_for_depth(config.max_depth)
         _now = asyncio.get_event_loop().time()
         # 拆解器自身的软 deadline 比外层硬 deadline 早 90s：让它层间优雅收尾、保住已完成层，
         # 而不是被 drain_task_queue 的硬取消丢弃全部。外层硬 deadline 仅作兜底。

@@ -72,17 +72,9 @@ async def stream_phase1(
             llm=deep_llm, max_depth=max_depth, sector=sector, language=language,
         )
         queue = asyncio.Queue()
-        max_batches_per_layer = 8
-        total_timeout = (
-            max_depth * max_batches_per_layer
-            * decomposer.LLM_TIMEOUT * (decomposer.MAX_RETRIES + 1)
-            // decomposer.MAX_CONCURRENCY
-            + decomposer.LLM_TIMEOUT
-        )
-        # 上限默认 3600s（旧 1800s 对深层/慢模型偏短），可用 BH_DECOMPOSE_TIMEOUT 覆盖。
-        import os
-        _cap = int(os.getenv("BH_DECOMPOSE_TIMEOUT", "3600"))
-        total_timeout = min(total_timeout, _cap)
+        # 整体超时按拆解层数给预算（4层4200s / 5层6400s），BH_DECOMPOSE_TIMEOUT 可覆盖。
+        from bottleneck_hunter.chain.decomposer import decompose_timeout_for_depth
+        total_timeout = decompose_timeout_for_depth(max_depth)
         _now = asyncio.get_event_loop().time()
         # 软 deadline 早 90s：拆解器层间优雅收尾、保住已完成层，不被硬取消丢弃全部。
         soft_deadline = _now + max(total_timeout - 90, total_timeout * 0.9)

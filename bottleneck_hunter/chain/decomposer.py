@@ -79,6 +79,36 @@ def _layer_type_for_depth(depth: int) -> LayerType:
     return LAYER_TYPE_MAP.get(depth, LayerType.EQUIPMENT)
 
 
+# 按拆解层数给整体超时预算（秒）。层数越深、节点扇出越大越慢，故非线性放宽。
+# 显式表尊重用户设定：4 层 4200s、5 层 6400s；其余层数按趋势插值/外推。
+# BH_DECOMPOSE_TIMEOUT 环境变量存在时**直接覆盖**本表（统一硬上限，便于运维临时调）。
+_DECOMPOSE_TIMEOUT_BY_DEPTH = {
+    1: 900,     # 15 min
+    2: 1800,    # 30 min
+    3: 3000,    # 50 min
+    4: 4200,    # 70 min（用户指定）
+    5: 6400,    # ~107 min（用户指定）
+}
+_DECOMPOSE_TIMEOUT_PER_EXTRA_LAYER = 2200  # 6 层及以上每多一层再加的预算
+
+
+def decompose_timeout_for_depth(depth: int) -> int:
+    """返回该拆解层数的整体超时预算（秒）。env BH_DECOMPOSE_TIMEOUT 若设则覆盖。"""
+    import os
+    env = os.getenv("BH_DECOMPOSE_TIMEOUT")
+    if env:
+        try:
+            return max(60, int(env))
+        except ValueError:
+            pass
+    d = max(1, int(depth or 1))
+    if d in _DECOMPOSE_TIMEOUT_BY_DEPTH:
+        return _DECOMPOSE_TIMEOUT_BY_DEPTH[d]
+    # 超出显式表（≥6 层）：从最深已知档位按每层增量外推
+    top = max(_DECOMPOSE_TIMEOUT_BY_DEPTH)
+    return _DECOMPOSE_TIMEOUT_BY_DEPTH[top] + (d - top) * _DECOMPOSE_TIMEOUT_PER_EXTRA_LAYER
+
+
 class ChainDecomposer:
     """Decomposes an industry chain from an end product using LLM."""
 
@@ -144,18 +174,18 @@ class ChainDecomposer:
 
         # Iteratively decompose each layer
         semaphore = asyncio.Semaphore(self.MAX_CONCURRENCY)
+        _last_layer_sec = 0.0  # 上一层实际耗时，用于自适应预估下一层（比最坏假设宽松）
 
         for depth in range(1, self.max_depth + 1):
-            # 层间 deadline 检查：预留一层的预算，不够就优雅停在当前深度(保住已完成层)。
-            # 单层最坏 = ceil(MAX_NODES_PER_LAYER/并发) 批 × LLM_TIMEOUT×(重试+1)，太悲观；
-            # 用「一层典型耗时」的保守估计：并发批数 × LLM_TIMEOUT。
+            _layer_t0 = asyncio.get_event_loop().time()
+            # 层间 deadline 检查：只在「剩余预算 < 下一层预估耗时」时才优雅停（保住已完成层）。
+            # 预估用**上一层实际耗时 ×1.5 安全系数**，而非最坏假设——避免明明预算够却提前停，
+            # 契合「限制更少、允许跑更久」。无历史(理论上 depth>1 必有)时退回一个温和估计。
             if deadline is not None and depth > 1:
-                import math
-                est_batches = math.ceil(self.MAX_NODES_PER_LAYER / self.MAX_CONCURRENCY)
-                est_layer_sec = est_batches * self.LLM_TIMEOUT
+                est_layer_sec = (_last_layer_sec * 1.5) if _last_layer_sec > 0 else (self.LLM_TIMEOUT * 3)
                 remaining = deadline - asyncio.get_event_loop().time()
                 if remaining < est_layer_sec:
-                    logger.warning("拆解 deadline 将至(剩 %.0fs<单层预估 %.0fs)，停在第 %d 层，返回部分结果",
+                    logger.warning("拆解 deadline 将至(剩 %.0fs<下一层预估 %.0fs)，停在第 %d 层，返回部分结果",
                                    remaining, est_layer_sec, depth - 1)
                     if on_progress:
                         await on_progress(f"⏱ 时间预算将尽，停在第 {depth - 1} 层，返回已拆解部分（可减少层数/换更快模型重试）")
@@ -238,6 +268,7 @@ class ChainDecomposer:
 
             node_count = len(graph.get_nodes_at_layer(depth))
             logger.info(f"Decomposed layer {depth}: found {node_count} nodes")
+            _last_layer_sec = asyncio.get_event_loop().time() - _layer_t0  # 记录本层实际耗时供下层自适应预估
             if on_progress:
                 await on_progress(f"── 层 {depth} 完成: {node_count} 个新节点，累计 {len(graph.nodes)} 个 ──")
 
