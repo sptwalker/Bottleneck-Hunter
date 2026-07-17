@@ -1751,8 +1751,9 @@ async function openConsultDrawer() {
   // 当日已有开场且无更新新闻 → 历史已展示，不再调用 open（省重复烧钱）；
   // 有更新新闻（如全量刷新/定时扫描后）→ 重开生成最新快照。
   if (transcript && _todayHasOpening(transcript) && !newsStale) return;
-  // 将要重新生成 → 清掉刚回显的历史，避免与新流重复
-  if (log) log.innerHTML = '';
+  // 将要重新生成：保留已回显的历史对话，仅在其后追加最新快照+开场。
+  // （新流只产出 snapshot+round0，不与历史重复；跨天会自动插时效分割线。）
+  // 此前这里清空 log → 每次开抽屉只要新闻有更新就丢失全部过往咨询记录（“从头刷新”根因）。
   if (snapEl) snapEl.innerHTML = '<div class="dc-snap-row">加载中…</div>';
   dcConsult.bubbles = {};
   setConsultSending(true);
