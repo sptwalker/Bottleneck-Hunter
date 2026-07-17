@@ -226,6 +226,61 @@ async def resolve_model(role: str = "pipeline_decompose", user: dict = Depends(g
     return {"provider": provider or "", "model": model or ""}
 
 
+@router.get("/resolve-model/debug")
+async def resolve_model_debug(role: str = "pipeline_decompose", user: dict = Depends(get_current_user)):
+    """诊断：展示某角色「跟随顶栏配置」的完整候选排名+打分明细，解释为何选中某模型。只读，不烧 token。"""
+    from bottleneck_hunter.llm_clients import factory as F
+    from bottleneck_hunter.llm_clients import health as H
+    uid = user.get("sub", "")
+    primary = F.get_primary_provider()
+    # 候选池 = 主模型 + 全部已注册 provider + 应急链（与调度一致）
+    try:
+        universe = F.list_custom_provider_ids()
+    except Exception:
+        universe = []
+    seen: set[str] = set()
+    chain = []
+    for c in ([primary] if primary else []) + list(universe) + [p for p, _ in F._FALLBACK_CHAIN]:
+        cl = (c or "").lower().strip()
+        if cl and cl not in seen:
+            seen.add(cl)
+            chain.append(cl)
+    policy = {}
+    try:
+        policy = H.load_routing_policy(uid, role) or {}
+    except Exception:
+        pass
+    stats = {}
+    caps = {}
+    try:
+        stats = H._load_stats(uid)
+        caps = H.load_capability_scores(uid, role)
+    except Exception:
+        pass
+    rows = []
+    for p in chain:
+        try:
+            score = H._score(p, uid, (primary or "").lower().strip(), stats, policy, caps)
+        except Exception:
+            score = None
+        rows.append({
+            "provider": p,
+            "tier": H.provider_tier(p),
+            "is_primary": p == (primary or "").lower().strip(),
+            "active": F.is_provider_active(p),
+            "has_key": F._user_has_llm_key(p, uid),
+            "circuit_open": H.health.is_open(uid, p),
+            "model": F.resolve_provider_model(p, uid),
+            "capability_score": caps.get(p),
+            "ok_rate": (stats.get(p) or {}).get("ok_rate"),
+            "calls": (stats.get(p) or {}).get("calls"),
+            "score": round(score, 4) if isinstance(score, (int, float)) else None,
+        })
+    rows.sort(key=lambda r: (r["score"] is not None, r["score"] or 0), reverse=True)
+    return {"role": role, "primary_provider": primary, "policy": policy,
+            "ranking": rows}
+
+
 class Phase2Request(BaseModel):
     analysis_id: str
     shortlist_config: ShortlistConfig = Field(default_factory=ShortlistConfig)
