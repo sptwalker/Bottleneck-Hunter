@@ -23,14 +23,36 @@ async def run_uzi_analysis(
     analysis_type: str,
     store: WatchlistStore,
     entry_id: str,
+    force: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """Run a UZI analysis and yield SSE-compatible progress events.
 
     Yields dicts with keys: event, progress (0-100), message, status, result, analysis_type.
+    force=True 则忽略当日缓存强制重跑。
     """
     if analysis_type not in ANALYSIS_TYPES:
         yield {"event": "error", "message": f"未知分析类型: {analysis_type}"}
         return
+
+    # 复用当日已完成的同类型分析：UZI 单次 8~9 次 LLM 调用，同标的同类型当日重复点击/重开
+    # 直接返回缓存结果，省算力。force=True 跳过。
+    if not force:
+        try:
+            recent = store.get_recent_completed_uzi(entry_id, analysis_type, max_age_hours=20)
+        except Exception:
+            recent = None
+        if recent and recent.get("result_json"):
+            try:
+                cached_result = json.loads(recent["result_json"])
+            except (json.JSONDecodeError, TypeError):
+                cached_result = None
+            if cached_result:
+                yield {"event": "started", "analysis_id": recent["id"], "progress": 0,
+                       "message": f"♻ 复用当日 {_type_label(analysis_type)} 结果（省重复分析）"}
+                yield {"event": "completed", "status": "completed", "progress": 100,
+                       "message": "复用当日已完成分析", "analysis_type": analysis_type,
+                       "analysis_id": recent["id"], "result": cached_result, "reused": True}
+                return
 
     analysis_id = store.create_uzi_analysis(entry_id, ticker, analysis_type)
     yield {"event": "started", "analysis_id": analysis_id, "progress": 0,

@@ -518,7 +518,8 @@ async def uzi_result(entry_id: str, analysis_id: str, user: dict = Depends(get_c
 
 
 @router.post("/{entry_id}/uzi/{analysis_type}")
-async def uzi_trigger(entry_id: str, analysis_type: str, request: Request, user: dict = Depends(get_current_user)):
+async def uzi_trigger(entry_id: str, analysis_type: str, request: Request,
+                      force: bool = False, user: dict = Depends(get_current_user)):
     from bottleneck_hunter.watchlist.uzi_runner import ANALYSIS_TYPES, run_uzi_analysis
 
     store = _user_store(user)
@@ -531,7 +532,7 @@ async def uzi_trigger(entry_id: str, analysis_type: str, request: Request, user:
     import json as _json
 
     async def event_generator():
-        async for evt in run_uzi_analysis(entry["ticker"], analysis_type, store, entry_id):
+        async for evt in run_uzi_analysis(entry["ticker"], analysis_type, store, entry_id, force=force):
             if await request.is_disconnected():
                 break
             yield {"event": evt.get("event", "progress"), "data": _json.dumps(evt, ensure_ascii=False)}

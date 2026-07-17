@@ -88,6 +88,38 @@ class _IntelMixin:
         finally:
             conn.close()
 
+    def get_recent_completed_uzi(self, entry_id: str, analysis_type: str,
+                                 max_age_hours: float = 20) -> dict | None:
+        """取该 entry 指定类型、max_age_hours 内**已完成**的最新分析（含 result_json），无则 None。
+
+        供 UZI 复用：同一标的同类型近期(默认20h≈当日)分析结果直接返回，省 8~9 次 LLM 调用。
+        """
+        conn = self._connect()
+        try:
+            q, p = self._user_filter(
+                """SELECT * FROM uzi_analyses
+                   WHERE entry_id = ? AND analysis_type = ? AND status = 'completed'
+                   ORDER BY completed_at DESC LIMIT 1""",
+                (entry_id, analysis_type),
+            )
+            row = conn.execute(q, p).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            ts = d.get("completed_at") or d.get("started_at") or ""
+            try:
+                from datetime import datetime, timezone
+                t = datetime.fromisoformat(ts)
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - t).total_seconds() > max_age_hours * 3600:
+                    return None
+            except (ValueError, TypeError):
+                return None
+            return d
+        finally:
+            conn.close()
+
 
     def create_intelligence(self, entry_id: str, ticker: str) -> tuple[str, int]:
         """Create a new intelligence record. Returns (intelligence_id, version)."""
