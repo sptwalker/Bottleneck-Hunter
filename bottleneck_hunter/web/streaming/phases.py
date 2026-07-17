@@ -173,11 +173,15 @@ async def stream_phase1(
     try:
         yield _sse("step_start", step="bottleneck", index=1, message=STEP_LABELS["bottleneck"])
         from bottleneck_hunter.llm_clients.factory import get_models_for_role
-        # 锁定主模型：默认让瓶颈评分也直用主模型(prefer_primary，多槽交叉退化为单主模型)；
-        # allow_fallback(弹窗后重跑)则恢复调度自选。
-        bottleneck_llms = get_models_for_role("bottleneck", prefer_primary=not allow_fallback)
-        if not bottleneck_llms:
+        if provider:
+            # 用户显式选了具体模型：瓶颈评分也用它(与拆解一致)，不改用主模型/调度。
             bottleneck_llms = [(deep_llm, provider, model)]
+        else:
+            # 「跟随顶栏配置」：锁定主模型(prefer_primary，多槽交叉退化为单主模型)；
+            # allow_fallback(弹窗后重跑)则恢复调度自选。
+            bottleneck_llms = get_models_for_role("bottleneck", prefer_primary=not allow_fallback)
+            if not bottleneck_llms:
+                bottleneck_llms = [(deep_llm, provider, model)]
         analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=language, industry=sector, market=market)
         bn_queue = asyncio.Queue()
         bn_task = asyncio.create_task(
@@ -195,6 +199,16 @@ async def stream_phase1(
 
         all_reports = await bn_task
         failed_nodes = analyzer.failed_nodes
+
+        # 主模型失败保护：所有节点都失败(且确有可分析节点)→ 锁定模式下发 primary_failed 让用户决策，
+        # 不让"0 个瓶颈"的空结果静默流入后续供应商分析。
+        _analyzable = [n for n in chain.nodes if (n.layer or 0) > 0]
+        if _analyzable and not all_reports:
+            _reason = getattr(analyzer, "_last_fail_reason", "") or "模型调用失败或额度不足"
+            if not allow_fallback:
+                yield _primary_failed_event("bottleneck", _reason, provider, model)
+                return
+            raise RuntimeError(f"瓶颈评分全部失败（{_reason}）；请检查所选模型可用性/余额后重试")
 
         # 按层取 top_n
         layer_groups: dict[int, list] = defaultdict(list)
@@ -366,6 +380,11 @@ async def stream_phase2(
         yield _sse("step_done", step="supplier_search", index=0, result=flat)
     except Exception as e:
         logger.exception("Phase2 supplier search failed")
+        # 锁定模式下若因主模型失败 → 发 primary_failed 让用户决策(切备用/中断)
+        if not allow_fallback:
+            from bottleneck_hunter.llm_clients.fallback import classify_reason
+            yield _primary_failed_event("supplier_search", classify_reason(e), provider, model)
+            return
         yield _sse("error", step="supplier_search", message=str(e))
         return
 
@@ -450,6 +469,10 @@ async def stream_phase2(
                    result=[sc.model_dump() for sc in scorecards])
     except Exception as e:
         logger.exception("Phase2 supplier eval failed")
+        if not allow_fallback:
+            from bottleneck_hunter.llm_clients.fallback import classify_reason
+            yield _primary_failed_event("supplier_eval", classify_reason(e), provider, model)
+            return
         yield _sse("error", step="supplier_eval", message=str(e))
         return
 

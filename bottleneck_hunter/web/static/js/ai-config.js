@@ -611,6 +611,7 @@ async function setProviderPrimary(id, name) {
     if (resp.ok) {
       await loadCustomProviders();
       await loadRoles();
+      window.invalidateFollowModel?.();  // 失效卡片预解析缓存，主模型改动即时反映
       setStatus('aic-provider-status', `已将「${name}」设为主要模型（默认+兜底优先）`, 'ok');
     } else {
       alert(resp.status === 403 ? '仅管理员可设置主要模型' : '设置主要失败');

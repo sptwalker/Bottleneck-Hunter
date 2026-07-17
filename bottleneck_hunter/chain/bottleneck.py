@@ -223,6 +223,7 @@ class BottleneckAnalyzer:
         self._timeout_count = 0
         self._retry_count = 0
         self._failed_nodes: list[dict] = []
+        self._last_fail_reason = ""  # 最近一次节点分析失败的中文原因(供上层弹窗判定主模型失败)
 
     @property
     def use_cross_scoring(self) -> bool:
@@ -237,6 +238,7 @@ class BottleneckAnalyzer:
         self._timeout_count = 0
         self._retry_count = 0
         self._failed_nodes = []
+        self._last_fail_reason = ""
         self._on_progress = on_progress
         use_cross = self.use_cross_scoring
         _t0 = time.time()
@@ -571,6 +573,7 @@ class BottleneckAnalyzer:
                     else:
                         self._timeout_count += 1
                         logger.error(f"瓶颈分析超时，已放弃: {node_name}")
+                        self._last_fail_reason = "请求超时"
                         if self._on_progress:
                             await self._on_progress(f"✗ 超时放弃: {node_name}")
                         return None
@@ -584,6 +587,11 @@ class BottleneckAnalyzer:
                     else:
                         self._timeout_count += 1
                         logger.error(f"瓶颈分析失败，已放弃: {node_name} - {e}")
+                        try:
+                            from bottleneck_hunter.llm_clients.fallback import classify_reason
+                            self._last_fail_reason = classify_reason(e)
+                        except Exception:  # noqa: BLE001
+                            self._last_fail_reason = "调用异常"
                         if self._on_progress:
                             await self._on_progress(f"✗ 调用失败: {node_name}")
                         return None

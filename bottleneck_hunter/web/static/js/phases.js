@@ -503,6 +503,11 @@ async function _ensureFollowModel() {
   } catch (e) { /* 取不到就维持占位，不阻塞 */ }
   finally { _followModel.fetching = false; }
 }
+// 顶栏主模型在 AI 配置中心被改（如设为主要）后，失效预解析缓存并重解析，卡片显示新主模型。
+window.invalidateFollowModel = function () {
+  _followModel.provider = ''; _followModel.model = '';
+  try { _updateAnalysisTags(); } catch (e) { /* noop */ }
+};
 
 function _updateAnalysisTags() {
   const completedPhases = state.config.completed_phases || 0;
@@ -687,6 +692,32 @@ async function runPhase1(sector, product, allowFallback = false) {
   updateNav();
 }
 
+// 主模型失败弹窗决策(phase1/2 共用)：有备用→问"切备用/中断"，选切换调 onSwitch(重跑带 allow_fallback)；
+// 无备用→单按钮"分析被迫停止"。onStop 收尾展示。
+function _handlePrimaryFailed(data, onSwitch, onStop) {
+  const reason = data.reason || '调用失败';
+  const modelStr = data.model ? `${data.provider}/${data.model}` : (data.provider || '主模型');
+  const stageLabel = { decompose: '产业链拆解', bottleneck: '瓶颈评分',
+                       supplier_search: '供应商搜索', supplier_eval: '供应商评估' }[data.stage] || '分析';
+  logMsg(`${stageLabel}中止: 主模型 ${modelStr} 出现「${reason}」`, 'error');
+  if (data.can_switch) {
+    const bk = data.backup_hint ? `（备用: ${data.backup_hint}）` : '';
+    showConfirm(
+      `你选择的主模型 ${modelStr} 在「${stageLabel}」出现「${reason}」问题。\n是否切换到备用模型继续分析${bk}？`,
+      { title: '主模型不可用', confirmText: '切换备用模型', cancelText: '中断分析', danger: true }
+    ).then(ok => {
+      if (ok) { logMsg('用户选择切换备用模型，重新分析...', 'info'); onSwitch?.(); }
+      else { onStop?.('已中断分析（主模型不可用）'); }
+    });
+  } else {
+    showConfirm(
+      `你选择的主模型 ${modelStr} 在「${stageLabel}」出现「${reason}」问题，且未配置可用的备用模型，分析被迫停止！\n请检查该模型的可用性/余额，或在 AI 配置中心添加其它可用模型。`,
+      { title: '分析被迫停止', confirmText: '知道了', cancelText: '', danger: true }
+    );
+    onStop?.(`分析停止: 主模型「${reason}」且无备用`);
+  }
+}
+
 function handlePhase1Event(data) {
   // 主模型失败：锁定主模型模式下主模型出问题(欠费/断联/异常输出) → 弹窗让用户决策，不自动切换。
   if (data._sseEvent === 'primary_failed') {
@@ -695,29 +726,11 @@ function handlePhase1Event(data) {
     state.p1Error = true;
     state.autoMode = false;
     setTriState('p1-tristate', 'p1TriState', 'restart');
-    const reason = data.reason || '调用失败';
-    const modelStr = data.model ? `${data.provider}/${data.model}` : (data.provider || '主模型');
-    logMsg(`Phase 1 中止: 主模型 ${modelStr} 出现「${reason}」`, 'error');
-    if (data.can_switch) {
-      const bk = data.backup_hint ? `（备用: ${data.backup_hint}）` : '';
-      showConfirm(
-        `你选择的主模型 ${modelStr} 出现「${reason}」问题。\n是否切换到备用模型继续分析${bk}？`,
-        { title: '主模型不可用', confirmText: '切换备用模型', cancelText: '中断分析', danger: true }
-      ).then(ok => {
-        if (ok) {
-          logMsg('用户选择切换备用模型，重新分析...', 'info');
-          runPhase1(state.config.sector, state.config.product, true);  // allow_fallback=true 重跑
-        } else {
-          showP1Info('已中断分析（主模型不可用）');
-        }
-      });
-    } else {
-      showConfirm(
-        `你选择的主模型 ${modelStr} 出现「${reason}」问题，且未配置可用的备用模型，分析被迫停止！\n请检查该模型的可用性/余额，或在 AI 配置中心添加其它可用模型。`,
-        { title: '分析被迫停止', confirmText: '知道了', cancelText: '', danger: true }
-      );
-      showP1Info(`分析停止: 主模型「${reason}」且无备用`);
-    }
+    _handlePrimaryFailed(
+      data,
+      () => runPhase1(state.config.sector, state.config.product, true),  // 切备用重跑
+      (msg) => showP1Info(msg)
+    );
     return;
   }
 
@@ -854,7 +867,7 @@ function _p2IsDuplicate(msg) {
 }
 
 /* ── Phase 2: SSE 连接 ──────────────────── */
-async function runPhase2() {
+async function runPhase2(allowFallback = false) {
   if (!state.analysisId) return;
   if (state.running) return;   // 防重入：已有环节在跑就忽略
   state.running = true;
@@ -913,6 +926,7 @@ async function runPhase2() {
     max_market_cap_yi: state.config.max_market_cap_yi || parseFloat(document.getElementById('wiz-max-cap')?.value || '200'),
     max_suppliers: 20,
     language: 'zh', provider, model,
+    allow_fallback: allowFallback,
   };
 
   _p2Abort = new AbortController();
@@ -952,6 +966,22 @@ async function runPhase2() {
 }
 
 function handlePhase2Event(data, progress) {
+  // 主模型失败：弹窗决策(切备用重跑 phase2 / 中断)
+  if (data._sseEvent === 'primary_failed') {
+    _stopP2Timer();
+    state.p2Error = true;
+    state.autoMode = false;
+    state.running = false;
+    setTriState('p2-tristate', 'p2TriState', 'restart');
+    _handlePrimaryFailed(
+      data,
+      () => runPhase2(true),  // 切备用重跑
+      (msg) => { if (progress) progress.innerHTML = `<div class="progress-msg progress-error">${msg}</div>`; }
+    );
+    updateSidebarStatus();
+    updateNav();
+    return;
+  }
   if (data._sseEvent === 'error' && data.step === 'init' && data.message) {
     progress.innerHTML = `<div class="progress-msg progress-error">${data.message}</div>`;
     logMsg(`[phase2] ${data.message}`, 'error');
@@ -1797,6 +1827,9 @@ async function loadWizardAnalysis(analysisId) {
       created_at: data.created_at,
       completed_phases: data.completed_phases || 0,
       run_count: data.run_count || 0,
+      // 记录该历史分析**当时实际用的**模型，卡片据此显示真实模型(而非当前顶栏选择)
+      provider: data.provider || '',
+      model: data.model || '',
     };
     state.phase1 = null;
     state.phase2 = null;
