@@ -39,6 +39,42 @@ async def test_fred_indicators_via_shared_client(monkeypatch):
     assert "cpi_yoy" in out and isinstance(out["cpi_yoy"]["value"], float)
 
 
+def _handler_v2(request):
+    """新增指标：10Y/2s10s/缩表(WALCL)/VIX/HY OAS/油/金。"""
+    url = str(request.url)
+    def obs(vals):
+        return httpx.Response(200, json={"observations": [{"date": f"d{i}", "value": str(v)}
+                                                           for i, v in enumerate(vals)]})
+    if "DGS10" in url: return obs([4.28, 4.21])
+    if "T10Y2Y" in url: return obs([-0.15, -0.10])           # 曲线倒挂 → 负值
+    if "WALCL" in url: return obs([6612000, 6640000])        # 百万美元 → 6.612 万亿，周环比 -0.42%
+    if "VIXCLS" in url: return obs([17.8, 19.2])
+    if "BAMLH0A0HYM2" in url: return obs([3.05, 2.98])
+    if "DCOILWTICO" in url: return obs([73.4, 71.9])
+    if "GOLDAMGBD228NLBM" in url: return obs([2410.5, 2395.0])
+    return httpx.Response(200, json={"observations": []})
+
+
+async def test_fred_new_indicators(monkeypatch):
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handler_v2))
+    monkeypatch.setattr("bottleneck_hunter.watchlist.retry.get_http_client", lambda timeout=20: client)
+    monkeypatch.setattr(
+        "bottleneck_hunter.data_provider.data_source_catalog.resolve_data_source_key",
+        lambda src, *a, **k: "FAKEKEY",
+    )
+    out = await macro_data._fetch_fred_indicators()
+    await client.aclose()
+
+    assert out["us_10y_yield"]["value"] == 4.28
+    assert out["yield_curve_2s10s"]["value"] == -0.15          # 倒挂负值保留
+    assert out["fed_balance_sheet"]["value"] == 6.612          # 百万→万亿
+    assert out["fed_balance_sheet"]["change_pct"] == -0.42     # 周环比%（缩表）
+    assert out["vix"]["value"] == 17.8
+    assert out["hy_oas"]["value"] == 3.05
+    assert out["wti_oil"]["value"] == 73.4
+    assert out["gold"]["value"] == 2410.5
+
+
 async def test_fred_no_key_returns_empty(monkeypatch):
     monkeypatch.setattr(
         "bottleneck_hunter.data_provider.data_source_catalog.resolve_data_source_key",

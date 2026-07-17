@@ -105,11 +105,25 @@ def foreign_indicator_keys(markets: list[str]) -> set[str]:
 
 
 # ── FRED（美联储经济数据）：真宏观经济指标，补齐 yfinance 只有行情价格的缺口 ──
-# (显示名, FRED series_id, 是否需按 CPI 计算同比通胀)
+# 国内服务器 yfinance(Yahoo)常被墙，而 FRED(api.stlouisfed.org)在桌面借道白名单 → 更可靠。
+# 故利率/曲线/信用利差/缩表/VIX/金油全部走 FRED；VIX/10Y 与 yfinance 同 key，FRED 作兜底。
+# (显示名 key, FRED series_id, 中文标签, kind)
+#   kind="level"  : 取最新值 + 环比绝对变动（利率/利差/VIX/油金等价格型）
+#   kind="cpi"    : 按 13 个月算同比通胀
+#   kind="walcl"  : 美联储总资产（百万美元）→ 换算万亿 + 周环比%（看缩表节奏）
 _FRED_INDICATORS = [
-    ("fed_funds_rate", "FEDFUNDS", "联邦基金利率(%)", False),
-    ("unemployment_rate", "UNRATE", "美国失业率(%)", False),
-    ("cpi_yoy", "CPIAUCSL", "美国CPI同比(%)", True),
+    ("fed_funds_rate", "FEDFUNDS", "联邦基金利率(%)", "level"),
+    ("unemployment_rate", "UNRATE", "美国失业率(%)", "level"),
+    ("cpi_yoy", "CPIAUCSL", "美国CPI同比(%)", "cpi"),
+    # ── 利率与流动性「量价全景」──
+    ("us_10y_yield", "DGS10", "10Y 美债收益率(%)", "level"),
+    ("yield_curve_2s10s", "T10Y2Y", "2s10s 利差(%,负=倒挂)", "level"),
+    ("fed_balance_sheet", "WALCL", "美联储总资产(万亿$,降=缩表QT)", "walcl"),
+    # ── 风险情绪「跨资产印证」──
+    ("vix", "VIXCLS", "VIX 恐慌指数", "level"),
+    ("hy_oas", "BAMLH0A0HYM2", "高收益债信用利差 HY OAS(%)", "level"),
+    ("wti_oil", "DCOILWTICO", "WTI 原油($/桶)", "level"),
+    ("gold", "GOLDAMGBD228NLBM", "伦敦金($/oz)", "level"),
 ]
 
 
@@ -126,15 +140,15 @@ async def _fred_series(key: str, series_id: str, limit: int = 1) -> list[dict]:
 
 
 async def _fetch_fred_indicators() -> dict:
-    """拉取 FRED 关键宏观指标（利率/失业率/CPI同比）。无 Key 则返回空（该源对当前用户不可用）。"""
+    """拉取 FRED 关键宏观指标（利率/曲线/信用利差/缩表/VIX/金油等）。无 Key 则返回空。"""
     from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
     key = resolve_data_source_key("fred")
     if not key:
         return {}
     out: dict[str, dict] = {}
-    for k, series_id, label, is_cpi in _FRED_INDICATORS:
+    for k, series_id, label, kind in _FRED_INDICATORS:
         try:
-            if is_cpi:
+            if kind == "cpi":
                 obs = await _fred_series(key, series_id, limit=13)  # 需 13 个月算同比
                 if len(obs) >= 13:
                     latest, year_ago = float(obs[0]["value"]), float(obs[12]["value"])
@@ -144,7 +158,16 @@ async def _fetch_fred_indicators() -> dict:
                         prev_yoy = round((float(obs[1]["value"]) / float(obs[13]["value"]) - 1) * 100, 2)
                     out[k] = {"value": yoy, "change_pct": round(yoy - prev_yoy, 2) if prev_yoy is not None else 0.0,
                               "label": label, "date": obs[0].get("date", "")}
-            else:
+            elif kind == "walcl":
+                # 美联储总资产：原始单位百万美元 → 万亿；change_pct 用周环比%（看缩表/扩表趋势）
+                obs = await _fred_series(key, series_id, limit=2)
+                if obs:
+                    val_m = float(obs[0]["value"])
+                    prev_m = float(obs[1]["value"]) if len(obs) >= 2 else val_m
+                    trillions = round(val_m / 1_000_000, 3)
+                    wow = round((val_m / prev_m - 1) * 100, 2) if prev_m else 0.0
+                    out[k] = {"value": trillions, "change_pct": wow, "label": label, "date": obs[0].get("date", "")}
+            else:  # kind == "level"：最新值 + 环比绝对变动
                 obs = await _fred_series(key, series_id, limit=2)
                 if obs:
                     val = float(obs[0]["value"])
@@ -205,19 +228,23 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
                 logger.warning("北向资金采集失败: %s", e)
         tasks.append(_fetch_north())
 
-    # FRED 真宏观指标（利率/失业率/CPI同比）—— Fed 政策对各市场都有外溢，全局纳入；无 Key 自动跳过
+    # FRED 真宏观指标 —— Fed 政策对各市场都有外溢，全局纳入；无 Key 自动跳过。
+    # vix/us_10y_yield 与 yfinance 同 key：FRED 作兜底(yfinance 取到就不覆盖，取不到则 FRED 补)，
+    # 其余(曲线/信用利差/缩表/金油等)为 FRED 独有。故等 yfinance 任务先跑完，FRED 再 setdefault。
     async def _fetch_fred():
         try:
             fred = await _fetch_fred_indicators()  # 已改异步(走共享 httpx，可借道)，不再 to_thread
             for k, v in fred.items():
+                if k in results:
+                    continue  # yfinance 已取到该 key(更实时) → 不覆盖
                 results[k] = v
                 store.save_macro_snapshot(k, today, v["value"], now_iso,
                                           change_pct=v.get("change_pct", 0.0))
         except Exception as e:
             logger.warning("FRED 宏观指标采集失败: %s", e)
-    tasks.append(_fetch_fred())
-
+    # 先并发跑 yfinance 指标(+北向)，全部完成后再跑 FRED 兜底，保证 setdefault 语义确定
     await asyncio.gather(*tasks, return_exceptions=True)
+    await _fetch_fred()
 
     if not results:
         foreign = foreign_indicator_keys(markets)  # 剔除他市专属指标，防缓存兜底串味
