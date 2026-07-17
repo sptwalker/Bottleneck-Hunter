@@ -727,10 +727,18 @@ async def run_committee_review(
                                f"{len(distinct_providers)} 个 provider，独立性下降（结论仅供参考）")
 
         # ── 第 2 轮：互相质疑，可改票（基于第 1 轮，需 ≥2 位有效委员才有意义）──
+        # 优化：第 2 轮辩论是为化解分歧；若第 1 轮已**全票一致且信心接近**，辩论几无价值，
+        # 直接跳过省 4 次 LLM 调用(约占单标的投委会 token 的 ~44%)。
         valid1 = {ro: r for ro, r in reviews1.items() if not r.get("error")}
         reviews2: dict[str, dict] = dict(reviews1)
         revised = []
-        if len(valid1) >= 2:
+        _distinct_votes = {r.get("vote", "abstain") for r in valid1.values()}
+        _unanimous = len(valid1) >= 2 and len(_distinct_votes) == 1 and not _needs_discussion(valid1)
+        if _unanimous:
+            yield _sse("committee_round2_skipped", ticker=ticker, vote=next(iter(_distinct_votes)),
+                       message=f"{ticker} 第 1 轮 {len(valid1)} 位委员全票一致"
+                               f"（{next(iter(_distinct_votes))}）且信心接近，跳过第 2 轮辩论省算力")
+        elif len(valid1) >= 2:
             yield _sse("committee_round2_start", ticker=ticker,
                        message=f"{ticker} 第 2 轮辩论与质疑...")
             r2_tasks = [_review_round2(m, exec_plan, reviews1) for m in MEMBERS]
