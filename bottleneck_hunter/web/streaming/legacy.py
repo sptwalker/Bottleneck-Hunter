@@ -63,9 +63,6 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
         )
 
         queue = asyncio.Queue()
-        task = asyncio.create_task(
-            _run_decompose_with_progress(decomposer, config.end_product, queue)
-        )
 
         # 整体超时: 每层假设最多 8 个并发批次，每批 LLM_TIMEOUT × (MAX_RETRIES+1)
         # 5层 × 8批 × 120s × 3次 / 4并发 ≈ 3600s，再加语义去重的 120s
@@ -76,13 +73,25 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
             // decomposer.MAX_CONCURRENCY
             + decomposer.LLM_TIMEOUT  # 语义去重
         )
-        total_timeout = min(total_timeout, 1800)  # 硬上限 30 分钟
-        deadline = asyncio.get_event_loop().time() + total_timeout
+        # 上限默认 3600s（旧 1800s 对深层/慢模型偏短，注释自算的 5 层预算就是 3720s），
+        # 可用 BH_DECOMPOSE_TIMEOUT 覆盖。
+        import os
+        _cap = int(os.getenv("BH_DECOMPOSE_TIMEOUT", "3600"))
+        total_timeout = min(total_timeout, _cap)
+        _now = asyncio.get_event_loop().time()
+        # 拆解器自身的软 deadline 比外层硬 deadline 早 90s：让它层间优雅收尾、保住已完成层，
+        # 而不是被 drain_task_queue 的硬取消丢弃全部。外层硬 deadline 仅作兜底。
+        soft_deadline = _now + max(total_timeout - 90, total_timeout * 0.9)
+        deadline = _now + total_timeout
+
+        task = asyncio.create_task(
+            _run_decompose_with_progress(decomposer, config.end_product, queue, deadline=soft_deadline)
+        )
 
         chain = None
         async for event in drain_task_queue(
             task, queue, deadline=deadline,
-            timeout_msg=f"产业链拆解超时（已等待 {total_timeout}s），请尝试减少拆解层数或更换模型",
+            timeout_msg=f"产业链拆解超时（已等待 {total_timeout}s），请尝试减少拆解层数或更换更快的模型",
         ):
             if isinstance(event, tuple) and event[0] == "__result__":
                 chain = event[1]
@@ -97,6 +106,10 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
 
         yield _sse("step_done", step="decompose", index=0, result=chain.model_dump())
 
+        if chain.metadata.get("partial"):
+            yield _sse("step_progress", step="decompose",
+                       message=f"⏱ 因时间预算，拆解停在第 {chain.metadata.get('stopped_at_layer', '?')} 层"
+                               f"（已返回部分结果，继续后续分析）。如需更深可减少层数或换更快模型。", log=True)
         if decompose_failures > 0:
             yield _sse("step_progress", step="decompose",
                        message=f"拆解完成（{decompose_failures} 次调用失败，{decompose_retries} 次重试）")

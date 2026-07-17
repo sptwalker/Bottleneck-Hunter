@@ -103,8 +103,8 @@ async def drain_task_queue(task, queue, *, deadline: float | None = None, poll: 
                 pass
 
 
-async def _run_decompose_with_progress(decomposer, end_product, queue):
-    """运行拆解并通过 queue 发送进度事件。"""
+async def _run_decompose_with_progress(decomposer, end_product, queue, deadline=None):
+    """运行拆解并通过 queue 发送进度事件。deadline 透传给拆解器做层间优雅收尾。"""
     async def on_layer_start(depth, max_depth, parent_count):
         await queue.put(_sse(
             "step_progress", step="decompose",
@@ -114,7 +114,8 @@ async def _run_decompose_with_progress(decomposer, end_product, queue):
     async def on_progress(msg):
         await queue.put(_sse("step_progress", step="decompose", message=msg, log=True))
 
-    result = await decomposer.decompose(end_product, on_layer_start=on_layer_start, on_progress=on_progress)
+    result = await decomposer.decompose(end_product, on_layer_start=on_layer_start,
+                                        on_progress=on_progress, deadline=deadline)
     await queue.put(None)  # 结束信号
     return result
 

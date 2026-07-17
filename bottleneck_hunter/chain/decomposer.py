@@ -108,8 +108,14 @@ class ChainDecomposer:
         self._timeout_count = 0
         self._retry_count = 0
 
-    async def decompose(self, end_product: str, on_layer_start=None, on_progress=None) -> ChainGraph:
-        """Run full decomposition and return a ChainGraph."""
+    async def decompose(self, end_product: str, on_layer_start=None, on_progress=None,
+                         deadline: float | None = None) -> ChainGraph:
+        """Run full decomposition and return a ChainGraph.
+
+        deadline: asyncio 事件循环时钟(loop.time())的绝对截止时刻。层间检查剩余时间，
+            不足以再钻一层时**优雅停止**并返回已拆好的图(metadata['partial']=True)，
+            而非被外层硬取消丢弃全部已完成层。None 则不限时(由外层兜底)。
+        """
         # 重置统计计数器
         self._timeout_count = 0
         self._retry_count = 0
@@ -140,6 +146,22 @@ class ChainDecomposer:
         semaphore = asyncio.Semaphore(self.MAX_CONCURRENCY)
 
         for depth in range(1, self.max_depth + 1):
+            # 层间 deadline 检查：预留一层的预算，不够就优雅停在当前深度(保住已完成层)。
+            # 单层最坏 = ceil(MAX_NODES_PER_LAYER/并发) 批 × LLM_TIMEOUT×(重试+1)，太悲观；
+            # 用「一层典型耗时」的保守估计：并发批数 × LLM_TIMEOUT。
+            if deadline is not None and depth > 1:
+                import math
+                est_batches = math.ceil(self.MAX_NODES_PER_LAYER / self.MAX_CONCURRENCY)
+                est_layer_sec = est_batches * self.LLM_TIMEOUT
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining < est_layer_sec:
+                    logger.warning("拆解 deadline 将至(剩 %.0fs<单层预估 %.0fs)，停在第 %d 层，返回部分结果",
+                                   remaining, est_layer_sec, depth - 1)
+                    if on_progress:
+                        await on_progress(f"⏱ 时间预算将尽，停在第 {depth - 1} 层，返回已拆解部分（可减少层数/换更快模型重试）")
+                    graph.metadata["partial"] = True
+                    graph.metadata["stopped_at_layer"] = depth - 1
+                    break
             parent_nodes = graph.get_nodes_at_layer(depth - 1)
             # 广度上限：父节点过多时只展开最关键的前 N 个（按其对下游的 dependency 排序），
             # 其余节点仍保留在图中作为叶子，只是不再向上钻取——避免指数爆炸导致整体超时。
