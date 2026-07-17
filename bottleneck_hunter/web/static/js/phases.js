@@ -501,9 +501,16 @@ function _updateAnalysisTags() {
     created_at: state.config.created_at || '',
     run_count: state.config.run_count || 1,
   };
-  const { provider, model } = getMainModel();
-  data.provider = provider || '';
-  data.model = model || '';
+  // 分析模型：优先用后端**实际解析出**的真实模型(resolved_*，"跟随顶栏配置"也能显示)；
+  // 其次用已加载分析记录里保存的 provider/model(加载历史时 loadAnalysis 写入)；
+  // 再回退到顶栏当前选择；仍为空(跟随顶栏配置且未开跑)则显示占位，保证卡片模型段始终有值。
+  const { provider: mainProv, model: mainModel } = getMainModel();
+  data.provider = state.config.resolved_provider || state.config.provider || mainProv || '';
+  data.model = state.config.resolved_model || state.config.model || mainModel || '';
+  if (!data.provider) {
+    data.provider = '跟随顶栏配置';
+    data.model = '';
+  }
 
   const hasData = data.sector || data.seq_no;
   const fullHtml = hasData ? buildAnalysisTag(data) : '';
@@ -730,6 +737,11 @@ function handlePhase1Event(data) {
     if (data.seq_no) state.seqNo = data.seq_no;
     if (data.run_count) state.config.run_count = data.run_count;
     if (data.completed_phases) state.config.completed_phases = data.completed_phases;
+    // 记录后端**实际解析出**的分析模型（"跟随顶栏配置"时前端 provider 为空，
+    // 后端 get_llm_for_position 解析出真实 provider/model 并放在 config 里回传）→ 卡片据此显示
+    const _cfg = data.config || {};
+    if (_cfg.provider) state.config.resolved_provider = _cfg.provider;
+    if (_cfg.model) state.config.resolved_model = _cfg.model;
     state.phase1 = data;
     if (state.phase2) state.p2NeedsUpdate = true; else state.phase2 = null;
     if (state.phase3) state.p3NeedsUpdate = true; else state.phase3 = null;
