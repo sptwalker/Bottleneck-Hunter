@@ -70,6 +70,16 @@ async def detect_catalysts(
         if not strategy and not intel:
             continue
 
+        # 跳过重复提取：策略与情报自上次提取以来都没更新（源没变→重提结果一样）。
+        # 策略每周才变、催化剂每天扫 → 多数日子源未变，跳过省 LLM。保守：仅在"有历史催化剂
+        # 可作参照 且 源时间 ≤ 最新催化剂时间"时才跳，任何不确定(无历史/缺时间戳/源更新)都照跑。
+        if existing:
+            newest_cat_ts = max((c.get("created_at", "") for c in existing), default="")
+            src_ts = max((strategy or {}).get("created_at", ""), (intel or {}).get("created_at", ""))
+            if newest_cat_ts and src_ts and src_ts <= newest_cat_ts:
+                logger.debug("催化剂：%s 策略/情报自上次提取未更新，跳过", ticker)
+                continue
+
         if llm and budget and budget.can_spend(estimated_tokens=1500):
             try:
                 catalysts = await _extract_catalysts_llm(
