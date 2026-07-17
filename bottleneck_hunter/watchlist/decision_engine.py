@@ -631,6 +631,37 @@ async def run_strategic_plan(
         yield _sse("decision_error", layer="L2", error="无可用 LLM")
         return
 
+    # 复用未过时的 L2：若最新有效组合策略的上游 macro_strategy_id == 当前 L1 的 id（L1 未变→
+    # L2 输入未变）且够新（默认 20h≈当日），直接复用、跳过重生成，省 L2 LLM(约 8000+3000 token)。
+    # L2 是策略层非交易执行；每日仍有 run_deviation_check 做偏离检查，故当日复用安全。
+    # BH_DECISION_REUSE_HOURS=0 可关闭。
+    import os as _os
+    _reuse_h = float(_os.getenv("BH_DECISION_REUSE_HOURS", "20"))
+    if _reuse_h > 0:
+        try:
+            _prev = store.get_latest_strategic_plan()
+        except Exception:
+            _prev = None
+        if _prev and _prev.get("macro_strategy_id") == macro.get("id") and _prev.get("result_json"):
+            _fresh = False
+            try:
+                from datetime import datetime, timezone
+                _t = datetime.fromisoformat(_prev.get("created_at", ""))
+                if _t.tzinfo is None:
+                    _t = _t.replace(tzinfo=timezone.utc)
+                _fresh = (datetime.now(timezone.utc) - _t).total_seconds() <= _reuse_h * 3600
+            except (ValueError, TypeError):
+                _fresh = False
+            if _fresh:
+                _rj = _prev.get("result_json") or {}
+                yield _sse("decision_done", layer="L2", reused=True,
+                           plan_id=_prev.get("id", ""),
+                           stance=(_rj.get("overall_stance", "balanced") if isinstance(_rj, dict) else "balanced"),
+                           result=_rj,
+                           message=f"♻ 复用当日 L2 组合策略 v{_prev.get('version', '?')}"
+                                   f"（上游 L1 未变），跳过重生成省算力")
+                return
+
     if budget and not budget.can_spend(estimated_tokens=8000):
         yield _sse("decision_error", layer="L2", error="预算不足")
         return
