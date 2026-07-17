@@ -153,6 +153,16 @@ class ChainDecomposer:
         self._last_fail_reason = ""
         self._on_progress = on_progress
 
+        # 一次性打印拆解器实际持有的 LLM 真实身份，确认锁定的主模型确实是它在拆解。
+        # base_url 是关键：siliconflow/deepseek 等 OpenAI 兼容 provider 底层 openai SDK 的
+        # 重试日志名都是 openai._base_client，只有 base_url 能区分真 OpenAI 还是兼容端点。
+        _m = getattr(self.llm, "model_name", None) or getattr(self.llm, "model", None) or "?"
+        _b = (getattr(self.llm, "openai_api_base", None)
+              or getattr(getattr(self.llm, "client", None), "_base_url", None)
+              or "(SDK默认/非OpenAI兼容)")
+        logger.info("[decompose] 拆解器 LLM=%s model=%s base_url=%s",
+                    type(self.llm).__name__, _m, _b)
+
         graph = ChainGraph(
             sector=self.sector or end_product,
             end_product=end_product,

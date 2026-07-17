@@ -38,6 +38,40 @@ from ._common import (
 # ===========================================================================
 
 
+def _describe_llm(llm) -> str:
+    """返回 LLM 实例的真实信息（type/内部model/base_url/fallback候选链），供日志定位。fail-silent。
+
+    诊断意图：siliconflow/deepseek/qwen 等 OpenAI 兼容 provider 都走 langchain_openai，底层
+    openai SDK 的重试日志名一律是 `openai._base_client` 且只打路径 /chat/completions（不含
+    base_url）——极易被误读成"在打 OpenAI"。打出真实 base_url 才能一锤定音是谁在被调用。
+    """
+    if llm is None:
+        return "None"
+    try:
+        cls = type(llm).__name__
+        # FallbackChatModel：打候选链，确认是否被套了自动替换壳
+        cands = getattr(llm, "candidates", None)
+        if cands:
+            parts = []
+            for c in cands:
+                try:
+                    parts.append(f"{c[1]}/{c[2]}({_describe_llm(c[0])})" if len(c) >= 3
+                                 else _describe_llm(c[0]))
+                except Exception:  # noqa: BLE001
+                    parts.append("?")
+            return f"{cls}[候选链: {' → '.join(parts)}]"
+        model = getattr(llm, "model_name", None) or getattr(llm, "model", None) or "?"
+        # base_url：langchain 存在 openai_api_base；底层 openai client 存 base_url
+        base = (getattr(llm, "openai_api_base", None)
+                or getattr(getattr(llm, "client", None), "_base_url", None)
+                or getattr(getattr(llm, "async_client", None), "base_url", None)
+                or getattr(llm, "anthropic_api_url", None)
+                or "(SDK默认)")
+        return f"{cls}(model={model}, base_url={base})"
+    except Exception as e:  # noqa: BLE001
+        return f"<描述失败: {e}>"
+
+
 def _primary_failed_event(stage: str, reason: str, provider: str, model: str):
     """构造 primary_failed 事件：附主模型失败原因 + 是否有备用可切换(供前端弹窗决策)。"""
     reason = reason or "调用失败"
@@ -85,6 +119,10 @@ async def stream_phase1(
     analysis_id = str(_uuid.uuid4())
 
     try:
+        _mode = ("显式选模型" if provider else
+                 ("放行备用/调度" if allow_fallback else "跟随顶栏·锁定主模型"))
+        logger.info("[phase1] LLM 解析开始 | 入参 provider=%r model=%r | 模式=%s | allow_fallback=%s",
+                    provider, model, _mode, allow_fallback)
         if provider:
             # 用户在环节下拉选了具体模型：直接用它。allow_fallback 时套自动替换壳(弹窗后重跑用备用)。
             deep_llm = create_llm(provider, model, with_fallback=allow_fallback)
@@ -98,6 +136,8 @@ async def stream_phase1(
             )
             if deep_llm is None:
                 raise ValueError("未配置可用的 LLM provider，请在 AI 配置中设置")
+        logger.info("[phase1] 解析结果 | provider=%s model=%s | 实例=%s",
+                    provider, model, _describe_llm(deep_llm))
     except Exception as e:
         yield _sse("error", step="init", message=f"LLM 初始化失败: {e}")
         return
