@@ -134,7 +134,7 @@
             <div class="custom-form">
               <div class="fg"><label>市场</label><select id="wiz-market"><option value="a_stock">A 股</option><option value="us_stock" selected>美股</option></select></div>
               <div class="fg"><label>产业方向</label><input type="text" id="wiz-sector" list="dl-sectors" placeholder="例: 低空经济" autocomplete="off"><datalist id="dl-sectors"></datalist></div>
-              <div class="fg"><label>终端产品</label><input type="text" id="wiz-product" list="dl-products" placeholder="例: eVTOL飞行器" autocomplete="off"><datalist id="dl-products"></datalist></div>
+              <div class="fg"><label>终端产品</label><input type="text" id="wiz-product" list="dl-products" placeholder="例: eVTOL飞行器" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')"><datalist id="dl-products"></datalist></div>
               <div class="fg"><label>主分析模型</label><select id="wiz-main-model"><option value="" selected>跟随顶栏配置</option></select></div>
               <button class="btn btn-primary" id="wiz-start-custom">开始分析</button>
             </div>
@@ -1424,8 +1424,8 @@
 <div class="ctx-menu" id="ctx-menu" style="display:none">
   <h4>配置赛道参数</h4>
   <div class="fg"><label>市场</label><select id="ctx-market"><option value="a_stock">A 股</option><option value="us_stock" selected>美股</option></select></div>
-  <div class="fg"><label>产业方向</label><input type="text" id="ctx-sector" autocomplete="off"></div>
-  <div class="fg"><label>终端产品</label><input type="text" id="ctx-product" autocomplete="off"></div>
+  <div class="fg"><label>产业方向</label><input type="text" id="ctx-sector" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')"></div>
+  <div class="fg"><label>终端产品</label><input type="text" id="ctx-product" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')"></div>
   <div class="fg"><label>主分析模型</label><select id="ctx-model">
     <option value="" selected>跟随顶栏配置</option>
   </select></div>
