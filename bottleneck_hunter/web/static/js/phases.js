@@ -487,6 +487,23 @@ function setTriState(btnId, stateKey, newState) {
 }
 
 /* ── 分析记录标签（替换旧的 seq badge + phase target） ── */
+// 「跟随顶栏配置」的预解析模型缓存：向后端问一次当前生效模型，供卡片直接显示真实模型名。
+const _followModel = { provider: '', model: '', fetching: false };
+async function _ensureFollowModel() {
+  if (_followModel.provider || _followModel.fetching) return;  // 已有或正在取
+  _followModel.fetching = true;
+  try {
+    const r = await fetch('/api/resolve-model?role=pipeline_decompose', { credentials: 'same-origin' });
+    const resp = r.ok ? await r.json() : null;
+    if (resp && resp.provider) {
+      _followModel.provider = resp.provider;
+      _followModel.model = resp.model || '';
+      _updateAnalysisTags();  // 拿到真实模型后重渲染卡片
+    }
+  } catch (e) { /* 取不到就维持占位，不阻塞 */ }
+  finally { _followModel.fetching = false; }
+}
+
 function _updateAnalysisTags() {
   const completedPhases = state.config.completed_phases || 0;
 
@@ -503,13 +520,16 @@ function _updateAnalysisTags() {
   };
   // 分析模型：优先用后端**实际解析出**的真实模型(resolved_*，"跟随顶栏配置"也能显示)；
   // 其次用已加载分析记录里保存的 provider/model(加载历史时 loadAnalysis 写入)；
-  // 再回退到顶栏当前选择；仍为空(跟随顶栏配置且未开跑)则显示占位，保证卡片模型段始终有值。
+  // 再回退到顶栏当前选择；仍为空(跟随顶栏配置且未开跑)则**预解析**当前生效模型，显示真实名。
   const { provider: mainProv, model: mainModel } = getMainModel();
-  data.provider = state.config.resolved_provider || state.config.provider || mainProv || '';
-  data.model = state.config.resolved_model || state.config.model || mainModel || '';
-  if (!data.provider) {
-    data.provider = '跟随顶栏配置';
-    data.model = '';
+  data.provider = state.config.resolved_provider || state.config.provider || mainProv
+                  || _followModel.provider || '';
+  data.model = state.config.resolved_model || state.config.model || mainModel
+               || _followModel.model || '';
+  if (!data.provider && !mainProv) {
+    // 跟随顶栏配置且尚无解析结果：异步预解析真实模型，回来后重渲染并显示真实模型名。
+    // 解析很快(本地解析)；未回来的一瞬模型段暂不显示，绝不显示"跟随顶栏配置"占位。
+    _ensureFollowModel();
   }
 
   const hasData = data.sector || data.seq_no;
@@ -2030,6 +2050,14 @@ async function refreshModelSelectors(fallbackProviderList) {
       sel.value = prev;
     } else {
       sel.value = '';
+    }
+    // 顶栏主模型切换 → 失效「跟随顶栏配置」的预解析缓存并重解析，卡片显示新的真实模型
+    if (id === 'wiz-main-model' && !sel._followHooked) {
+      sel._followHooked = true;
+      sel.addEventListener('change', () => {
+        _followModel.provider = ''; _followModel.model = '';
+        _updateAnalysisTags();  // 会在跟随态下触发 _ensureFollowModel 重取
+      });
     }
   });
 

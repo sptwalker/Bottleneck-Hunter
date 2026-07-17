@@ -211,6 +211,21 @@ class ShortlistConfig(BaseModel):
     max_shortlist_count: int = Field(default=30, ge=1, le=100)
 
 
+@router.get("/resolve-model")
+async def resolve_model(role: str = "pipeline_decompose", user: dict = Depends(get_current_user)):
+    """预解析「跟随顶栏配置」当前会实际用到的 provider/model（不构造调用、不烧 token）。
+
+    供前端在开始分析前就把真实模型名显示到标题栏卡片，而非等分析跑完或显示占位。
+    """
+    from bottleneck_hunter.llm_clients.factory import get_llm_for_position
+    try:
+        _llm, provider, model = get_llm_for_position(role or "pipeline_decompose", with_fallback=False)
+    except Exception as e:
+        logger.debug("resolve-model 解析失败: %s", e)
+        provider, model = "", ""
+    return {"provider": provider or "", "model": model or ""}
+
+
 class Phase2Request(BaseModel):
     analysis_id: str
     shortlist_config: ShortlistConfig = Field(default_factory=ShortlistConfig)
