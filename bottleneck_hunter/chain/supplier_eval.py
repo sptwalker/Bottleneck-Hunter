@@ -268,12 +268,44 @@ class SupplierEvaluator:
         llm: BaseChatModel,
         language: str = "zh",
         investability_filter: InvestabilityFilter | None = None,
+        store=None,
+        reuse_max_age_days: int = 7,
     ):
         self.llm = llm
         self.language = language
         self._system_prompt = _load_prompt("supplier_eval")
         self._on_progress = None
         self._investability_filter = investability_filter or InvestabilityFilter()
+        # 复用已评估的企业档案：同一 ticker 在 reuse_max_age_days 天内评过 → 直接用旧评分，
+        # 跳过 LLM。store 为 None(如脱离 web 上下文)则不复用，保持原行为。
+        self._store = store
+        self._reuse_max_age_days = reuse_max_age_days
+
+    def _reuse_scorecard(self, ticker: str) -> SupplierScorecard | None:
+        """若该 ticker 有够新的持久化档案，反序列化为 SupplierScorecard 复用，否则 None。"""
+        if self._store is None or self._reuse_max_age_days <= 0:
+            return None
+        try:
+            arch = self._store.get_company_archive(ticker)
+        except Exception:
+            return None
+        if not arch or not arch.get("scorecard"):
+            return None
+        updated = arch.get("updated_at") or ""
+        try:
+            from datetime import datetime, timezone
+            ts = datetime.fromisoformat(updated)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - ts).total_seconds() / 86400
+            if age_days > self._reuse_max_age_days:
+                return None
+        except (ValueError, TypeError):
+            return None
+        try:
+            return SupplierScorecard(**arch["scorecard"])
+        except Exception:
+            return None
 
     async def evaluate(
         self,
@@ -511,13 +543,30 @@ class SupplierEvaluator:
         """Evaluate a batch of suppliers for one bottleneck node."""
         financial_map = financial_map or {}
         batch_context = self._compute_batch_context(suppliers, financial_map)
+
+        # 先复用够新的持久化档案，只对"无档案/档案过旧"的供应商跑 LLM，省重复评估调用。
+        reused: list[SupplierScorecard] = []
+        to_eval: list[SupplierInfo] = []
+        for s in suppliers:
+            sc = self._reuse_scorecard(getattr(s, "ticker", ""))
+            if sc is not None:
+                reused.append(sc)
+            else:
+                to_eval.append(s)
+        if reused and self._on_progress:
+            try:
+                await self._on_progress(f"♻ 复用 {len(reused)} 家近期已评估企业档案，"
+                                        f"仅新评 {len(to_eval)} 家（省重复 LLM 调用）")
+            except Exception:
+                pass
+
         tasks = [
             self.evaluate(s, bottleneck, financial_map.get(s.ticker), batch_context)
-            for s in suppliers
+            for s in to_eval
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        scorecards = []
+        scorecards = list(reused)
         for r in results:
             if isinstance(r, Exception):
                 logger.warning(f"Supplier evaluation failed: {r}")

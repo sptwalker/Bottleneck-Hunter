@@ -339,7 +339,7 @@ async def stream_phase2(
     scorecards = []
     try:
         yield _sse("step_start", step="supplier_eval", index=2, message=STEP_LABELS["supplier_eval"])
-        evaluator = SupplierEvaluator(llm=deep_llm, language=language)
+        evaluator = SupplierEvaluator(llm=deep_llm, language=language, store=store)
         se_queue = asyncio.Queue()
         se_task = asyncio.create_task(
             _run_supplier_eval_with_progress(evaluator, supplier_map, top_reports, se_queue, financial_map=financial_map)
