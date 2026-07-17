@@ -136,41 +136,49 @@ class ChainStore:
 
     def get_fresh_chain(self, product_name: str, max_age_days: int = 14,
                         min_depth: int = 0, sector: str = "") -> dict[str, Any] | None:
-        """最新版本若够新(≤max_age_days)、深度足够(≥min_depth)、赛道匹配、且非部分结果，
-        则返回，否则 None。供筛选入口复用已拆解的产业链、跳过 70~360 次 LLM 拆解调用。
+        """返回可复用的产业链版本，否则 None。省 70~360 次 LLM 拆解调用。
 
+        逐版本(新→旧)扫描，返回第一个同时满足所有安全门的版本——**不只看最新版**，
+        这样一次失败/退化的保存(root-only)不会把更早的好版本"遮蔽"掉。
         安全门(缺一不可复用)：
-        - 赛道匹配：同 end_product 不同 sector(如"轴承"在汽车 vs 风电)拆出的链完全不同，
-          sector 不一致必须重拆，否则会拿错行业的链跑瓶颈/供应商。
-        - 非部分结果：拆解超时会 metadata.partial=True 但仍以「请求深度」存 max_depth，
-          若复用等于拿一个实际更浅的截断链冒充完整链，故 partial 一律重拆。
-        - 深度门：缓存链 max_depth ≥ 请求深度(且因上一条保证它是「实际达到」的深度)。
+        - 够新：created_at 在 max_age_days 内。
+        - 赛道匹配：同 end_product 不同 sector(如"轴承"在汽车 vs 风电)拆出的链完全不同。
+        - 非部分结果：拆解超时会 metadata.partial=True，其深层不完整。
+        - **实际达到深度** ≥ 请求深度：用节点的真实最大 layer 判定，而非存储的 max_depth
+          (max_depth 记的是「请求深度」，LLM 全失败时会得到 root-only 但 max_depth 仍等于请求值)。
         """
-        latest = self.get_latest_chain(product_name)
-        if not latest:
-            return None
-        cj = latest.get("chain_json") or {}
-        if not isinstance(cj, dict):
-            return None
-        # 赛道必须匹配(sector 为空则不校验，兼容旧调用)
-        if sector and (cj.get("sector") or "") != sector:
-            return None
-        # 部分结果(拆解超时截断)不可复用——它的 max_depth 是请求深度而非实际达到深度
-        if (cj.get("metadata") or {}).get("partial"):
-            return None
-        # 深度门：缓存链的 max_depth 必须 ≥ 请求深度
-        cached_depth = cj.get("max_depth", 0) or 0
-        if min_depth and cached_depth < min_depth:
-            return None
-        created_raw = latest.get("created_at", "")
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
         try:
-            created = datetime.fromisoformat(created_raw)
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-        except (ValueError, TypeError):
+            versions = self.get_chains(product_name)  # 新→旧
+        except Exception:
             return None
-        age_days = (datetime.now(timezone.utc) - created).total_seconds() / 86400
-        return latest if age_days <= max_age_days else None
+        for v in versions:
+            cj = v.get("chain_json") or {}
+            if not isinstance(cj, dict):
+                continue
+            # 够新
+            try:
+                created = datetime.fromisoformat(v.get("created_at", ""))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            if (now - created).total_seconds() / 86400 > max_age_days:
+                continue  # 更旧的版本只会更旧，但为简单起见继续扫(数量少)
+            # 赛道匹配(sector 为空则不校验，兼容旧调用)
+            if sector and (cj.get("sector") or "") != sector:
+                continue
+            # 非部分结果
+            if (cj.get("metadata") or {}).get("partial"):
+                continue
+            # 实际达到深度 ≥ 请求深度(用真实节点 layer，而非存储 max_depth)
+            nodes = cj.get("nodes") or []
+            achieved = max((n.get("layer", 0) or 0 for n in nodes), default=0)
+            if min_depth and achieved < min_depth:
+                continue
+            return v
+        return None
 
     # ── 版本对比 ───────────────────────────────────────────
 

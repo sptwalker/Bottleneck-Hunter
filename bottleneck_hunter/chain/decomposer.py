@@ -300,7 +300,16 @@ class ChainDecomposer:
                 f"（节点异常 {fail_count} 次，超时放弃 {timeout_count} 次，重试 {retry_count} 次）"
             )
 
-        # 自动保存产业链版本
+        # 自动保存产业链版本——但**只保存有效链**：若第 1 层就没拆出任何子节点(LLM 全失败/
+        # 额度不足等)，得到的是 root-only 退化链，保存它会污染缓存(后续被复用成"1 层供应链")。
+        # 有效判据：至少拆出 1 层子节点(总节点 > 1 且存在 layer≥1 的节点)。
+        _has_children = len(graph.nodes) > 1 and any((n.layer or 0) >= 1 for n in graph.nodes)
+        if not _has_children:
+            logger.warning("拆解未产出任何子节点(第1层全失败?)，不保存退化链，交由上层报错重试")
+            graph.metadata["decompose_failed"] = True
+            self._on_progress = None
+            return graph
+
         model_name = getattr(self.llm, "model_name", "") or getattr(self.llm, "model", "") or ""
         graph.model_used = str(model_name)
         try:

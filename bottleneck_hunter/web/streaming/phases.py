@@ -117,6 +117,11 @@ async def stream_phase1(
                     yield event
             if chain is None:
                 raise RuntimeError("产业链拆解未返回结果")
+            # 退化链保护：第 1 层没拆出任何子节点(LLM 全失败/额度不足)→ 明确报错，
+            # 不让"1 层供应链"的空结果流入后续瓶颈/供应商分析。
+            if chain.metadata.get("decompose_failed") or not any((n.layer or 0) >= 1 for n in chain.nodes):
+                raise RuntimeError("产业链拆解未产出任何子环节，通常是 AI 模型调用失败或额度不足；"
+                                   "请检查顶栏所选模型的可用性/余额后重试")
             yield _sse("step_done", step="decompose", index=0, result=chain.model_dump())
             if chain.metadata.get("partial"):
                 yield _sse("step_progress", step="decompose",
