@@ -364,6 +364,10 @@ def get_models_for_role(
 
     # 优先级1: 数据库矩阵（手动覆盖，最高优先）
     configs = _load_role_configs_from_db(role_key, uid)
+    if prefer_primary:
+        logger.info("[resolve] role=%s prefer_primary=True | _PRIMARY_PROVIDER=%r | DB矩阵configs=%s",
+                    role_key, _PRIMARY_PROVIDER,
+                    [(c.get("provider"), c.get("model")) for c in (configs or [])] or "无")
     if configs:
         results = []
         for cfg in configs:
@@ -375,6 +379,9 @@ def get_models_for_role(
             except Exception as e:
                 logger.warning("create_llm 失败 %s/%s: %s", cfg["provider"], cfg["model"], e)
         if results:
+            if prefer_primary:
+                logger.info("[resolve] role=%s 命中【优先级1 DB矩阵】→ %s（注意：矩阵优先于锁定主模型）",
+                            role_key, [(r[1], r[2]) for r in results])
             return results
 
     # 优先级1.5（仅 prefer_primary）：顶栏「主要模型」直用 —— 用户设了主模型即由它完全决定，
@@ -382,7 +389,9 @@ def get_models_for_role(
     # 供产业链分析/瓶颈评分/供应商评估等重要环节使用（用户诉求：主模型决定这些环节）。
     if prefer_primary:
         prim = (_PRIMARY_PROVIDER or "").lower().strip()
-        if prim and is_provider_active(prim) and _user_has_llm_key(prim, uid):
+        _act = is_provider_active(prim) if prim else False
+        _hk = _user_has_llm_key(prim, uid) if prim else False
+        if prim and _act and _hk:
             try:
                 from bottleneck_hunter.llm_clients.health import health as _health
                 _open = _health.is_open(uid, prim)
@@ -394,9 +403,17 @@ def get_models_for_role(
                     try:
                         _llm = create_llm(prim, pm, temperature=temperature,
                                           with_fallback=with_fallback, user_id=uid)
+                        logger.info("[resolve] role=%s 命中【优先级1.5 主模型直用】→ %s/%s", role_key, prim, pm)
                         return [(_llm, prim, pm)]  # 多槽角色也退化为单主模型(用户显式要求)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("prefer_primary 主模型 %s/%s 构建失败，回退调度: %s", prim, pm, e)
+                else:
+                    logger.warning("[resolve] role=%s 主模型 %s 无可解析 model，跳过直用→调度", role_key, prim)
+            else:
+                logger.warning("[resolve] role=%s 主模型 %s 处于熔断，跳过直用→调度", role_key, prim)
+        else:
+            logger.warning("[resolve] role=%s 主模型直用被跳过 | _PRIMARY=%r active=%s has_key=%s → 落到调度",
+                           role_key, prim or "(空)", _act, _hk)
 
     # 优先级2（DC_MODEL_* 环境影子配置）已退役：它是旧的静态角色→模型硬绑定，会**无条件**
     # 覆盖智能调度、且单值会让多槽 fan-out 塌成 1 个模型。统一配置只认「手填矩阵(可覆盖)」+
@@ -412,8 +429,12 @@ def get_models_for_role(
                 model = role_def.default_model or resolve_provider_model(dp, uid)
                 if model and _ctx_fits(model, role_min_ctx):  # 默认模型容量不足→落到优先级4另选
                     try:
-                        return [(create_llm(dp, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
-                                 dp, model)]
+                        _r = [(create_llm(dp, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
+                               dp, model)]
+                        if prefer_primary:
+                            logger.info("[resolve] role=%s 命中【优先级3 角色默认】→ %s/%s（主模型直用未生效）",
+                                        role_key, dp, model)
+                        return _r
                     except Exception:
                         pass
         except Exception:  # noqa: BLE001
@@ -483,6 +504,9 @@ def get_models_for_role(
             continue
         results.append((llm, provider, model))
 
+    if prefer_primary:
+        logger.info("[resolve] role=%s 命中【优先级4 智能调度】→ %s（主模型直用未生效，已回退调度排序）",
+                    role_key, [(r[1], r[2]) for r in results] or "空")
     return results
 
 
