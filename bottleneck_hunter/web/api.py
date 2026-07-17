@@ -201,6 +201,7 @@ class Phase1Request(BaseModel):
     model: str = ""
     market: str = "us_stock"
     max_market_cap_yi: Optional[float] = 200
+    force_refresh_chain: bool = Field(default=False, description="强制重建产业链，忽略已缓存版本")
 
 
 class ShortlistConfig(BaseModel):
@@ -262,6 +263,7 @@ async def phase1(request: Request, req: Phase1Request, user: dict = Depends(get_
                 max_depth=req.max_depth, top_n=req.top_n,
                 language=req.language, provider=req.provider, model=req.model,
                 market=req.market, max_market_cap_yi=req.max_market_cap_yi,
+                force_refresh_chain=req.force_refresh_chain,
                 store=store,
             ):
                 if await request.is_disconnected():

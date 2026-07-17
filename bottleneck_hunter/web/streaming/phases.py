@@ -49,6 +49,7 @@ async def stream_phase1(
     model: str = "",
     market: str = "us_stock",
     max_market_cap_yi: float | None = 200,
+    force_refresh_chain: bool = False,
     store=None,
 ) -> AsyncGenerator[dict, None]:
     """Phase 1: 产业链拆解 + 瓶颈分析。返回 ALL 瓶颈报告。"""
@@ -68,38 +69,58 @@ async def stream_phase1(
         return
     try:
         yield _sse("step_start", step="decompose", index=0, message=STEP_LABELS["decompose"])
-        decomposer = ChainDecomposer(
-            llm=deep_llm, max_depth=max_depth, sector=sector, language=language,
-        )
-        queue = asyncio.Queue()
-        # 整体超时按拆解层数给预算（4层4200s / 5层6400s），BH_DECOMPOSE_TIMEOUT 可覆盖。
-        from bottleneck_hunter.chain.decomposer import decompose_timeout_for_depth
-        total_timeout = decompose_timeout_for_depth(max_depth)
-        _now = asyncio.get_event_loop().time()
-        # 软 deadline 早 90s：拆解器层间优雅收尾、保住已完成层，不被硬取消丢弃全部。
-        soft_deadline = _now + max(total_timeout - 90, total_timeout * 0.9)
-        deadline = _now + total_timeout
 
-        task = asyncio.create_task(
-            _run_decompose_with_progress(decomposer, end_product, queue, deadline=soft_deadline)
-        )
-
+        # 复用已拆解的产业链：结构稳定，14 天内的缓存直接用，省 70~360 次 LLM 拆解调用。
+        # force_refresh_chain=True 或缓存过旧/过浅时才重拆。
         chain = None
-        async for event in drain_task_queue(
-            task, queue, deadline=deadline,
-            timeout_msg=f"产业链拆解超时（已等待 {total_timeout}s），请尝试减少拆解层数或更换更快的模型",
-        ):
-            if isinstance(event, tuple) and event[0] == "__result__":
-                chain = event[1]
-            else:
-                yield event
+        if not force_refresh_chain:
+            try:
+                from bottleneck_hunter.chain.chain_store import ChainStore
+                from bottleneck_hunter.chain.models import ChainGraph
+                cached = ChainStore().get_fresh_chain(end_product, max_age_days=14, min_depth=max_depth)
+                if cached:
+                    chain = ChainGraph(**cached["chain_json"])
+                    yield _sse("step_progress", step="decompose",
+                               message=f"♻ 复用已缓存产业链 v{cached['version']}"
+                                       f"（{cached['created_at'][:10]}，模型 {cached.get('model_used', '?')}）"
+                                       f"，省去重复拆解。如需重建请勾选「强制重建产业链」。", log=True)
+                    yield _sse("step_done", step="decompose", index=0, result=chain.model_dump(), reused=True)
+            except Exception:
+                logger.exception("缓存产业链复用失败，回退到重新拆解")
+                chain = None
+
         if chain is None:
-            raise RuntimeError("产业链拆解未返回结果")
-        yield _sse("step_done", step="decompose", index=0, result=chain.model_dump())
-        if chain.metadata.get("partial"):
-            yield _sse("step_progress", step="decompose",
-                       message=f"⏱ 因时间预算，拆解停在第 {chain.metadata.get('stopped_at_layer', '?')} 层"
-                               f"（已返回部分结果，继续后续分析）。如需更深可减少层数或换更快模型。", log=True)
+            decomposer = ChainDecomposer(
+                llm=deep_llm, max_depth=max_depth, sector=sector, language=language,
+            )
+            queue = asyncio.Queue()
+            # 整体超时按拆解层数给预算（4层4200s / 5层6400s），BH_DECOMPOSE_TIMEOUT 可覆盖。
+            from bottleneck_hunter.chain.decomposer import decompose_timeout_for_depth
+            total_timeout = decompose_timeout_for_depth(max_depth)
+            _now = asyncio.get_event_loop().time()
+            # 软 deadline 早 90s：拆解器层间优雅收尾、保住已完成层，不被硬取消丢弃全部。
+            soft_deadline = _now + max(total_timeout - 90, total_timeout * 0.9)
+            deadline = _now + total_timeout
+
+            task = asyncio.create_task(
+                _run_decompose_with_progress(decomposer, end_product, queue, deadline=soft_deadline)
+            )
+
+            async for event in drain_task_queue(
+                task, queue, deadline=deadline,
+                timeout_msg=f"产业链拆解超时（已等待 {total_timeout}s），请尝试减少拆解层数或更换更快的模型",
+            ):
+                if isinstance(event, tuple) and event[0] == "__result__":
+                    chain = event[1]
+                else:
+                    yield event
+            if chain is None:
+                raise RuntimeError("产业链拆解未返回结果")
+            yield _sse("step_done", step="decompose", index=0, result=chain.model_dump())
+            if chain.metadata.get("partial"):
+                yield _sse("step_progress", step="decompose",
+                           message=f"⏱ 因时间预算，拆解停在第 {chain.metadata.get('stopped_at_layer', '?')} 层"
+                                   f"（已返回部分结果，继续后续分析）。如需更深可减少层数或换更快模型。", log=True)
     except Exception as e:
         logger.exception("Phase1 decompose failed")
         yield _sse("error", step="decompose", message=str(e))

@@ -214,6 +214,9 @@
               <label>市值上限(<span id="wiz-max-cap-unit">亿美元</span>):
                 <input type="number" id="wiz-max-cap" class="form-input form-input--sm" value="300" style="width:70px">
               </label>
+              <label title="不勾选则复用14天内已拆解的产业链，省去重复拆解的大量AI调用；勾选强制重新拆解" style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap">
+                <input type="checkbox" id="wiz-force-rebuild"> 强制重建产业链
+              </label>
               <span class="p1-timer" id="p1-timer" style="display:none">已用时：<b id="p1-timer-val">00分00秒</b></span>
               <div class="p1-progress-bar p1-progress-inline" id="p1-progress-bar" style="display:none">
                 <div class="p2-progress-track"><div class="p2-progress-fill" id="p1-progress-fill" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div></div>

@@ -134,6 +134,30 @@ class ChainStore:
 
         return self._row_to_dict(row) if row else None
 
+    def get_fresh_chain(self, product_name: str, max_age_days: int = 14,
+                        min_depth: int = 0) -> dict[str, Any] | None:
+        """最新版本若够新(≤max_age_days)且深度足够(≥min_depth)则返回，否则 None。
+
+        供筛选入口复用已拆解的产业链、跳过 70~360 次 LLM 拆解调用。产业链结构稳定，
+        14 天内的缓存足够；depth 门确保不会拿一个更浅的缓存冒充更深的请求。
+        """
+        latest = self.get_latest_chain(product_name)
+        if not latest:
+            return None
+        # 深度门：缓存链的 max_depth 必须 ≥ 请求深度，否则重拆
+        cached_depth = (latest.get("chain_json") or {}).get("max_depth", 0) or 0
+        if min_depth and cached_depth < min_depth:
+            return None
+        created_raw = latest.get("created_at", "")
+        try:
+            created = datetime.fromisoformat(created_raw)
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return None
+        age_days = (datetime.now(timezone.utc) - created).total_seconds() / 86400
+        return latest if age_days <= max_age_days else None
+
     # ── 版本对比 ───────────────────────────────────────────
 
     def compare_chains(self, v1_id: int, v2_id: int) -> dict[str, Any]:

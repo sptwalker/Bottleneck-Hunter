@@ -608,13 +608,17 @@ async function runPhase1(sector, product) {
   const maxCap = parseFloat(document.getElementById('wiz-max-cap')?.value || '200');
   state.config.max_market_cap_yi = maxCap;
 
-  logMsg(`参数: 深度=${depth}, TopN=${topN}, 市场=${market}, 模型=${provider}/${model || '默认'}`);
+  // 强制重建产业链：勾选则忽略缓存重新拆解；不勾则复用 14 天内已拆解版本（省大量 LLM 调用）
+  const forceRebuild = !!document.getElementById('wiz-force-rebuild')?.checked;
+
+  logMsg(`参数: 深度=${depth}, TopN=${topN}, 市场=${market}, 模型=${provider}/${model || '默认'}${forceRebuild ? '，强制重建产业链' : ''}`);
 
   const body = {
     sector, end_product: product,
     max_depth: depth, top_n: topN,
     max_market_cap_yi: maxCap,
     language: 'zh', provider, model, market,
+    force_refresh_chain: forceRebuild,
   };
 
   _p1Abort = new AbortController();
