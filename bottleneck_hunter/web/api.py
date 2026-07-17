@@ -202,6 +202,7 @@ class Phase1Request(BaseModel):
     market: str = "us_stock"
     max_market_cap_yi: Optional[float] = 200
     force_refresh_chain: bool = Field(default=False, description="强制重建产业链，忽略已缓存版本")
+    allow_fallback: bool = Field(default=False, description="放行智能调度/自动替换（用户在主模型失败弹窗选切换备用后重发）")
 
 
 class ShortlistConfig(BaseModel):
@@ -219,7 +220,8 @@ async def resolve_model(role: str = "pipeline_decompose", user: dict = Depends(g
     """
     from bottleneck_hunter.llm_clients.factory import get_llm_for_position
     try:
-        _llm, provider, model = get_llm_for_position(role or "pipeline_decompose", with_fallback=False)
+        _llm, provider, model = get_llm_for_position(role or "pipeline_decompose",
+                                                     with_fallback=False, prefer_primary=True)
     except Exception as e:
         logger.debug("resolve-model 解析失败: %s", e)
         provider, model = "", ""
@@ -290,6 +292,7 @@ class Phase2Request(BaseModel):
     language: str = "zh"
     provider: str = "openai"
     model: str = ""
+    allow_fallback: bool = Field(default=False, description="放行智能调度/自动替换（主模型失败弹窗选切换备用后重发）")
 
 
 class ScoringConfig(BaseModel):
@@ -334,6 +337,7 @@ async def phase1(request: Request, req: Phase1Request, user: dict = Depends(get_
                 language=req.language, provider=req.provider, model=req.model,
                 market=req.market, max_market_cap_yi=req.max_market_cap_yi,
                 force_refresh_chain=req.force_refresh_chain,
+                allow_fallback=req.allow_fallback,
                 store=store,
             ):
                 if await request.is_disconnected():
@@ -365,6 +369,7 @@ async def phase2(request: Request, req: Phase2Request, user: dict = Depends(get_
                 market=req.market, max_market_cap_yi=req.max_market_cap_yi,
                 max_suppliers=req.max_suppliers,
                 language=req.language, provider=req.provider, model=req.model,
+                allow_fallback=req.allow_fallback,
                 store=store,
             ):
                 if await request.is_disconnected():

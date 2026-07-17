@@ -594,7 +594,7 @@ function hideP1Overlay() {
 }
 
 /* ── Phase 1: SSE 连接 ──────────────────── */
-async function runPhase1(sector, product) {
+async function runPhase1(sector, product, allowFallback = false) {
   if (state.running) return;   // 防重入：已有环节在跑就忽略(避免重复触发/并发)
   state.config.sector = sector;
   state.config.product = product;
@@ -646,6 +646,7 @@ async function runPhase1(sector, product) {
     max_market_cap_yi: maxCap,
     language: 'zh', provider, model, market,
     force_refresh_chain: forceRebuild,
+    allow_fallback: allowFallback,
   };
 
   _p1Abort = new AbortController();
@@ -687,6 +688,39 @@ async function runPhase1(sector, product) {
 }
 
 function handlePhase1Event(data) {
+  // 主模型失败：锁定主模型模式下主模型出问题(欠费/断联/异常输出) → 弹窗让用户决策，不自动切换。
+  if (data._sseEvent === 'primary_failed') {
+    _stopP1Timer();
+    hideP1Overlay();
+    state.p1Error = true;
+    state.autoMode = false;
+    setTriState('p1-tristate', 'p1TriState', 'restart');
+    const reason = data.reason || '调用失败';
+    const modelStr = data.model ? `${data.provider}/${data.model}` : (data.provider || '主模型');
+    logMsg(`Phase 1 中止: 主模型 ${modelStr} 出现「${reason}」`, 'error');
+    if (data.can_switch) {
+      const bk = data.backup_hint ? `（备用: ${data.backup_hint}）` : '';
+      showConfirm(
+        `你选择的主模型 ${modelStr} 出现「${reason}」问题。\n是否切换到备用模型继续分析${bk}？`,
+        { title: '主模型不可用', confirmText: '切换备用模型', cancelText: '中断分析', danger: true }
+      ).then(ok => {
+        if (ok) {
+          logMsg('用户选择切换备用模型，重新分析...', 'info');
+          runPhase1(state.config.sector, state.config.product, true);  // allow_fallback=true 重跑
+        } else {
+          showP1Info('已中断分析（主模型不可用）');
+        }
+      });
+    } else {
+      showConfirm(
+        `你选择的主模型 ${modelStr} 出现「${reason}」问题，且未配置可用的备用模型，分析被迫停止！\n请检查该模型的可用性/余额，或在 AI 配置中心添加其它可用模型。`,
+        { title: '分析被迫停止', confirmText: '知道了', cancelText: '', danger: true }
+      );
+      showP1Info(`分析停止: 主模型「${reason}」且无备用`);
+    }
+    return;
+  }
+
   // 终止性错误事件（拆解/瓶颈超时或失败）：停表、收起遮罩、置错误态、允许重来，
   // 避免错误被当成普通进度消息、流结束后界面卡死（计时停、遮罩不消、无从重试）。
   if (data._sseEvent === 'error') {

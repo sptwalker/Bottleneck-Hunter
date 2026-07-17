@@ -137,6 +137,7 @@ class ChainDecomposer:
         # 统计计数器（每次 decompose 调用前重置）
         self._timeout_count = 0
         self._retry_count = 0
+        self._last_fail_reason = ""  # 最近一次 LLM 调用失败的中文原因(供上层弹窗判定主模型失败)
 
     async def decompose(self, end_product: str, on_layer_start=None, on_progress=None,
                          deadline: float | None = None) -> ChainGraph:
@@ -149,6 +150,7 @@ class ChainDecomposer:
         # 重置统计计数器
         self._timeout_count = 0
         self._retry_count = 0
+        self._last_fail_reason = ""
         self._on_progress = on_progress
 
         graph = ChainGraph(
@@ -307,6 +309,8 @@ class ChainDecomposer:
         if not _has_children:
             logger.warning("拆解未产出任何子节点(第1层全失败?)，不保存退化链，交由上层报错重试")
             graph.metadata["decompose_failed"] = True
+            if self._last_fail_reason:
+                graph.metadata["fail_reason"] = self._last_fail_reason  # 供上层判定主模型失败原因
             self._on_progress = None
             return graph
 
@@ -382,6 +386,7 @@ class ChainDecomposer:
                 else:
                     self._timeout_count += 1
                     logger.error(f"LLM 调用超时，已放弃: {parent_name} (层 {depth})")
+                    self._last_fail_reason = "请求超时"
                     if self._on_progress:
                         await self._on_progress(f"✗ 超时放弃: {parent_name}")
                     return []
@@ -395,6 +400,11 @@ class ChainDecomposer:
                 else:
                     self._timeout_count += 1
                     logger.error(f"LLM 调用失败，已放弃: {parent_name} (层 {depth}) - {e}")
+                    try:
+                        from bottleneck_hunter.llm_clients.fallback import classify_reason
+                        self._last_fail_reason = classify_reason(e)
+                    except Exception:  # noqa: BLE001
+                        self._last_fail_reason = "调用异常"
                     if self._on_progress:
                         await self._on_progress(f"✗ 调用失败: {parent_name}")
                     return []

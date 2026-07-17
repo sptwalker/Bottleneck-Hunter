@@ -48,7 +48,13 @@ export function showConfirm(message, opts = {}) {
   title.textContent   = opts.title || '确认操作';
   msg.textContent     = message;
   ok.textContent      = opts.confirmText || '确定';
-  cancel.textContent  = opts.cancelText || '取消';
+  // cancelText 显式传空字符串 → 隐藏取消按钮（单按钮提示框，如"分析被迫停止"）
+  if (opts.cancelText === '') {
+    cancel.style.display = 'none';
+  } else {
+    cancel.style.display = '';
+    cancel.textContent = opts.cancelText || '取消';
+  }
 
   ok.classList.toggle('btn-danger', !!opts.danger);
   ok.classList.toggle('btn-primary', !opts.danger);

@@ -329,12 +329,17 @@ def get_models_for_role(
     user_id: str = "",
     temperature: float = 0.3,
     with_fallback: bool = False,
+    prefer_primary: bool = False,
 ) -> list[tuple[BaseChatModel, str, str]]:
     """统一接口: 返回该角色配置的所有模型实例列表。
 
-    优先级: 数据库 ai_role_config(手填矩阵/可覆盖) → 角色注册表默认值(仅单模型位) → 智能调度排序
+    优先级: 数据库 ai_role_config(手填矩阵/可覆盖) → [prefer_primary 时: 顶栏主模型直用]
+        → 角色注册表默认值(仅单模型位) → 智能调度排序
     （DC_MODEL_* 环境影子配置已退役，不再读取）
 
+    prefer_primary: True 时（供产业链分析/瓶颈评分/供应商评估等重要环节使用）——用户设了顶栏
+        「主要模型」即完全由它决定，系统不再走智能调度自选。仅当主模型不可用(禁用/无Key/熔断)
+        才回退后续优先级保证可用。注意：对多槽 fan-out 角色(如瓶颈交叉)这会退化为单主模型。
     with_fallback: 默认 False —— 多模型 fan-out 角色（投委会/圆桌/瓶颈交叉/L1）沿用「某成员失败即丢弃」
         语义并保持 provider 多样性，不做跨 provider 自动替换。单模型位（get_llm_for_position）传 True。
 
@@ -371,6 +376,27 @@ def get_models_for_role(
                 logger.warning("create_llm 失败 %s/%s: %s", cfg["provider"], cfg["model"], e)
         if results:
             return results
+
+    # 优先级1.5（仅 prefer_primary）：顶栏「主要模型」直用 —— 用户设了主模型即由它完全决定，
+    # 不走智能调度。仅当主模型可用(启用+有Key+未熔断)才用；否则回退后续优先级保证可用。
+    # 供产业链分析/瓶颈评分/供应商评估等重要环节使用（用户诉求：主模型决定这些环节）。
+    if prefer_primary:
+        prim = (_PRIMARY_PROVIDER or "").lower().strip()
+        if prim and is_provider_active(prim) and _user_has_llm_key(prim, uid):
+            try:
+                from bottleneck_hunter.llm_clients.health import health as _health
+                _open = _health.is_open(uid, prim)
+            except Exception:  # noqa: BLE001
+                _open = False
+            if not _open:
+                pm = resolve_provider_model(prim, uid)
+                if pm:
+                    try:
+                        _llm = create_llm(prim, pm, temperature=temperature,
+                                          with_fallback=with_fallback, user_id=uid)
+                        return [(_llm, prim, pm)]  # 多槽角色也退化为单主模型(用户显式要求)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("prefer_primary 主模型 %s/%s 构建失败，回退调度: %s", prim, pm, e)
 
     # 优先级2（DC_MODEL_* 环境影子配置）已退役：它是旧的静态角色→模型硬绑定，会**无条件**
     # 覆盖智能调度、且单值会让多槽 fan-out 塌成 1 个模型。统一配置只认「手填矩阵(可覆盖)」+
@@ -465,11 +491,14 @@ def get_llm_for_position(
     provider_hint: str | None = None,
     temperature: float = 0.3,
     with_fallback: bool = True,
+    prefer_primary: bool = False,
 ) -> tuple[BaseChatModel | None, str, str]:
     """统一的「按 position 获取 LLM」入口（向后兼容）。
 
     委托给 get_models_for_role() 取第一个结果。
     provider_hint 作为旧代码的兼容路径保留。
+    prefer_primary: True 时（产业链分析/供应商评估等重要环节）用户设了顶栏主模型即由它决定，
+        不走智能调度；主模型不可用才回退。透传给 get_models_for_role。
     with_fallback: 默认 True，单模型位获得调用失败自动替换；自管重试链的调用方
         （如 committee._build_llm_chain）传 False 以拿到裸模型。
     返回: (llm_instance, provider_id, model_name) 或 (None, '', '')
@@ -478,7 +507,8 @@ def get_llm_for_position(
         from bottleneck_hunter.auth.current_user import get_current_user_id
         uid = get_current_user_id()
         if position:
-            results = get_models_for_role(position, user_id=uid, temperature=temperature, with_fallback=with_fallback)
+            results = get_models_for_role(position, user_id=uid, temperature=temperature,
+                                          with_fallback=with_fallback, prefer_primary=prefer_primary)
             if results:
                 return results[0]
 

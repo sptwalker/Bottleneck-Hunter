@@ -38,6 +38,27 @@ from ._common import (
 # ===========================================================================
 
 
+def _primary_failed_event(stage: str, reason: str, provider: str, model: str):
+    """构造 primary_failed 事件：附主模型失败原因 + 是否有备用可切换(供前端弹窗决策)。"""
+    reason = reason or "调用失败"
+    can_switch = False
+    backup_hint = ""
+    try:
+        from bottleneck_hunter.llm_clients.fallback import build_fallback_candidates
+        from bottleneck_hunter.auth.current_user import get_current_user_id
+        cands = build_fallback_candidates(provider or "", model or "", get_current_user_id())
+        can_switch = len(cands) > 0
+        if cands:
+            # cands 元素形如 (llm, provider, model)
+            _c = cands[0]
+            backup_hint = f"{_c[1]}/{_c[2]}" if len(_c) >= 3 else ""
+    except Exception:  # noqa: BLE001
+        pass
+    return _sse("primary_failed", stage=stage, reason=reason,
+                provider=provider or "", model=model or "",
+                can_switch=can_switch, backup_hint=backup_hint)
+
+
 async def stream_phase1(
     *,
     sector: str,
@@ -50,18 +71,31 @@ async def stream_phase1(
     market: str = "us_stock",
     max_market_cap_yi: float | None = 200,
     force_refresh_chain: bool = False,
+    allow_fallback: bool = False,
     store=None,
 ) -> AsyncGenerator[dict, None]:
-    """Phase 1: 产业链拆解 + 瓶颈分析。返回 ALL 瓶颈报告。"""
+    """Phase 1: 产业链拆解 + 瓶颈分析。返回 ALL 瓶颈报告。
+
+    allow_fallback: 默认 False —— 用户设了主模型时这几个环节**锁定主模型**、不走智能调度，
+        主模型失败即发 primary_failed 事件让前端弹窗。为 True(用户在弹窗选「切换备用」后重发)
+        则本次放行智能调度+自动替换，用备用模型跑完。
+    """
     import uuid as _uuid
 
     analysis_id = str(_uuid.uuid4())
 
     try:
         if provider:
-            deep_llm = create_llm(provider, model)
+            # 用户在环节下拉选了具体模型：直接用它。allow_fallback 时套自动替换壳(弹窗后重跑用备用)。
+            deep_llm = create_llm(provider, model, with_fallback=allow_fallback)
         else:
-            deep_llm, provider, model = get_llm_for_position("pipeline_decompose")
+            # 「跟随顶栏配置」：默认锁定主模型(prefer_primary)、不自动替换(with_fallback=False)，
+            # 主模型失败即发 primary_failed 让前端弹窗；allow_fallback(弹窗选切换后重发)则恢复调度+替换。
+            deep_llm, provider, model = get_llm_for_position(
+                "pipeline_decompose",
+                prefer_primary=not allow_fallback,
+                with_fallback=allow_fallback,
+            )
             if deep_llm is None:
                 raise ValueError("未配置可用的 LLM provider，请在 AI 配置中设置")
     except Exception as e:
@@ -117,11 +151,14 @@ async def stream_phase1(
                     yield event
             if chain is None:
                 raise RuntimeError("产业链拆解未返回结果")
-            # 退化链保护：第 1 层没拆出任何子节点(LLM 全失败/额度不足)→ 明确报错，
-            # 不让"1 层供应链"的空结果流入后续瓶颈/供应商分析。
+            # 退化链保护：第 1 层没拆出任何子节点(LLM 全失败/额度不足)。
             if chain.metadata.get("decompose_failed") or not any((n.layer or 0) >= 1 for n in chain.nodes):
-                raise RuntimeError("产业链拆解未产出任何子环节，通常是 AI 模型调用失败或额度不足；"
-                                   "请检查顶栏所选模型的可用性/余额后重试")
+                _reason = chain.metadata.get("fail_reason", "") or "模型调用失败或额度不足"
+                if not allow_fallback:
+                    # 锁定主模型模式：主模型失败 → 发 primary_failed 让前端弹窗决策(切备用/中断)，不自动跑
+                    yield _primary_failed_event("decompose", _reason, provider, model)
+                    return
+                raise RuntimeError(f"产业链拆解未产出任何子环节（{_reason}）；请检查所选模型可用性/余额后重试")
             yield _sse("step_done", step="decompose", index=0, result=chain.model_dump())
             if chain.metadata.get("partial"):
                 yield _sse("step_progress", step="decompose",
@@ -136,7 +173,9 @@ async def stream_phase1(
     try:
         yield _sse("step_start", step="bottleneck", index=1, message=STEP_LABELS["bottleneck"])
         from bottleneck_hunter.llm_clients.factory import get_models_for_role
-        bottleneck_llms = get_models_for_role("bottleneck")
+        # 锁定主模型：默认让瓶颈评分也直用主模型(prefer_primary，多槽交叉退化为单主模型)；
+        # allow_fallback(弹窗后重跑)则恢复调度自选。
+        bottleneck_llms = get_models_for_role("bottleneck", prefer_primary=not allow_fallback)
         if not bottleneck_llms:
             bottleneck_llms = [(deep_llm, provider, model)]
         analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=language, industry=sector, market=market)
@@ -232,9 +271,13 @@ async def stream_phase2(
     language: str = "zh",
     provider: str = "openai",
     model: str = "",
+    allow_fallback: bool = False,
     store=None,
 ) -> AsyncGenerator[dict, None]:
-    """Phase 2: 入围筛选（搜索+财务+评估+催化剂+Alpha）。"""
+    """Phase 2: 入围筛选（搜索+财务+评估+催化剂+Alpha）。
+
+    allow_fallback: 同 stream_phase1——默认锁定主模型、失败发 primary_failed；弹窗选切换后重发为 True。
+    """
     from bottleneck_hunter.chain.models import BottleneckReport, ChainGraph
 
     logger.info("[stream-phase2] 启动 | provider=%s | model=%s | analysis_id=%s", provider, model, analysis_id)
@@ -249,9 +292,13 @@ async def stream_phase2(
 
     try:
         if provider:
-            deep_llm = create_llm(provider, model)
+            deep_llm = create_llm(provider, model, with_fallback=allow_fallback)
         else:
-            deep_llm, provider, model = get_llm_for_position("pipeline_eval")
+            deep_llm, provider, model = get_llm_for_position(
+                "pipeline_eval",
+                prefer_primary=not allow_fallback,
+                with_fallback=allow_fallback,
+            )
             if deep_llm is None:
                 raise ValueError("未配置可用的 LLM provider，请在 AI 配置中设置")
         llm_info = f"{provider}/{getattr(deep_llm, 'model_name', None) or getattr(deep_llm, 'model', model)}"
