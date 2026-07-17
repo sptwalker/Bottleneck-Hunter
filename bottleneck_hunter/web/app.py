@@ -368,8 +368,10 @@ def create_app() -> FastAPI:
             checks["db"] = False
         try:
             # analyses.db 是独立文件——单独探一次，避免它锁死/损坏时 healthz 仍绿灯。
-            from bottleneck_hunter.dataflows.store import AnalysisStore
-            AnalysisStore().ping()
+            # 复用 api 模块的单例 _store，避免每次健康检查都 new AnalysisStore() 触发 _init_db
+            # （每 30s 一条"分析数据库已就绪"日志刷屏）。
+            from bottleneck_hunter.web.api import _store as _analysis_store
+            _analysis_store.ping()
             checks["analyses_db"] = True
         except Exception:
             checks["analyses_db"] = False

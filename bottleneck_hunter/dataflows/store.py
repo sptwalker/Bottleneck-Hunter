@@ -164,7 +164,7 @@ class AnalysisStore:
             self._backfill_seq_no(conn)
             self._backfill_completed_phases(conn)
             conn.commit()
-        logger.info(f"分析数据库已就绪: {self.db_path}")
+        logger.debug(f"分析数据库已就绪: {self.db_path}")
 
     def _run_once_migrations(self, conn: sqlite3.Connection) -> None:
         """非幂等的一次性数据迁移，靠 _meta 标记确保每个 DB 只跑一次（多次实例化/重启都安全）。"""

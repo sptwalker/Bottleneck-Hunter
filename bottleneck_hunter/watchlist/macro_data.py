@@ -53,6 +53,28 @@ def _fetch_northbound_flow() -> dict | None:
         return None
 
 
+@with_retry(max_retries=2, base_delay=1.0)
+def _fetch_sge_gold() -> dict | None:
+    """上海金 Au99.99 收盘价（人民币/克），akshare 国内可达，替代已停更的 FRED 伦敦金。
+
+    价格锚是人民币/克而非美元/盎司，但用于「跨资产风险印证」看的是黄金**走势方向**，
+    单位差异不影响判断；label 已注明单位避免误读。
+    """
+    if ak is None:
+        return None
+    try:
+        df = ak.spot_hist_sge(symbol="Au99.99")
+        if df is None or df.empty or len(df) < 1:
+            return None
+        latest = float(df.iloc[-1]["close"])
+        prev = float(df.iloc[-2]["close"]) if len(df) >= 2 else latest
+        change_pct = round((latest / prev - 1) * 100, 2) if prev else 0.0
+        return {"value": round(latest, 2), "change_pct": change_pct}
+    except Exception as e:
+        logger.debug("上海金获取失败: %s", e)
+        return None
+
+
 # 宏观指标定义：(显示名, yfinance 代码, 市场标签)
 # 全球风险因子：VIX/美债/美元指数——各市场都合理参考（人民币/资本流动/联储外溢）
 _GLOBAL_INDICATORS = [
@@ -123,7 +145,7 @@ _FRED_INDICATORS = [
     ("vix", "VIXCLS", "VIX 恐慌指数", "level"),
     ("hy_oas", "BAMLH0A0HYM2", "高收益债信用利差 HY OAS(%)", "level"),
     ("wti_oil", "DCOILWTICO", "WTI 原油($/桶)", "level"),
-    ("gold", "GOLDAMGBD228NLBM", "伦敦金($/oz)", "level"),
+    # 黄金：FRED 的 GOLDAMGBD228NLBM 已停更(返回400)，改用 akshare 上海金(见 _fetch_sge_gold)。
 ]
 
 
@@ -245,6 +267,18 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
     # 先并发跑 yfinance 指标(+北向)，全部完成后再跑 FRED 兜底，保证 setdefault 语义确定
     await asyncio.gather(*tasks, return_exceptions=True)
     await _fetch_fred()
+
+    # 黄金（上海金，akshare 国内可达）——全局风险资产，各市场都参考
+    async def _fetch_gold():
+        try:
+            data = await asyncio.to_thread(_fetch_sge_gold)
+            if data:
+                results["gold"] = {**data, "label": "上海金 Au99.99(¥/克)"}
+                store.save_macro_snapshot("gold", today, data["value"], now_iso,
+                                          change_pct=data.get("change_pct", 0.0))
+        except Exception as e:
+            logger.warning("黄金采集失败: %s", e)
+    await _fetch_gold()
 
     if not results:
         foreign = foreign_indicator_keys(markets)  # 剔除他市专属指标，防缓存兜底串味

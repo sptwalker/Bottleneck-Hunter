@@ -51,7 +51,6 @@ def _handler_v2(request):
     if "VIXCLS" in url: return obs([17.8, 19.2])
     if "BAMLH0A0HYM2" in url: return obs([3.05, 2.98])
     if "DCOILWTICO" in url: return obs([73.4, 71.9])
-    if "GOLDAMGBD228NLBM" in url: return obs([2410.5, 2395.0])
     return httpx.Response(200, json={"observations": []})
 
 
@@ -72,7 +71,8 @@ async def test_fred_new_indicators(monkeypatch):
     assert out["vix"]["value"] == 17.8
     assert out["hy_oas"]["value"] == 3.05
     assert out["wti_oil"]["value"] == 73.4
-    assert out["gold"]["value"] == 2410.5
+    # 黄金已改走 akshare 上海金(FRED 伦敦金停更)，不在 FRED 结果内
+    assert "gold" not in out
 
 
 async def test_fred_no_key_returns_empty(monkeypatch):
