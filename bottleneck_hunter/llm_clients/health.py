@@ -93,8 +93,19 @@ _PROVIDER_TIER = {
 
 
 def provider_tier(provider: str) -> str:
-    """返回 'free' / 'paid' / ''（未知）。"""
-    return _PROVIDER_TIER.get((provider or "").lower().strip(), "")
+    """返回 'free' / 'paid' / ''（未知）。
+
+    自定义 provider id(如 siliconflow_nex_n2_pro / huawei_glm_5_2)不在 _PROVIDER_TIER 表里，
+    直接查会得空档，导致付费/免费策略对它们失效。故先精确查表，未命中再按**子串**推断：
+    id 里含哪个已知 provider 名就继承其档(按已知名长度降序，最具体优先)。仍无则空(中性)。
+    """
+    p = (provider or "").lower().strip()
+    if p in _PROVIDER_TIER:
+        return _PROVIDER_TIER[p]
+    for known in sorted(_PROVIDER_TIER, key=len, reverse=True):
+        if known in p:
+            return _PROVIDER_TIER[known]
+    return ""
 
 
 def load_routing_policy(user_id: str = "", role_key: str = "") -> dict:
