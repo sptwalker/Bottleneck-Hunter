@@ -322,17 +322,28 @@ async def _fetch_one(ticker: str, store: WatchlistStore, llm, budget: BudgetTrac
         if not articles:
             return 0
 
-        # LLM 分析
-        analysis = await _summarize_with_llm(ticker, articles, llm, budget)
+        # 只对**新文章**跑 LLM：save_news 是 INSERT OR IGNORE(id=内容哈希)，已入库文章不会更新，
+        # 重摘旧文章的结果落库即被丢弃 → 纯浪费。过滤掉已存 id；无新文章则直接跳过 LLM。
+        try:
+            known_ids = {n.get("id") for n in store.get_news(ticker, limit=500)}
+        except Exception:
+            known_ids = set()
+        new_articles = [a for a in articles if a.get("id") not in known_ids]
+        if not new_articles:
+            logger.debug("%s 无新文章，跳过 LLM 摘要", ticker)
+            return 0
 
-        # 把 LLM 分析结果挂到每条新闻
-        for a in articles:
+        # LLM 分析（仅新文章）
+        analysis = await _summarize_with_llm(ticker, new_articles, llm, budget)
+
+        # 把 LLM 分析结果挂到每条新文章
+        for a in new_articles:
             a["llm_analysis"] = analysis.get("summary", "")
             a["sentiment"] = analysis.get("sentiment", "neutral")
             a["sentiment_score"] = analysis.get("sentiment_score", 0.0)
             a.setdefault("summary", "")
 
-        return store.save_news(articles)
+        return store.save_news(new_articles)
 
 
 async def fetch_news_batch(
