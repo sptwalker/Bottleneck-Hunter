@@ -35,6 +35,33 @@ def _sse(event: str, **data) -> dict:
     return {"event": event, "data": {"event": event, **data}}
 
 
+# 决策层 LLM 调用的输出 token 上限：L2/L3 要产出完整 JSON(多板块配置/多标的战术)，
+# provider 默认上限偏小 → 输出被截断 → JSON 解析失败(曾致 L2/L3 整层无产出)。可用环境覆盖。
+import os as _os
+_DECISION_MAX_TOKENS = int(_os.getenv("BH_DECISION_MAX_TOKENS", "8192"))
+
+
+async def _llm_json_object(llm, prompt: str, *, layer: str = "") -> dict:
+    """调 LLM 并抽取 JSON 对象，抗截断：加大 max_tokens；解析失败则纠偏重试一次。
+
+    FallbackChatModel._generate 会把 max_tokens 透传给主/备各候选。首解析失败常因降级模型
+    输出被截断/夹带说明 → 追加"只输出完整紧凑 JSON"提示重试(顺带经 fallback 重选模型)。
+    仍失败则抛，交由各层既有 except 降级。
+    """
+    resp = await asyncio.to_thread(
+        lambda: llm.invoke(prompt, max_tokens=_DECISION_MAX_TOKENS).content)
+    try:
+        return extract_json_object(resp)
+    except ValueError:
+        logger.warning("%s LLM 输出无法解析为 JSON(疑被截断)，纠偏重试一次", layer or "decision")
+        retry_prompt = (prompt
+                        + "\n\n【重要】上一次输出无法解析。请**只**返回一个**完整且闭合**的 JSON 对象，"
+                          "不要任何解释文字、不要 markdown 代码围栏、不要在中途截断。")
+        resp2 = await asyncio.to_thread(
+            lambda: llm.invoke(retry_prompt, max_tokens=_DECISION_MAX_TOKENS).content)
+        return extract_json_object(resp2)  # 再失败则向上抛，走各层降级
+
+
 def _load_prompt(name: str) -> str:
     path = PROMPTS_DIR / f"{name}.md"
     if path.exists():
@@ -480,10 +507,9 @@ async def run_macro_strategy(
         else:
             yield _sse("decision_progress", layer="L1", step="llm_reasoning",
                        message="L1 LLM 推理中...")
-            response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+            result = await _llm_json_object(llm, prompt, layer="L1")
             if budget:
                 budget.record(provider, model, 5000, 2000, "macro_strategy")
-            result = extract_json_object(response)
         strategy_id = store.create_macro_strategy(result)
 
         yield _sse("decision_done", layer="L1", strategy_id=strategy_id,
@@ -547,12 +573,11 @@ async def run_macro_check(
                   .replace("{today_market_data}", json.dumps(market_data, ensure_ascii=False))
                   )
 
-        response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+        result = await _llm_json_object(llm, prompt, layer="L1-check")
 
         if budget:
             budget.record(provider, model, 2000, 500, "macro_check")
 
-        result = extract_json_object(response)
         status = result.get("strategy_status", "valid")
 
         if status == "needs_major_revision":
@@ -658,12 +683,11 @@ async def run_strategic_plan(
         yield _sse("decision_progress", layer="L2", step="llm_reasoning",
                    message="L2 LLM 推理中...")
 
-        response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+        result = await _llm_json_object(llm, prompt, layer="L2")
 
         if budget:
             budget.record(provider, model, 8000, 3000, "strategic_plan")
 
-        result = extract_json_object(response)
         _normalize_result_tickers(result)  # 归一 holding ticker(.SH→.SS)，与观察池对齐
         # A4: 确定性钳制 L2 目标配置到 L1 alloc_bounds（防止 LLM 给出越界仓位/beta 后被下游放行）
         clamp_warnings = _clamp_target_allocation(result, alloc_bounds)
@@ -781,12 +805,11 @@ async def run_deviation_check(
                   }, ensure_ascii=False))
                   )
 
-        response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+        result = await _llm_json_object(llm, prompt, layer="L2-deviation")
 
         if budget:
             budget.record(provider, model, 3000, 800, "deviation_check")
 
-        result = extract_json_object(response)
         # rebalance_needed：有确定性判定时以 drift 为准；无明确目标(None)时退回 LLM
         if drift["rebalance_suggested"] is None:
             rebalance_needed = bool(result.get("rebalance_needed", False))
@@ -963,12 +986,11 @@ async def run_tactical_plans(
         yield _sse("decision_progress", layer="L3", step="llm_reasoning",
                    message="L3 LLM 推理中...")
 
-        response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+        result = await _llm_json_object(llm, prompt, layer="L3")
 
         if budget:
             budget.record(provider, model, 8000, 3000, "tactical_plans")
 
-        result = extract_json_object(response)
         _normalize_result_tickers(result)  # 归一战术计划 ticker，与观察池/L2 对齐
         tactical_plans = result.get("tactical_plans", [])
 
@@ -1213,12 +1235,11 @@ async def run_execution_plans(
         yield _sse("decision_progress", layer="L4", step="llm_reasoning",
                    message="L4 LLM 推理中...")
 
-        response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+        result = await _llm_json_object(llm, prompt, layer="L4")
 
         if budget:
             budget.record(provider, model, 5000, 2000, "execution_plans")
 
-        result = extract_json_object(response)
         _normalize_result_tickers(result)  # 归一执行计划 ticker，与观察池/持仓对齐
         exec_plans = result.get("execution_plans", [])
 

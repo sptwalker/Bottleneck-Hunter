@@ -148,6 +148,13 @@ _FRED_INDICATORS = [
     # 黄金：FRED 的 GOLDAMGBD228NLBM 已停更(返回400)，改用 akshare 上海金(见 _fetch_sge_gold)。
 ]
 
+# 美股大盘指数的 FRED 兜底：yfinance(^GSPC/^IXIC)被 Yahoo 限流(429)时用 FRED 补。
+# 仅当 markets 含 us_stock 时才取(sp500/nasdaq 是美股专属，绝不进 A股/港股宏观口径)。
+_FRED_US_EQUITY = [
+    ("sp500", "SP500", "标普500", "level"),
+    ("nasdaq", "NASDAQCOM", "纳斯达克综指", "level"),
+]
+
 
 async def _fred_series(key: str, series_id: str, limit: int = 1) -> list[dict]:
     # 走共享 httpx 客户端(带桌面借道 transport)：api.stlouisfed.org 在借道白名单，国内服务器可经桌面取
@@ -161,14 +168,17 @@ async def _fred_series(key: str, series_id: str, limit: int = 1) -> list[dict]:
     return [o for o in (r.json().get("observations") or []) if o.get("value") not in (None, "", ".")]
 
 
-async def _fetch_fred_indicators() -> dict:
-    """拉取 FRED 关键宏观指标（利率/曲线/信用利差/缩表/VIX/金油等）。无 Key 则返回空。"""
+async def _fetch_fred_indicators(extra: list | None = None) -> dict:
+    """拉取 FRED 关键宏观指标（利率/曲线/信用利差/缩表/VIX/金油等）。无 Key 则返回空。
+
+    extra: 追加的 (key, series_id, label, kind) 列表（如按市场条件加的美股指数兜底）。
+    """
     from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
     key = resolve_data_source_key("fred")
     if not key:
         return {}
     out: dict[str, dict] = {}
-    for k, series_id, label, kind in _FRED_INDICATORS:
+    for k, series_id, label, kind in (_FRED_INDICATORS + (extra or [])):
         try:
             if kind == "cpi":
                 obs = await _fred_series(key, series_id, limit=13)  # 需 13 个月算同比
@@ -255,7 +265,10 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
     # 其余(曲线/信用利差/缩表/金油等)为 FRED 独有。故等 yfinance 任务先跑完，FRED 再 setdefault。
     async def _fetch_fred():
         try:
-            fred = await _fetch_fred_indicators()  # 已改异步(走共享 httpx，可借道)，不再 to_thread
+            # 美股市场额外把 sp500/nasdaq 纳入 FRED 兜底(yfinance 被 429 限流时补大盘指数)；
+            # 非美股市场不加，避免美股指数串味进 A股/港股宏观口径。
+            extra = _FRED_US_EQUITY if "us_stock" in markets else None
+            fred = await _fetch_fred_indicators(extra=extra)  # 已改异步(走共享 httpx，可借道)，不再 to_thread
             for k, v in fred.items():
                 if k in results:
                     continue  # yfinance 已取到该 key(更实时) → 不覆盖
