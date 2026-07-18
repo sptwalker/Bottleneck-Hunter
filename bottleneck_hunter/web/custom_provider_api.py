@@ -304,6 +304,7 @@ def _reassign_role_configs(disabled_pid: str, primary_pid: str) -> int:
         if cl and cl not in _seen:
             _seen.add(cl)
             candidates.append(cl)
+    primary = (primary_pid or "").lower().strip()
     replaced = 0
     for r in rows:
         uid = r.get("user_id", "") or ""
@@ -318,7 +319,11 @@ def _reassign_role_configs(disabled_pid: str, primary_pid: str) -> int:
                     new_pid, new_model = c, m
                     break
         try:
-            if new_pid:
+            # 替代目标恰为主模型(或无可用替代) → 删除该行、不写固定条目。否则会把"当时的主模型"
+            # 钉死成固定配置，日后主模型一换就变成过期脏配（本次 bug 根因：pipeline_decompose
+            # 被改写成当年的主模型 siliconflow_nex_n2_pro，换成 minimax 后仍固定压着主模型）。
+            # 删掉让该角色回落到 prefer_primary(锁定环节自动跟随主模型)/智能调度，永远跟最新主模型。
+            if new_pid and new_pid != primary:
                 wl.upsert_role_config(
                     r["role_key"], r["slot_index"], new_pid, new_model,
                     role_label=r.get("role_label", "") or "",
