@@ -23,6 +23,7 @@ from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.regime_mapper import get_allocation_bounds, format_bounds_for_prompt
+from bottleneck_hunter.watchlist.persona import format_persona_for_prompt, get_user_single_cap
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position, get_models_for_role
 
@@ -476,6 +477,7 @@ async def run_macro_strategy(
                   .replace("{sentiment_indicators}", json.dumps(market_data.get("sentiment", {}), ensure_ascii=False))
                   .replace("{macro_economic}", json.dumps(market_data.get("macro", {}), ensure_ascii=False))
                   .replace("{market_news}", json.dumps(market_data.get("news", []), ensure_ascii=False))
+                  .replace("{user_persona}", format_persona_for_prompt(store))
                   )
 
         all_models = get_models_for_role("L1_macro")
@@ -689,6 +691,10 @@ async def run_strategic_plan(
         risk_appetite = macro_json.get("risk_appetite", "balanced")
         confidence = macro_json.get("regime_confidence", 5)
         alloc_bounds = get_allocation_bounds(regime, risk_appetite, confidence)
+        # 用户个人「单一持仓上限」是硬约束：与 L1 市场档位取更严者（min），确保用户偏好不被市场放大
+        _user_cap = get_user_single_cap(store)
+        if _user_cap:
+            alloc_bounds["max_single_pct"] = min(alloc_bounds["max_single_pct"], _user_cap)
         bounds_text = format_bounds_for_prompt(alloc_bounds)
 
         prompt = (prompt_template
@@ -710,6 +716,7 @@ async def run_strategic_plan(
                       previous_plan.get("result_json", {}) if previous_plan else {},
                       ensure_ascii=False,
                   ))
+                  .replace("{user_persona}", format_persona_for_prompt(store))
                   )
 
         yield _sse("decision_progress", layer="L2", step="llm_reasoning",
@@ -1013,6 +1020,7 @@ async def run_tactical_plans(
                   .replace("{thesis_alerts}",
                            json.dumps(thesis_alerts, ensure_ascii=False) if thesis_alerts else "暂无失效投资论点")
                   .replace("{recent_trades}", recent_trades_text)
+                  .replace("{user_persona}", format_persona_for_prompt(store))
                   )
 
         yield _sse("decision_progress", layer="L3", step="llm_reasoning",
@@ -1260,6 +1268,7 @@ async def run_execution_plans(
                   .replace("{trade_feedback}", feedback_text)
                   .replace("{recent_trades}", recent_trades_text)
                   .replace("{user_preferences}", pref_text)
+                  .replace("{user_persona}", format_persona_for_prompt(store))
                   .replace("{experience_cards}", experience_text)
                   .replace("{layer_performance}", layer_perf_text)
                   )

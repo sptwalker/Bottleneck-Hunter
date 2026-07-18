@@ -11,8 +11,10 @@ import json
 import logging
 import os
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
@@ -123,6 +125,40 @@ async def get_latest_macro(market: str = "us_stock", user: dict = Depends(get_cu
 async def get_macro_history(limit: int = 10, market: str = "us_stock", user: dict = Depends(get_current_user)):
     store = _user_store(user).for_market(market)
     return {"history": store.get_macro_history(limit=limit)}
+
+
+# ─────────────────────────────────────────────────────────
+# 用户个人持仓风格（注入各层决策 LLM 的硬约束；按用户+市场隔离）
+# ─────────────────────────────────────────────────────────
+
+class PortfolioStyle(BaseModel):
+    """用户持仓风格。枚举/数值范围在此校验，越界值由 Field 拦截。"""
+    risk_appetite: Literal["aggressive", "balanced", "conservative"] = "balanced"
+    max_drawdown_pct: int = Field(25, ge=5, le=60)
+    max_single_pct: int = Field(20, ge=5, le=50)
+    concentration: Literal["concentrated", "balanced", "diversified"] = "balanced"
+    horizon: Literal["short", "swing", "long"] = "swing"
+    cash_timing: Literal["full", "balanced", "timing"] = "balanced"
+    stop_loss: Literal["strict", "tolerant"] = "strict"
+    sector_notes: str = Field("", max_length=500)
+
+
+@router.get("/style")
+async def get_portfolio_style(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """读取当前用户在该市场的持仓风格（未设定则返回默认档）。"""
+    from bottleneck_hunter.watchlist.persona import load_style
+    store = _user_store(user).for_market(market)
+    return {"style": load_style(store)}
+
+
+@router.put("/style")
+async def save_portfolio_style(style: PortfolioStyle, market: str = "us_stock",
+                               user: dict = Depends(get_current_user)):
+    """保存持仓风格。Pydantic 已完成枚举/范围校验，此处仅落库。"""
+    from bottleneck_hunter.watchlist.persona import save_style
+    store = _user_store(user).for_market(market)
+    save_style(store, style.model_dump())
+    return {"ok": True, "style": style.model_dump()}
 
 
 # ─────────────────────────────────────────────────────────

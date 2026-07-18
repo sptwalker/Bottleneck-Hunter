@@ -847,6 +847,80 @@
               </div>
             </div>
 
+            <!-- 持仓风格调节（注入各层决策 LLM 的硬约束） -->
+            <div class="dc-card" id="dc-style">
+              <div class="dc-card-header">
+                <h3>持仓风格</h3>
+                <button class="btn btn-outline-accent btn-xs" id="dc-style-save" title="保存并注入各层决策">保存</button>
+              </div>
+              <div class="dc-card-body" id="dc-style-body">
+                <p class="dc-style-intro">你的投资性格会作为<b>硬约束</b>注入 L1-L4 决策：市场再好也不突破你的回撤与单一持仓上限。</p>
+
+                <!-- 风险偏好 -->
+                <div class="dc-style-field">
+                  <label class="dc-style-label">风险偏好</label>
+                  <div class="dc-seg" id="dc-style-risk" role="group">
+                    <button type="button" class="dc-seg-btn" data-val="conservative">保守</button>
+                    <button type="button" class="dc-seg-btn active" data-val="balanced">中性</button>
+                    <button type="button" class="dc-seg-btn" data-val="aggressive">激进</button>
+                  </div>
+                </div>
+
+                <!-- 最大回撤容忍 -->
+                <div class="dc-style-field">
+                  <label class="dc-style-label">最大回撤容忍 <span class="dc-style-val" id="dc-style-dd-val">25%</span></label>
+                  <input type="range" class="dc-style-range" id="dc-style-dd" min="5" max="60" step="1" value="25">
+                </div>
+
+                <!-- 单一持仓上限 -->
+                <div class="dc-style-field">
+                  <label class="dc-style-label">单一持仓上限 <span class="dc-style-val" id="dc-style-single-val">20%</span></label>
+                  <input type="range" class="dc-style-range" id="dc-style-single" min="5" max="50" step="1" value="20">
+                </div>
+
+                <!-- 高级选项（默认收起） -->
+                <details class="dc-style-advanced">
+                  <summary>高级选项</summary>
+                  <div class="dc-style-field">
+                    <label class="dc-style-label" for="dc-style-conc">持仓集中度</label>
+                    <select class="dc-style-select" id="dc-style-conc">
+                      <option value="concentrated">集中（3-5 只）</option>
+                      <option value="balanced" selected>均衡（6-10 只）</option>
+                      <option value="diversified">分散（10 只以上）</option>
+                    </select>
+                  </div>
+                  <div class="dc-style-field">
+                    <label class="dc-style-label" for="dc-style-horizon">持有周期</label>
+                    <select class="dc-style-select" id="dc-style-horizon">
+                      <option value="short">短线（日/周）</option>
+                      <option value="swing" selected>波段(月级)</option>
+                      <option value="long">长线（季/年）</option>
+                    </select>
+                  </div>
+                  <div class="dc-style-field">
+                    <label class="dc-style-label" for="dc-style-cash">现金择时倾向</label>
+                    <select class="dc-style-select" id="dc-style-cash">
+                      <option value="full">满仓型</option>
+                      <option value="balanced" selected>平衡</option>
+                      <option value="timing">留现金择时</option>
+                    </select>
+                  </div>
+                  <div class="dc-style-field">
+                    <label class="dc-style-label" for="dc-style-stop">止损纪律</label>
+                    <select class="dc-style-select" id="dc-style-stop">
+                      <option value="strict" selected>严格止损</option>
+                      <option value="tolerant">容忍波动</option>
+                    </select>
+                  </div>
+                  <div class="dc-style-field">
+                    <label class="dc-style-label" for="dc-style-notes">行业偏好/排除</label>
+                    <textarea class="dc-style-notes" id="dc-style-notes" rows="2" maxlength="500"
+                              placeholder="如：偏好科技与新能源，排除白酒、地产"></textarea>
+                  </div>
+                </details>
+              </div>
+            </div>
+
             <!-- 模型评分排行 -->
             <div class="dc-card" id="dc-model-ratings">
               <div class="dc-card-header">

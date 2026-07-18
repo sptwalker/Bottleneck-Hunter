@@ -14,6 +14,8 @@
 
 {strategic_plan}
 
+{user_persona}
+
 ## 个股最新数据
 
 每只股票附带以下 L2 层信息：

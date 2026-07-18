@@ -3,7 +3,7 @@
  * L1 宏观 / L2 组合 / L3 战术 / L4 执行 / 投委会 / 模拟账户
  */
 import { showConfirm } from './utils/confirm.js';
-import { fmtBJ } from './wizard-state.js';
+import { fmtBJ, toast } from './wizard-state.js';
 import { openReport, buildMeetingReport, buildDecisionReport } from './report-export.js';
 
 const DC_API = '/api/decision';
@@ -124,6 +124,16 @@ function escDC(s) {
   const d = document.createElement('div');
   d.textContent = String(s);
   return d.innerHTML;
+}
+
+// 把 LLM 回复的 markdown 渲染为 HTML（marked 已在 index.html 全局加载）；失败/缺失则退回转义纯文本
+function mdDC(s) {
+  if (!s) return '';
+  if (typeof marked !== 'undefined' && marked.parse) {
+    try { return marked.parse(String(s), { breaks: true, gfm: true }); }
+    catch (e) { return escDC(s); }
+  }
+  return escDC(s);
 }
 
 function fmtNum(n, digits = 0) {
@@ -278,6 +288,7 @@ function renderAll(data) {
   loadRiskDashboard();
   loadMeetings();
   loadModelRatings();
+  loadPortfolioStyle();
   updateLightsFromData(data);
 }
 
@@ -903,6 +914,85 @@ async function scanCatalysts() {
   dcState.loading = false;
 }
 
+/* ── 持仓风格调节 ─────────────────────────────────── */
+
+// 从后端拉当前市场的风格并回填控件
+async function loadPortfolioStyle() {
+  try {
+    const { style } = await dcFetch(`/style?market=${encodeURIComponent(dcState.market)}`);
+    if (style) applyStyleToControls(style);
+  } catch (e) {
+    console.error('加载持仓风格失败:', e);
+  }
+}
+
+function applyStyleToControls(s) {
+  // 风险偏好分段按钮
+  document.querySelectorAll('#dc-style-risk .dc-seg-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.val === s.risk_appetite));
+  const dd = document.getElementById('dc-style-dd');
+  const single = document.getElementById('dc-style-single');
+  if (dd) { dd.value = s.max_drawdown_pct; document.getElementById('dc-style-dd-val').textContent = s.max_drawdown_pct + '%'; }
+  if (single) { single.value = s.max_single_pct; document.getElementById('dc-style-single-val').textContent = s.max_single_pct + '%'; }
+  const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
+  set('dc-style-conc', s.concentration);
+  set('dc-style-horizon', s.horizon);
+  set('dc-style-cash', s.cash_timing);
+  set('dc-style-stop', s.stop_loss);
+  set('dc-style-notes', s.sector_notes || '');
+}
+
+function collectStyleFromControls() {
+  const activeRisk = document.querySelector('#dc-style-risk .dc-seg-btn.active');
+  const val = (id) => document.getElementById(id)?.value;
+  return {
+    risk_appetite: activeRisk?.dataset.val || 'balanced',
+    max_drawdown_pct: parseInt(val('dc-style-dd'), 10) || 25,
+    max_single_pct: parseInt(val('dc-style-single'), 10) || 20,
+    concentration: val('dc-style-conc') || 'balanced',
+    horizon: val('dc-style-horizon') || 'swing',
+    cash_timing: val('dc-style-cash') || 'balanced',
+    stop_loss: val('dc-style-stop') || 'strict',
+    sector_notes: (val('dc-style-notes') || '').trim(),
+  };
+}
+
+async function savePortfolioStyle() {
+  const btn = document.getElementById('dc-style-save');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  try {
+    await dcFetch(`/style?market=${encodeURIComponent(dcState.market)}`, {
+      method: 'PUT',
+      body: JSON.stringify(collectStyleFromControls()),
+    });
+    toast('持仓风格已保存，将注入下次决策', 'success');
+  } catch (e) {
+    toast('保存失败：' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '保存'; }
+  }
+}
+
+// 绑定风格面板交互（分段按钮/滑块实时数值/保存按钮）——仅调用一次
+function bindStylePanel() {
+  document.getElementById('dc-style-risk')?.addEventListener('click', (e) => {
+    const b = e.target.closest('.dc-seg-btn');
+    if (!b) return;
+    b.parentElement.querySelectorAll('.dc-seg-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+  });
+  const bindRange = (id, valId) => {
+    const el = document.getElementById(id);
+    el?.addEventListener('input', () => {
+      const v = document.getElementById(valId);
+      if (v) v.textContent = el.value + '%';
+    });
+  };
+  bindRange('dc-style-dd', 'dc-style-dd-val');
+  bindRange('dc-style-single', 'dc-style-single-val');
+  document.getElementById('dc-style-save')?.addEventListener('click', savePortfolioStyle);
+}
+
 /* ── 初始化 ───────────────────────────────────────── */
 
 export function initDecision() {
@@ -961,6 +1051,9 @@ export function initDecision() {
 
   // 模型校准按钮
   document.getElementById('dc-btn-calibrate')?.addEventListener('click', runCalibration);
+
+  // 持仓风格面板
+  bindStylePanel();
 
   // 会议详情抽屉
   const meetingDrawer = document.getElementById('dc-meeting-drawer');
@@ -1456,7 +1549,7 @@ function _consultBubbleEl(m) {
   } else if (m.type === 'summary') {
     div.className = 'dc-bubble dc-bubble-summary';
     div.innerHTML = '<div class="dc-bubble-role">📋 历史摘要</div>';
-    const c = document.createElement('div'); c.textContent = m.content || ''; div.appendChild(c);
+    const c = document.createElement('div'); c.className = 'dc-md'; c.innerHTML = mdDC(m.content || ''); div.appendChild(c);
   } else if (m.type === 'system') {
     div.className = 'dc-bubble dc-bubble-system';
     div.textContent = m.content || '';
@@ -1468,7 +1561,9 @@ function _consultBubbleEl(m) {
     head.className = 'dc-bubble-role';
     head.innerHTML = `${escDC(name)}<span class="dc-bubble-round">${escDC(rmark)}</span>`
       + `<span class="dc-bubble-model">${escDC(_modelLabel(m.provider, m.model))}</span>`;
-    const c = document.createElement('div'); c.textContent = m.content || '';
+    // 历史载入时 content 已存在→直接渲染 markdown；流式新气泡 content 为空→保持空 div 逐字追加纯文本，msg_done 时再转 markdown
+    const c = document.createElement('div'); c.className = 'dc-md';
+    if (m.content) c.innerHTML = mdDC(m.content); else c.textContent = '';
     div.appendChild(head); div.appendChild(c);
     div._content = c;
     if (m.failed) _attachRetryBtn(div, m.role, m.round, m.fail_reason);
@@ -1498,7 +1593,7 @@ async function retryConsult(role, round, div) {
   const bar = div.querySelector('.dc-consult-retry');
   const btn = bar && bar.querySelector('button');
   if (btn) { btn.disabled = true; btn.textContent = '重试中…'; }
-  if (div._content) div._content.textContent = '';
+  if (div._content) { div._content.textContent = ''; div._content.classList.add('dc-md-streaming'); }
   setConsultSending(true);
   await consultStream('/macro/consult/retry', { market: dcConsult.market, role }, {
     onEvent: (data) => {
@@ -1510,6 +1605,7 @@ async function retryConsult(role, round, div) {
       } else if (evt === 'msg_done') {
         const mEl = div.querySelector('.dc-bubble-model');
         if (mEl) mEl.textContent = _modelLabel(data.provider, data.model);
+        if (div._content) { div._content.classList.remove('dc-md-streaming'); if (div._content.textContent) div._content.innerHTML = mdDC(div._content.textContent); }
         if (!data.failed) { if (bar) bar.remove(); }              // 成功→撤掉重试条
         else if (btn) { btn.disabled = false; btn.textContent = '🔄 重试'; }  // 仍失败→可再试
       } else if (evt === 'error') {
@@ -1555,6 +1651,7 @@ function _createStreamBubble(role, round) {
   const div = _consultBubbleEl({ type: 'analyst', role, round, content: '' });
   log.appendChild(div);
   div._content = div.querySelector('div:last-child');
+  div._content.classList.add('dc-md-streaming');  // 流式期保留换行；msg_done 转 markdown 时移除
   div._modelEl = div.querySelector('.dc-bubble-model');  // msg_done 时回填具体模型
   log.scrollTop = log.scrollHeight;
   return div;
@@ -1705,6 +1802,8 @@ function handleConsultEvent(data) {
   if (evt === 'msg_done') {
     const el = dcConsult.bubbles[`${data.role}-${data.round}`];
     if (el && el._modelEl) el._modelEl.textContent = _modelLabel(data.provider, data.model);
+    // 流式结束：移除流式换行类，把逐字累积的纯文本一次性转成 markdown 渲染
+    if (el && el._content) { el._content.classList.remove('dc-md-streaming'); if (el._content.textContent) el._content.innerHTML = mdDC(el._content.textContent); }
     if (el && data.failed) _attachRetryBtn(el, data.role, data.round, data.fail_reason);
     return;
   }

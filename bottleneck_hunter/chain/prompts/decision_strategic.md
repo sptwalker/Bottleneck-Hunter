@@ -14,6 +14,8 @@
 
 {allocation_bounds}
 
+{user_persona}
+
 ## 观察池个股信号
 
 {watchlist_signals}
