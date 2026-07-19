@@ -1,6 +1,6 @@
 # BottleneckHunter (瓶颈猎手) — AI 产业链瓶颈选股系统
 
-[![GitHub license](https://img.shields.io/github/license/Acclerate/BottleneckHunter)](https://github.com/Acclerate/BottleneckHunter/blob/main/LICENSE)
+[![GitHub license](https://img.shields.io/github/license/sptwalker/Bottleneck-Hunter)](https://github.com/sptwalker/Bottleneck-Hunter/blob/main/LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://pyproject.toml)
 
 **BottleneckHunter** 是一个基于 AI 和大语言模型（LLM）的**产业链瓶颈与“卡脖子”供应商选股系统**。本项目的核心投资方法论源自古宇家办对 Serenity 的 **“三步选股法”**（产业链拆解 → 供应商检索 → 多模型交叉验证）的深度解读。
@@ -52,13 +52,46 @@ graph TD
 
 ---
 
+## 决策中心：从“一次性筛选”到“持续跟踪 + 多层决策”
+
+除了上述 CLI 分析流程，系统还提供一个 **Web 决策中心**（`bottleneck-hunter serve` 启动），把选出的标的纳入观察池持续跟踪，并用**四层 AI 决策 + 投委会评审 + 模拟交易闭环**辅助持仓决策。
+
+```mermaid
+graph LR
+    A[观察池<br/>持续跟踪] --> B[L1 宏观策略]
+    B --> C[L2 组合配置]
+    C --> D[L3 战术计划]
+    D --> E[L4 执行方案]
+    E --> F[投委会评审<br/>4 成员]
+    F --> G[模拟交易]
+    G --> H[自动复盘<br/>经验卡片]
+    H --> A
+```
+
+**核心能力：**
+
+| 模块 | 说明 |
+|------|------|
+| **四层决策引擎** | L1 宏观环境 → L2 组合配置 → L3 个股战术 → L4 账户执行，逐层收敛，增量更新（L1/L2 周级 + 日检，L3/L4 每日） |
+| **投委会评审** | 风控官 / 成长型 / 价值型 / 逆向投资者 4 位不同 LLM 独立审查 + 圆桌辩论 + 加权共识 |
+| **用户持仓风格** | 风险偏好 / 最大回撤 / 单一持仓上限等设定，作为**硬约束**注入 L1-L4（单一持仓上限接入 L2 确定性钳制） |
+| **宏观咨询** | 宏观市场 / 产业动向两位分析师流式多轮对话，每市场一条滚动会话 |
+| **模拟交易闭环** | 半自动模式（系统建议 → 用户确认 → 执行）+ 持仓/盈亏跟踪 + 卖出自动复盘 → 经验卡片回流 |
+| **催化剂 & 风险** | 催化剂追踪与时效判定、组合风险度量（VaR / Beta / HHI / 相关性）、回测框架 |
+| **AI 模型智能调度** | 数据驱动的 provider 选型（遥测优先 + 能力先验），自动 fallback，主模型可锁定 |
+| **多市场 & 多用户** | A股 / 美股全链路隔离；JWT 认证 + Per-User API Key 加密隔离；行情/新闻等公共数据全局共享 |
+
+> 完整设计与阶段进展见 [PLAN.md](PLAN.md)、[决策闭环改进](docs/DECISION_LOOP_IMPROVEMENT.md)、[模型调度设计](docs/MODEL_SCHEDULER_DESIGN.md)。
+
+---
+
 ## 目录结构
 
 ```text
 BottleneckHunter/
 ├── bottleneck_hunter/
-│   ├── cli.py                  # 交互式命令行入口
-│   ├── chain/
+│   ├── cli.py                  # 交互式命令行入口 (screen / hot / serve)
+│   ├── chain/                  # 分析流程：产业链拆解 → 瓶颈 → 供应商 → 交叉验证
 │   │   ├── models.py           # 核心数据模型 (Pydantic v2)
 │   │   ├── decomposer.py       # 产业链拆解引擎 (LLM 驱动)
 │   │   ├── bottleneck.py       # 瓶颈评分与识别算法
@@ -67,16 +100,32 @@ BottleneckHunter/
 │   │   ├── cross_validation.py # 多模型反向交叉验证框架
 │   │   ├── graph.py            # LangGraph 工作流状态编排
 │   │   ├── report.py           # 报告生成器 (Markdown)
-│   │   ├── prompts/            # LLM System Prompts (拆解、评估、交叉验证)
-│   │   └── data/               # 预设产业链本地数据库 (GPU、机器人、商业航天等)
+│   │   ├── prompts/            # LLM System Prompts (37 个模板)
+│   │   └── data/               # 预设产业链本地数据库 (GPU / 机器人 / 商业航天等)
+│   ├── watchlist/              # 决策中心：观察池 + L1-L4 决策引擎 + 投委会 + 模拟交易 + 复盘
+│   │   ├── decision_engine.py  # L1 宏观 / L2 组合 / L3 战术 / L4 执行 + 投委会串联
+│   │   ├── persona.py          # 用户持仓风格（硬约束注入各层决策）
+│   │   ├── store_schema.py     # 全部 DB 表结构 (53 张)
+│   │   ├── scheduler.py        # APScheduler 双市场定时任务
+│   │   └── …                   # 催化剂 / 风控 / 复盘 / 偏好学习 / 模型智能调度
+│   ├── web/                    # FastAPI 应用与前端
+│   │   ├── app.py              # 应用装配 + 认证中间件 + 静态资源
+│   │   ├── decision_api.py     # 决策中心 API（含持仓风格）
+│   │   ├── trading_api.py      # 模拟交易 API
+│   │   └── static/             # 前端 (index.html + js/ + css/，本地 vendor 库)
+│   ├── auth/                   # JWT 认证、用户/邀请码、Per-User Key 加密隔离
+│   ├── data_provider/          # 多市场数据源适配 (yfinance / akshare / tushare / FMP 等)
 │   ├── llm_clients/
-│   │   └── factory.py          # 多模型 LLM 客户端工厂
+│   │   └── factory.py          # 多模型 LLM 客户端工厂 + 智能调度
 │   └── dataflows/              # 数据流接口
-├── tests/                      # 单元测试 (100% 覆盖核心逻辑)
+├── tests/                      # 单元测试 (82 个测试文件 / 988 个测试函数)
+├── docs/                       # 设计文档、审计报告、部署与测试指南
 ├── pyproject.toml              # 项目依赖与打包配置
 ├── .env.example                # 环境变量配置模板
 └── PLAN.md                     # 开发规划路线图
 ```
+
+> 项目已从一次性 CLI 选股工具，演进为**持续跟踪 + 多层决策的 Web 平台**（详见下方「决策中心」）。
 
 ---
 
@@ -88,8 +137,8 @@ BottleneckHunter/
 
 ```bash
 # 克隆仓库
-git clone https://github.com/Acclerate/BottleneckHunter.git
-cd BottleneckHunter
+git clone https://github.com/sptwalker/Bottleneck-Hunter.git
+cd Bottleneck-Hunter
 
 # 创建并激活虚拟环境 (可选)
 python -m venv .venv
@@ -138,6 +187,16 @@ bottleneck-hunter screen
 bottleneck-hunter hot
 ```
 该命令会获取东财最新的板块数据并打印直观的排名表，同时在 `output/` 中保存扫描快照。
+
+#### 🖥️ 启动 Web 决策中心
+持续跟踪与多层决策平台（观察池 / L1-L4 决策 / 投委会 / 模拟交易）通过 Web 服务提供：
+
+```bash
+bottleneck-hunter serve                 # 默认 http://127.0.0.1:8000
+bottleneck-hunter serve --port 8010     # 指定端口
+```
+
+> 首次访问需登录（多用户系统）。各 LLM Provider 的 API Key 可在顶栏「AI 配置中心」按用户配置，也可用 `.env` 中的全局 Key 作为回退。
 
 ---
 

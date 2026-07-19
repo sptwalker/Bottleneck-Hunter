@@ -234,16 +234,29 @@ BottleneckHunter/
 | P0 | Phase 16C - Per-User API KEY | ✅ 已完成 | AES-256-GCM加密存储(user_api_keys表)、用户KEY→.env全局KEY fallback链、Settings面板11 provider配置、KEY hint显示(sk-...xxxx) |
 | P0 | Phase 16D - 管理员后台 | ✅ 已完成 | 用户管理(冻结/解冻/删除+级联清理)、邀请码管理(批量生成/作废)、系统配置(开放注册/默认上限)、数据统计、admin.js/admin.css前端面板 |
 | P0 | **系统全面评审** | ✅ 已完成 | 5维度深度审计(决策引擎/数据管道/产业链/风控/前端)，38个问题，综合评分5.2/10，详见 [评审报告](docs/SYSTEM_AUDIT_REPORT.md) |
-| P0 | Phase 17A - 数据基础修复 | ⬜ 待开始 | market_snapshots加market列、宏观数据接入L1(VIX/美债/DXY/北向资金)、Form 4真实解析、A股基本面增强、机构持仓+分析师评级 |
-| P0 | Phase 17B - 技术缺陷修复 | ⬜ 待开始 | L4约束硬验证引擎、夏令时动态处理、SQLite连接安全加固、SSE自动重连、composite_score实际生效 |
-| P0 | Phase 17C - 风控量化体系 | ⬜ 待开始 | 回测框架(Sharpe/Sortino/MaxDD/基准对比)、组合风控(VaR/Beta/HHI/相关性矩阵)、仓位算法(Kelly/波动率缩放/风险平价) |
-| P1 | Phase 17D - 闭环反馈贯通 | ⬜ 待开始 | 模拟交易流程验证、自动复盘链路修复、经验卡片生成应用、催化剂结果判定、用户偏好学习 |
-| P1 | Phase 17E - 规则引擎优化 | ⬜ 待开始 | 可投性过滤(TAM/客户数/毛利率/流动性门槛)、分行业瓶颈权重、LLM评分规则化+锚定、产业链版本管理 |
-| P2 | Phase 17F - 体验与可视化 | ⬜ 待开始 | 决策链路追溯、风险仪表盘、催化剂日历、A/B对比分析 |
+| P0 | Phase 17A - 数据基础修复 | ✅ 已完成 | market_snapshots加market列、宏观数据接入L1(VIX/美债/DXY/北向资金)、Form 4真实解析、A股基本面增强、机构持仓+分析师评级 |
+| P0 | Phase 17B - 技术缺陷修复 | ✅ 已完成 | L4约束硬验证引擎、夏令时动态处理、SQLite连接安全加固、SSE自动重连、composite_score实际生效 |
+| P0 | Phase 17C - 风控量化体系 | ✅ 已完成 | 回测框架(Sharpe/Sortino/MaxDD/基准对比)、组合风控(VaR/Beta/HHI/相关性矩阵)、仓位算法(Kelly/波动率缩放/风险平价) |
+| P1 | Phase 17D - 闭环反馈贯通 | ✅ 已完成 | 模拟交易流程验证、自动复盘链路修复、经验卡片生成应用、催化剂结果判定、用户偏好学习 |
+| P1 | Phase 17E - 规则引擎优化 | ✅ 已完成 | 可投性过滤(TAM/客户数/毛利率/流动性门槛)、分行业瓶颈权重、LLM评分规则化+锚定、产业链版本管理 |
+| P2 | Phase 17F - 体验与可视化 | ✅ 已完成 | 决策链路追溯、风险仪表盘、催化剂日历、A/B对比分析 |
 
-**当前版本**：60+ Python 模块，32 测试文件，530+ 项测试全部通过
+> Phase 17A-17F 于提交 `18ac7c8`（2026-06-27）一次性交付全部 26 项任务，详见 [改进完善计划](docs/IMPROVEMENT_PLAN.md)。此后（6-27 至今）的持续开发见下方 **Phase 18+**。
 
-**下一步**：Phase 17A 数据基础修复，详见 [改进完善计划](docs/IMPROVEMENT_PLAN.md)
+| P0 | Phase 18 - 决策闭环校验与自进化 | ✅ 已完成 | L1-L4+投委会校验闭环、反馈接通、组合风控、自进化；投委会加权共识（锁定主模型优先于历史角色矩阵）；详见 [决策闭环改进](docs/DECISION_LOOP_IMPROVEMENT.md) |
+| P0 | Phase 19 - AI 模型智能调度 | ✅ 已完成 | 数据驱动调度取代静态分配、遥测优先、平滑过渡、按角色上下文容量事前选型 + 自动 fallback + 手动重试；详见 [调度设计](docs/MODEL_SCHEDULER_DESIGN.md) |
+| P0 | Phase 20 - 多用户与 Key 隔离加固 | ✅ 已完成 | current_user ContextVar 严格按用户解析 Key（缺 Key 即 MissingUserKeyError 拦截）、顶栏 AI 配置中心为唯一入口、tier比例/budget主键/热点缓存/模型同步修复 |
+| P0 | Phase 21 - 市场隔离一致性 | ✅ 已完成 | A股/美股 for_market + _filtered 全链路隔离、list_all/get_tickers 按 market 过滤、打分一致性验证 |
+| P0 | Phase 22 - L1 宏观咨询互动 | ✅ 已完成 | 两位分析师（宏观市场/产业动向）流式多轮对话、每市场一条滚动会话、跨天时效分割、失败重试、markdown 渲染 |
+| P0 | Phase 23 - LLM 容量选型与容错 | ✅ 已完成 | 按角色上下文容量事前选型（model_context 映射 + role min_context）、自动 fallback、手动重试 |
+| P1 | Phase 24 - 定时任务可靠性 | ✅ 已完成 | misfire_grace_time、启动补跑、gating、everyday 调度；时区统一（UTC 存储 / 北京展示 fmtBJ / 调度 Asia-Shanghai） |
+| P1 | Phase 25 - 用户持仓风格调节 | ✅ 已完成 | 决策中心「持仓风格」面板：风险偏好/最大回撤/单一持仓上限 + 高级选项，作为硬约束注入 L1-L4（单一持仓上限接入 L2 确定性钳制），按用户+市场隔离；`persona.py` |
+| P1 | Phase 26 - 前端资产本地化 | ✅ 已完成 | jsdelivr/unpkg/cdnjs 国内不可达 → 前端库本地 vendor（marked 等，用 npmmirror 下载） |
+| P1 | Phase 27 - 生产部署与可观测 | ✅ 已完成 | bh.youdoogo.com / docker(8089) / nginx；桌面借道 WS 加 upgrade 头；首页更新历史自动化（commit 📢 行首白话行进 UPDATE_HISTORY.json）；详见 [部署](docs/DEPLOY.md) [可观测](docs/OBSERVABILITY.md) |
+
+**当前版本**（2026-07-19）：149 个 Python 模块，82 测试文件 / 988 个测试函数，53 张 DB 表，37 个 LLM 提示词模板，110 条用户可见更新记录
+
+**下一步**：见 [改进完善计划](docs/IMPROVEMENT_PLAN.md) 与本文件 Phase 18+；决策平台核心闭环已贯通，重心转向实盘数据质量、回测校准与用户体验打磨
 
 ---
 
