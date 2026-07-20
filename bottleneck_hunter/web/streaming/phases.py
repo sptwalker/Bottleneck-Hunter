@@ -151,8 +151,11 @@ async def stream_phase1(
             try:
                 from bottleneck_hunter.chain.chain_store import ChainStore
                 from bottleneck_hunter.chain.models import ChainGraph
+                # 传 current_model：只复用同一模型拆的缓存。根因 #14——用户选 deepseek 却复用了
+                # MiniMax 的稀疏旧链。不一致/无匹配缓存 → cached 为 None → 下方用当前模型重拆。
                 cached = ChainStore().get_fresh_chain(end_product, max_age_days=14,
-                                                      min_depth=max_depth, sector=sector)
+                                                      min_depth=max_depth, sector=sector,
+                                                      current_model=model or "")
                 if cached:
                     chain = ChainGraph(**cached["chain_json"])
                     yield _sse("step_progress", step="decompose",
@@ -160,6 +163,8 @@ async def stream_phase1(
                                        f"（{cached['created_at'][:10]}，模型 {cached.get('model_used', '?')}）"
                                        f"，省去重复拆解。如需重建请勾选「强制重建产业链」。", log=True)
                     yield _sse("step_done", step="decompose", index=0, result=chain.model_dump(), reused=True)
+                else:
+                    logger.info("[phase1] 无可复用缓存(模型不一致/过旧/无缓存)，用当前模型 %s 重新拆解", model)
             except Exception:
                 logger.exception("缓存产业链复用失败，回退到重新拆解")
                 chain = None

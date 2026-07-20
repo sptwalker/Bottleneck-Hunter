@@ -331,6 +331,18 @@ class ChainDecomposer:
             graph.created_at = datetime.now(timezone.utc).isoformat()
             from bottleneck_hunter.chain.chain_store import ChainStore
             store = ChainStore()
+            # 退化保护：若同产品同模型已有「够新且明显更完整」的缓存，而本次节点数骤降(<其50%)，
+            # 判为退化(网络抖动/限流致拆解不全)，打 low_power 标 → 复用侧优先跳过，避免退化版遮蔽好版。
+            cur_n = len(graph.nodes)
+            try:
+                best_n = store.best_recent_node_count(
+                    end_product, model_used=str(model_name), max_age_days=14, sector=self.sector)
+                if best_n and cur_n < best_n * 0.5:
+                    graph.metadata["low_power"] = True
+                    logger.warning("拆解疑似退化：本次 %d 节点 < 同模型近期最优 %d 的一半，标记 low_power 不覆盖优质缓存",
+                                   cur_n, best_n)
+            except Exception:  # noqa: BLE001
+                logger.exception("退化检测失败，不影响保存")
             store.save_chain(end_product, graph.model_dump(), model_used=str(model_name))
         except Exception:
             logger.exception("产业链版本保存失败，不影响拆解结果")

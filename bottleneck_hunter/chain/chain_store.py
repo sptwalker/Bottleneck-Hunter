@@ -135,7 +135,8 @@ class ChainStore:
         return self._row_to_dict(row) if row else None
 
     def get_fresh_chain(self, product_name: str, max_age_days: int = 14,
-                        min_depth: int = 0, sector: str = "") -> dict[str, Any] | None:
+                        min_depth: int = 0, sector: str = "",
+                        current_model: str = "") -> dict[str, Any] | None:
         """返回可复用的产业链版本，否则 None。省 70~360 次 LLM 拆解调用。
 
         逐版本(新→旧)扫描，返回第一个同时满足所有安全门的版本——**不只看最新版**，
@@ -146,6 +147,11 @@ class ChainStore:
         - 非部分结果：拆解超时会 metadata.partial=True，其深层不完整。
         - **实际达到深度** ≥ 请求深度：用节点的真实最大 layer 判定，而非存储的 max_depth
           (max_depth 记的是「请求深度」，LLM 全失败时会得到 root-only 但 max_depth 仍等于请求值)。
+        - **模型匹配**(current_model 非空时)：只复用同一模型拆的缓存。根因 #14：用户选了
+          deepseek 却复用了 MiniMax 拆的稀疏旧链——选模型形同虚设。不一致即跳过 → 上层用
+          当前模型重拆。current_model 为空(未知/兼容旧调用)时不校验此门。
+        - **非退化**：跳过 metadata.low_power=True 的版本(同模型某次明显退化的缓存)，避免
+          劣质版遮蔽更完整的旧版；仅当无其它合格版本时才容忍(见末尾兜底)。
         """
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
@@ -153,6 +159,7 @@ class ChainStore:
             versions = self.get_chains(product_name)  # 新→旧
         except Exception:
             return None
+        low_power_fallback = None  # 全部合格版本都被 low_power 挡掉时的兜底(总比重拆省)
         for v in versions:
             cj = v.get("chain_json") or {}
             if not isinstance(cj, dict):
@@ -169,6 +176,9 @@ class ChainStore:
             # 赛道匹配(sector 为空则不校验，兼容旧调用)
             if sector and (cj.get("sector") or "") != sector:
                 continue
+            # 模型匹配(current_model 非空才校验)：不一致即不复用，交由上层用当前模型重拆
+            if current_model and (v.get("model_used") or "") != current_model:
+                continue
             # 非部分结果
             if (cj.get("metadata") or {}).get("partial"):
                 continue
@@ -177,8 +187,49 @@ class ChainStore:
             achieved = max((n.get("layer", 0) or 0 for n in nodes), default=0)
             if min_depth and achieved < min_depth:
                 continue
+            # 退化版：先记为兜底，优先找非退化版本
+            if (cj.get("metadata") or {}).get("low_power"):
+                if low_power_fallback is None:
+                    low_power_fallback = v
+                continue
             return v
-        return None
+        # 合格版本全是退化版 → 兜底复用最新的退化版(仍比重拆省；实测极少发生)
+        return low_power_fallback
+
+    def best_recent_node_count(self, product_name: str, model_used: str,
+                               max_age_days: int = 14, sector: str = "") -> int:
+        """同产品同模型、够新、非 partial、非 low_power 的缓存里，节点数最高者。无则 0。
+
+        供保存侧退化检测：本次拆解节点数远低于它即判退化(见 decomposer)。
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        try:
+            versions = self.get_chains(product_name)
+        except Exception:
+            return 0
+        best = 0
+        for v in versions:
+            if (v.get("model_used") or "") != model_used:
+                continue
+            cj = v.get("chain_json") or {}
+            if not isinstance(cj, dict):
+                continue
+            try:
+                created = datetime.fromisoformat(v.get("created_at", ""))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            if (now - created).total_seconds() / 86400 > max_age_days:
+                continue
+            if sector and (cj.get("sector") or "") != sector:
+                continue
+            meta = cj.get("metadata") or {}
+            if meta.get("partial") or meta.get("low_power"):
+                continue
+            best = max(best, len(cj.get("nodes") or []))
+        return best
 
     # ── 版本对比 ───────────────────────────────────────────
 
