@@ -75,11 +75,21 @@
 - **止盈位 target_prices**：第一目标参考 `base_price`，第二目标参考 `bull_price`，概率沿用情景概率
 - 若该股无 scenario_valuation，再回退到纯技术位
 
+## 评分校准锚点（risk_assessment.confidence 0-10，务必对照）
+
+打分前先对照下列刻度确定所属区间再给分：
+- 9-10：多个独立数据源相互印证，结论近乎确定
+- 7-8：主要证据支持，个别环节待确认
+- 5-6：证据不足或存在明显分歧，把握有限
+- 3-4：大量依赖假设，数据缺口大
+- 1-2：几乎无有效数据支撑，仅凭直觉
+
+**语言要求：所有文本字段（reasoning / key_risk / market_context_note 等）必须用简体中文，不得使用英文。**
+
 ## 输出格式
 
-返回严格 JSON 格式：
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
 
-```json
 {
   "tactical_plans": [
     {
@@ -120,7 +130,6 @@
   "market_context_note": "当前市场环境对本周战术的影响（1-2句话）",
   "priority_ranking": ["NVDA", "AMD", "TSMC"]
 }
-```
 
 ## 战术原则
 

@@ -43,9 +43,8 @@
 
 **重要：所有文本字段（summary / reason / opinion / recommendation / committee_note / key_risks_flagged 等）必须用简体中文撰写，不得使用英文。**
 
-返回严格 JSON 格式：
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
 
-```json
 {
   "final_verdict": "approved | approved_with_modifications | rejected | needs_discussion",
   "approval_rate": 75,
@@ -86,4 +85,3 @@
   ],
   "summary": "3-5句话总结投委会决议，包含核心结论和主要分歧"
 }
-```

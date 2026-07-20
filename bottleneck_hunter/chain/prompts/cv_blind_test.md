@@ -37,10 +37,11 @@
 
 ## 输出要求
 
-返回严格的 JSON 对象，不要包含任何其他文字。
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
 score 必须是 1-10 之间的整数。
 
-```json
+**语言要求：所有文本字段（reasoning / concerns / strengths / fatal_reason 等）必须用简体中文，不得使用英文。**
+
 {
   "score": 6,
   "reasoning": "你的独立评估结论（2-3句话，标明信息确定程度）",
@@ -49,4 +50,4 @@ score 必须是 1-10 之间的整数。
   "fatal_risk": false,
   "fatal_reason": ""
 }
-```
+

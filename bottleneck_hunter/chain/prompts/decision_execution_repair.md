@@ -29,9 +29,10 @@
 
 ## 输出格式
 
+**语言要求：rationale / adjustment_note / reason 等文本字段必须用简体中文。** 返回严格 JSON，不要包含 markdown 代码块。
+
 可行时返回：
 
-```json
 {
   "feasible": true,
   "ticker": "NVDA",
@@ -44,16 +45,13 @@
   "rationale": "原计划占比超 25% 上限，缩量至 19% 合规",
   "adjustment_note": "股数 50 → 25，符合单股上限约束"
 }
-```
 
 不可行时返回：
 
-```json
 {
   "feasible": false,
   "reason": "现金仅剩 $800，不足以买入 1 股 NVDA（$190），无法修复"
 }
-```
 
 ## 修正原则
 

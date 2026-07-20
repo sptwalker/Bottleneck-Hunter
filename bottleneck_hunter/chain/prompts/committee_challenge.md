@@ -14,9 +14,10 @@
 
 投票字段只能取：`approve`（赞成）、`approve_with_modification`（有条件赞成）、`reject`（反对）、`abstain`（弃权）。
 
-**所有文本字段必须用简体中文。** 返回严格 JSON（不要 markdown 代码块）：
+new_confidence 校准锚点（0-10）：9-10=多源印证近乎确定；7-8=主要证据支持；5-6=证据不足有分歧；3-4=大量依赖假设；1-2=仅凭直觉。
 
-```json
+**所有文本字段必须用简体中文。** 返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
+
 {
   "response": "对用户质询的正式回应，2-4 句，明确说明你是否被说服及核心理由",
   "accept_user_point": true,
@@ -24,4 +25,3 @@
   "new_confidence": 7,
   "revised_assessment": "若改票，给出修订后的总体评估；若维持原判，重申你的核心理由"
 }
-```

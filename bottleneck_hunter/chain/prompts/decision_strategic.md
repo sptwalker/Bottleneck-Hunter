@@ -64,9 +64,10 @@
 
 ## 输出格式
 
-返回严格 JSON 格式：
+**语言要求：所有文本字段（thesis / reason / strategy_text / rationale 等）必须用简体中文，不得使用英文。**
 
-```json
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
+
 {
   "overall_stance": "aggressive | balanced | defensive",
   "target_allocation": {
@@ -133,7 +134,6 @@
   ],
   "strategy_text": "完整策略阐述（600-1000字），解释配置逻辑和关键决策依据"
 }
-```
 
 ## 核心原则
 

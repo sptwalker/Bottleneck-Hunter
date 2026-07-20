@@ -26,9 +26,10 @@
 
 ## 输出格式
 
-返回严格 JSON 格式：
+**语言要求：所有文本字段（daily_commentary / reason 等）必须用简体中文，不得使用英文。**
 
-```json
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
+
 {
   "strategy_status": "valid | needs_minor_tweak | needs_major_revision",
   "confidence_in_current": 8,
@@ -42,6 +43,5 @@
   "major_revision_needed": false,
   "major_revision_triggers": ["如果需要重建，列出触发因素"]
 }
-```
 
 注意：大多数日子应该返回 `"strategy_status": "valid"`。只有真正的重大变化才需要 `needs_major_revision`。

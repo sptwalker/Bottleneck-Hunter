@@ -19,9 +19,10 @@
 
 ## 审查要求
 
-请严格按以下 JSON 格式返回：
+请严格按以下 JSON 格式返回，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
 
-```json
+**语言要求：所有文本字段（supporting_evidence / contradicting_evidence / assessment / conviction_change_reason / key_risks / next_review_focus 等）必须用简体中文，不得使用英文（枚举值除外）。**
+
 {
   "pillar_assessments": [
     {
@@ -38,7 +39,7 @@
   "key_risks": ["关键风险1", "关键风险2"],
   "next_review_focus": ["下次审查重点关注的事项"]
 }
-```
+
 
 ## 审查原则
 

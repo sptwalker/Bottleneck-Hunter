@@ -21,9 +21,10 @@
 
 ## 输出格式
 
-输出严格 JSON，不要添加 markdown code fence：
+输出严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
 
-```json
+**语言要求：所有文本字段（analysis / parameter / current / suggested / reason / evidence 等）必须用简体中文，不得使用英文（type 枚举值除外）。**
+
 {
   "analysis": "2-3 句总体分析",
   "suggestions": [
@@ -37,7 +38,7 @@
     }
   ]
 }
-```
+
 
 ## 约束
 

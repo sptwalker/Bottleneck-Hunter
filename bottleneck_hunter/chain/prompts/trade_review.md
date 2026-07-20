@@ -42,8 +42,10 @@
 
 ## 输出格式
 
-返回 JSON 对象，不要多余文字：
-```json
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
+
+**语言要求：所有文本字段（what_went_right / what_went_wrong / key_lessons / assessment / title / content 等）必须用简体中文，不得使用英文（scope / category 等枚举值除外）。**
+
 {
   "what_went_right": ["正确的判断1", "正确的判断2"],
   "what_went_wrong": ["错误或不足1", "错误或不足2"],
@@ -64,4 +66,4 @@
     "confidence": 0.7
   }
 }
-```
+

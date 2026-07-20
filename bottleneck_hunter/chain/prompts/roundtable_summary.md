@@ -19,8 +19,8 @@
 
 ## 输出要求
 
-返回严格 JSON：
-```json
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
+
 {
   "final_ranking": [
     {"rank": 1, "ticker": "XXX", "name": "公司名", "reasoning": "综合各方观点的上榜理由"},
@@ -42,7 +42,6 @@
   "investment_thesis": "投资主线：一段连贯的策略建议",
   "speech": "总结发言（3-4段自然语言，概述会议成果）"
 }
-```
 
 ## 数据使用指引
 
@@ -51,3 +50,5 @@
 - 在投资主线中综合考量最新市场数据和基本面分析
 - 风险警示中区分已确认的风险和需要进一步关注的潜在风险
 - 关注各角色给出的信心分差异——分歧大的标的可能需要更多研究
+
+**语言要求：所有文本字段（reasoning / key_agreements / key_disagreements / risk_warnings / investment_thesis / speech 等）必须用简体中文，不得使用英文。**

@@ -46,9 +46,10 @@
 
 ## 输出格式
 
-返回严格 JSON 格式：
+**语言要求：所有文本字段（market_summary / strategy_text / risk_factors 等）必须用简体中文，不得使用英文。**
 
-```json
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
+
 {
   "regime": "bull | bear | sideways | transition",
   "regime_confidence": 7,
@@ -71,7 +72,6 @@
   "strategy_text": "完整策略阐述（800-1200字），包含推理过程",
   "valid_until_trigger": "什么情况下此策略需要重建（如VIX突破30、联储紧急行动等）"
 }
-```
 
 ## 分析原则
 

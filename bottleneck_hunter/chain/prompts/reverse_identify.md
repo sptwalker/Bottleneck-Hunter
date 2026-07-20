@@ -18,9 +18,10 @@
 
 ## 输出格式
 
-只返回**纯 JSON**（不要 markdown 代码块、不要多余文字），字段如下：
+只返回**纯 JSON**（不要 markdown 代码块、不要多余文字）。下方示例仅为结构示范，请直接输出对应的 JSON 对象，字段如下：
 
-```json
+**语言要求：所有文本字段（sector / end_product / node_name / node_description / function / key_parameters 等）必须用简体中文，不得使用英文（layer_type 枚举值除外）。**
+
 {
   "sector": "细分产业方向，如 'GPU/AI算力' 'AI光通信'",
   "end_product": "该产业链的终端产品，如 'GPU' 'AI数据中心'",
@@ -31,6 +32,6 @@
   "function": "该环节的技术功能",
   "key_parameters": ["关键参数1", "关键参数2"]
 }
-```
+
 
 `layer_type` 只能取以下之一：`assembly`（子部件/组装）、`component`（零部件）、`sub_component`（次级零部件）、`material`（材料）、`raw_material`（原材料）、`equipment`（设备）。

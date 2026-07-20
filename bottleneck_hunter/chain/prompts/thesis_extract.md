@@ -10,9 +10,10 @@
 
 ## 要求
 
-请严格按以下 JSON 格式返回，不要多余文字：
+请严格按以下 JSON 格式返回，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
 
-```json
+**语言要求：所有文本字段（thesis_title / thesis_summary / text / falsification 等）必须用简体中文，不得使用英文（conviction / time_horizon 等枚举值除外）。**
+
 {
   "thesis_title": "一句话投资论点（如：AI算力需求爆发驱动光模块龙头成长）",
   "thesis_summary": "2-3句话投资摘要",
@@ -26,7 +27,7 @@
     }
   ]
 }
-```
+
 
 ## 关键原则
 

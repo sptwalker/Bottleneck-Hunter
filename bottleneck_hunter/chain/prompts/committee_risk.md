@@ -56,11 +56,21 @@
 
 你的评审必须基于上方提供的**真实数据**作答：在 `key_concerns` / `stress_test` / `overall_assessment` 中**引用具体数字**（如账户现金比例、单笔金额、持仓集中度、组合权益等）。若某项数据显示"暂无"，明确指出该数据缺口并据此降低 confidence，而非凭空臆测。
 
+## 评分校准锚点（confidence 及各维度分数均 0-10，务必对照）
+
+打分前先对照下列刻度确定所属区间再给分，杜绝随手打分：
+- 9-10：多个独立数据源相互印证，结论近乎确定
+- 7-8：主要证据支持，个别环节待确认
+- 5-6：证据不足或存在明显分歧，把握有限
+- 3-4：大量依赖假设，数据缺口大
+- 1-2：几乎无有效数据支撑，仅凭直觉
+
+**语言要求：所有文本字段（key_concerns / reason / overall_assessment / strengths 等）必须用简体中文，不得使用英文。**
+
 ## 输出格式
 
-返回严格 JSON 格式：
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
 
-```json
 {
   "vote": "approve | approve_with_modification | reject",
   "confidence": 7,
@@ -87,4 +97,3 @@
   "strengths": ["止损设置明确", "分批策略降低择时风险"],
   "overall_assessment": "2-3句话综合评估"
 }
-```
