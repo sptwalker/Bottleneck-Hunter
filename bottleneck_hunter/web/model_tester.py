@@ -1,12 +1,13 @@
 """模型能力综合测试引擎。
 
-6 个测试维度 — 设计目标：拉开区分度，贴合实际使用场景。
+7 个测试维度 — 设计目标：拉开区分度，贴合实际使用场景。
 - connectivity: 基础连通性（通/不通）
 - json_output: 复杂 JSON 结构化输出能力（嵌套/数组/严格格式）
 - chinese_analysis: 中文产业链深度分析（评判分析质量而非关键词命中）
 - speed: 响应速度（连续梯度而非台阶）
 - scoring_variance: 评分区分度（关注排序正确性而非方差大小）
 - instruction_follow: 指令遵循能力（字数限制/格式约束/角色扮演）
+- chain_decompose: 产业链拆解能力（真跑 2 次单节点拆解，量广度/结构/深度/去重）
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 TEST_DIMENSIONS = [
     "connectivity", "json_output", "chinese_analysis",
-    "speed", "scoring_variance", "instruction_follow",
+    "speed", "scoring_variance", "instruction_follow", "chain_decompose",
 ]
 
 # ── connectivity ────────────────────────────────────────
@@ -400,6 +401,143 @@ async def test_instruction_follow(provider: str, model: str) -> dict:
         return {"score": 0.0, "error": str(e)[:200]}
 
 
+# ── chain_decompose (真实拆解能力) ──────────────────────
+#
+# 为什么单列一维：记录 #10(deepseek 457节点) vs #13(minimax 79节点) 同条件差 6 倍，
+# 根因是「每个节点向上拆出几个子部件」的模型广度差异——通用维度(JSON/中文/指令)测不出。
+# 本维度真跑 2 次生产同款单节点拆解(HBM 两层)，直接量广度/结构/深度/去重。
+
+_CHAIN_SEED = "HBM"  # 固定种子产品（贴合本次排查案例）
+
+
+def _score_chain_decompose(layer1: list, layer2: list,
+                           parent_name: str, child_name: str) -> tuple[float, dict]:
+    """对两层单节点拆解结果打分（满分 10），纯函数、无网络。返回 (score, breakdown)。"""
+    layer1 = layer1 if isinstance(layer1, list) else []
+    layer2 = layer2 if isinstance(layer2, list) else []
+    breakdown = {}
+
+    # 1. 广度 (0-4)：两次调用平均子节点数，~8 个满分（deepseek↔minimax 分水岭在此）
+    avg = (len(layer1) + len(layer2)) / 2
+    breakdown["breadth"] = round(min(avg / 8, 1.0) * 4, 2)
+    breakdown["layer1_count"] = len(layer1)
+    breakdown["layer2_count"] = len(layer2)
+
+    # 2. 结构合规 (0-3)：元素含必备字段的占比（name/function/upstream_deps/dependency/representative_companies）
+    def _well_formed(el) -> bool:
+        if not isinstance(el, dict):
+            return False
+        if not str(el.get("name", "")).strip():
+            return False
+        if not str(el.get("function", "")).strip():
+            return False
+        if not isinstance(el.get("upstream_deps"), list):
+            return False
+        if not isinstance(el.get("dependency"), (int, float)):
+            return False
+        if not isinstance(el.get("representative_companies"), list):
+            return False
+        return True
+
+    all_els = layer1 + layer2
+    if all_els:
+        frac_ok = sum(1 for e in all_els if _well_formed(e)) / len(all_els)
+    else:
+        frac_ok = 0.0
+    breakdown["structure"] = round(frac_ok * 3, 2)
+
+    # 3. 深度专业 (0-2)：孙节点是真·上游(非空且不与父/子重名) 1 分 + 代表公司带合法代码占比 1 分
+    def _name(el):
+        return str(el.get("name", "")).strip() if isinstance(el, dict) else ""
+
+    l2_names = [_name(e) for e in layer2 if _name(e)]
+    real_upstream = bool(l2_names) and not any(
+        n == parent_name or n == child_name for n in l2_names)
+    depth = 1.0 if real_upstream else 0.0
+
+    def _has_code(el) -> bool:
+        if not isinstance(el, dict):
+            return False
+        for c in el.get("representative_companies") or []:
+            if isinstance(c, dict) and str(c.get("code", "")).strip():
+                return True
+        return False
+
+    if all_els:
+        depth += sum(1 for e in all_els if _has_code(e)) / len(all_els)
+    breakdown["depth"] = round(min(depth, 2.0), 2)
+
+    # 4. 去重 (0-1)：孙节点与子节点名称基本不重叠（惩罚偷懒复读父级的模型）
+    l1_names = {_name(e) for e in layer1 if _name(e)}
+    if l2_names:
+        overlap = sum(1 for n in l2_names if n in l1_names) / len(l2_names)
+        breakdown["dedup"] = round((1 - overlap) * 1.0, 2)
+    else:
+        breakdown["dedup"] = 0.0
+
+    total = breakdown["breadth"] + breakdown["structure"] + breakdown["depth"] + breakdown["dedup"]
+    return round(min(total, 10.0), 1), breakdown
+
+
+async def test_chain_decompose(provider: str, model: str) -> dict:
+    """真跑 2 次单节点拆解（HBM 两层），量化模型的产业链拆解能力。
+
+    0 分有三种成因，务必区分（否则界面上都长一样，得逐个人肉重测才知道）：
+    - 接口层就抛异常（连不通/密钥无效/provider SDK 异常）→ 进 except，error 带异常类型名 + 中文归因。
+    - 连上但 LLM 拒绝（欠费 402/限流 429/超时）→ _decompose_layer 优雅降级返回 []，
+      dec._last_fail_reason 记录了中文原因，这里带进 fail_reason，区分「欠费」vs「真拆不动」。
+    - 真连上、真返回，但拆得少 → 正常低分（breadth 低），无 error/fail_reason。
+    """
+    try:
+        from bottleneck_hunter.chain.decomposer import ChainDecomposer
+        llm = create_llm(provider, model, temperature=0.3, with_fallback=False)
+        dec = ChainDecomposer(llm, max_depth=2, sector=_CHAIN_SEED, language="zh")
+        dec._on_progress = None  # 直接调 _decompose_layer 需要此属性（decompose() 里才设）
+
+        layer1 = await asyncio.wait_for(
+            dec._decompose_layer(_CHAIN_SEED, _CHAIN_SEED, 1, []), timeout=90)
+        layer1 = layer1 if isinstance(layer1, list) else []
+
+        # 取第一个子节点继续下钻一层
+        child_name = ""
+        for el in layer1:
+            if isinstance(el, dict) and str(el.get("name", "")).strip():
+                child_name = str(el["name"]).strip()
+                break
+
+        layer2 = []
+        if child_name:
+            existing = [_CHAIN_SEED] + [str(e.get("name", "")) for e in layer1 if isinstance(e, dict)]
+            layer2 = await asyncio.wait_for(
+                dec._decompose_layer(_CHAIN_SEED, child_name, 2, existing), timeout=90)
+            layer2 = layer2 if isinstance(layer2, list) else []
+
+        score, breakdown = _score_chain_decompose(layer1, layer2, _CHAIN_SEED, child_name)
+        preview = "、".join(
+            str(e.get("name", "")) for e in layer1[:6] if isinstance(e, dict))
+        result = {
+            "score": score, "breakdown": breakdown,
+            "layer1_count": len(layer1), "layer2_count": len(layer2),
+            "child": child_name, "preview": preview,
+        }
+        # 拆出 0 节点：不是"能力差"，多半是 LLM 拒绝（欠费/限流/超时）。带出降级原因，别让 0 分含糊。
+        if not layer1:
+            reason = getattr(dec, "_last_fail_reason", "") or "模型返回空/无法解析为产业链节点"
+            result["fail_reason"] = reason
+            result["error"] = f"拆解未返回任何节点（{reason}）"
+        return result
+    except Exception as e:
+        # str(e) 可能为空串（某些 provider SDK 异常），补异常类型名 + 中文归因，杜绝"空 error 的 0 分"。
+        try:
+            from bottleneck_hunter.llm_clients.fallback import classify_reason
+            reason = classify_reason(e)
+        except Exception:  # noqa: BLE001
+            reason = "调用异常"
+        detail = str(e).strip()
+        err = f"{type(e).__name__}: {detail}" if detail else type(e).__name__
+        return {"score": 0.0, "error": err[:300], "fail_reason": reason}
+
+
 # ── 注册 ────────────────────────────────────────────────
 
 _TEST_FUNCS = {
@@ -409,6 +547,7 @@ _TEST_FUNCS = {
     "speed": test_speed,
     "scoring_variance": test_scoring_variance,
     "instruction_follow": test_instruction_follow,
+    "chain_decompose": test_chain_decompose,
 }
 
 

@@ -54,12 +54,14 @@ _COMMITTEE_WEIGHTS = {
     "chinese_analysis": 0.25, "speed": 0.05,
     "scoring_variance": 0.35, "instruction_follow": 0.15,
 }
-# - 产业链管线：产业链分析要「长结构化输出稳、严格遵循 schema」，速度是次要的
-#   （快而脆的模型在几十次长输出调用里反而常失败）。重 JSON 结构化 + 指令遵循 + 中文长文分析，弱化速度。
+# - 产业链管线：拆解角色以「真实拆解力」为主导（chain_decompose 直接跑单节点拆解，量广度/结构/深度）。
+#   记录 #10(deepseek 457节点) vs #13(minimax 79节点)证明：通用维度测不出拆解广度差，必须单列并给主导权重。
+#   其余：长结构化输出稳(json_output)、严格遵循 schema(instruction_follow)、中文长文分析次之；速度弱化(快而脆的模型在几十次长输出里反而常失败)。
 _PIPELINE_WEIGHTS = {
-    "connectivity": 0.05, "json_output": 0.40,
-    "chinese_analysis": 0.20, "speed": 0.05,
-    "scoring_variance": 0.05, "instruction_follow": 0.25,
+    "connectivity": 0.05, "json_output": 0.20,
+    "chinese_analysis": 0.10, "speed": 0.05,
+    "scoring_variance": 0.05, "instruction_follow": 0.15,
+    "chain_decompose": 0.40,
 }
 # - 看板模块：重速度与 JSON（高频小任务），均衡
 _WATCHLIST_WEIGHTS = {

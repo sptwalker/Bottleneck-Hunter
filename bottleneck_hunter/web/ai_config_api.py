@@ -323,11 +323,16 @@ async def test_comprehensive(request: Request, incremental: bool = False,
                 }
 
             composite = compute_composite_score(results, _BOTTLENECK_WEIGHTS)
+            # scores 同时带 {dim}_detail（含 fail_reason/error），让前端 0 分 tooltip 实时可用，
+            # 与 GET /test/results 的数据形状一致（无需重刷页面才看到失败原因）。
+            scores = {d: r.get("score", 0) for d, r in results.items()}
+            for d, r in results.items():
+                scores[f"{d}_detail"] = r
             model_result = {
                 "provider": provider,
                 "model": model,
                 "composite_score": composite,
-                "scores": {d: r.get("score", 0) for d, r in results.items()},
+                "scores": scores,
             }
             all_results.append(model_result)
 

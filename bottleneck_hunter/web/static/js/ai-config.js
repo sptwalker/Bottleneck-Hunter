@@ -27,6 +27,7 @@ const DIMENSION_LABELS = {
   speed: '速度',
   scoring_variance: '评分力',
   instruction_follow: '指令遵循',
+  chain_decompose: '拆解力',
 };
 
 function escHtml(s) {
@@ -788,17 +789,23 @@ function renderTestResults() {
   if (!tbody) return;
 
   if (_testResults.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="aic-test-empty">暂无测试结果，点击"开始综合测试"</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="aic-test-empty">暂无测试结果，点击"开始综合测试"</td></tr>';
     return;
   }
 
   const sorted = [..._testResults].sort((a, b) => (b.composite_score || 0) - (a.composite_score || 0));
   tbody.innerHTML = sorted.map(r => {
-    const dims = ['connectivity', 'json_output', 'chinese_analysis', 'speed', 'scoring_variance', 'instruction_follow'];
+    const dims = ['connectivity', 'json_output', 'chinese_analysis', 'speed', 'scoring_variance', 'instruction_follow', 'chain_decompose'];
     const cells = dims.map(d => {
       const s = r.scores?.[d] ?? '-';
       if (s === '-') return '<td class="aic-score-cell">-</td>';
       const cls = scoreClass(s);
+      // 0 分带原因时：加 tooltip + 角标，区分「欠费/超时/连不通」vs「真拆不动」，免得逐个人肉重测
+      const detail = r.scores?.[`${d}_detail`] || {};
+      const reason = detail.fail_reason || detail.error || '';
+      if (Number(s) === 0 && reason) {
+        return `<td class="aic-score-cell ${cls}" title="${escHtml(reason)}">0.0<sup style="color:var(--danger,#dc2626)">!</sup></td>`;
+      }
       return `<td class="aic-score-cell ${cls}">${Number(s).toFixed(1)}</td>`;
     }).join('');
 
