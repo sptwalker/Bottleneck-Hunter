@@ -310,6 +310,17 @@ async def stream_reverse_analysis(
     resolved_market = detect_market(ticker, fallback=market or "us_stock")
     market_enum = MarketRegion.A_STOCK if resolved_market == "a_stock" else MarketRegion.US_STOCK
 
+    # 归一化为 canonical 代码（大小写 / A股后缀），确保取数、落库、company_archive
+    # 与观察池/决策用同一 key——否则反向建的档观察池按归一化 key 查不到。
+    # 顺带早期格式拦截：明显不像代码（公司名/含空格）直接拒，省一次 LLM+取数。
+    from bottleneck_hunter.watchlist.store_base import normalize_ticker, validate_ticker
+    ticker = normalize_ticker(ticker, resolved_market)
+    try:
+        validate_ticker(ticker, resolved_market)
+    except ValueError as e:
+        yield _sse("error", step="validate", message=str(e))
+        return
+
     # LLM：显式指定优先；否则自动使用用户在 AI 配置中为「入围评估(pipeline_eval)」选的主模型
     try:
         if provider:
