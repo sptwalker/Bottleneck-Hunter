@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
+
 from bottleneck_hunter.watchlist.slippage import calc_slippage
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
@@ -86,15 +88,22 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     if not real_px:
         return {"error": "无真实市价快照，拒绝以 LLM 估价成交", "plan_id": plan_id,
                 "needs": "price_snapshot", "ticker": ticker}
-    # 偏离度硬校验：规划价与真实市价偏离过大（>30%）时，说明 LLM 估价严重失真或标的异动，暂缓成交。
-    if planned_price and abs(real_px - planned_price) / planned_price > 0.30:
-        return {"error": "规划价与真实市价偏离 >30%，暂缓成交待复核", "plan_id": plan_id,
-                "planned_price": planned_price, "market_price": real_px, "ticker": ticker}
     exec_basis = real_px
-    # 注：result_json 的 limit_price/split_plan/execution_method 当前执行器未支持（死配置）。
 
     if not action or not ticker or not shares or not exec_basis:
         return {"error": "执行计划缺少关键字段", "plan_id": plan_id}
+
+    # 限价单：挂单价 = 规划价 target_price。买/加仓须 市价≤挂单价、卖/减仓须 市价≥挂单价 才成交；
+    # 未达则自动转「挂单」等待（不用 LLM 估价成交），最长 2 周由轮询任务续判/到期。
+    # 无挂单价 = 市价单立即成交。成交价永远用真实市价快照（对用户有利一侧）。
+    # 取代原「偏离>30% 直接拒绝」——那类单现在转挂单而非报错。
+    if planned_price:
+        favorable = (real_px <= planned_price) if action in ("buy", "add") else (real_px >= planned_price)
+        if not favorable:
+            until = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat(timespec="seconds")
+            store.rest_execution(plan_id, until)
+            return {"rested": True, "plan_id": plan_id, "ticker": ticker, "action": action,
+                    "limit_price": planned_price, "market_price": real_px}
 
     if action in ("buy", "add"):
         result = _execute_buy(store, account, plan_id, ticker, shares, exec_basis,
@@ -108,6 +117,7 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
         return {"error": f"不支持的操作类型: {action}", "plan_id": plan_id}
 
     if "error" not in result:
+        store.mark_executed(plan_id)  # confirmed → executed（激活状态机；挂单成交与普通成交共用）
         _recalc_account(store, account["id"])
         if action in ("sell", "reduce"):
             trade_id = result.get("trade_id", "")

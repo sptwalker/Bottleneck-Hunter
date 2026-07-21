@@ -545,6 +545,23 @@ async def get_blocked_executions(market: str = "us_stock", user: dict = Depends(
     return {"executions": store.get_blocked_executions()}
 
 
+@router.get("/executions/resting")
+async def get_resting_executions(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """挂单中的限价单（未达限价、等待成交）。"""
+    store = _user_store(user).for_market(market)
+    return {"executions": store.get_resting_executions()}
+
+
+@router.post("/executions/{plan_id}/cancel-resting")
+async def cancel_resting_execution(plan_id: str, user: dict = Depends(get_current_user)):
+    """用户手动取消挂单。"""
+    store = _user_store(user)
+    ok = store.expire_execution(plan_id, "[用户取消]")
+    if not ok:
+        raise HTTPException(status_code=404, detail="挂单不存在或已成交/已取消")
+    return {"status": "cancelled"}
+
+
 @router.post("/executions/{plan_id}/restore")
 async def restore_execution(plan_id: str, user: dict = Depends(get_current_user)):
     """用户手动恢复被拦截的计划到待确认队列（override）。"""
@@ -584,6 +601,11 @@ async def confirm_execution(plan_id: str, user: dict = Depends(get_current_user)
         except Exception:
             logger.warning("回滚 plan_id=%s 到 pending 失败", plan_id)
         raise HTTPException(status_code=500, detail=f"交易执行异常: {e}") from e
+    # 未达限价 → 已自动转挂单（不算失败，不回滚 pending；前端把它移入挂单区）
+    if trade_result.get("rested"):
+        return {"status": "resting", "trade": trade_result,
+                "limit_price": trade_result.get("limit_price"),
+                "market_price": trade_result.get("market_price")}
     # execute_trade 返回 error 字段表示业务错误（约束不通过、现金不足、缺价等）
     if "error" in trade_result:
         # 业务错误也回滚到 pending，卡片继续可操作(可重试/可取消)，不卡在 confirmed

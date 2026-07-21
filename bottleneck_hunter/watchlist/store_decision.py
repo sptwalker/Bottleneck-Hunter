@@ -523,14 +523,66 @@ class _DecisionMixin:
 
 
     def clear_pending_executions(self) -> int:
-        """清空所有 pending/confirmed(未执行) 的执行计划，标记为 rejected。"""
+        """清空所有 pending/confirmed(未执行) 的执行计划，标记为 rejected。挂单(resting)不清。"""
         with self._write_conn() as conn:
             q, p = self._filtered(
                 "UPDATE execution_plans SET status = 'rejected', rejection_reason = '用户手动清空' "
-                "WHERE status IN ('pending', 'confirmed') AND executed_at IS NULL"
+                "WHERE status IN ('pending', 'confirmed') AND executed_at IS NULL "
+                "AND COALESCE(resting_until, '') = ''"
             )
             cur = conn.execute(q, p)
             return cur.rowcount
+
+
+    # ── 挂单交易（限价单）生命周期：resting_until 非空 = 挂单中 ──────────────
+    def rest_execution(self, plan_id: str, resting_until: str) -> bool:
+        """把已确认(confirmed)的计划转为挂单：首次落挂单时间/到期，重复调用不重置(避免续期)。"""
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET method = 'limit', "
+                "resting_since = CASE WHEN COALESCE(resting_since,'')='' THEN ? ELSE resting_since END, "
+                "resting_until = CASE WHEN COALESCE(resting_until,'')='' THEN ? ELSE resting_until END "
+                "WHERE id = ? AND status = 'confirmed'",
+                (_now_iso(), resting_until, plan_id),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
+
+    def get_resting_executions(self, limit: int = 100) -> list[dict]:
+        """挂单中的限价单（confirmed + resting_until 非空）。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM execution_plans WHERE status = 'confirmed' "
+                "AND COALESCE(resting_until,'') != '' ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+            rows = conn.execute(q, p).fetchall()
+            return [self._parse_json_fields(dict(r), ("result_json",)) for r in rows]
+        finally:
+            conn.close()
+
+    def mark_executed(self, plan_id: str) -> bool:
+        """成交成功 → 推进到 executed（激活状态机死状态），清挂单标记。普通成交与挂单成交共用。"""
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET status = 'executed', executed_at = ?, resting_until = '' "
+                "WHERE id = ? AND status = 'confirmed'",
+                (_now_iso(), plan_id),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
+
+    def expire_execution(self, plan_id: str, reason: str = "") -> bool:
+        """挂单到期/用户取消 → expired，清挂单标记（仅作用于挂单中的计划）。"""
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET status = 'expired', resting_until = '', rejection_reason = ? "
+                "WHERE id = ? AND status = 'confirmed' AND COALESCE(resting_until,'') != ''",
+                (reason, plan_id),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
 
 
     def get_execution_plan(self, plan_id: str) -> dict | None:

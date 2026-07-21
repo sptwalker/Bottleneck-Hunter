@@ -112,7 +112,7 @@ class TestTradeExecutor:
         s.create_sim_position(account["id"], "AAPL", 100, 180.0, entry_id)
 
         plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
-            "action": "sell", "shares": 50, "target_price": 200.0,
+            "action": "sell", "shares": 50, "target_price": 180.0,
             "amount": 10000, "reasoning": "止盈",
         })
         s.confirm_execution(plan_id)
@@ -134,7 +134,7 @@ class TestTradeExecutor:
         s.create_sim_position(account["id"], "AAPL", 50, 180.0, entry_id)
 
         plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
-            "action": "sell", "shares": 50, "target_price": 200.0,
+            "action": "sell", "shares": 50, "target_price": 180.0,
             "amount": 10000, "reasoning": "清仓",
         })
         s.confirm_execution(plan_id)

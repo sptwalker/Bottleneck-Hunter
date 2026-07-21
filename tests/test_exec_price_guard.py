@@ -1,15 +1,16 @@
-"""Phase 0 验收：trade_executor 诚信价格闸门 —— 无真实快照/偏离过大时拒绝成交。
+"""trade_executor 价格闸门 —— 无真实快照拒绝成交；未达限价则转挂单（不再用规划价直通）。
 
-对应改进方案 0.4（消除 LLM 幻觉价直通模拟成交）。
-运行：pytest tests/test_exec_price_guard.py -q
+对应改进方案 0.4 + 挂单交易（限价单）。运行：pytest tests/test_exec_price_guard.py -q
 """
 from bottleneck_hunter.watchlist.trade_executor import execute_trade
 
 
 class _FakeStore:
-    """最小可跑的假 store，只实现 execute_trade 价格闸门前需要的方法。"""
-    def __init__(self, snapshot_close, planned_price=100.0, action="buy"):
+    """最小可跑的假 store，只实现 execute_trade 价格/限价闸门前需要的方法。"""
+    def __init__(self, snapshot_close, planned_price=100.0, action="buy", positions=None):
         self._snap_close = snapshot_close
+        self._positions = positions or []
+        self.rested = None
         self._plan = {
             "id": "p1", "market": "us_stock", "action": action,
             "ticker": "TEST", "shares": 10, "target_price": planned_price,
@@ -26,10 +27,20 @@ class _FakeStore:
         return {"id": "acc1", "cash_balance": 1_000_000, "initial_capital": 1_000_000}
 
     def get_sim_positions(self, account_id):
-        return []
+        return self._positions
 
     def get_latest_snapshot(self, ticker):
         return {"close": self._snap_close} if self._snap_close is not None else None
+
+    def rest_execution(self, plan_id, resting_until):
+        self.rested = (plan_id, resting_until)
+        return True
+
+    def mark_executed(self, plan_id):
+        return True
+
+    def reject_execution(self, plan_id, reason=""):
+        return True
 
 
 def test_no_snapshot_refuses_fill():
@@ -40,35 +51,39 @@ def test_no_snapshot_refuses_fill():
     assert r.get("needs") == "price_snapshot", r
 
 
-def test_large_deviation_refuses_fill():
-    """规划价与真实市价偏离 >30% → 暂缓成交。"""
-    # 真实价 100，规划价 200（偏离 100%）
-    store = _FakeStore(snapshot_close=100.0, planned_price=200.0)
+def test_unfavorable_price_parks_as_resting():
+    """买单：市价 200 > 挂单价 100 → 不利 → 自动转挂单等待，不成交、不报错。"""
+    store = _FakeStore(snapshot_close=200.0, planned_price=100.0, action="buy")
     r = execute_trade(store, "p1")
-    assert "error" in r
-    assert "偏离" in r["error"], r
+    assert r.get("rested") is True, r
+    assert r["limit_price"] == 100.0 and r["market_price"] == 200.0
+    assert store.rested is not None  # 已落挂单
 
 
-def test_normal_fill_uses_real_price():
-    """快照存在且偏离在阈值内 → 用真实市价成交，不触发闸门。
+def test_sell_unfavorable_parks():
+    """卖单：市价 80 < 挂单价 120 → 不利 → 挂单（需持仓，否则先被持仓校验拦）。"""
+    pos = [{"ticker": "TEST", "shares": 100, "market_value": 8000, "sector": ""}]
+    store = _FakeStore(snapshot_close=80.0, planned_price=120.0, action="sell", positions=pos)
+    r = execute_trade(store, "p1")
+    assert r.get("rested") is True, r
 
-    此处只验证不被价格闸门拦截（会因假 store 缺少后续买入方法而在更后面失败，
-    但只要不是价格闸门的两个 error 即证明闸门放行）。
-    """
-    store = _FakeStore(snapshot_close=100.0, planned_price=105.0)
+
+def test_favorable_price_fills():
+    """买单：市价 100 ≤ 挂单价 105 → 有利 → 放行成交（假 store 缺后续方法→AttributeError 视为放行）。"""
+    store = _FakeStore(snapshot_close=100.0, planned_price=105.0, action="buy")
     try:
         r = execute_trade(store, "p1")
     except AttributeError:
-        # 放行后进入 _execute_buy，假 store 未实现 create_sim_trade 等 → 属正常
         return
-    # 若返回了 error，必须不是价格闸门的两类
     if "error" in r:
         assert r.get("needs") != "price_snapshot"
-        assert "偏离" not in r["error"]
+    assert not r.get("rested")
 
 
 if __name__ == "__main__":
     test_no_snapshot_refuses_fill()
-    test_large_deviation_refuses_fill()
-    test_normal_fill_uses_real_price()
-    print("PASS: exec price guard")
+    test_unfavorable_price_parks_as_resting()
+    test_sell_unfavorable_parks()
+    test_favorable_price_fills()
+    print("PASS: exec price/limit guard")
+

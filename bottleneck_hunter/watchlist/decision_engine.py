@@ -1324,6 +1324,8 @@ async def run_execution_plans(
                 pass
 
         existing_tickers = {ep["ticker"] for ep in store.get_pending_executions() if ep.get("ticker")}
+        # 挂单中的标的也算「已有计划」，避免对已挂单标的重复生成执行计划
+        existing_tickers |= {ep["ticker"] for ep in store.get_resting_executions() if ep.get("ticker")}
         batch_tickers = set()
         # recent_map 已在上方 prompt 构建时计算，此处直接复用（同批生成期间无新成交）
 

@@ -45,6 +45,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "cn_auto_review":         {"hour": 20, "minute": 15},
     # 新增任务
     "stale_refresh":          {"interval_hours": 6},
+    "resting_limit_poll":     {"interval_hours": 1},   # 挂单撮合轮询（开市时段每小时）
     "us_full_refresh":        {"day_of_week": "sun", "hour": 7, "minute": 0},
     "cn_full_refresh":        {"day_of_week": "sun", "hour": 8, "minute": 0},
 }

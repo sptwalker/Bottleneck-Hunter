@@ -572,6 +572,9 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE strategic_plans ADD COLUMN user_id TEXT DEFAULT ''",
     "ALTER TABLE tactical_plans ADD COLUMN user_id TEXT DEFAULT ''",
     "ALTER TABLE execution_plans ADD COLUMN user_id TEXT DEFAULT ''",
+    # 挂单交易（限价单）：resting_until 非空 = 该 confirmed 计划正挂单等待成交
+    "ALTER TABLE execution_plans ADD COLUMN resting_since TEXT DEFAULT ''",
+    "ALTER TABLE execution_plans ADD COLUMN resting_until TEXT DEFAULT ''",
     "ALTER TABLE committee_reviews ADD COLUMN user_id TEXT DEFAULT ''",
     "ALTER TABLE committee_consensus ADD COLUMN user_id TEXT DEFAULT ''",
     "ALTER TABLE catalyst_tracking ADD COLUMN user_id TEXT DEFAULT ''",

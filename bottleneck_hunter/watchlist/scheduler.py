@@ -931,6 +931,56 @@ async def job_oplog_prune() -> None:
         logger.warning("操作日志清理失败: %s", e)
 
 
+async def job_poll_resting_orders() -> None:
+    """挂单（限价单）轮询：到期自动取消 + 开市时段按限价尝试成交。每小时。
+
+    随「自动决策」门控（daily_decision）。成交不烧 LLM 预算，仅刷价+撮合，代价有界。
+    """
+    from bottleneck_hunter.watchlist.market_hours import is_market_open
+    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+    from bottleneck_hunter.watchlist.trade_executor import execute_trade
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for uid, store, budget in _iter_users("daily_decision"):
+        try:
+            resting = store.get_resting_executions()
+            if not resting:
+                continue
+            # 1. 到期取消（不看开市，任何时候都该过期）
+            live: list[dict] = []
+            for r in resting:
+                ru = r.get("resting_until") or ""
+                if ru and ru <= now_iso:
+                    store.expire_execution(r["id"], "[挂单到期自动取消]")
+                else:
+                    live.append(r)
+            # 2. 按市场分组，仅对开市市场刷价 + 撮合
+            by_market: dict[str, list[dict]] = {}
+            for r in live:
+                by_market.setdefault(r.get("market") or "us_stock", []).append(r)
+            for market, orders in by_market.items():
+                if not is_market_open(market):
+                    continue
+                mstore = store.for_market(market)
+                tickers = sorted({o["ticker"] for o in orders if o.get("ticker")})
+                try:
+                    await fetch_price_batch(tickers, mstore, market=market)  # 走 yf_gate 限速刷新
+                except Exception as e:
+                    logger.warning("挂单轮询刷价失败 (%s): %s", market, e)
+                filled = 0
+                for o in orders:
+                    try:
+                        res = execute_trade(mstore, o["id"])
+                        if res and "error" not in res and not res.get("rested"):
+                            filled += 1
+                    except Exception as e:
+                        logger.warning("挂单成交尝试失败 %s: %s", o.get("ticker"), e)
+                if filled:
+                    logger.info("挂单轮询 (user=%s/%s): 成交 %d/%d",
+                                uid[:8] if uid else "global", market, filled, len(orders))
+        except Exception as e:
+            logger.error("挂单轮询 (user=%s) failed: %s", uid[:8] if uid else "global", e)
+
+
 _JOB_SPECS = [
     ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US pre-market price update"),
     ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US post-market price update"),
@@ -954,6 +1004,7 @@ _JOB_SPECS = [
     ("model_calibration",      job_model_calibration,   {},                     _TZ_CN        , "weekly",   "Weekly AI model accuracy calibration"),
     ("model_capability_refresh", job_model_capability_refresh, {},               _TZ_CN        , "monthly",  "Monthly AI model capability re-test (刷新能力分)"),
     ("stale_refresh",          job_stale_refresh,       {},                     None,           "interval", "Stale watchlist refresh (safety net)"),
+    ("resting_limit_poll",     job_poll_resting_orders, {},                     None,           "interval", "Resting limit-order fill poll"),
     ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_CN        , "weekly",   "US full refresh (data+decision)"),
     ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
 ]
@@ -996,6 +1047,7 @@ def list_job_categories() -> dict[str, str]:
         "us_weekly_strategy": "weekly_strategy", "cn_weekly_strategy": "weekly_strategy",
         "us_auto_review": "auto_review", "cn_auto_review": "auto_review",
         "stale_refresh": "daily_decision",  # 情报/策略 LLM 兜底，随自动决策开关
+        "resting_limit_poll": "daily_decision",  # 挂单撮合，随自动决策开关
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
         "model_capability_refresh": "",
@@ -1030,6 +1082,7 @@ def list_job_labels() -> dict[str, dict]:
         "cn_auto_review":      {"label": "A股·自动复盘",           "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
         # 新增
         "stale_refresh":       {"label": "陈旧兜底刷新",           "desc": "刷新超过阈值未更新的观察池标的", "tz": "轮询", "freq": "每隔N小时"},
+        "resting_limit_poll":  {"label": "挂单撮合轮询",           "desc": "开市时段按限价尝试成交，到期自动取消", "tz": "轮询", "freq": "每小时"},
         "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
     }
