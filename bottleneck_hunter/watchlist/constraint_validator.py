@@ -149,25 +149,47 @@ def validate_execution_plan(
             result_json = {}
 
     action = plan.get("action") or result_json.get("action", "")
-    shares = plan.get("shares") or result_json.get("shares", 0)
-    price = (plan.get("target_price")
-             or result_json.get("target_price")
-             or result_json.get("estimated_price", 0))
     ticker = plan.get("ticker", "")
     sector = plan.get("sector", "") or result_json.get("sector", "")
+    market = result_json.get("market") or plan.get("market") or "us_stock"
 
-    if not action or not ticker or not shares or not price:
+    def _num(v) -> float:
+        # LLM JSON 可能把数值发成字符串；统一转 float，防比较崩溃(F4)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+    shares = _num(plan.get("shares") or result_json.get("shares", 0))
+    price = _num(plan.get("target_price") or result_json.get("target_price")
+                 or result_json.get("estimated_price", 0))
+
+    # ── 先于任何早返回：非法参数 + 卖出持仓硬校验（生成期必须拦得住，不受缺价/零权益影响）──
+    if action in ("buy", "add", "sell", "reduce") and (shares < 0 or price < 0):
+        result.add_violation(f"非法交易参数：{ticker} 股数={shares:.4g}, 价格={price:.4g}")
         return result
 
-    # 非法参数硬拦截：交易动作但股数/价格为负 → 明显错误，直接判违规（不放行）
-    if action in ("buy", "add", "sell", "reduce") and (shares < 0 or price < 0):
-        result.add_violation(f"非法交易参数：{ticker} 股数={shares}, 价格={price}")
+    if action in ("sell", "reduce") and ticker:
+        # 归一化两侧代码再比对，避免 600519 vs 600519.SS / BRK.B vs BRK-B 误判无持仓(F2)
+        from bottleneck_hunter.watchlist.store_base import normalize_ticker
+        nt = normalize_ticker(ticker, market)
+        held = 0.0
+        for p in positions:
+            if normalize_ticker(p.get("ticker", ""), market) == nt:
+                held = _num(p.get("shares", 0))
+                break
+        if held <= 0:
+            result.add_violation(f"{ticker} 无持仓，卖出指令无效")
+        elif shares > held:
+            result.add_violation(f"卖出 {shares:.0f} 股超过 {ticker} 持仓 {held:.0f} 股")
+        if not result.valid:
+            return result
+
+    if not action or not ticker or not shares or not price:
         return result
 
     # P0.4 校验口径：预期价(不加滑点)
     trade_amount = shares * price
     # 风险预算口径：最坏滑点价
-    market = result_json.get("market", "us_stock")
     cfg = SLIPPAGE_CONFIG.get(market, SLIPPAGE_CONFIG["us_stock"])
     worst_slip_pct = cfg["max_bps"] / 10000
     if action in ("buy", "add"):
@@ -176,12 +198,9 @@ def validate_execution_plan(
         worst_amount = shares * price * (1 - worst_slip_pct)
 
     total_equity = account.get("total_equity") or account.get("current_capital", 100000)
-    cash = account.get("cash_balance", 0)
+    cash = _num(account.get("cash_balance", 0))
 
-    if total_equity <= 0:
-        return result
-
-    # 1. 单笔交易金额上限
+    # 1. 单笔交易金额上限（绝对值口径，不依赖权益）
     max_trade = c["max_single_trade_usd"]
     if trade_amount > max_trade:
         result.add_violation(
@@ -193,73 +212,65 @@ def validate_execution_plan(
         )
 
     if action in ("buy", "add"):
-        # 0. 现金充足性硬校验（最坏滑点口径，与执行器 _execute_buy 对齐）——直接杜绝“买入超余额”
+        # 0. 现金充足性硬校验（绝对值口径，equity<=0 时也拦得住「买入超余额」）(F1)
         if worst_amount > cash:
             result.add_violation(
                 f"现金不足：最坏滑点下需 ${worst_amount:.0f}，可用现金仅 ${cash:.0f}")
-        # 2. 单股持仓占比上限
-        existing_value = 0
-        for p in positions:
-            if p.get("ticker") == ticker:
-                existing_value = p.get("market_value", 0)
-                break
-        new_value = existing_value + trade_amount
-        position_pct = new_value / total_equity * 100
-        max_pos = c["max_single_position_pct"]
-        if position_pct > max_pos:
-            result.add_violation(
-                f"买入后 {ticker} 占比 {position_pct:.1f}% 超过上限 {max_pos:.0f}%"
-            )
-        elif (existing_value + worst_amount) / total_equity * 100 > max_pos:
-            result.add_warning(
-                f"最坏滑点下 {ticker} 占比可能触及上限 {max_pos:.0f}%"
-            )
 
-        # 3. 板块集中度上限
-        if sector:
-            sector_value = sum(
-                p.get("market_value", 0) for p in positions
-                if _get_sector(p) == sector and p.get("ticker") != ticker
-            )
-            sector_value += new_value
-            sector_pct = sector_value / total_equity * 100
-            max_sec = c["max_sector_pct"]
-            if sector_pct > max_sec:
+        # 以下 %口径检查需正权益基准；权益<=0(未初始化)时跳过，避免除零并 fail-open(F1)
+        if total_equity > 0:
+            # 2. 单股持仓占比上限
+            existing_value = 0
+            for p in positions:
+                if p.get("ticker") == ticker:
+                    existing_value = p.get("market_value", 0)
+                    break
+            new_value = existing_value + trade_amount
+            position_pct = new_value / total_equity * 100
+            max_pos = c["max_single_position_pct"]
+            if position_pct > max_pos:
                 result.add_violation(
-                    f"板块 '{sector}' 占比 {sector_pct:.1f}% 超过上限 {max_sec:.0f}%"
+                    f"买入后 {ticker} 占比 {position_pct:.1f}% 超过上限 {max_pos:.0f}%"
+                )
+            elif (existing_value + worst_amount) / total_equity * 100 > max_pos:
+                result.add_warning(
+                    f"最坏滑点下 {ticker} 占比可能触及上限 {max_pos:.0f}%"
                 )
 
-        # 4. 最低现金比例
-        cash_after = cash - trade_amount
-        cash_pct = cash_after / total_equity * 100
-        min_cash = c["min_cash_pct"]
-        if cash_pct < min_cash:
+            # 3. 板块集中度上限
+            if sector:
+                sector_value = sum(
+                    p.get("market_value", 0) for p in positions
+                    if _get_sector(p) == sector and p.get("ticker") != ticker
+                )
+                sector_value += new_value
+                sector_pct = sector_value / total_equity * 100
+                max_sec = c["max_sector_pct"]
+                if sector_pct > max_sec:
+                    result.add_violation(
+                        f"板块 '{sector}' 占比 {sector_pct:.1f}% 超过上限 {max_sec:.0f}%"
+                    )
+
+            # 4. 最低现金比例
+            cash_after = cash - trade_amount
+            cash_pct = cash_after / total_equity * 100
+            min_cash = c["min_cash_pct"]
+            if cash_pct < min_cash:
+                result.add_violation(
+                    f"买入后现金比例 {cash_pct:.1f}% 低于下限 {min_cash:.0f}%"
+                )
+            elif (cash - worst_amount) / total_equity * 100 < min_cash:
+                result.add_warning(
+                    f"最坏滑点下现金比例可能跌破下限 {min_cash:.0f}%"
+                )
+
+    # 5. 日交易额度（%口径，需正权益）
+    if total_equity > 0:
+        max_turnover = c["max_daily_turnover_pct"] / 100 * total_equity
+        if trade_amount > max_turnover:
             result.add_violation(
-                f"买入后现金比例 {cash_pct:.1f}% 低于下限 {min_cash:.0f}%"
+                f"单笔 ${trade_amount:.0f} 超过日交易额度 ${max_turnover:.0f}"
             )
-        elif (cash - worst_amount) / total_equity * 100 < min_cash:
-            result.add_warning(
-                f"最坏滑点下现金比例可能跌破下限 {min_cash:.0f}%"
-            )
-
-    elif action in ("sell", "reduce"):
-        # 卖出硬约束：不得卖出无持仓 / 超过持仓数量（杜绝明显错误的卖出指令）
-        held = 0
-        for p in positions:
-            if p.get("ticker") == ticker:
-                held = int(p.get("shares", 0) or 0)
-                break
-        if held <= 0:
-            result.add_violation(f"{ticker} 无持仓，卖出指令无效")
-        elif shares > held:
-            result.add_violation(f"卖出 {shares} 股超过 {ticker} 持仓 {held} 股")
-
-    # 5. 日交易额度（简单检查单笔 vs 总额度）
-    max_turnover = c["max_daily_turnover_pct"] / 100 * total_equity
-    if trade_amount > max_turnover:
-        result.add_violation(
-            f"单笔 ${trade_amount:.0f} 超过日交易额度 ${max_turnover:.0f}"
-        )
 
     if not result.valid:
         logger.warning("执行计划 %s 违反约束: %s", plan.get("id", "?"), "; ".join(result.violations))
@@ -293,8 +304,11 @@ def max_compliant_shares(
     sector = plan.get("sector", "") or result_json.get("sector", "")
     # 卖出/减仓：最多可卖 = 当前持仓股数（0=无持仓，无法缩量→上层拦截）
     if action in ("sell", "reduce"):
+        from bottleneck_hunter.watchlist.store_base import normalize_ticker
+        mkt = result_json.get("market") or plan.get("market") or "us_stock"
+        nt = normalize_ticker(ticker, mkt)
         for p in positions:
-            if p.get("ticker") == ticker:
+            if normalize_ticker(p.get("ticker", ""), mkt) == nt:
                 return int(p.get("shares", 0) or 0)
         return 0
     if action not in ("buy", "add") or not price:

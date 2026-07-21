@@ -435,11 +435,16 @@ class _DecisionMixin:
         new_method = modifications.get("method") or modifications.get("execution_method")
 
         # 投委会只准「缩量」：放大 shares 会绕过 L4 原始约束校验（现金/占比/额度），
-        # 生成超约束的待确认指令。故 new_shares 超过原计划股数时钳到原值。
+        # 生成超约束的待确认指令。放大 / 原计划无股数却要加量 → 一律钳回原值。防非数值崩溃。
         cur_shares = plan.get("shares") or 0
-        if new_shares is not None and cur_shares and int(new_shares) > int(cur_shares):
-            logger.info("投委会改单放大被拒 %s: %s→%s，钳回原值", plan_id, cur_shares, new_shares)
-            new_shares = cur_shares
+        if new_shares is not None:
+            try:
+                _new, _cur = float(new_shares), float(cur_shares)
+            except (TypeError, ValueError):
+                _new = _cur = 0.0
+            if _cur <= 0 or _new > _cur:
+                logger.info("投委会改单放大被拒 %s: %s→%s，钳回原值", plan_id, cur_shares, new_shares)
+                new_shares = cur_shares
 
         if new_shares is not None:
             rj["shares"] = new_shares
@@ -580,6 +585,18 @@ class _DecisionMixin:
                 "UPDATE execution_plans SET status = 'expired', resting_until = '', rejection_reason = ? "
                 "WHERE id = ? AND status = 'confirmed' AND COALESCE(resting_until,'') != ''",
                 (reason, plan_id),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
+
+    def unclaim_execution(self, plan_id: str, resting_until: str = "") -> bool:
+        """成交失败回滚：executed→confirmed，恢复 executed_at 与原挂单标记
+        （配合 execute_trade 的原子领单：mark_executed 抢占后若成交失败则补偿回滚）。"""
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET status = 'confirmed', executed_at = NULL, resting_until = ? "
+                "WHERE id = ? AND status = 'executed'",
+                (resting_until or "", plan_id),
             )
             cur = conn.execute(q, p)
             return cur.rowcount > 0

@@ -149,8 +149,11 @@ def _track_us_stock(ticker: str) -> SmartMoneySignal:
     score = 5.0
 
     try:
+        from bottleneck_hunter.data_provider import yf_gate
+        yf_gate.throttle()  # 全局限速：聪明钱查询也均匀错峰打 Yahoo
         stock = yf.Ticker(ticker)
         info = stock.info or {}
+        yf_gate.observe(None)
 
         # 1) 机构持仓 — 按机构数量区分
         try:
@@ -231,6 +234,11 @@ def _track_us_stock(ticker: str) -> SmartMoneySignal:
             logger.debug(f"做空比例获取失败 ({ticker}): {e}")
 
     except Exception as e:
+        try:
+            from bottleneck_hunter.data_provider import yf_gate
+            yf_gate.observe(e)
+        except Exception:
+            pass
         logger.warning(f"yfinance 聪明钱数据获取失败 ({ticker}): {e}")
 
     signal.smart_money_score = round(min(10.0, max(0.0, score)), 1)

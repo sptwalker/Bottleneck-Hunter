@@ -68,8 +68,13 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
 
     from bottleneck_hunter.watchlist.constraint_validator import validate_execution_plan
     positions = store.get_sim_positions(account["id"])
+    is_resting = bool(plan.get("resting_until"))
     validation = validate_execution_plan(plan, account, positions)
     if not validation.valid:
+        if is_resting:
+            # 挂单轮询时约束暂不满足（如现金临时不足/占比超限）→ 保持挂单，绝不撤单。
+            return {"error": "约束暂不满足，保持挂单", "violations": validation.violations,
+                    "resting_hold": True, "plan_id": plan_id}
         store.reject_execution(plan_id, "; ".join(validation.violations))
         return {"error": "约束校验不通过", "violations": validation.violations, "plan_id": plan_id}
 
@@ -88,22 +93,33 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     if not real_px:
         return {"error": "无真实市价快照，拒绝以 LLM 估价成交", "plan_id": plan_id,
                 "needs": "price_snapshot", "ticker": ticker}
+    # 挂单自动撮合：行情快照过旧(>36h)时不自动成交，等下次刷价再判。手动确认(非挂单)不受此限——用户在场。
+    if is_resting:
+        fetched = snap.get("fetched_at") or ""
+        stale_before = (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat(timespec="seconds")
+        if fetched and fetched < stale_before:
+            return {"error": "行情快照过旧，暂缓自动撮合", "stale": True, "plan_id": plan_id, "ticker": ticker}
     exec_basis = real_px
 
     if not action or not ticker or not shares or not exec_basis:
         return {"error": "执行计划缺少关键字段", "plan_id": plan_id}
 
-    # 限价单：挂单价 = 规划价 target_price。买/加仓须 市价≤挂单价、卖/减仓须 市价≥挂单价 才成交；
+    # 限价单：仅对买卖动作生效、挂单价须为正。买/加仓 市价≤挂单价、卖/减仓 市价≥挂单价 才成交；
     # 未达则自动转「挂单」等待（不用 LLM 估价成交），最长 2 周由轮询任务续判/到期。
-    # 无挂单价 = 市价单立即成交。成交价永远用真实市价快照（对用户有利一侧）。
-    # 取代原「偏离>30% 直接拒绝」——那类单现在转挂单而非报错。
-    if planned_price:
+    # 无挂单价 = 市价单立即成交。成交价永远用真实市价快照（对用户有利一侧）。取代原「偏离>30% 拒绝」。
+    if action in ("buy", "add", "sell", "reduce") and planned_price and planned_price > 0:
         favorable = (real_px <= planned_price) if action in ("buy", "add") else (real_px >= planned_price)
         if not favorable:
             until = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat(timespec="seconds")
             store.rest_execution(plan_id, until)
             return {"rested": True, "plan_id": plan_id, "ticker": ticker, "action": action,
                     "limit_price": planned_price, "market_price": real_px}
+
+    # 原子领单：confirmed→executed CAS 抢占，杜绝与并发取消/轮询的竞态孤儿成交。
+    # 领单失败 = 已被取消/成交，直接跳过；下方成交失败再回滚领单，恢复原状态（含挂单）。
+    prev_resting_until = plan.get("resting_until") or ""
+    if not store.mark_executed(plan_id):
+        return {"error": "计划状态已变更（已取消/已成交），跳过成交", "stale": True, "plan_id": plan_id}
 
     if action in ("buy", "add"):
         result = _execute_buy(store, account, plan_id, ticker, shares, exec_basis,
@@ -114,17 +130,21 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
                                plan.get("entry_id"), result_json.get("reasoning", ""),
                                market=market)
     else:
+        store.unclaim_execution(plan_id, prev_resting_until)
         return {"error": f"不支持的操作类型: {action}", "plan_id": plan_id}
 
-    if "error" not in result:
-        store.mark_executed(plan_id)  # confirmed → executed（激活状态机；挂单成交与普通成交共用）
-        _recalc_account(store, account["id"])
-        if action in ("sell", "reduce"):
-            trade_id = result.get("trade_id", "")
-            is_win = result.get("realized_pnl", 0) > 0
-            _update_card_outcomes(store, plan_id, is_win)
-            if trade_id:
-                _schedule_auto_review(store, trade_id)
+    if "error" in result:
+        # 成交失败 → 回滚领单，恢复 confirmed(含挂单)，可重试/继续挂单
+        store.unclaim_execution(plan_id, prev_resting_until)
+        return result
+
+    _recalc_account(store, account["id"])
+    if action in ("sell", "reduce"):
+        trade_id = result.get("trade_id", "")
+        is_win = result.get("realized_pnl", 0) > 0
+        _update_card_outcomes(store, plan_id, is_win)
+        if trade_id:
+            _schedule_auto_review(store, trade_id)
 
     return result
 

@@ -25,13 +25,15 @@ def _seed_snapshot(store, ticker, close):
 
 
 def _make_plan(store, ticker, action, shares, price):
-    return store.create_execution_plan(
+    pid = store.create_execution_plan(
         tactical_plan_id="", entry_id="",
         ticker=ticker,
         result_json={"action": action, "shares": shares,
                      "target_price": price, "reasoning": "e2e test"},
         status="pending",
     )
+    store.confirm_execution(pid)  # execute_trade 只作用于已确认计划（原子领单 confirmed→executed）
+    return pid
 
 
 def test_buy_sell_loop_persists_realized_pnl():

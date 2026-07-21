@@ -7,14 +7,18 @@ from bottleneck_hunter.watchlist.trade_executor import execute_trade
 
 class _FakeStore:
     """最小可跑的假 store，只实现 execute_trade 价格/限价闸门前需要的方法。"""
-    def __init__(self, snapshot_close, planned_price=100.0, action="buy", positions=None):
+    def __init__(self, snapshot_close, planned_price=100.0, action="buy", positions=None,
+                 resting_until="", claim_ok=True):
         self._snap_close = snapshot_close
         self._positions = positions or []
         self.rested = None
+        self.rejected = None
+        self.unclaimed = None
+        self._claim_ok = claim_ok
         self._plan = {
             "id": "p1", "market": "us_stock", "action": action,
             "ticker": "TEST", "shares": 10, "target_price": planned_price,
-            "result_json": {},
+            "result_json": {}, "resting_until": resting_until,
         }
 
     def for_market(self, market):
@@ -37,9 +41,14 @@ class _FakeStore:
         return True
 
     def mark_executed(self, plan_id):
+        return self._claim_ok
+
+    def unclaim_execution(self, plan_id, resting_until=""):
+        self.unclaimed = (plan_id, resting_until)
         return True
 
     def reject_execution(self, plan_id, reason=""):
+        self.rejected = (plan_id, reason)
         return True
 
 
@@ -78,6 +87,24 @@ def test_favorable_price_fills():
     if "error" in r:
         assert r.get("needs") != "price_snapshot"
     assert not r.get("rested")
+
+
+def test_atomic_claim_skip_when_status_changed():
+    """并发取消/成交导致领单失败（mark_executed False）→ 跳过成交、不动钱（HIGH #1）。"""
+    store = _FakeStore(snapshot_close=100.0, planned_price=105.0, action="buy", claim_ok=False)
+    r = execute_trade(store, "p1")
+    assert r.get("stale") is True and "error" in r
+    assert store.unclaimed is None  # 未领到单，不需回滚，更不会成交
+
+
+def test_resting_order_validation_fail_holds_not_reject():
+    """挂单轮询时约束不满足 → 保持挂单，绝不撤单（#2）。"""
+    # 卖单无持仓 → 校验失败；但它是挂单(resting_until 非空) → 应 hold 而非 reject
+    store = _FakeStore(snapshot_close=80.0, planned_price=120.0, action="sell",
+                       positions=[], resting_until="2099-01-01T00:00:00+00:00")
+    r = execute_trade(store, "p1")
+    assert r.get("resting_hold") is True
+    assert store.rejected is None  # 没有被撤单
 
 
 if __name__ == "__main__":

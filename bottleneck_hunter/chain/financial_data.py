@@ -358,8 +358,11 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
     snap = FinancialSnapshot(data_source="yfinance")
 
     try:
+        from bottleneck_hunter.data_provider import yf_gate
+        yf_gate.throttle()  # 全局限速：反向/刷新的美股财务查询也均匀错峰打 Yahoo
         stock = yf.Ticker(ticker)
         info = stock.info or {}
+        yf_gate.observe(None)
 
         snap.revenue_yi = _safe_float(info.get("totalRevenue"), 1e-8)
         snap.revenue_yoy_pct = _safe_float(info.get("revenueGrowth"), 100)
@@ -445,6 +448,11 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
             logger.debug(f"yfinance 日线数据获取失败 ({ticker}): {e}")
 
     except Exception as e:
+        try:
+            from bottleneck_hunter.data_provider import yf_gate
+            yf_gate.observe(e)  # 命中 429 → 闸门自适应退避
+        except Exception:
+            pass
         logger.warning(f"yfinance 数据获取失败 ({ticker}): {e}")
 
     return snap

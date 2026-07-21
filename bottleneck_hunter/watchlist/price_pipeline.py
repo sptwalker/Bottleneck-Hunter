@@ -114,9 +114,16 @@ def _fetch_daily_data(ticker: str, days: int = 180) -> tuple[list[dict], dict]:
     返回 (snapshots, company_info)——与 A 股路径一致的二元组，空数据也返回 ([], {})，
     避免调用方解包失败。
     """
-    t = yf.Ticker(ticker)
-    period = "1y" if days > 180 else "6mo"
-    df: pd.DataFrame = t.history(period=period)
+    from bottleneck_hunter.data_provider import yf_gate
+    yf_gate.throttle()  # 全局限速：直连日K兜底路径也均匀错峰打 Yahoo
+    try:
+        t = yf.Ticker(ticker)
+        period = "1y" if days > 180 else "6mo"
+        df: pd.DataFrame = t.history(period=period)
+    except Exception as e:
+        yf_gate.observe(e)
+        raise
+    yf_gate.observe(None)
     if df is None or df.empty:
         logger.warning("No price data for %s", ticker)
         return [], {}

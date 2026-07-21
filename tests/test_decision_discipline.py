@@ -86,18 +86,19 @@ class TestExecutionUsesMarketPrice:
         s = store.for_market("us_stock")
         s.get_sim_account()
         eid = s.add({"ticker": "MSFT", "company_name": "Microsoft", "tier": "focus", "market": "us_stock"})
-        # L4 规划估价 300，但下单时市价 330
+        # L4 挂单价 350（≥市价，限价满足→可成交），但下单时真实市价 330
         plan_id = s.create_execution_plan("sp1", eid, "MSFT",
-                                          {"action": "buy", "shares": 10, "target_price": 300})
+                                          {"action": "buy", "shares": 10, "target_price": 350})
         s.save_snapshots([{"ticker": "MSFT", "date": "2026-07-02", "close": 330.0, "market": "us_stock"}])
+        s.confirm_execution(plan_id)  # execute_trade 只作用于已确认计划（原子领单）
         # validate_execution_plan 在 trade_executor 内是函数内 import，patch 其源模块以放行；聚焦成交价来源
         with patch("bottleneck_hunter.watchlist.constraint_validator.validate_execution_plan",
                    return_value=MagicMock(valid=True, violations=[])):
             res = te.execute_trade(s, plan_id)
         assert "error" not in res, res
-        # 成交均价应接近市价 330（叠加滑点），而非规划价 300
+        # 成交均价应接近真实市价 330（叠加滑点），而非挂单价 350
         trades = s.get_sim_trades("MSFT")
-        assert trades and trades[0]["price"] > 320  # 用市价而非 300
+        assert trades and trades[0]["price"] > 320  # 用市价而非挂单价 350
 
 
 # ── B1: L4 约束读入 regime（熊市防守收紧）──────────────────
@@ -133,6 +134,7 @@ class TestRecordOutcomeOnSell:
         plan_id = s.create_execution_plan("sp1", eid, "TSLA",
                                           {"action": "sell", "shares": 10, "target_price": 300})
         s.save_snapshots([{"ticker": "TSLA", "date": "2026-07-02", "close": 300.0, "market": "us_stock"}])
+        s.confirm_execution(plan_id)  # execute_trade 只作用于已确认计划（原子领单）
         with patch("bottleneck_hunter.watchlist.constraint_validator.validate_execution_plan",
                    return_value=MagicMock(valid=True, violations=[])):
             res = te.execute_trade(s, plan_id)
