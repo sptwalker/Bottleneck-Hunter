@@ -169,10 +169,15 @@ def _fetch_daily_data(ticker: str, days: int = 180) -> tuple[list[dict], dict]:
 
 def _fetch_company_info_us(ticker: str) -> dict:
     """获取美股企业基本面信息 (yfinance Ticker.info)。同步。"""
+    from bottleneck_hunter.data_provider import yf_gate
+    yf_gate.throttle()  # 全局限速：反向分析/价格管道的公司信息查询也均匀错峰打 Yahoo
     try:
         t = yf.Ticker(ticker)
-        return t.info or {}
+        info = t.info or {}
+        yf_gate.observe(None)
+        return info
     except Exception as e:
+        yf_gate.observe(e)  # 命中 429 则闸门自适应退避
         logger.debug("获取 %s company info 失败: %s", ticker, e)
         return {}
 

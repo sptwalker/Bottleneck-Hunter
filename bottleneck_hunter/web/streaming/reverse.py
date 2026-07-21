@@ -63,6 +63,25 @@ def _to_float(v) -> float | None:
         return None
 
 
+def _finnhub_company_profile(ticker: str) -> dict:
+    """finnhub 兜底取美股公司名/行业——Yahoo 被 IP 级限流(429)时的非 Yahoo 源。
+
+    无 finnhub key 或失败返 {}。目的：Yahoo 拿不到名字时仍能核实企业身份，
+    避免带着「名称未知」进 LLM 让它按裸代码脑补公司（SPCX→错认 Space Perspective 的根因）。
+    """
+    try:
+        from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
+        key = resolve_data_source_key("finnhub")
+        if not key:
+            return {}
+        import finnhub
+        prof = finnhub.Client(api_key=key).company_profile2(symbol=ticker) or {}
+        return {"name": prof.get("name", "") or "", "sector": prof.get("finnhubIndustry", "") or ""}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("finnhub 公司信息兜底失败 (%s): %s", ticker, e)
+        return {}
+
+
 def _fetch_company_basic(ticker: str, market_enum: MarketRegion) -> dict:
     """抓取公司名称/行业/简介/市值（用于校验有效性 + 构造 SupplierInfo）。"""
     out: dict = {"name": "", "name_cn": "", "sector": "", "description": "", "market_cap": None}
@@ -84,7 +103,8 @@ def _fetch_company_basic(ticker: str, market_enum: MarketRegion) -> dict:
                     out["market_cap"] = round(mc / 1e8, 1)  # 元 → 亿
         else:
             from bottleneck_hunter.watchlist.price_pipeline import _fetch_company_info_us
-            info = _fetch_company_info_us(ticker.split(".")[0].strip())
+            sym = ticker.split(".")[0].strip()
+            info = _fetch_company_info_us(sym)
             if info:
                 out["name"] = info.get("longName") or info.get("shortName") or ""
                 out["sector"] = info.get("sector") or info.get("industry") or ""
@@ -92,6 +112,11 @@ def _fetch_company_basic(ticker: str, market_enum: MarketRegion) -> dict:
                 mc = _to_float(info.get("marketCap"))
                 if mc is not None:
                     out["market_cap"] = round(mc / 1e9, 1)  # USD → $B
+            # Yahoo 空/被限流 → finnhub 兜底核实身份（非 Yahoo 源）
+            if not out["name"]:
+                fb = _finnhub_company_profile(sym)
+                out["name"] = fb.get("name", "")
+                out["sector"] = out["sector"] or fb.get("sector", "")
     except Exception as e:
         logger.warning("反向分析公司信息抓取失败 (%s): %s", ticker, e)
     return out
@@ -324,9 +349,10 @@ async def stream_reverse_analysis(
     # LLM：显式指定优先；否则自动使用用户在 AI 配置中为「入围评估(pipeline_eval)」选的主模型
     try:
         if provider:
-            llm = create_llm(provider, model)
+            llm = create_llm(provider, model, with_fallback=True)
         else:
-            results = get_models_for_role("pipeline_eval", user_id=user_id)
+            # with_fallback：单模型位，主模型超时/失败自动换 provider（治 siliconflow 判瓶颈超时）
+            results = get_models_for_role("pipeline_eval", user_id=user_id, with_fallback=True)
             if results:
                 llm, provider, model = results[0]
             else:
@@ -353,10 +379,12 @@ async def stream_reverse_analysis(
         supplier.gross_margin = snap.gross_margin_pct
         supplier.pe_ratio = snap.consensus_pe
 
-    # 名称/行业/财务全部缺失 → 视为无效代码
-    if not basic.get("name") and not basic.get("sector") and snap is None:
+    # ① fail-safe：名称缺失 = 无法核实企业身份 → 直接报错，绝不带着「名称未知」进 LLM
+    # 让它按裸代码脑补公司（SPCX 被错认成 Space Perspective 的根因）。宁可诚实报错，不臆测。
+    if not basic.get("name"):
         yield _sse("error", step="validate",
-                   message=f"企业代码 {ticker} 无效或无法获取信息，请检查后重试")
+                   message=f"无法核实 {ticker} 的企业信息（数据源可能被限流，或代码有误）。"
+                           f"请稍后重试或核对代码——系统不会在身份未核实时臆测企业。")
         return
     yield _sse("step_done", step="validate",
                result={"name": supplier.name, "market": resolved_market, "sector": supplier.sector})
