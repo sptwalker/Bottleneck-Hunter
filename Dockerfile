@@ -42,6 +42,8 @@ COPY bottleneck_hunter/ ./bottleneck_hunter/
 # 运行时按仓库根定位的非包文件：更新历史 + 新手必读指南（docs/ 整目录随镜像发布）
 COPY UPDATE_HISTORY.json ./
 COPY docs/ ./docs/
+# 运维脚本（备份/一次性数据迁移等）随镜像发布，容器内可直接 docker exec 跑，免 docker cp
+COPY scripts/ ./scripts/
 # 源码就位后仅重链接包（--no-deps 不重装依赖）：注册 console_scripts、editable 指向真实源码
 RUN pip install -e . --no-deps
 
