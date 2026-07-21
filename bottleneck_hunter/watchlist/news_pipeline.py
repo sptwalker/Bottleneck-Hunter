@@ -55,8 +55,15 @@ async def _news_in_thread(fn, ticker: str, timeout_sec: float = 20) -> list[dict
 @with_retry(max_retries=3, base_delay=1.0)
 def _fetch_yfinance_news(ticker: str, limit: int = 10) -> list[dict]:
     """Fetch news from yfinance Ticker.news (sync)."""
-    t = yf.Ticker(ticker)
-    raw = t.news or []
+    from bottleneck_hunter.data_provider import yf_gate
+    yf_gate.throttle()  # 全局限速：均匀错峰打 Yahoo，避免 429
+    try:
+        t = yf.Ticker(ticker)
+        raw = t.news or []
+    except Exception as e:
+        yf_gate.observe(e)  # 命中 429 则闸门自适应退避；异常照抛给 with_retry
+        raise
+    yf_gate.observe(None)
     results = []
     for item in raw[:limit]:
         content = item.get("content", {}) if isinstance(item.get("content"), dict) else {}

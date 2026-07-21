@@ -30,8 +30,15 @@ def _get_sem() -> asyncio.Semaphore:
 @with_retry(max_retries=3, base_delay=1.0)
 def _analyze_options_chain(ticker: str) -> dict | None:
     """Fetch options chain and analyze. Synchronous."""
-    t = yf.Ticker(ticker)
-    expiries = t.options
+    from bottleneck_hunter.data_provider import yf_gate
+    yf_gate.throttle()  # 全局限速：均匀错峰打 Yahoo，避免 429
+    try:
+        t = yf.Ticker(ticker)
+        expiries = t.options
+    except Exception as e:
+        yf_gate.observe(e)  # 命中 429 则闸门自适应退避；异常照抛给 with_retry
+        raise
+    yf_gate.observe(None)
     if not expiries:
         return None
 

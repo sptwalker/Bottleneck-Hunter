@@ -76,6 +76,32 @@ def normalize_ticker(ticker: str | None, market: str = "") -> str:
     return t.upper()
 
 
+# 美股代码：1-5 位字母/数字根 + 可选 .X/-X 类别股后缀（如 BRK.B、BRK-B）。
+# 覆盖 AAPL/GOOGL/TSM/SPCX 等；拦住把公司名当代码存进来（如 "SPACEX" 6 字母无分隔）。
+_US_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9]{0,4}([.\-][A-Z]{1,2})?$")
+
+
+def validate_ticker(ticker: str, market: str = "") -> None:
+    """校验（已 normalize 的）ticker 是否像该市场的合法代码，不合法抛 ValueError。
+
+    只在写入口（store add）调用，不拦读——避免历史脏数据被读操作误伤。
+    仅强校验 us_stock：公司名（如 "SPACEX"）会被拒，根因见 SPACEX/SPCX 事故——
+    名字当代码存进去，yfinance 永远解析不到。A股走 6 位数字码、由列表选取，不在此拦
+    （容量测试等会用非 6 位假码）；其它市场亦不强校验。
+
+    诚实边界：纯格式只拦得住明显不像代码的（6+ 字母、含空格）；恰好 5 字母的名字
+    （如 "TESLA"）与合法代码（"GOOGL"）无法区分，拦不住。
+    """
+    t = (ticker or "").strip()
+    if not t:
+        raise ValueError("代码不能为空")
+    mkt = normalize_market(market) if market else ""
+    if mkt == "us_stock" and not _US_TICKER_RE.match(t):
+        raise ValueError(
+            f"'{t}' 不像美股代码——请填交易所代码（如 SPCX），而非公司名（如 SPACEX）"
+        )
+
+
 _DB_LOCKS: dict[str, threading.Lock] = {}
 
 

@@ -32,13 +32,17 @@ def _get_sem() -> asyncio.Semaphore:
 
 def _fetch_institutional_holders_sync(ticker: str) -> list[dict]:
     """同步获取机构持仓数据（在线程池中运行）。"""
+    from bottleneck_hunter.data_provider import yf_gate
+    yf_gate.throttle()  # 全局限速：均匀错峰打 Yahoo，避免 429
     try:
         t = yf.Ticker(ticker)
         df = t.institutional_holders
+        yf_gate.observe(None)
         if df is None or df.empty:
             logger.info("无机构持仓数据: %s", ticker)
             return []
     except Exception as e:
+        yf_gate.observe(e)  # 命中 429 则闸门自适应退避
         logger.warning("获取 %s 机构持仓失败: %s", ticker, e)
         return []
 
@@ -120,13 +124,17 @@ async def fetch_institutional_holders(
 
 def _fetch_analyst_ratings_sync(ticker: str) -> list[dict]:
     """同步获取分析师评级 / 推荐数据（在线程池中运行）。"""
+    from bottleneck_hunter.data_provider import yf_gate
+    yf_gate.throttle()  # 全局限速：均匀错峰打 Yahoo，避免 429
     try:
         t = yf.Ticker(ticker)
         df = t.recommendations
+        yf_gate.observe(None)
         if df is None or df.empty:
             logger.info("无分析师评级数据: %s", ticker)
             return []
     except Exception as e:
+        yf_gate.observe(e)  # 命中 429 则闸门自适应退避
         logger.warning("获取 %s 分析师评级失败: %s", ticker, e)
         return []
 

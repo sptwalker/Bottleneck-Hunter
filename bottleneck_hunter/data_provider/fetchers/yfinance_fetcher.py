@@ -24,10 +24,18 @@ class YfinanceFetcher(BaseFetcher):
     async def fetch_daily(self, ticker: str, days: int = 180) -> pd.DataFrame | None:
         import yfinance as yf
 
+        from bottleneck_hunter.data_provider import yf_gate
+
         def _fetch():
-            t = yf.Ticker(ticker)
-            period = "1y" if days > 180 else "6mo"
-            df = t.history(period=period)
+            yf_gate.throttle()  # 全局限速：均匀错峰打 Yahoo，避免 429
+            try:
+                t = yf.Ticker(ticker)
+                period = "1y" if days > 180 else "6mo"
+                df = t.history(period=period)
+            except Exception as e:
+                yf_gate.observe(e)
+                raise
+            yf_gate.observe(None)
             if df is None or df.empty:
                 return None
             records = []
@@ -50,13 +58,17 @@ class YfinanceFetcher(BaseFetcher):
     async def fetch_realtime(self, ticker: str) -> StandardQuote | None:
         import yfinance as yf
 
+        from bottleneck_hunter.data_provider import yf_gate
+
         def _fetch():
+            yf_gate.throttle()  # 全局限速：均匀错峰打 Yahoo，避免 429
             t = yf.Ticker(ticker)
             info = {}
             try:
                 info = t.info or {}
-            except Exception:
-                pass
+                yf_gate.observe(None)
+            except Exception as e:
+                yf_gate.observe(e)
             price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
             if not price:
                 return None

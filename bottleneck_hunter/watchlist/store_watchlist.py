@@ -19,9 +19,10 @@ class _WatchlistMixin:
         """Add a stock to the watchlist. Returns entry id. Raises ValueError on capacity overflow."""
         conn = self._connect()
         try:
-            from bottleneck_hunter.watchlist.store_base import normalize_ticker
+            from bottleneck_hunter.watchlist.store_base import normalize_ticker, validate_ticker
             if entry.get("ticker"):
                 entry = {**entry, "ticker": normalize_ticker(entry["ticker"], entry.get("market", ""))}
+                validate_ticker(entry["ticker"], entry.get("market", ""))  # 名字当代码拦在写入口
             tier = entry.get("tier", "track")
             caps = self._effective_tier_caps()
             tier_cap = caps.get(tier, caps.get("track", 12))
