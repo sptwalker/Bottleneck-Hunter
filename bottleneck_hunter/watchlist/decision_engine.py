@@ -1395,9 +1395,9 @@ async def run_execution_plans(
                     ep, vres = fixed, vres2
 
             if not vres.valid:
-                # ── P0.3 自动降级：缩量到合规 ──
+                # ── P0.3 自动降级：缩量到合规（buy/add 缩买量；sell/reduce 缩到持仓，超卖→按实际持仓卖）──
                 n = max_compliant_shares(ep, account, positions, constraints)
-                if n > 0 and ep.get("action") in ("buy", "add"):
+                if n > 0 and ep.get("action") in ("buy", "add", "sell", "reduce"):
                     ep["shares"] = n
                     price = ep.get("target_price") or ep.get("estimated_price", 0)
                     ep["estimated_amount"] = n * price

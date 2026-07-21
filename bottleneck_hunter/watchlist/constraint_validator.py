@@ -233,6 +233,18 @@ def validate_execution_plan(
                 f"最坏滑点下现金比例可能跌破下限 {min_cash:.0f}%"
             )
 
+    elif action in ("sell", "reduce"):
+        # 卖出硬约束：不得卖出无持仓 / 超过持仓数量（杜绝明显错误的卖出指令）
+        held = 0
+        for p in positions:
+            if p.get("ticker") == ticker:
+                held = int(p.get("shares", 0) or 0)
+                break
+        if held <= 0:
+            result.add_violation(f"{ticker} 无持仓，卖出指令无效")
+        elif shares > held:
+            result.add_violation(f"卖出 {shares} 股超过 {ticker} 持仓 {held} 股")
+
     # 5. 日交易额度（简单检查单笔 vs 总额度）
     max_turnover = c["max_daily_turnover_pct"] / 100 * total_equity
     if trade_amount > max_turnover:
@@ -270,6 +282,12 @@ def max_compliant_shares(
              or result_json.get("estimated_price", 0))
     ticker = plan.get("ticker", "")
     sector = plan.get("sector", "") or result_json.get("sector", "")
+    # 卖出/减仓：最多可卖 = 当前持仓股数（0=无持仓，无法缩量→上层拦截）
+    if action in ("sell", "reduce"):
+        for p in positions:
+            if p.get("ticker") == ticker:
+                return int(p.get("shares", 0) or 0)
+        return 0
     if action not in ("buy", "add") or not price:
         return 0
 
