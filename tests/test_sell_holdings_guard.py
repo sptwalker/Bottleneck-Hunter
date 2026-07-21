@@ -38,8 +38,31 @@ def test_max_compliant_shares_sell_clamps_to_holding():
     assert max_compliant_shares(_sell("AAPL", 100), _ACCOUNT, [], _LOOSE) == 0
 
 
+def _buy(ticker, shares, price=10.0):
+    return {"action": "buy", "ticker": ticker, "shares": shares, "target_price": price}
+
+
+def test_buy_exceeds_cash_blocked():
+    # 现金 50000，买 100000 → 超余额，即便其它约束宽松也须拦
+    acct = {"total_equity": 200000, "cash_balance": 50000}
+    r = validate_execution_plan(_buy("AAPL", 1000, 100.0), acct, positions=[], constraints=_LOOSE)
+    assert not r.valid and any("现金不足" in v for v in r.violations)
+
+
+def test_buy_within_cash_ok():
+    acct = {"total_equity": 200000, "cash_balance": 50000}
+    r = validate_execution_plan(_buy("AAPL", 100, 100.0), acct, positions=[], constraints=_LOOSE)
+    assert r.valid, r.violations
+
+
+def test_negative_shares_blocked():
+    r = validate_execution_plan(_buy("AAPL", -10, 100.0), _ACCOUNT, positions=[], constraints=_LOOSE)
+    assert not r.valid and any("非法" in v for v in r.violations)
+
+
 if __name__ == "__main__":
-    for fn in [test_sell_no_position_blocked, test_sell_exceeds_holding_blocked,
-               test_sell_within_holding_ok, test_max_compliant_shares_sell_clamps_to_holding]:
-        fn()
-    print("卖出持仓校验自检通过")
+    import sys
+    mod = sys.modules[__name__]
+    for name in [n for n in dir(mod) if n.startswith("test_")]:
+        getattr(mod, name)()
+    print("交易约束校验自检通过")

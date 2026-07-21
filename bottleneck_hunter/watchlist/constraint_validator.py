@@ -159,6 +159,11 @@ def validate_execution_plan(
     if not action or not ticker or not shares or not price:
         return result
 
+    # 非法参数硬拦截：交易动作但股数/价格为负 → 明显错误，直接判违规（不放行）
+    if action in ("buy", "add", "sell", "reduce") and (shares < 0 or price < 0):
+        result.add_violation(f"非法交易参数：{ticker} 股数={shares}, 价格={price}")
+        return result
+
     # P0.4 校验口径：预期价(不加滑点)
     trade_amount = shares * price
     # 风险预算口径：最坏滑点价
@@ -188,6 +193,10 @@ def validate_execution_plan(
         )
 
     if action in ("buy", "add"):
+        # 0. 现金充足性硬校验（最坏滑点口径，与执行器 _execute_buy 对齐）——直接杜绝“买入超余额”
+        if worst_amount > cash:
+            result.add_violation(
+                f"现金不足：最坏滑点下需 ${worst_amount:.0f}，可用现金仅 ${cash:.0f}")
         # 2. 单股持仓占比上限
         existing_value = 0
         for p in positions:

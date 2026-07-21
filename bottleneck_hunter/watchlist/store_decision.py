@@ -434,6 +434,13 @@ class _DecisionMixin:
         new_price = modifications.get("target_price") or modifications.get("limit_price")
         new_method = modifications.get("method") or modifications.get("execution_method")
 
+        # 投委会只准「缩量」：放大 shares 会绕过 L4 原始约束校验（现金/占比/额度），
+        # 生成超约束的待确认指令。故 new_shares 超过原计划股数时钳到原值。
+        cur_shares = plan.get("shares") or 0
+        if new_shares is not None and cur_shares and int(new_shares) > int(cur_shares):
+            logger.info("投委会改单放大被拒 %s: %s→%s，钳回原值", plan_id, cur_shares, new_shares)
+            new_shares = cur_shares
+
         if new_shares is not None:
             rj["shares"] = new_shares
         if new_price is not None:
