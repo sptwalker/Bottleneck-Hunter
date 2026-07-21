@@ -280,6 +280,7 @@ function renderAll(data) {
   renderTactical(data.tactical_plans || []);
   renderPending(data.pending_executions || []);
   loadBlocked();
+  loadResting();
   // 催化剂：日历视图下不要用列表覆盖(否则 overview 每次返回都把日历清成列表)；
   // 日历视图改为重载日历，保持当前视图。列表视图正常渲染列表。
   if (dcState.catalystView === 'calendar') loadCatalystCalendar();
@@ -624,6 +625,76 @@ async function handleBlockedAction(e) {
   }
 }
 
+/* ── 挂单交易（限价单等待成交）────────────────────── */
+
+async function loadResting() {
+  const container = document.getElementById('dc-resting-section');
+  if (!container) return;
+  let executions = [];
+  try {
+    const data = await dcFetch(`/executions/resting?market=${encodeURIComponent(dcState.market)}`);
+    executions = data.executions || [];
+  } catch { executions = []; }
+  renderResting(executions);
+}
+
+function renderResting(executions) {
+  const container = document.getElementById('dc-resting-section');
+  if (!container) return;
+  if (!executions.length) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+    return;
+  }
+  container.style.display = '';
+
+  const items = executions.map(ex => {
+    let rj = ex.result_json;
+    if (typeof rj === 'string') { try { rj = JSON.parse(rj); } catch { rj = {}; } }
+    rj = rj || {};
+    const action = ex.action || rj.action || '--';
+    const shares = ex.shares || rj.shares || '--';
+    const price = ex.target_price || rj.target_price || '--';
+    const since = ex.resting_since ? fmtBJ(ex.resting_since) : '--';
+    const until = ex.resting_until ? fmtBJ(ex.resting_until) : '--';
+    return `<div class="dc-blocked-item" data-plan-id="${escDC(ex.id)}">
+      <div class="dc-pending-header">
+        <span class="dc-pending-ticker">${escDC(dcName(ex.ticker))} ${actionBadge(action)}
+          <span class="dc-blocked-tag dc-blocked-tag--system">挂单中</span></span>
+        <span style="font-size:12px;color:var(--muted)">${shares}股 @ 挂单价 ${price !== '--' ? fmtNum(Number(price), 2) : '--'}</span>
+      </div>
+      <div class="dc-blocked-reason">挂单时间 ${since} · 到期 ${until}（未达限价前每小时开市轮询撮合，到期自动取消）</div>
+      <div class="dc-pending-actions">
+        <button class="dc-btn-reject" data-action="cancel-resting" data-plan-id="${escDC(ex.id)}">取消挂单</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="dc-card-header">
+      <h3>挂单交易 <span class="dc-card-toggle"></span></h3>
+      <span class="dc-badge">${executions.length}</span>
+    </div>
+    <div class="dc-card-body">${items}</div>`;
+}
+
+async function handleRestingAction(e) {
+  const btn = e.target.closest('[data-action="cancel-resting"]');
+  if (!btn) return;
+  if (!confirm('确定取消该挂单？')) return;
+  const planId = btn.dataset.planId;
+  btn.disabled = true;
+  btn.textContent = '取消中...';
+  try {
+    await dcFetch(`/executions/${encodeURIComponent(planId)}/cancel-resting`, { method: 'POST' });
+    await loadResting();
+  } catch (err) {
+    alert('取消失败: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = '取消挂单';
+  }
+}
+
 /* ── 确认 / 拒绝 ──────────────────────────────────── */
 
 async function handlePendingAction(e) {
@@ -656,11 +727,15 @@ async function handlePendingAction(e) {
   try {
     if (action === 'confirm') {
       const res = await dcFetch(`/executions/${encodeURIComponent(planId)}/confirm`, { method: 'POST' });
-      const trade = res.trade || {};
-      const msg = trade.error
-        ? `执行失败: ${trade.error}`
-        : `${trade.side === 'buy' ? '买入' : '卖出'} ${trade.ticker} ${trade.shares}股 @ ${fmtNum(trade.price, 2)}`;
-      alert(msg);
+      if (res.status === 'resting') {
+        alert(`未达限价，已转为挂单等待成交：挂单价 ${fmtNum(res.limit_price, 2)}，当前市价 ${fmtNum(res.market_price, 2)}。开市每小时轮询撮合，最长 2 周。`);
+      } else {
+        const trade = res.trade || {};
+        const msg = trade.error
+          ? `执行失败: ${trade.error}`
+          : `${trade.side === 'buy' ? '买入' : '卖出'} ${trade.ticker} ${trade.shares}股 @ ${fmtNum(trade.price, 2)}`;
+        alert(msg);
+      }
     } else {
       const reason = prompt('拒绝原因（可选）:') || '';
       await dcFetch(`/executions/${encodeURIComponent(planId)}/reject`, {
@@ -1045,6 +1120,7 @@ export function initDecision() {
 
   document.getElementById('dc-pending-list')?.addEventListener('click', handlePendingAction);
   document.getElementById('dc-blocked-section')?.addEventListener('click', handleBlockedAction);
+  document.getElementById('dc-resting-section')?.addEventListener('click', handleRestingAction);
 
   // 会议日期筛选
   document.getElementById('dc-meeting-date')?.addEventListener('change', () => loadMeetings());

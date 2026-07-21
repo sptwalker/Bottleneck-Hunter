@@ -556,7 +556,7 @@
           </div>
           <div class="wl-toolbar-center">
             <div class="wl-search-box">
-              <input type="text" class="form-input wl-search-input" id="wl-search" placeholder="搜索 Ticker / 名称...">
+              <input type="search" class="form-input wl-search-input" id="wl-search" placeholder="搜索 Ticker / 名称..." autocomplete="off" name="wl-search-nofill">
             </div>
             <select class="form-input wl-filter-select" id="wl-filter-market">
               <option value="us_stock">美股</option>
@@ -780,6 +780,9 @@
 
             <!-- 已拦截操作（系统/投委会拦截，动态渲染） -->
             <div class="dc-card" id="dc-blocked-section" style="display:none"></div>
+
+            <!-- 挂单交易（限价单等待成交，动态渲染） -->
+            <div class="dc-card" id="dc-resting-section" style="display:none"></div>
 
             <!-- 投委会评审 -->
             <div class="dc-card" id="dc-committee">

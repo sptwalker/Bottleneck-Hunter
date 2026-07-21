@@ -267,3 +267,53 @@ P0（校验闭环）──┬──→ P1（接通反馈）──→ P3（自进
 4. P1：构造催化剂落空 → 验证 sell 信号生成；查 `layer_performance` 表
 5. P2：构造高相关持仓 → 验证组合约束拦截
 6. P3：构造踏空场景 → 验证机会成本复盘生成
+
+---
+
+## 六、交易约束单一真值清单（防「明显错误的执行命令」）
+
+`constraint_validator.validate_execution_plan` 是**唯一硬校验点**，同时被 L4 生成期
+(`decision_engine._full_validate`) 与执行期 (`trade_executor.execute_trade`) 调用——一处修、两路径全堵。
+
+**生成期硬约束（不满足 → 拦截进「已拦截」区 / 自动缩量）**
+| 约束 | 适用 | 说明 |
+|---|---|---|
+| 单笔金额 ≤ `max_single_trade_usd` | 买/卖 | 按风险偏好动态取值 |
+| 单股占比 ≤ `max_single_position_pct` | 买/加仓 | 买入后市值/总权益 |
+| 板块集中度 ≤ `max_sector_pct` | 买/加仓 | |
+| 最低现金 ≥ `min_cash_pct` | 买/加仓 | |
+| **现金充足性（最坏滑点口径）** | 买/加仓 | 直接杜绝「买入超余额」，与 `_execute_buy` 对齐 |
+| **卖出不得无持仓 / 超持仓** | 卖/减仓 | 超量自动缩到持仓；无持仓拦截 |
+| **股数/价格非负** | 全部 | 负参数直接判违规 |
+| 日换手 ≤ `max_daily_turnover_pct` | 买/卖 | |
+| 组合 beta / regime 仓位上限 | 买/加仓 | `validate_portfolio_beta` / `validate_against_regime` |
+| 账户级熔断（急跌禁新开/加仓） | 买/加仓 | `check_account_circuit_breaker` |
+| 投委会改单**只准缩量** | 卖/买 | `apply_committee_modifications` 放大 shares 时钳回原值 |
+
+**执行期硬拦（`trade_executor`）**：`_execute_buy` 现金不足拦截、`_execute_sell` 持仓不足拦截、
+必须真实市价快照才成交（拒绝 LLM 估价）、限价单未达价则挂单。
+
+## 七、挂单交易（限价单）生命周期
+
+批准后不能马上成交的买卖**自动转挂单**（取代原「偏离>30% 直接报错」）。严格限价语义：
+买单 `市价≤挂单价`、卖单 `市价≥挂单价` 才成交；成交价永远用真实市价快照。
+
+```
+pending --(用户批准 confirm)--> execute_trade 尝试成交
+  ├ 限价满足 → 立即成交 → status=executed + executed_at + sim_trade
+  └ 限价未满足 → 挂单：status=confirmed + resting_until=now+14d + method=limit
+挂单中 job_poll_resting_orders（每小时）：
+  ├ 到期(now>resting_until) → status=expired（自动取消）
+  ├ 用户取消(cancel-resting) → status=expired + [用户取消]
+  └ 开市 & 限价满足 → 成交 → status=executed
+```
+
+- **状态判别**：挂单 = `status='confirmed'` 且 `resting_until` 非空（不改 status CHECK）。
+- **store**：`rest_execution`(幂等不续期)/`get_resting_executions`/`mark_executed`/`expire_execution`；
+  `clear_pending_executions` 不误清挂单；L4 `existing_tickers` 并入挂单标的防重复生成。
+- **调度**：`job_poll_resting_orders`（interval 1h，随 `daily_decision` 门控）；
+  `market_hours.is_market_open` 判 A股/美股北京时段（美股取夏冬令时并集，节假日不特判）。
+- **API**：`GET /executions/resting`、`POST /executions/{id}/cancel-resting`；确认端点返回 `status=resting`。
+- **前端**：决策页「挂单交易」区（`#dc-resting-section`）显示挂单价/挂单时间/到期 + 取消按钮。
+- **数据现实**：价格快照约每日盘前/盘后各一次，非实时逐笔；轮询按小时跑但撮合分辨率受此数据节奏约束。
+
