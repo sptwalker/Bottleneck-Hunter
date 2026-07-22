@@ -17,6 +17,11 @@ export async function readSSEStream(url, body, { onEvent, onTick, onError, signa
         signal,
       });
       if (!resp.ok) {
+        if (resp.status === 401) {
+          // 会话过期/未登录 → 直接跳登录页，别当「连接失败」反复重试误导用户
+          window.location.href = '/login';
+          return;
+        }
         throw new Error(`HTTP ${resp.status}`);
       }
       const reader = resp.body.getReader();
@@ -76,6 +81,7 @@ export async function readSSEStream(url, body, { onEvent, onTick, onError, signa
       if (analysisId) {
         try {
           const statusResp = await fetch(`/api/history/${analysisId}/phase-status`);
+          if (statusResp.status === 401) { window.location.href = '/login'; return; }
           if (statusResp.ok) {
             const statusData = await statusResp.json();
             if (statusData && statusData.completed) {

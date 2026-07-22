@@ -63,13 +63,14 @@ def verify_token(token: str) -> Optional[dict]:
         return None
 
 
-def set_auth_cookie(response: Response, token: str):
-    """在响应中设置 HttpOnly cookie。"""
+def set_auth_cookie(response: Response, token: str, secure: bool = False):
+    """在响应中设置 HttpOnly cookie。secure=True 时仅经 HTTPS 传输（生产由 X-Forwarded-Proto 判定）。"""
     response.set_cookie(
         key=_COOKIE_NAME,
         value=token,
         httponly=True,
         samesite="lax",
+        secure=secure,
         max_age=_JWT_EXPIRE_HOURS * 3600,
         path="/",
     )

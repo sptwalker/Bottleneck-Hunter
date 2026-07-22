@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 import time
 from collections import defaultdict
@@ -28,6 +29,17 @@ from bottleneck_hunter.auth.store import AuthStore
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+def _cookie_secure(request: Request) -> bool:
+    """判定认证 cookie 是否加 Secure：生产经 nginx 时 X-Forwarded-Proto=https 即加；
+    直连 https 亦加；本地 http 默认不加（否则 cookie 不回传）。可用 BH_COOKIE_SECURE=1 强制。"""
+    xf = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    if xf:
+        return xf == "https"
+    if request.url.scheme == "https":
+        return True
+    return os.getenv("BH_COOKIE_SECURE", "").lower() in ("1", "true")
 
 # 模块级引用，由 app.py lifespan 注入
 _auth_store: AuthStore | None = None
@@ -171,7 +183,7 @@ async def login(req: LoginRequest, request: Request, response: Response):
 
     _login_record_success(key, uk)
     token = create_token(user.id, user.username, user.role)
-    set_auth_cookie(response, token)
+    set_auth_cookie(response, token, secure=_cookie_secure(request))
     store.update_last_login(user.id)
     logger.info(f"用户登录: {user.username}")
     from bottleneck_hunter.web.admin_events import notify_admins
@@ -225,7 +237,7 @@ async def register(req: RegisterRequest, response: Response):
 
 
 @router.post("/verify-registration")
-async def verify_registration(req: VerifyRegistrationRequest, response: Response):
+async def verify_registration(req: VerifyRegistrationRequest, request: Request, response: Response):
     """第二阶段：校验验证码 → 建号 → 消费邀请码 → 登录。"""
     store = _store()
     ok, msg, payload = store.verify_code(req.email, "register", req.code)
@@ -252,7 +264,7 @@ async def verify_registration(req: VerifyRegistrationRequest, response: Response
         store.consume_invite_code(invite, user.id)
 
     token = create_token(user.id, user.username, user.role)
-    set_auth_cookie(response, token)
+    set_auth_cookie(response, token, secure=_cookie_secure(request))
     store.update_last_login(user.id)
     logger.info("新用户注册完成: %s", user.username)
     return {"ok": True, "user": UserInfo(**user.model_dump()).model_dump()}

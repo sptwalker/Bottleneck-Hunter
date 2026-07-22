@@ -60,6 +60,19 @@
   closeBtn.addEventListener('click', closeDrawer);
   drawer.addEventListener('click', (e) => { if (e.target === drawer) closeDrawer(); });
 
+  /* ── 退出登录 ─────────────────────────────────── */
+  const logoutBtn = document.getElementById('acc-logout');
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', async () => {
+      logoutBtn.disabled = true;
+      setStatus(document.getElementById('acc-logout-status'), '正在退出…', true);
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch (_) { /* 忽略：无论成功与否都跳登录页 */ }
+      window.location.href = '/login';
+    });
+  }
+
   /* ── 改密码 ─────────────────────────────────── */
   document.getElementById('acc-change-pw').addEventListener('click', async () => {
     const status = document.getElementById('acc-pw-status');
