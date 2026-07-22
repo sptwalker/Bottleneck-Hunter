@@ -108,6 +108,16 @@ export function initAIConfig() {
 
   // Matrix actions
   container.querySelector('#aic-save-matrix')?.addEventListener('click', saveMatrixConfig);
+  // 切换 provider 下拉 → 联动把「模型名」填成该 provider 的默认模型（选“未配置”则清空）。
+  // 委托绑在稳定容器上：renderMatrixForModule 只替换其 innerHTML、不换容器，故只需绑一次。
+  container.querySelector('#aic-matrix-list')?.addEventListener('change', (e) => {
+    const sel = e.target.closest?.('.aic-slot-provider');
+    if (!sel) return;
+    const modelInp = sel.closest('.aic-slot')?.querySelector('.aic-provider-input');
+    if (!modelInp) return;
+    const p = _providers.find(x => x.id === sel.value);
+    modelInp.value = sel.value ? (p?.default_model || '') : '';
+  });
 
   // Module tabs（分配矩阵按系统模块）
   container.querySelectorAll('.aic-module-tab').forEach(tab => {
