@@ -27,7 +27,9 @@ class EquityHolding(BaseModel):
     ticker: str
     company: str
     quantity: float
-    market_value_usd: float
+    market_value_usd: float                 # 统一美元口径（结单 Total Value USD 列）
+    nominal_ccy: str = "USD"                # 名义货币（来自币种小节标题）
+    market_value_nominal: float | None = None  # 原币市值（审计留痕；USD 持仓 == market_value_usd）
 
     @field_validator("ticker")
     @classmethod
@@ -69,37 +71,71 @@ def _num(s: str) -> Optional[float]:
 
 # ── 持仓解析 ─────────────────────────────────────────────────────────────
 
-_TICKER_RE = re.compile(r"^Ticker\s+([A-Z0-9]{1,6})\s+\S+\s+Equity\s*$")
+_TICKER_RE = re.compile(r"^Ticker\s+([A-Z0-9]{1,6})\s+\S+\s+Equity\s*$")   # 个股锚（恒为股票）
+_ISIN_RE = re.compile(r"^ISIN\s+([A-Z]{2}[A-Z0-9]{9,10})\s*$")             # ETF/基金锚
 _TOTAL_EQ_RE = re.compile(r"TOTAL\s+EQUITIES")
+_CCY_SECTION_RE = re.compile(r"Equities\s*\((USD|HKD|TWD|EUR|JPY|GBP|CNH|CNY|SGD|AUD)\)")
+# 进入/离开 EQUITIES 区（ISIN 锚需区分股票ETF vs 固收债券：仅 EQUITIES 区内的 ISIN 才算持仓）
+_EQ_ENTER_RE = re.compile(r"^EQUITIES\b")
+_EQ_LEAVE_RE = re.compile(r"^(FIXED INCOME|OTHER ASSETS|INVESTMENT CASH|CASH AND|TOTAL EQUITIES|"
+                          r"STRUCTURED|ALTERNATIVE|COMMODIT)")
 
 
 def _parse_equities(pages: list[str]) -> tuple[list[EquityHolding], Optional[float]]:
-    """从所有页文本抽 EQUITIES 持仓 + TOTAL EQUITIES 合计。"""
+    """固定偏移解析 EQUITIES 持仓（含个股 Ticker 锚 + ETF 的 ISIN 锚）+ TOTAL EQUITIES 合计。
+
+    块结构（锚行往前 10 行，个股/ETF 一致）：
+      i-10 数量 | i-9 单价 | i-8 总成本 | i-7 现价 | i-6 市值(原币) |
+      i-5 未实现 | i-4 Total Value USD ★统一美元口径 | i-3 公司名 | i-2 日期 | i-1 %占比
+    - 个股锚 `Ticker XXX Equity`：恒为股票（固收用 `Ticker XXX ID`，不含 Equity，天然排除）。
+    - ETF 锚 `ISIN XXXX`：仅当处于 EQUITIES 区才算（否则会误收固收债券的 ISIN）。
+    `in_equities` 状态跨页保持（应对 'EQUITIES CONTINUED' 续页）。
+    """
     holdings: list[EquityHolding] = []
     total_eq: Optional[float] = None
+    in_equities = False
+    cur_ccy = "USD"
 
     for page_text in pages:
         lines = page_text.splitlines()
-        for i, line in enumerate(lines):
-            # TOTAL EQUITIES 合计行：下一行是数字
-            if _TOTAL_EQ_RE.search(line) and i + 1 < len(lines):
-                v = _num(lines[i + 1])
-                if v and v > 0:
-                    total_eq = v
+        for i, raw in enumerate(lines):
+            line = raw.strip()
 
-            # 持仓行
-            m = _TICKER_RE.match(line.strip())
-            if not m or i < 10:
+            # 区间与币种状态（跨页保持）
+            if _EQ_ENTER_RE.match(line):
+                in_equities = True
+            elif _EQ_LEAVE_RE.match(line):
+                if _TOTAL_EQ_RE.search(line) and i + 1 < len(lines):
+                    v = _num(lines[i + 1].strip())
+                    if v and v > 0:
+                        total_eq = v
+                in_equities = False
+            sm = _CCY_SECTION_RE.search(line)
+            if sm:
+                cur_ccy = sm.group(1)
+
+            # 锚点：个股 Ticker 或（EQUITIES 区内的）ETF ISIN
+            tm = _TICKER_RE.match(line)
+            im = _ISIN_RE.match(line)
+            if tm:
+                symbol = tm.group(1)
+            elif im and in_equities:
+                symbol = im.group(1)          # ETF 暂用 ISIN 作标识（P2 再映射到可交易代码）
+            else:
                 continue
-            ticker = m.group(1)
-            qty = _num(lines[i - 10])
-            mv = _num(lines[i - 6])
+            if i < 10:
+                continue
+
+            qty = _num(lines[i - 10].strip())
+            mv_nominal = _num(lines[i - 6].strip())   # 原币市值（审计）
+            mv_usd = _num(lines[i - 4].strip())       # Total Value USD（统一口径）★
             company = lines[i - 3].strip()
-            if qty and mv and qty > 0 and mv > 0:
+            if qty and mv_usd and qty > 0 and mv_usd > 0:
                 try:
                     holdings.append(EquityHolding(
-                        ticker=ticker, company=company,
-                        quantity=qty, market_value_usd=mv,
+                        ticker=symbol, company=company, quantity=qty,
+                        market_value_usd=mv_usd, nominal_ccy=cur_ccy,
+                        market_value_nominal=mv_nominal,
                     ))
                 except Exception:  # noqa: BLE001
                     pass
@@ -123,7 +159,7 @@ def _parse_period(filename: str) -> str:
 
 # ── 语句内对账 ────────────────────────────────────────────────────────────
 
-_RECON_TOL = 0.02   # 2% 容差（四舍五入 + 汇率微差）
+_RECON_TOL = 0.005   # 0.5% 容差（口径已统一为 Total Value USD，仅留四舍五入余量）
 
 def _reconcile(holdings: list[EquityHolding],
                statement_total: Optional[float]) -> ReconResult:
@@ -219,7 +255,8 @@ def demo() -> None:
         print(f"  结单合计 ${stmt.recon.statement_equities_total_usd:,.2f}  "
               f"差值 ${stmt.recon.delta_usd:+,.2f}  对账: {stmt.recon.status}")
     for h in stmt.holdings:
-        print(f"    {h.ticker:6} {h.company[:28]:28} {h.quantity:>8,.0f}股  ${h.market_value_usd:>14,.2f}")
+        ccy = "" if h.nominal_ccy == "USD" else f"  [{h.nominal_ccy} {h.market_value_nominal:,.0f}]"
+        print(f"    {h.ticker:6} {h.company[:28]:28} {h.quantity:>8,.0f}股  ${h.market_value_usd:>14,.2f}{ccy}")
     assert stmt.recon.holdings_count > 0, "未抽到持仓"
     assert stmt.recon.status in ("ok", "no_statement_total", "mismatch")
     print("ingest demo 通过")

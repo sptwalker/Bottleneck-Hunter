@@ -29,11 +29,29 @@ def _make_citi_like_pdf() -> bytes:
             f"Ticker {company_ticker[company]} UW Equity",  # i 行 ★
         ]
     company_ticker = {"Alphabet Inc": "GOOGL", "Meta Platforms Inc": "META"}
+
+    def block_ccy(qty, mv_nominal, mv_usd, company, anchor):
+        """非 USD / ETF：市值原币(i-6) ≠ 美元总值(i-4)，锚行可为 Ticker 或 ISIN。"""
+        return [
+            f"{qty:,.0f}", "317.3527", "378,919.12", "429.8",
+            f"{mv_nominal:,.2f}",     # i-6 市值(原币)
+            "134,262.08",
+            f"{mv_usd:,.2f}",         # i-4 Total Value USD
+            company, "30JUN26", "0.18", anchor,
+        ]
+
     lines = ["INVESTMENT POSITIONS", "EQUITIES 60.86% SORTED BY NOM CCY",
              "Nominal Ccy", "Quantity", "Description", "Market Value"]
     lines += block(3387, 1210412.19, "Alphabet Inc")
     lines += block(2292, 1291060.68, "Meta Platforms Inc")
-    lines += ["TOTAL EQUITIES", f"{1210412.19 + 1291060.68:,.2f}"]
+    # ETF：ISIN 锚（无 Ticker 行）
+    lines += ["Developed Large Cap Equities (USD)"]
+    lines += block_ccy(1500, 961140.00, 961140.00, "iShares Semiconductor ETF - ETF", "ISIN US4642875235")
+    # 港股：HKD 小节，市值原币(HKD) ≠ 美元总值
+    lines += ["Emerging Market All Cap Equities (HKD)"]
+    lines += block_ccy(1194, 513181.20, 65440.92, "Tencent Holdings Ltd (700 HK)", "Ticker 700 HK Equity")
+    tot = 1210412.19 + 1291060.68 + 961140.00 + 65440.92
+    lines += ["TOTAL EQUITIES", f"{tot:,.2f}"]
 
     doc = fitz.open()
     page = doc.new_page()
@@ -49,10 +67,26 @@ def citi_pdf():
 def test_parse_holdings(citi_pdf):
     stmt = ingest.ingest_pdf(citi_pdf, "Integrated Statement for Jun 2026_30_Jun_2026.PDF")
     tickers = {h.ticker for h in stmt.holdings}
-    assert tickers == {"GOOGL", "META"}, tickers
+    assert {"GOOGL", "META", "700", "US4642875235"} <= tickers, tickers
     g = next(h for h in stmt.holdings if h.ticker == "GOOGL")
     assert g.quantity == 3387 and abs(g.market_value_usd - 1210412.19) < 0.01
     assert g.company == "Alphabet Inc"
+
+
+def test_etf_isin_anchor_captured(citi_pdf):
+    """ETF 用 ISIN 锚（无 Ticker 行）也应抽到——漏 $961,140 那只。"""
+    stmt = ingest.ingest_pdf(citi_pdf, "x_30_Jun_2026.PDF")
+    etf = next(h for h in stmt.holdings if h.ticker == "US4642875235")
+    assert abs(etf.market_value_usd - 961140.00) < 0.01
+
+
+def test_multicurrency_uses_usd_column(citi_pdf):
+    """港股取 Total Value USD（$65,440），非原币市值（HKD 513,181）。"""
+    stmt = ingest.ingest_pdf(citi_pdf, "x_30_Jun_2026.PDF")
+    hk = next(h for h in stmt.holdings if h.ticker == "700")
+    assert hk.nominal_ccy == "HKD"
+    assert abs(hk.market_value_usd - 65440.92) < 0.01           # 美元口径
+    assert abs(hk.market_value_nominal - 513181.20) < 0.01      # 原币留审计
 
 
 def test_period_end_from_filename(citi_pdf):
@@ -63,7 +97,7 @@ def test_period_end_from_filename(citi_pdf):
 def test_reconcile_ok(citi_pdf):
     stmt = ingest.ingest_pdf(citi_pdf, "x_30_Jun_2026.PDF")
     assert stmt.recon.status == "ok"          # 逐只合计 == TOTAL EQUITIES
-    assert stmt.recon.holdings_count == 2
+    assert stmt.recon.holdings_count == 4
     assert abs(stmt.recon.delta_usd) < 1.0
 
 
