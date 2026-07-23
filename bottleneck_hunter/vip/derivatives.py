@@ -128,53 +128,79 @@ def _ff(pat: str, text: str, group=1) -> Optional[float]:
 
 
 def _days_between(a: str, b: str) -> int:
-    da = datetime.strptime(a, "%b %d, %Y")
-    db = datetime.strptime(b, "%b %d, %Y")
+    """兼容 Citi/野村日期格式：Jul 22, 2026 / 7 July 2026 / July 7, 2026。"""
+    fmts = ("%b %d, %Y", "%d %B %Y", "%B %d, %Y", "%d %b %Y")
+    def parse(s: str):
+        for f in fmts:
+            try:
+                return datetime.strptime(s.strip(), f)
+            except ValueError:
+                continue
+        raise ValueError(f"unsupported date format: {s}")
+    da = parse(a)
+    db = parse(b)
     return (db - da).days
 
 
 # ── 条款抽取：Accumulator/Decumulator ────────────────────────────────────
 
 def extract_accumulator_terms(pdf_path: str) -> DerivativeTerm:
-    text = _read_pdf_text(pdf_path)
-    # 识别 product family：term sheet 正文常同时出现“Equity Accumulator / Equity Decumulator”说明语，
-    # 不能简单全局搜 Decumulator。以产品标题/全称里的 Daily Securities Accumulator/Decumulator 为准。
+    text = _read_pdf_text(pdf_path, pages=8)
+    # 识别 product family：正文常同时出现“Equity Accumulator / Equity Decumulator”说明语，
+    # 故优先看产品标题里的 Daily ... Accumulator/Decumulator。
     fam = "equity_accumulator"
-    if re.search(r"Daily Securities Decumulator", text, re.I):
+    if re.search(r"Daily(?: Securities)? Decumulator", text, re.I):
         fam = "equity_decumulator"
-    elif re.search(r"Daily Securities Accumulator", text, re.I):
+    elif re.search(r"Daily(?: Securities)? Accumulator", text, re.I):
         fam = "equity_accumulator"
-    symbol = _f(r"Bloomberg Ticker\s*:?\s*([A-Z0-9]{1,6}\s+[A-Z]{2})", text) or ""
-    symbol = symbol.split()[0]
-    ccy = _f(r":\s*([A-Z]{3})\s+\d+(?:\.\d+)?\s*\(.*Initial Price\)", text) or "USD"
-    trade_date = _f(r"Trade Date\s*:?\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
-    termination = _f(r"Termination Date\s*:?\s*The earlier of \(a\)\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
-    tenor = _days_between(trade_date, termination) if trade_date and termination else 365
-    ds = _ff(r"Daily Number of Shares \(DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or 0.0
-    stds = _ff(r"Step-up Daily Number of Shares \(St-DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or 0.0
-    max_nom = _ff(r"Maximum Number of Nominal Shares\s*:?\s*([\d,]+(?:\.\d+)?)", text) or 0.0
-    afp = _ff(r":\s*USD\s*([\d,]+\.\d+)\s*\(\s*70\.75% of Initial Price\s*\)", text) or _ff(r"AFP\)?\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
-    initial = _ff(r"Initial Price\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
-    ko = _ff(r"Knock-out Price \(KO\)\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
-    gp = _f(r"Guaranteed Period End Date\s*:?\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
+
+    # Citi 样本：Bloomberg Ticker / AFP / KO / DS / St-DS / Max Nominal Shares
+    if "Micron Technology Inc" in text or "Marvell Technology Inc" in text or "Alibaba Group Holding" in text:
+        symbol = _f(r"Bloomberg Ticker\s*:?\s*([A-Z0-9]{1,6}\s+[A-Z]{2})", text) or ""
+        symbol = symbol.split()[0]
+        ccy = _f(r":\s*([A-Z]{3})\s+\d+(?:\.\d+)?\s*\(.*Initial Price\)", text) or "USD"
+        trade_date = _f(r"Trade Date\s*:?\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
+        termination = _f(r"Termination Date\s*:?\s*The earlier of \(a\)\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
+        tenor = _days_between(trade_date, termination) if trade_date and termination else 365
+        ds = _ff(r"Daily Number of Shares \(DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or 0.0
+        stds = _ff(r"Step-up Daily Number of Shares \(St-DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or 0.0
+        max_nom = _ff(r"Maximum Number of Nominal Shares\s*:?\s*([\d,]+(?:\.\d+)?)", text) or 0.0
+        afp = _ff(r":\s*USD\s*([\d,]+\.\d+)\s*\(\s*70\.75% of Initial Price\s*\)", text) or _ff(r"AFP\)?\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
+        initial = _ff(r"Initial Price\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
+        ko = _ff(r"Knock-out Price \(KO\)\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
+        gp = _f(r"Guaranteed Period End Date\s*:?\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
+        return DerivativeTerm(
+            product_family=fam, underlying_symbol=symbol, currency=ccy, tenor_days=tenor, source_file=pdf_path,
+            terms={"initial_price": initial, "afp": afp, "knock_out_price": ko, "knock_out_direction": "up_and_out",
+                   "daily_shares": ds, "step_up_daily_shares": stds, "max_nominal_shares": max_nom,
+                   "guaranteed_period_end": gp, "settlement_style": "physical_spot", "net_premium": 0.0},
+        )
+
+    # Nomura 样本：12 Month USD Daily Accumulator/Decumulator（BE.N / PLTR.OQ）
+    symbol = _f(r"Underlying Share\s*([A-Za-z0-9 .&'/-]+)?\s*\(([A-Z0-9]{1,6})\s+[A-Z]{2}\s+Equity\)", text, group=2, flags=re.I | re.S) or ""
+    if not symbol:
+        symbol = (_f(r"^([A-Z0-9.]{2,10}),\s*\d+(?:\.\d+)?%\s*Strike Price", text, flags=re.I | re.M) or "").split('.')[0]
+    ccy = _f(r"Settlement Currency\s*([A-Z]{3})", text) or _f(r"Underlying CCY\s*([A-Z]{3})", text) or "USD"
+    trade_date = _f(r"Trade Date\s*([0-9]{1,2} [A-Za-z]+ 20\d{2})", text) or ""
+    end_pat = r"Final Decumulation Date\s*([0-9]{1,2} [A-Za-z]+ 20\d{2})" if fam == "equity_decumulator" else r"Final Accumulation Date\s*([0-9]{1,2} [A-Za-z]+ 20\d{2})"
+    final_date = _f(end_pat, text) or ""
+    tenor = _days_between(trade_date, final_date) if trade_date and final_date else 365
+    initial = _ff(r"Reference Spot Price \(USD\)\s*([\d,]+\.\d+)", text) or 0.0
+    afp = _ff(r"Forward Price \(USD\)\s*([\d,]+\.\d+)", text) or 0.0
+    ko = _ff(r"Knock(?:-Out)? (?:Price|Level) \(USD\)\s*([\d,]+\.\d+)", text) or 0.0
+    max_nom = _ff(r"Maximum Total Shares\s*([\d,]+(?:\.\d+)?)", text) or 0.0
+    ds = _ff(r"Shares per Day\s*([\d,]+(?:\.\d+)?)", text) or _ff(r"Shares per day\s*([\d,]+(?:\.\d+)?)", text) or 0.0
+    gear = _ff(r"Gearing Ratio\s*([\d,]+(?:\.\d+)?)", text) or 1.0
+    # Nomura 日累积/减持没有显式 Step-up shares，而是 LNBD * Gearing Ratio —— 折算为 step-up daily shares = DS*GearingRatio
+    stds = ds * gear
+    protected_end = _f(r"Protected\s+Period\s+End\s+Date.*?([0-9]{1,2} [A-Za-z]+ 20\d{2})", text) or ""
     return DerivativeTerm(
-        product_family=fam,
-        underlying_symbol=symbol,
-        currency=ccy,
-        tenor_days=tenor,
-        source_file=pdf_path,
-        terms={
-            "initial_price": initial,
-            "afp": afp,
-            "knock_out_price": ko,
-            "knock_out_direction": "up_and_out",
-            "daily_shares": ds,
-            "step_up_daily_shares": stds,
-            "max_nominal_shares": max_nom,
-            "guaranteed_period_end": gp,
-            "settlement_style": "physical_spot",
-            "net_premium": 0.0,
-        },
+        product_family=fam, underlying_symbol=symbol, currency=ccy, tenor_days=tenor, source_file=pdf_path,
+        terms={"initial_price": initial, "afp": afp, "knock_out_price": ko,
+               "knock_out_direction": "down_and_out" if fam == "equity_decumulator" else "up_and_out",
+               "daily_shares": ds, "step_up_daily_shares": stds, "gearing_ratio": gear,
+               "max_nominal_shares": max_nom, "guaranteed_period_end": protected_end,
+               "settlement_style": "physical_spot", "net_premium": 0.0},
     )
 
 
@@ -233,13 +259,29 @@ def extract_mli_terms(pdf_path: str) -> DerivativeTerm:
 
 def payoff_accumulator(term: DerivativeTerm, final_price: float, *,
                        knock_out_happened: bool = False, days_observed: int | None = None) -> dict:
-    """简化场景引擎：按终值相对 AFP/KO 估算累计股数与持有成本（静态近似,供报告风险提示）。"""
+    """简化场景引擎：按终值相对 AFP/KO 估算累计/减持股数与盈亏（静态近似，供报告风险提示）。
+
+    - Accumulator：终值 < AFP → step-up 累积更多股（更危险）
+    - Decumulator：终值 > AFP → step-up 减持更多股（上涨踏空风险）
+    """
     t = term.terms
     ds = t.get("daily_shares", 0)
     stds = t.get("step_up_daily_shares", 0)
     afp = t.get("afp", 0.0)
     ko = t.get("knock_out_price", 0.0)
     days = int(days_observed or term.tenor_days)
+
+    if term.product_family == "equity_decumulator":
+        if knock_out_happened and final_price <= ko:
+            shares = ds  # 最保守：按 1 天 DS 近似
+        else:
+            shares = days * (ds if final_price <= afp else stds)
+        proceeds = shares * afp
+        market_value = shares * final_price
+        return {"shares_decumulated": shares, "proceeds": proceeds, "market_value": market_value,
+                "pnl": proceeds - market_value}
+
+    # accumulator
     if knock_out_happened and final_price >= ko:
         shares = ds  # 最保守：按 1 天 DS（路径依赖,这里不假装精确）
     else:
@@ -278,11 +320,11 @@ def classify_pdf(pdf_path: str) -> str:
     text = _read_pdf_text(pdf_path, pages=2)
     if "Master Fund Highlights" in text or "Financial Statements" in text:
         return "fund_report"
-    if "Daily Securities Accumulator" in text:
+    if re.search(r"Daily(?: Securities)? Accumulator", text, re.I):
         return "accumulator"
-    if "Daily Securities Decumulator" in text:
+    if re.search(r"Daily(?: Securities)? Decumulator", text, re.I):
         return "decumulator"
-    if "Market Linked Instrument" in text or "Leverage Call Spread" in text:
+    if "Market Linked Instrument" in text or "Leverage Call Spread" in text or "Daily Callable Fixed Coupon" in text:
         return "mli"
     return "other"
 
