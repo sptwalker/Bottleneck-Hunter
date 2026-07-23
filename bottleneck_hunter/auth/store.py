@@ -119,6 +119,50 @@ class AuthStore:
                     expires_at TEXT,
                     created_at TEXT
                 );
+                -- VIP 私人财务顾问：财务文档（PII，parsed_json 加密）+ 建议审计（见 docs/VIP_ADVISOR_TECH_SPEC.md §2.1）
+                CREATE TABLE IF NOT EXISTS financial_documents (
+                    id                    TEXT PRIMARY KEY,
+                    user_id               TEXT NOT NULL,
+                    market                TEXT DEFAULT 'us_stock',
+                    broker                TEXT DEFAULT '',
+                    doc_type              TEXT DEFAULT 'monthly_statement'
+                                          CHECK(doc_type IN ('monthly_statement','trade_confirm','position_report')),
+                    period_end            TEXT DEFAULT '',
+                    file_name             TEXT DEFAULT '',
+                    file_hint             TEXT DEFAULT '',
+                    content_hash          TEXT NOT NULL,
+                    raw_pdf_encrypted     TEXT DEFAULT '',
+                    parsed_json_encrypted TEXT DEFAULT '',
+                    recon_flags_json      TEXT DEFAULT '{}',
+                    status                TEXT DEFAULT 'needs_review'
+                                          CHECK(status IN ('needs_review','parsed_ok','extract_failed',
+                                                           'duplicate','normalized','purged')),
+                    parse_error           TEXT DEFAULT '',
+                    created_at            TEXT NOT NULL,
+                    parsed_at             TEXT DEFAULT '',
+                    purged_at             TEXT DEFAULT '',
+                    updated_at            TEXT DEFAULT '',
+                    UNIQUE(user_id, content_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_findoc_user_period
+                    ON financial_documents(user_id, market, broker, period_end);
+                CREATE TABLE IF NOT EXISTS advice_audit_trail (
+                    id                  TEXT PRIMARY KEY,
+                    user_id             TEXT DEFAULT '',
+                    market              TEXT DEFAULT 'us_stock',
+                    advice_type         TEXT DEFAULT 'report'
+                                        CHECK(advice_type IN ('report','recommendation','chat','correction')),
+                    advice_ref          TEXT DEFAULT '',
+                    source_doc_ids      TEXT DEFAULT '[]',
+                    source_data_ref     TEXT DEFAULT '{}',
+                    model_provider      TEXT DEFAULT '',
+                    model_name          TEXT DEFAULT '',
+                    disclaimer_version  TEXT DEFAULT '',
+                    content_hash        TEXT DEFAULT '',
+                    created_at          TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_user_ref
+                    ON advice_audit_trail(user_id, advice_ref);
             """)
         self._migrate()
 
@@ -251,6 +295,134 @@ class AuthStore:
     def delete_user(self, user_id: str):
         with self._conn() as conn:
             conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    # ── VIP 财务文档（PII，parsed_json 加密）+ 建议审计 ──────────────
+    def create_financial_doc(self, user_id: str, *, content_hash: str,
+                             market: str = "us_stock", broker: str = "",
+                             doc_type: str = "monthly_statement",
+                             period_end: str = "", file_name: str = "",
+                             parsed_json: str = "", raw_pdf_b64: str = "",
+                             recon_flags: dict | None = None,
+                             status: str = "needs_review",
+                             parse_error: str = "") -> str:
+        """落一份财务文档。parsed_json / raw_pdf_b64 落库前加密；(user_id,content_hash) 幂等去重。
+
+        raw_pdf_b64 默认空（即焚，只留结构化数据）；短存原始件时传 base64(pdf)。
+        recon_flags 只存 flag/字段名/状态（绝无金额数值，H2）。
+        """
+        import json as _json
+
+        from .crypto import encrypt, make_hint
+        did = uuid.uuid4().hex[:12]
+        now = _utcnow().isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO financial_documents
+                   (id, user_id, market, broker, doc_type, period_end, file_name, file_hint,
+                    content_hash, raw_pdf_encrypted, parsed_json_encrypted, recon_flags_json,
+                    status, parse_error, created_at, parsed_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (did, user_id, market, broker, doc_type, period_end, file_name,
+                 make_hint(file_name),
+                 content_hash,
+                 encrypt(raw_pdf_b64) if raw_pdf_b64 else "",
+                 encrypt(parsed_json) if parsed_json else "",
+                 _json.dumps(recon_flags or {}, ensure_ascii=False),
+                 status, parse_error, now,
+                 now if parsed_json else "", now),
+            )
+        return did
+
+    def find_financial_doc_by_hash(self, user_id: str, content_hash: str) -> Optional[dict]:
+        """幂等去重查重：同用户同文件哈希已存在则返回其行（不解密）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM financial_documents WHERE user_id = ? AND content_hash = ?",
+                (user_id, content_hash),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_financial_doc(self, user_id: str, doc_id: str, *, decrypt_parsed: bool = False) -> Optional[dict]:
+        """取一份文档。decrypt_parsed=True 时解密 parsed_json（仅在需处理解析结果时用，绝不入日志）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM financial_documents WHERE user_id = ? AND id = ?",
+                (user_id, doc_id),
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        if decrypt_parsed and d.get("parsed_json_encrypted"):
+            from .crypto import decrypt
+            try:
+                d["parsed_json"] = decrypt(d["parsed_json_encrypted"])
+            except Exception:  # noqa: BLE001
+                d["parsed_json"] = ""
+        d.pop("parsed_json_encrypted", None)
+        d.pop("raw_pdf_encrypted", None)  # 绝不外泄密文
+        return d
+
+    def list_financial_docs(self, user_id: str, *, status: str | None = None,
+                            limit: int = 100) -> list[dict]:
+        """列文档（不含密文/明文 PII，仅元数据 + hint + status + recon flags），供前端队列/展示。"""
+        q = "SELECT id, market, broker, doc_type, period_end, file_hint, content_hash, " \
+            "recon_flags_json, status, parse_error, created_at, parsed_at " \
+            "FROM financial_documents WHERE user_id = ?"
+        params: list = [user_id]
+        if status:
+            q += " AND status = ?"
+            params.append(status)
+        q += " ORDER BY period_end DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(q, tuple(params)).fetchall()]
+
+    def update_financial_doc_status(self, user_id: str, doc_id: str, status: str,
+                                    *, parse_error: str = "", purge_raw: bool = False) -> bool:
+        """流转状态；purge_raw=True 时清空原始 PDF 密文并记 purged_at（即焚）。"""
+        now = _utcnow().isoformat()
+        sets = ["status = ?", "updated_at = ?"]
+        vals: list = [status, now]
+        if parse_error:
+            sets.append("parse_error = ?"); vals.append(parse_error)
+        if purge_raw:
+            sets.append("raw_pdf_encrypted = ''"); sets.append("purged_at = ?"); vals.append(now)
+        vals += [user_id, doc_id]
+        with self._conn() as conn:
+            cur = conn.execute(
+                f"UPDATE financial_documents SET {', '.join(sets)} WHERE user_id = ? AND id = ?",
+                tuple(vals),
+            )
+            return cur.rowcount > 0
+
+    def create_advice_audit(self, user_id: str, *, advice_type: str = "report",
+                            advice_ref: str = "", source_doc_ids: list | None = None,
+                            source_data_ref: dict | None = None,
+                            model_provider: str = "", model_name: str = "",
+                            disclaimer_version: str = "", content_hash: str = "",
+                            market: str = "us_stock") -> str:
+        """记一条建议审计（报告/推荐/聊天/纠错的溯源 + 免责版本，无 PII 金额）。"""
+        import json as _json
+        aid = uuid.uuid4().hex[:12]
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO advice_audit_trail
+                   (id, user_id, market, advice_type, advice_ref, source_doc_ids, source_data_ref,
+                    model_provider, model_name, disclaimer_version, content_hash, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (aid, user_id, market, advice_type, advice_ref,
+                 _json.dumps(source_doc_ids or [], ensure_ascii=False),
+                 _json.dumps(source_data_ref or {}, ensure_ascii=False),
+                 model_provider, model_name, disclaimer_version, content_hash, _utcnow().isoformat()),
+            )
+        return aid
+
+    def delete_all_user_financial_docs(self, user_id: str) -> int:
+        """右被遗忘：清该用户全部财务文档 + 建议审计（auth.db 部分）。返回删除行数。"""
+        with self._conn() as conn:
+            n1 = conn.execute("DELETE FROM financial_documents WHERE user_id = ?", (user_id,)).rowcount
+            n2 = conn.execute("DELETE FROM advice_audit_trail WHERE user_id = ?", (user_id,)).rowcount
+        return (n1 or 0) + (n2 or 0)
 
     def get_user_by_email(self, email: str) -> Optional[UserInDB]:
         if not email:

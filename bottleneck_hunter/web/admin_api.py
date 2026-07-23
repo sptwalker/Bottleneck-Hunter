@@ -210,6 +210,22 @@ async def delete_user(user_id: str, user: dict = Depends(_require_admin)):
             store.delete_data_source_key(user_id, ds["source_id"])
     except Exception as e:
         logger.debug("清理用户数据源 Key 失败: %s", e)
+
+    # ── VIP 财务数据级联清理（PII，务必在 store.delete_user 之前）──
+    # auth.db 部分（M1 已落地）；watchlist 侧 portfolio/vip_reports/sim/profile/chat/knowledge
+    # 随 P2/P5/P3/P6/P4 各阶段落地时解注释（见 docs/VIP_ADVISOR_TECH_SPEC.md §8）。
+    try:
+        n = store.delete_all_user_financial_docs(user_id)
+        if n:
+            logger.info("VIP 财务数据级联清理: %d 行 (user=%s)", n, user_id[:8])
+        # from bottleneck_hunter.watchlist.store import WatchlistStore
+        # wl = WatchlistStore().for_user(user_id)
+        # wl.delete_all_user_portfolio(user_id)   # [P2] transactions→positions→instruments
+        # wl.delete_user_vip_reports(user_id)     # [P5] vip_reports（含 import_snapshot 溯源锚）
+        # wl.delete_user_sim_data(user_id)        # [P5] sim_account + sim_positions（现有缺口）
+    except Exception as e:  # noqa: BLE001
+        logger.warning("VIP 财务数据级联清理失败: %s", e)
+
     store.delete_user(user_id)
     logger.info(f"管理员删除用户 {target.username}")
     return {"ok": True}
