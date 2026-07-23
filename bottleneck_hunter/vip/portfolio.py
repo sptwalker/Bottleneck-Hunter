@@ -316,14 +316,16 @@ async def generate_advisor_narrative(summary: dict, *, user_id: str = "",
 
 async def generate_vip_report_ai(wl_store, *, period: str = "",
                                  source_doc_ids: list | None = None,
-                                 user_id: str = "", budget=None) -> dict:
+                                 user_id: str = "", budget=None,
+                                 derivative_terms: list | None = None) -> dict:
     """异步：组合摘要 → vip_advisor 分层叙事 → number_guard → 落库。M1 报告的 AI 增强入口。"""
     summary = build_portfolio_summary(wl_store)
     nar = await generate_advisor_narrative(summary, user_id=user_id, budget=budget)
     return generate_vip_report(
         wl_store, period=period, narrative=nar.get("narrative", ""),
         source_doc_ids=source_doc_ids,
-        model_provider=nar.get("provider", ""), model_name=nar.get("model", ""))
+        model_provider=nar.get("provider", ""), model_name=nar.get("model", ""),
+        derivative_terms=derivative_terms)
 
 
 def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",

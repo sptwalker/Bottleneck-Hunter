@@ -109,6 +109,49 @@ async def list_statements(market: str = "us_stock", user: dict = Depends(require
     return {"documents": AuthStore().list_financial_docs(user["sub"])}
 
 
+@router.post("/derivatives/upload")
+async def upload_derivative_file(file: UploadFile = File(...),
+                                 market: str = "us_stock",
+                                 broker: str = "nomura",
+                                 pdf_password: str = "",
+                                 user: dict = Depends(require_vip)):
+    """上传日常衍生品/结构票据文件 → 分类 → 条款抽取 → 落 vip_derivative_terms。"""
+    raw = await file.read()
+    if not raw or raw[:5] != _PDF_MAGIC:
+        raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
+    if len(raw) > _MAX_PDF_BYTES:
+        raise HTTPException(status_code=400, detail="文件超过 20MB 上限")
+
+    from hashlib import sha256
+    from bottleneck_hunter.vip import derivatives as drv
+    from bottleneck_hunter.web.oplog import record_operation
+    uid = user["sub"]
+    wl = _wl(user, market)
+    kind = drv.classify_pdf(raw, pdf_password=pdf_password)
+    if kind not in ("accumulator", "decumulator", "mli"):
+        raise HTTPException(status_code=400, detail=f"该文件类型当前不建模：{kind}")
+    try:
+        if kind in ("accumulator", "decumulator"):
+            term = drv.extract_accumulator_terms(raw, pdf_password=pdf_password)
+        else:
+            term = drv.extract_mli_terms(raw, pdf_password=pdf_password)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"条款抽取失败: {e}") from e
+    did = drv.save_derivative_term(wl, term, source_file_name=file.filename or "term.pdf",
+                                   source_file_hash=sha256(raw).hexdigest(), broker=broker)
+    record_operation(uid, "上传衍生品文件", category="vip_financial",
+                     detail=f"deriv={did[:8]} kind={kind} src={file.filename or ''}")
+    return {"id": did, "kind": kind, "term": {"family": term.product_family, "underlying": term.underlying_symbol}}
+
+
+@router.get("/derivatives")
+async def list_derivatives(market: str = "us_stock", user: dict = Depends(require_vip)):
+    from bottleneck_hunter.vip import derivatives as drv
+    terms = drv.list_derivative_terms(_wl(user, market))
+    return {"items": [{"product_family": t.product_family, "underlying_symbol": t.underlying_symbol,
+                        "currency": t.currency, "source_file": t.source_file} for t in terms]}
+
+
 @router.post("/reports/generate")
 async def generate_report(market: str = "us_stock", period: str = "",
                           with_ai: bool = True, user: dict = Depends(require_vip)):
@@ -122,10 +165,12 @@ async def generate_report(market: str = "us_stock", period: str = "",
         raise HTTPException(status_code=400, detail="尚无持仓，请先上传月结单")
 
     uid = user["sub"]
+    from bottleneck_hunter.vip import derivatives as drv
+    dterms = drv.list_derivative_terms(wl)
     if with_ai:
-        out = await portfolio.generate_vip_report_ai(wl, period=period, user_id=uid)
+        out = await portfolio.generate_vip_report_ai(wl, period=period, user_id=uid, derivative_terms=dterms)
     else:
-        out = portfolio.generate_vip_report(wl, period=period)
+        out = portfolio.generate_vip_report(wl, period=period, derivative_terms=dterms)
     record_operation(uid, "生成投资分析报告", category="vip_financial",
                      detail=f"report={out['report_id'][:8]} period={period}")
     return {"report_id": out["report_id"], "report_md": out["report_md"],

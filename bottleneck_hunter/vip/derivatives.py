@@ -106,9 +106,16 @@ class DerivativeTerm:
 
 # ── 文本抽取 helper ───────────────────────────────────────────────────────
 
-def _read_pdf_text(pdf_path: str, pages: int = 6) -> str:
+def _read_pdf_text(pdf_source, pages: int = 6, pdf_password: str = "") -> str:
+    """读 PDF 前 N 页文本。pdf_source 可为 path(str/Path) 或 bytes；加密 PDF 可传密码。"""
     import fitz
-    doc = fitz.open(pdf_path)
+    if isinstance(pdf_source, (bytes, bytearray)):
+        doc = fitz.open(stream=pdf_source, filetype="pdf")
+    else:
+        doc = fitz.open(str(pdf_source))
+    if doc.needs_pass:
+        if not pdf_password or not doc.authenticate(pdf_password):
+            raise ValueError("pdf_password_required_or_invalid")
     return "\n".join(page.get_text() for page in doc[:pages])
 
 
@@ -144,8 +151,8 @@ def _days_between(a: str, b: str) -> int:
 
 # ── 条款抽取：Accumulator/Decumulator ────────────────────────────────────
 
-def extract_accumulator_terms(pdf_path: str) -> DerivativeTerm:
-    text = _read_pdf_text(pdf_path, pages=8)
+def extract_accumulator_terms(pdf_source, pdf_password: str = "") -> DerivativeTerm:
+    text = _read_pdf_text(pdf_source, pages=8, pdf_password=pdf_password)
     # 识别 product family：正文常同时出现“Equity Accumulator / Equity Decumulator”说明语，
     # 故优先看产品标题里的 Daily ... Accumulator/Decumulator。
     fam = "equity_accumulator"
@@ -170,7 +177,7 @@ def extract_accumulator_terms(pdf_path: str) -> DerivativeTerm:
         ko = _ff(r"Knock-out Price \(KO\)\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
         gp = _f(r"Guaranteed Period End Date\s*:?\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
         return DerivativeTerm(
-            product_family=fam, underlying_symbol=symbol, currency=ccy, tenor_days=tenor, source_file=pdf_path,
+            product_family=fam, underlying_symbol=symbol, currency=ccy, tenor_days=tenor, source_file=str(pdf_source),
             terms={"initial_price": initial, "afp": afp, "knock_out_price": ko, "knock_out_direction": "up_and_out",
                    "daily_shares": ds, "step_up_daily_shares": stds, "max_nominal_shares": max_nom,
                    "guaranteed_period_end": gp, "settlement_style": "physical_spot", "net_premium": 0.0},
@@ -195,7 +202,7 @@ def extract_accumulator_terms(pdf_path: str) -> DerivativeTerm:
     stds = ds * gear
     protected_end = _f(r"Protected\s+Period\s+End\s+Date.*?([0-9]{1,2} [A-Za-z]+ 20\d{2})", text) or ""
     return DerivativeTerm(
-        product_family=fam, underlying_symbol=symbol, currency=ccy, tenor_days=tenor, source_file=pdf_path,
+        product_family=fam, underlying_symbol=symbol, currency=ccy, tenor_days=tenor, source_file=str(pdf_source),
         terms={"initial_price": initial, "afp": afp, "knock_out_price": ko,
                "knock_out_direction": "down_and_out" if fam == "equity_decumulator" else "up_and_out",
                "daily_shares": ds, "step_up_daily_shares": stds, "gearing_ratio": gear,
@@ -206,8 +213,8 @@ def extract_accumulator_terms(pdf_path: str) -> DerivativeTerm:
 
 # ── 条款抽取：MLI Booster / Leverage Call Spread + KI Put ───────────────
 
-def extract_mli_terms(pdf_path: str) -> DerivativeTerm:
-    text = _read_pdf_text(pdf_path)
+def extract_mli_terms(pdf_source, pdf_password: str = "") -> DerivativeTerm:
+    text = _read_pdf_text(pdf_source, pages=8, pdf_password=pdf_password)
     symbol = _f(r"Underlying Share.*?Bloomberg.*?:\s*([A-Z0-9]{1,6}\s+[A-Z]{2})", text, flags=re.I | re.S) or ""
     symbol = symbol.split()[0]
     ccy = _f(r"([A-Z]{3})-Denominated", text) or "USD"
@@ -239,7 +246,7 @@ def extract_mli_terms(pdf_path: str) -> DerivativeTerm:
         underlying_symbol=symbol,
         currency=ccy,
         tenor_days=tenor,
-        source_file=pdf_path,
+        source_file=str(pdf_source),
         terms={
             "initial_price": initial,
             "knock_in_price": ki_price,
@@ -315,9 +322,9 @@ def payoff_mli_booster(term: DerivativeTerm, final_price: float, *,
             "knock_in_price": ki, "strike_price": strike}
 
 
-def classify_pdf(pdf_path: str) -> str:
+def classify_pdf(pdf_source, pdf_password: str = "") -> str:
     """日常文件快速分类：fund_report / accumulator / decumulator / mli / other。"""
-    text = _read_pdf_text(pdf_path, pages=2)
+    text = _read_pdf_text(pdf_source, pages=2, pdf_password=pdf_password)
     if "Master Fund Highlights" in text or "Financial Statements" in text:
         return "fund_report"
     if re.search(r"Daily(?: Securities)? Accumulator", text, re.I):
@@ -327,6 +334,40 @@ def classify_pdf(pdf_path: str) -> str:
     if "Market Linked Instrument" in text or "Leverage Call Spread" in text or "Daily Callable Fixed Coupon" in text:
         return "mli"
     return "other"
+
+
+def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: str, source_file_hash: str,
+                         broker: str, rationale_ref: str = "") -> str:
+    import json, uuid
+    did = uuid.uuid4().hex[:12]
+    with wl_store._write_conn() as conn:
+        conn.execute(
+            f"""INSERT OR REPLACE INTO vip_derivative_terms
+               (id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
+                currency, terms_json, rationale_ref, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
+               VALUES (?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
+            (did, source_file_name, source_file_hash, broker, term.product_family, term.underlying_symbol,
+             term.currency, json.dumps(term.terms, ensure_ascii=False), rationale_ref, datetime.now().isoformat())
+            + wl_store._user_insert_params() + wl_store._market_insert_params(),
+        )
+    return did
+
+
+def list_derivative_terms(wl_store, limit: int = 50) -> list[DerivativeTerm]:
+    import json
+    conn = wl_store._connect()
+    try:
+        q, p = wl_store._filtered(
+            "SELECT * FROM vip_derivative_terms ORDER BY created_at DESC LIMIT ?", (limit,))
+        rows = [dict(r) for r in conn.execute(q, p).fetchall()]
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        out.append(DerivativeTerm(product_family=r["product_family"], underlying_symbol=r["underlying_symbol"],
+                                  currency=r["currency"], tenor_days=0,
+                                  terms=json.loads(r["terms_json"] or "{}"), source_file=r["source_file_name"]))
+    return out
 
 
 def demo() -> None:

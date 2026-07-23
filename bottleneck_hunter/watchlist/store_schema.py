@@ -576,6 +576,21 @@ CREATE TABLE IF NOT EXISTS vip_reports (
     user_id      TEXT DEFAULT '',
     market       TEXT DEFAULT 'us_stock'
 );
+CREATE TABLE IF NOT EXISTS vip_derivative_terms (
+    id                TEXT PRIMARY KEY,
+    source_file_name  TEXT DEFAULT '',
+    source_file_hash  TEXT DEFAULT '',
+    broker            TEXT DEFAULT '',
+    product_family    TEXT DEFAULT '',
+    underlying_symbol TEXT DEFAULT '',
+    currency          TEXT DEFAULT 'USD',
+    terms_json        TEXT DEFAULT '{}',
+    rationale_ref     TEXT DEFAULT '',
+    created_at        TEXT NOT NULL,
+    user_id           TEXT DEFAULT '',
+    market            TEXT DEFAULT 'us_stock',
+    UNIQUE(user_id, market, source_file_hash, product_family, underlying_symbol)
+);
 """
 
 CREATE_INDEXES = """
@@ -1115,10 +1130,19 @@ MIGRATIONS: list[str] = [
         alert_key TEXT DEFAULT '', created_at TEXT NOT NULL,
         user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock'
     )""",
+    """CREATE TABLE IF NOT EXISTS vip_derivative_terms (
+        id TEXT PRIMARY KEY,
+        source_file_name TEXT DEFAULT '', source_file_hash TEXT DEFAULT '', broker TEXT DEFAULT '',
+        product_family TEXT DEFAULT '', underlying_symbol TEXT DEFAULT '', currency TEXT DEFAULT 'USD',
+        terms_json TEXT DEFAULT '{}', rationale_ref TEXT DEFAULT '',
+        created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
+        UNIQUE(user_id, market, source_file_hash, product_family, underlying_symbol)
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_instruments_symbol   ON instruments(user_id, market, symbol)",
     "CREATE INDEX IF NOT EXISTS idx_positions_asof       ON positions(user_id, market, account_ref, as_of_date)",
     "CREATE INDEX IF NOT EXISTS idx_positions_instrument ON positions(instrument_id)",
     "CREATE INDEX IF NOT EXISTS idx_transactions_date    ON transactions(user_id, market, account_ref, trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_transactions_instr   ON transactions(instrument_id, trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_vip_reports_user     ON vip_reports(user_id, market, kind, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vip_deriv_user       ON vip_derivative_terms(user_id, market, created_at)",
 ]

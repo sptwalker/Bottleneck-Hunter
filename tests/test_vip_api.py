@@ -21,6 +21,28 @@ def _citi_pdf() -> bytes:
     return doc.tobytes()
 
 
+def _nomura_deriv_pdf() -> bytes:
+    import fitz
+    lines = [
+        "International Wealth Management",
+        "12 Month USD Daily Accumulator",
+        "BE.N, 62.74% Strike Price, 103.00% Knock-out",
+        "Summary of final terms and conditions as of 7 July 2026",
+        "Trade Date", "7 July 2026",
+        "Final Accumulation Date", "6 July 2027",
+        "Settlement Currency", "USD",
+        "Underlying Share", "BLOOM ENERGY CORP- A (BE UN Equity)",
+        "Forward Price", "USD 169.8030 (62.74% of Spot price , rounded to 4 decimal places)",
+        "Knock-out Price", "USD 278.7650 (103.00% of Spot price , rounded to 4 decimal places)",
+        "Maximum Total Shares", "1,500 (Shares per Day x Maximum Accumulation Days x Gearing Ratio)",
+        "Shares per Day", "3",
+        "Maximum Accumulation Days", "250",
+        "Gearing Ratio", "2",
+    ]
+    doc = fitz.open(); pg = doc.new_page(); pg.insert_text((36, 40), "\n".join(lines), fontsize=8)
+    return doc.tobytes()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     # auth.db + watchlist.db 指到临时目录
@@ -72,6 +94,18 @@ def test_admin_upload_and_report(client, monkeypatch):
     assert rr.status_code == 200, rr.text
     rep = rr.json()
     assert "持仓分析报告" in rep["report_md"] and "GOOGL" in rep["report_md"]
+
+    # 上传一个日常衍生品文件 → 列表可见 → 报告自动附衍生品风险摘要
+    dr = client.post("/api/vip/derivatives/upload?market=us_stock&broker=nomura",
+                     files={"file": ("oac.pdf", _nomura_deriv_pdf(), "application/pdf")})
+    assert dr.status_code == 200, dr.text
+    dres = dr.json()
+    assert dres["kind"] == "accumulator"
+    items = client.get("/api/vip/derivatives").json()["items"]
+    assert items and items[0]["underlying_symbol"] == "BE"
+    rr2 = client.post("/api/vip/reports/generate?with_ai=false&period=2026-06")
+    assert rr2.status_code == 200, rr2.text
+    assert "衍生品 / 结构化产品风险摘要" in rr2.json()["report_md"]
 
     # 列报告
     reps = client.get("/api/vip/reports").json()["reports"]

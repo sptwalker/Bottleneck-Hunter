@@ -8,9 +8,11 @@
   const fileEl = document.getElementById('vip-file');
   const marketEl = document.getElementById('vip-market');
   const uploadBtn = document.getElementById('vip-upload-btn');
+  const derivFileEl = document.getElementById('vip-deriv-file');
+  const derivUploadBtn = document.getElementById('vip-deriv-upload-btn');
   const reportBtn = document.getElementById('vip-report-btn');
   const btnVip = document.getElementById('btn-vip');
-  if (!uploadBtn || !reportBtn) return;
+  if (!uploadBtn || !reportBtn || !derivUploadBtn) return;
 
   function setStatus(id, msg, ok) {
     const el = document.getElementById(id);
@@ -50,6 +52,23 @@
     } catch (_) {}
   }
 
+  async function loadDerivatives() {
+    try {
+      const r = await fetch(`/api/vip/derivatives?market=${encodeURIComponent(marketEl.value)}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      const items = data.items || [];
+      const box = document.getElementById('vip-deriv-list');
+      if (!box) return;
+      if (!items.length) { box.innerHTML = '<p class="empty-text">暂无已建模衍生品文件</p>'; return; }
+      let html = '<table class="data-table"><thead><tr><th>产品族</th><th>标的</th><th>币种</th><th>来源文件</th></tr></thead><tbody>';
+      for (const d of items) {
+        html += `<tr><td>${d.product_family || '—'}</td><td>${d.underlying_symbol || '—'}</td><td>${d.currency || '—'}</td><td>${d.source_file || '—'}</td></tr>`;
+      }
+      box.innerHTML = html + '</tbody></table>';
+    } catch (_) {}
+  }
+
   uploadBtn.addEventListener('click', async () => {
     const f = fileEl.files && fileEl.files[0];
     if (!f) { setStatus('vip-upload-status', '请先选择 PDF 文件', false); return; }
@@ -78,6 +97,28 @@
     }
   });
 
+  derivUploadBtn.addEventListener('click', async () => {
+    const f = derivFileEl.files && derivFileEl.files[0];
+    if (!f) { setStatus('vip-deriv-status', '请先选择 PDF 文件', false); return; }
+    derivUploadBtn.disabled = true;
+    setStatus('vip-deriv-status', '上传建模中…', true);
+    try {
+      const pwd = prompt('如文件有密码，请输入（无密码可留空）:') || '';
+      const fd = new FormData();
+      fd.append('file', f);
+      const url = `/api/vip/derivatives/upload?market=${encodeURIComponent(marketEl.value)}&pdf_password=${encodeURIComponent(pwd)}`;
+      const r = await fetch(url, { method: 'POST', body: fd });
+      const data = await r.json();
+      if (!r.ok) { setStatus('vip-deriv-status', '✗ ' + (data.detail || '建模失败'), false); return; }
+      setStatus('vip-deriv-status', `✓ 已建模：${data.term.family} / ${data.term.underlying}`, true);
+      await loadDerivatives();
+    } catch (e) {
+      setStatus('vip-deriv-status', '✗ 上传失败: ' + e.message, false);
+    } finally {
+      derivUploadBtn.disabled = false;
+    }
+  });
+
   reportBtn.addEventListener('click', async () => {
     reportBtn.disabled = true;
     setStatus('vip-report-status', '生成中…（含 AI 分析约需数十秒）', true);
@@ -99,8 +140,8 @@
     }
   });
 
-  if (marketEl) marketEl.addEventListener('change', loadDocs);
-  // 进入 VIP 视图时刷新文档列表
+  if (marketEl) marketEl.addEventListener('change', () => { loadDocs(); loadDerivatives(); });
+  // 进入 VIP 视图时刷新文档列表 / 衍生品列表
   const nav = document.getElementById('btn-vip');
-  if (nav) nav.addEventListener('click', () => setTimeout(loadDocs, 50));
+  if (nav) nav.addEventListener('click', () => setTimeout(() => { loadDocs(); loadDerivatives(); }, 50));
 })();

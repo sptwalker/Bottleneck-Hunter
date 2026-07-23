@@ -1560,7 +1560,16 @@
       <div id="vip-docs" style="margin-top:12px"></div>
     </div>
     <div class="account-section">
-      <h4>2. 生成投资分析报告</h4>
+      <h4>2. 上传日常衍生品文件</h4>
+      <div class="account-form" style="align-items:center;gap:12px">
+        <input type="file" id="vip-deriv-file" accept="application/pdf,.pdf">
+        <button class="btn btn-sm btn-primary" id="vip-deriv-upload-btn">上传并建模</button>
+        <span class="account-status" id="vip-deriv-status"></span>
+      </div>
+      <div id="vip-deriv-list" style="margin-top:12px"></div>
+    </div>
+    <div class="account-section">
+      <h4>3. 生成投资分析报告</h4>
       <div class="account-form" style="align-items:center;gap:12px">
         <label style="font-size:13px"><input type="checkbox" id="vip-with-ai" checked> 含 AI 顾问团队叙事</label>
         <button class="btn btn-sm btn-primary" id="vip-report-btn">生成报告</button>
