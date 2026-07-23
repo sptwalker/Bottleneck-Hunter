@@ -3,13 +3,30 @@ from bottleneck_hunter.vip import number_guard as ng
 from bottleneck_hunter.vip import compliance as cp
 
 
-_FACTS = "GOOGL 市值 $1,205,022.50，占比 60.86%，未实现盈亏 $656,223.00"
+_FACTS = "GOOGL 数量 1030 股，市值 $1,205,022.50，占比 60.86%，未实现盈亏 $656,223.00；期权 5 contracts；净值 12.34"
 
 
 def test_verify_real_numbers_pass():
     r = {x["token"]: x["status"] for x in ng.verify_numbers("市值 $1,205,022.50，占 60.86%", _FACTS)}
     assert r["$1,205,022.50"] == "verified"
     assert r["60.86%"] == "verified"
+
+
+def test_unit_bare_number_verified():
+    """带单位裸数（股/contracts/净值）纳入校验，真实值放行。"""
+    assert ng.verify_numbers("持 1030 股", _FACTS)[0]["status"] == "verified"
+    assert ng.verify_numbers("共 5 contracts", _FACTS)[0]["status"] == "verified"
+    assert ng.verify_numbers("净值 12.34", _FACTS)[0]["status"] == "verified"
+
+
+def test_fabricated_unit_number_flagged():
+    """编造的带单位裸数被抓。"""
+    assert ng.verify_numbers("持 8888 股", _FACTS)[0]["status"] == "unverified"
+
+
+def test_date_and_serial_not_checked():
+    """日期/页码等无单位裸数不纳入校验（不产生 token）。"""
+    assert ng.verify_numbers("成交日 30JUN26 第 3 页", _FACTS) == []
 
 
 def test_fabricated_number_flagged():

@@ -12,14 +12,27 @@ from __future__ import annotations
 
 import re
 
-# $金额（可带负号/千分位/小数）| 数字%
-_TOKEN_RE = re.compile(r"(?:[\$＄]\s?-?\d[\d,]*(?:\.\d+)?)|(?:-?\d[\d,]*(?:\.\d+)?\s?%)")
+# 校验对象三类，其余裸数字（日期/序号/页码）一律不校：
+#   1) $金额（可带负号/千分位/小数）  2) 数字%  3) 带单位的裸数（N 股 / N contracts / 净值 N 等）
+# 带单位裸数：数字后紧跟单位词，或"净值/单价/成本/市值 + 数字"。日期(30JUN26)/纯序号不带这些单位，天然排除。
+_UNIT_AFTER = r"(?:股|份|手|张|contracts?|shares?|lots?|units?)"
+_UNIT_BEFORE = r"(?:净值|单价|成本|市值|价格|price|nav|cost)"
+_TOKEN_RE = re.compile(
+    r"(?:[\$＄]\s?-?\d[\d,]*(?:\.\d+)?)"                                  # $金额
+    r"|(?:-?\d[\d,]*(?:\.\d+)?\s?%)"                                       # 数字%
+    r"|(?:-?\d[\d,]*(?:\.\d+)?\s?" + _UNIT_AFTER + r")"                    # N 股/contracts…
+    r"|(?:" + _UNIT_BEFORE + r"[:：\s]?\s?-?\d[\d,]*(?:\.\d+)?)",          # 净值/成本 N
+    re.IGNORECASE,
+)
 _NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 _REL_TOL = 0.01  # 1% 相对容差，吸收四舍五入
 
 
 def _to_float(s: str) -> float | None:
-    s = s.replace("$", "").replace("＄", "").replace("%", "").replace(",", "").replace(" ", "").strip()
+    """从 token 里剥掉货币符/百分号/单位词/千分位，取出纯数值。"""
+    s = re.sub(_UNIT_BEFORE, "", s, flags=re.IGNORECASE)
+    s = re.sub(_UNIT_AFTER, "", s, flags=re.IGNORECASE)
+    s = re.sub(r"[\$＄%,:：\s]", "", s).strip()
     try:
         return float(s)
     except ValueError:
@@ -54,8 +67,9 @@ def verify_numbers(text: str, facts) -> list[dict]:
         tok = m.group(0)
         v = _to_float(tok)
         status = "unverified"
-        # 通道1：去逗号子串直接命中（数字串原样出现在 facts）
-        digits = tok.replace("$", "").replace("＄", "").replace("%", "").replace(",", "").replace(" ", "").strip().lstrip("-")
+        # 通道1：数字串（去单位/符号/逗号）原样出现在 facts
+        v_str = "" if v is None else (repr(v) if v != int(v) else str(int(v)))
+        digits = v_str.lstrip("-")
         if digits and digits in fx_nocomma:
             status = "verified"
         # 通道2：数值 1% 相对容差匹配任一 facts 数字
@@ -82,20 +96,26 @@ def annotate_unverified(text: str, facts, marker: str = " ⚠未核到") -> str:
 
 
 def demo() -> None:
-    facts = "持仓 GOOGL 市值 $1,205,022.50，占比 60.86%，未实现盈亏 $656,223.00"
-    # 报告叙事：前两个数字真实，第三个是 LLM 编的
-    text = "组合中 GOOGL 市值约 $1,205,022.50（占 60.86%），另有一笔 $9,999,999.00 的臆造收益。"
+    facts = "持仓 GOOGL 数量 1030 股，市值 $1,205,022.50，占比 60.86%，未实现盈亏 $656,223.00；期权 5 contracts"
+    # 报告叙事：真实数字 + 一个编造金额
+    text = "组合中 GOOGL 市值约 $1,205,022.50（占 60.86%），持 1030 股，另有一笔 $9,999,999.00 的臆造收益。"
     res = verify_numbers(text, facts)
     by = {r["token"]: r["status"] for r in res}
     assert by.get("$1,205,022.50") == "verified", res
     assert by.get("60.86%") == "verified", res
+    assert by.get("1030 股") == "verified", res           # 带单位裸数命中
     assert by.get("$9,999,999.00") == "unverified", res
     # 四舍五入应放行（1% 容差）
     assert verify_numbers("市值 $1,205,000", facts)[0]["status"] == "verified"
-    # 标注
+    # 编造股数应被抓
+    assert verify_numbers("持 8888 股", facts)[0]["status"] == "unverified"
+    # 日期/序号不带单位 → 不被当作校验对象
+    assert verify_numbers("成交日 30JUN26 页 3", facts) == []
+    # 标注：只标未核到
     marked = annotate_unverified(text, facts)
     assert "$9,999,999.00 ⚠未核到" in marked
-    assert "$1,205,022.50 ⚠未核到" not in marked  # 真实数字不标
+    assert "$1,205,022.50 ⚠未核到" not in marked
+    assert "1030 股 ⚠未核到" not in marked
     print("number_guard 自检通过")
 
 
