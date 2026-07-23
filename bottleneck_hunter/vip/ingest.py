@@ -74,10 +74,13 @@ class BrokerStatement(BaseModel):
 
 # ── PDF 文本抽取 ──────────────────────────────────────────────────────────
 
-def _extract_pages(pdf_bytes: bytes) -> list[str]:
-    """用 fitz 逐页抽文本，返回页文本列表。"""
+def _extract_pages(pdf_bytes: bytes, pdf_password: str = "") -> list[str]:
+    """用 fitz 逐页抽文本，返回页文本列表。加密 PDF 可传密码。"""
     import fitz  # PyMuPDF
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if doc.needs_pass:
+        if not pdf_password or not doc.authenticate(pdf_password):
+            raise ValueError("pdf_password_required_or_invalid")
     return [page.get_text() for page in doc]
 
 
@@ -176,6 +179,31 @@ def _parse_period(filename: str) -> str:
     return f"{m.group(3)}-{_MONTH[m.group(2)]}-{int(m.group(1)):02d}"
 
 
+def _parse_nomura_asof(pages: list[str]) -> str:
+    """Nomura 首页面眉 `As Of Date: 02−JUN−2026` → ISO `2026-06-02`。"""
+    head = "\n".join(pages[:2]).upper()
+    m = re.search(r"AS OF DATE:\s*(\d{1,2})[-−](JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[-−](\d{4})", head)
+    if not m:
+        return ""
+    return f"{m.group(3)}-{_MONTH[m.group(2)]}-{int(m.group(1)):02d}"
+
+
+def _clean_nomura_lines(pages: list[str]) -> list[str]:
+    lines = [re.sub(r"\s+", " ", x).strip() for pg in pages for x in pg.splitlines() if x.strip()]
+    out = []
+    for s in lines:
+        # fitz 对 PDF 中的 en-dash / Unicode 连字符常解成各种字符，统一规整后再匹配
+        s = s.replace("−", "-").replace("–", "-").replace("—", "-").replace("��", "-")
+        if s in {"BANK COPY", "Page", "Reference currency", "USD", "HKD", "Cash", "Equities", "Derivatives", "Structured Products"}:
+            out.append(s)
+            continue
+        if s.startswith("Client Account no") or s.startswith("Portfolio no") or s.startswith("Portfolio name") \
+           or s.startswith("Statement as of") or s.startswith("DD.MM.YYYY") or s.startswith("Page "):
+            continue
+        out.append(s)
+    return out
+
+
 def _parse_cash(pages: list[str]) -> tuple[list[CashBalance], float]:
     """抽 `INVESTABLE CASH BY CURRENCY` 明细 + `TOTAL CASH` 权威合计（统一美元口径）。
 
@@ -240,10 +268,14 @@ def detect_broker(pages: list[str], filename: str = "", hint: str = "") -> str:
         h = hint.strip().lower()
         if h in ("citi", "citibank", "citigroup"):
             return "citi"
+        if h in ("nomura", "nsl"):
+            return "nomura"
     head = "\n".join(pages[:3]).lower()
     fname = filename.lower()
     if "citibank" in head or "citi private bank" in head or "integrated statement" in fname:
         return "citi"
+    if "nomura singapore limited" in head or "portfolio statement" in head:
+        return "nomura"
     return "unknown"
 
 
@@ -263,22 +295,100 @@ def _parse_citi_statement(pages: list[str], filename: str, content_hash: str) ->
     )
 
 
+def _parse_nomura_cash(pages: list[str]) -> tuple[list[CashBalance], float]:
+    lines = _clean_nomura_lines(pages)
+    balances: list[CashBalance] = []
+    total_cash_usd = 0.0
+    for i, line in enumerate(lines):
+        if "Position Details" not in line or "Money Account" not in line:
+            continue
+        j = i + 1
+        while j + 2 < len(lines):
+            if "Position Details" in lines[j] and "Equities" in lines[j]:
+                break
+            if re.fullmatch(r"[A-Z]{3}", lines[j]) and _num(lines[j + 1]) is not None and _num(lines[j + 2]) is not None:
+                balances.append(CashBalance(currency=lines[j], market_value_nominal=_num(lines[j + 1]),
+                                            market_value_usd=_num(lines[j + 2])))
+                j += 3
+                continue
+            if lines[j] == "Total" and _num(lines[j + 1]) is not None:
+                total_cash_usd = _num(lines[j + 1]) or 0.0
+                break
+            j += 1
+    if total_cash_usd <= 0:
+        total_cash_usd = round(sum(x.market_value_usd for x in balances), 2)
+    return balances, total_cash_usd
+
+
+def _nomura_symbol(company_line: str) -> str:
+    m = re.search(r"\(([A-Z0-9]{1,6})\s+[A-Z]{2}\)", company_line)
+    return m.group(1) if m else company_line.split()[0].strip().upper()
+
+
+def _parse_nomura_equities(pages: list[str]) -> list[EquityHolding]:
+    lines = _clean_nomura_lines(pages)
+    out: list[EquityHolding] = []
+    in_eq = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if "Position Details" in line and "Equities" in line:
+            in_eq = True
+            i += 1
+            continue
+        if in_eq and (("Position Details" in line and ("Derivatives" in line or "Deposit" in line)) or line.startswith("Completed Transactions")):
+            in_eq = False
+        if not in_eq:
+            i += 1
+            continue
+        # 币种行 + 公司名 + Sector + ISIN + s + qty + avg + mkt + mv_nom + pnl_usd + value_usd ...
+        if re.fullmatch(r"[A-Z]{3}", line) and i + 10 < len(lines) and lines[i + 2].startswith("Sector"):
+            ccy = line
+            company = lines[i + 1]
+            qty = _num(lines[i + 5])
+            mv_nom = _num(lines[i + 8])
+            mv_usd = _num(lines[i + 10])
+            symbol = _nomura_symbol(company)
+            if qty is not None and mv_nom is not None and mv_usd is not None and mv_usd > 0:
+                out.append(EquityHolding(ticker=symbol, company=company, quantity=qty,
+                                         nominal_ccy=ccy, market_value_nominal=mv_nom,
+                                         market_value_usd=mv_usd))
+            i += 11
+            continue
+        i += 1
+    return out
+
+
+def _parse_nomura_statement(pages: list[str], filename: str, content_hash: str) -> BrokerStatement:
+    holdings = _parse_nomura_equities(pages)
+    cash_balances, total_cash_usd = _parse_nomura_cash(pages)
+    period = _parse_nomura_asof(pages)
+    # 暂无明确 TOTAL EQUITIES 总计行锚，先按逐只和落 no_statement_total；后续若定位到合计行再收紧对账。
+    recon = ReconResult(holdings_count=len(holdings), holdings_total_usd=sum(h.market_value_usd for h in holdings),
+                       statement_equities_total_usd=None, delta_usd=None, status="no_statement_total")
+    return BrokerStatement(
+        broker="nomura", content_hash=content_hash, period_end=period,
+        holdings=holdings, cash_balances=cash_balances, total_cash_usd=total_cash_usd, recon=recon,
+    )
+
+
 _PARSERS = {
     "citi": _parse_citi_statement,
+    "nomura": _parse_nomura_statement,
 }
 
 
 # ── 公开入口 ──────────────────────────────────────────────────────────────
 
 
-def ingest_pdf(pdf_bytes: bytes, filename: str = "", broker_hint: str = "") -> BrokerStatement:
+def ingest_pdf(pdf_bytes: bytes, filename: str = "", broker_hint: str = "", pdf_password: str = "") -> BrokerStatement:
     """解析 PDF → BrokerStatement（含对账结果）。不写库，纯解析。
 
     仅做 broker dispatch；未知格式不在这里硬猜，直接抛 unsupported_broker。
     调用方若要接 LLM fallback，应在 ingest_and_store(user_id 可用处) 处理。
     """
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
-    pages = _extract_pages(pdf_bytes)
+    pages = _extract_pages(pdf_bytes, pdf_password=pdf_password)
     broker = detect_broker(pages, filename, broker_hint)
     parser = _PARSERS.get(broker)
     if not parser:
@@ -288,14 +398,14 @@ def ingest_pdf(pdf_bytes: bytes, filename: str = "", broker_hint: str = "") -> B
 
 def ingest_and_store(pdf_bytes: bytes, filename: str,
                      user_id: str, market: str = "us_stock",
-                     broker: str = "citi") -> dict:
+                     broker: str = "citi", pdf_password: str = "") -> dict:
     """解析 + 加密落 financial_documents。返回 {doc_id, status, recon}。
 
     幂等：同用户同文件哈希已存在则直接返回已有 doc_id（不重复写）。
     """
     from bottleneck_hunter.auth.store import AuthStore
 
-    stmt = ingest_pdf(pdf_bytes, filename, broker_hint=broker)
+    stmt = ingest_pdf(pdf_bytes, filename, broker_hint=broker, pdf_password=pdf_password)
     store = AuthStore()
 
     # 幂等去重
