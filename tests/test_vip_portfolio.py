@@ -86,6 +86,22 @@ def test_report_persisted_and_audited(wl):
     assert row and row["kind"] == "periodic" and row["period"] == "2026-06"
 
 
+def test_derivative_summary_in_report(wl):
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
+    terms = [
+        DerivativeTerm("equity_accumulator", "MU", "USD", 365,
+                       {"afp": 625.5927, "knock_out_price": 910.7569, "daily_shares": 3, "step_up_daily_shares": 6}),
+        DerivativeTerm("equity_mli_booster", "MU", "USD", 120,
+                       {"knock_in_pct_initial": 0.5379, "strike_pct_initial": 1.0, "max_upside_pct": 0.5}),
+    ]
+    out = portfolio.generate_vip_report(wl, period="2026-06", derivative_terms=terms)
+    assert "衍生品 / 结构化产品风险摘要" in out["report_md"]
+    assert "MU 累积器" in out["report_md"] and "MLI Booster" in out["report_md"]
+
+
 def test_vip_roles_registered():
     from bottleneck_hunter.llm_clients.role_registry import get_role
     for k in ("vip_statement_extract", "vip_advisor", "vip_chat"):

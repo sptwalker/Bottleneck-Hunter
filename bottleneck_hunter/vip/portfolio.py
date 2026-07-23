@@ -210,7 +210,26 @@ def build_portfolio_summary(wl_store) -> dict:
             "holdings": holdings, "top5_concentration_pct": round(top5, 1)}
 
 
-def render_report_md(summary: dict, narrative: str = "", period: str = "") -> str:
+def render_derivative_summary(terms: list) -> str:
+    """把已抽条款的结构化产品压成风险摘要 Markdown（供报告附录/风险提示）。"""
+    if not terms:
+        return ""
+    L = ["## 衍生品 / 结构化产品风险摘要", ""]
+    for t in terms:
+        if t.product_family in ("equity_accumulator", "equity_decumulator"):
+            kind = "累积器" if t.product_family.endswith("accumulator") else "减持器"
+            L.append(f"- **{t.underlying_symbol} {kind}**：AFP {t.terms.get('afp')}, KO {t.terms.get('knock_out_price')}, "
+                     f"DS {t.terms.get('daily_shares')}, Step-up {t.terms.get('step_up_daily_shares')}。"
+                     f"风险在于标的跌破 AFP 时会按 Step-up 股数累积，路径依赖强。")
+        elif t.product_family == "equity_mli_booster":
+            L.append(f"- **{t.underlying_symbol} MLI Booster**：KI={t.terms.get('knock_in_pct_initial', 0)*100:.2f}% 初始价，"
+                     f"Strike={t.terms.get('strike_pct_initial', 0)*100:.0f}% 初始价，上行封顶 {t.terms.get('max_upside_pct', 0)*100:.0f}%。"
+                     f"若触发 KI 且到期低于 Strike，将承受与标的下跌类似的损失。")
+    L.append("")
+    return "\n".join(L)
+
+
+def render_report_md(summary: dict, narrative: str = "", period: str = "", derivatives_md: str = "") -> str:
     """渲染报告 Markdown（append-lines 风格，仿 chain/report.py）。narrative 已过 number_guard。"""
     L: list[str] = []
     L.append(f"# 持仓分析报告{f'（{period}）' if period else ''}")
@@ -232,6 +251,8 @@ def render_report_md(summary: dict, narrative: str = "", period: str = "") -> st
         L.append("")
         L.append(narrative)
         L.append("")
+    if derivatives_md:
+        L.append(derivatives_md)
     return compliance.with_disclaimer("\n".join(L))
 
 
@@ -303,7 +324,8 @@ async def generate_vip_report_ai(wl_store, *, period: str = "",
 
 def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
                         source_doc_ids: list | None = None,
-                        model_provider: str = "", model_name: str = "") -> dict:
+                        model_provider: str = "", model_name: str = "",
+                        derivative_terms: list | None = None) -> dict:
     """生成并落库一份持仓分析报告。narrative 为 LLM 叙事段（可空=纯数据报告）。
 
     narrative 渲染前**强制过 number_guard**（facts=组合摘要），未核到的金额/占比标"⚠未核到"。
@@ -320,7 +342,8 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
         unverified = [c["token"] for c in checks if c["status"] == "unverified"]
         narrative = number_guard.annotate_unverified(narrative, facts)
 
-    report_md = render_report_md(summary, narrative, period)
+    report_md = render_report_md(summary, narrative, period,
+                                 derivatives_md=render_derivative_summary(derivative_terms or []))
 
     rid = uuid.uuid4().hex[:12]
     with wl_store._write_conn() as conn:
