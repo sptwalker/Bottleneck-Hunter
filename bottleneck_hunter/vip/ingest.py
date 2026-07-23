@@ -45,11 +45,24 @@ class ReconResult(BaseModel):
     status: str                                      # "ok" | "mismatch" | "no_statement_total"
 
 
+class CashBalance(BaseModel):
+    currency: str
+    market_value_nominal: float
+    market_value_usd: float
+
+    @field_validator("currency")
+    @classmethod
+    def _c(cls, v: str) -> str:
+        return v.strip().upper()
+
+
 class BrokerStatement(BaseModel):
     broker: str = "citi"
     period_end: str = ""          # ISO 格式 YYYY-MM-DD
     content_hash: str
     holdings: list[EquityHolding] = []
+    cash_balances: list[CashBalance] = []
+    total_cash_usd: float = 0.0
     recon: ReconResult
 
 
@@ -157,6 +170,43 @@ def _parse_period(filename: str) -> str:
     return f"{m.group(3)}-{_MONTH[m.group(2)]}-{int(m.group(1)):02d}"
 
 
+def _parse_cash(pages: list[str]) -> tuple[list[CashBalance], float]:
+    """抽 `INVESTABLE CASH BY CURRENCY` 明细 + `TOTAL CASH` 权威合计（统一美元口径）。
+
+    p5 结构：Currency / % Total / Market Value Nominal Currency / Market Value USD
+      USD / 74.08% / 719,962.81 / 719,962.81
+      HKD / 25.92% / 1,975,915.99 / 251,969.03
+    p12 结构：`TOTAL CASH` 下一行即统一美元总额。
+    """
+    balances: list[CashBalance] = []
+    total_cash_usd = 0.0
+    for page_text in pages:
+        lines = [x.strip() for x in page_text.splitlines()]
+        for i, line in enumerate(lines):
+            if line == "INVESTABLE CASH BY CURRENCY":
+                j = i + 1
+                while j + 3 < len(lines):
+                    ccy = lines[j]
+                    if ccy == "EUR":          # 真实样本里 EUR 小节后为空，点到即止
+                        break
+                    if re.fullmatch(r"[A-Z]{3}", ccy) and re.fullmatch(r"-?\d[\d,]*(?:\.\d+)?%", lines[j + 1]):
+                        nom = _num(lines[j + 2])
+                        usd = _num(lines[j + 3])
+                        if nom is not None and usd is not None:
+                            balances.append(CashBalance(currency=ccy, market_value_nominal=nom, market_value_usd=usd))
+                            j += 4
+                            continue
+                    j += 1
+            if line == "TOTAL CASH" and i + 1 < len(lines):
+                v = _num(lines[i + 1])
+                if v and v > 0:
+                    total_cash_usd = v
+    # 若找不到 TOTAL CASH，退化为逐币种美元和
+    if total_cash_usd <= 0:
+        total_cash_usd = round(sum(x.market_value_usd for x in balances), 2)
+    return balances, total_cash_usd
+
+
 # ── 语句内对账 ────────────────────────────────────────────────────────────
 
 _RECON_TOL = 0.005   # 0.5% 容差（口径已统一为 Total Value USD，仅留四舍五入余量）
@@ -188,12 +238,15 @@ def ingest_pdf(pdf_bytes: bytes, filename: str = "") -> BrokerStatement:
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
     pages = _extract_pages(pdf_bytes)
     holdings, total_eq = _parse_equities(pages)
+    cash_balances, total_cash_usd = _parse_cash(pages)
     recon = _reconcile(holdings, total_eq)
     period = _parse_period(filename)
     return BrokerStatement(
         content_hash=content_hash,
         period_end=period,
         holdings=holdings,
+        cash_balances=cash_balances,
+        total_cash_usd=total_cash_usd,
         recon=recon,
     )
 

@@ -111,12 +111,13 @@ def _upsert_position(wl_store, instrument_id, account_ref, as_of_date, *,
 
 # ── P5: 物化 —— 规范 positions → sim_account + sim_positions ──────────────
 
-def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "") -> dict:
+def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
+                          cash_total_usd: float = 0.0) -> dict:
     """把某快照日的规范 positions 投影到 sim_*，供决策引擎消费。
 
     先把旧 sim 快照冻结进 vip_reports(kind='import_snapshot')作溯源锚（M2），再清零重建。
-    market_value_base(统一美元)→ sim_positions.market_value；Σ→ total_equity。
-    返回 {account_id, n_positions, total_equity, snapshot_report_id}。
+    market_value_base(统一美元)→ sim_positions.market_value；Σ持仓 + 现金(total_cash_usd)→ total_equity。
+    返回 {account_id, n_positions, total_equity, cash_balance, snapshot_report_id}。
     """
     account = wl_store.get_sim_account()
     acct_id = account["id"]
@@ -134,7 +135,8 @@ def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "")
         wl_store.update_sim_position(op["id"], shares=0, market_value=0,
                                      unrealized_pnl=0, weight_pct=0)
 
-    total_equity = sum(r["market_value_base"] for r in rows)
+    total_positions = sum(r["market_value_base"] for r in rows)
+    total_equity = total_positions + (cash_total_usd or 0.0)
     n = 0
     for r in rows:
         symbol = r["symbol"]
@@ -149,9 +151,11 @@ def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "")
 
     wl_store.update_sim_account(total_equity=round(total_equity, 2),
                                 current_capital=round(total_equity, 2),
-                                cash_balance=0.0)   # M1 现金层留 M3（流水净额）
+                                cash_balance=round(cash_total_usd or 0.0, 2))
     return {"account_id": acct_id, "n_positions": n,
-            "total_equity": round(total_equity, 2), "snapshot_report_id": snap_id}
+            "total_equity": round(total_equity, 2),
+            "cash_balance": round(cash_total_usd or 0.0, 2),
+            "snapshot_report_id": snap_id}
 
 
 def _latest_positions(wl_store, as_of_date, account_ref) -> list[dict]:
@@ -191,16 +195,18 @@ def _freeze_snapshot(wl_store, account, positions) -> str:
 # ── P5: 报告 —— sim_* → 组合摘要 →（LLM 叙事，M1 可选）→ 落库 ──────────
 
 def build_portfolio_summary(wl_store) -> dict:
-    """从 sim_* 汇总组合结构（不调 LLM）：总权益、持仓明细、集中度 Top5。供报告与 number_guard facts。"""
+    """从 sim_* 汇总组合结构（不调 LLM）：总权益、现金、持仓明细、集中度 Top5。供报告与 number_guard facts。"""
     account = wl_store.get_sim_account()
     positions = sorted(wl_store.get_sim_positions(account["id"]),
                        key=lambda p: p.get("market_value", 0), reverse=True)
     total = account.get("total_equity", 0) or 0
+    cash = account.get("cash_balance", 0) or 0
     holdings = [{"ticker": p["ticker"], "shares": p["shares"],
                  "market_value": round(p.get("market_value", 0), 2),
                  "weight_pct": p.get("weight_pct", 0)} for p in positions]
     top5 = sum(p["weight_pct"] for p in holdings[:5])
-    return {"total_equity": round(total, 2), "n_holdings": len(holdings),
+    return {"total_equity": round(total, 2), "cash_balance": round(cash, 2),
+            "n_holdings": len(holdings),
             "holdings": holdings, "top5_concentration_pct": round(top5, 1)}
 
 
@@ -210,6 +216,7 @@ def render_report_md(summary: dict, narrative: str = "", period: str = "") -> st
     L.append(f"# 持仓分析报告{f'（{period}）' if period else ''}")
     L.append("")
     L.append(f"- 组合总权益：**${summary['total_equity']:,.2f}**（统一美元口径）")
+    L.append(f"- 其中可投资现金：**${summary['cash_balance']:,.2f}**")
     L.append(f"- 持仓数：{summary['n_holdings']} 只")
     L.append(f"- 前五大集中度：{summary['top5_concentration_pct']}%")
     L.append("")

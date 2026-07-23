@@ -52,6 +52,14 @@ def _make_citi_like_pdf() -> bytes:
     lines += block_ccy(1194, 513181.20, 65440.92, "Tencent Holdings Ltd (700 HK)", "Ticker 700 HK Equity")
     tot = 1210412.19 + 1291060.68 + 961140.00 + 65440.92
     lines += ["TOTAL EQUITIES", f"{tot:,.2f}"]
+    # 现金汇总（逐币种 + TOTAL CASH）
+    lines += [
+        "INVESTABLE CASH BY CURRENCY",
+        "Currency", "% of Total", "Market Value Nominal Currency", "Market Value USD",
+        "USD", "74.08%", "719,962.81", "719,962.81",
+        "HKD", "25.92%", "1,975,915.99", "251,969.03",
+        "TOTAL CASH", "971,931.84",
+    ]
 
     doc = fitz.open()
     page = doc.new_page()
@@ -99,6 +107,14 @@ def test_reconcile_ok(citi_pdf):
     assert stmt.recon.status == "ok"          # 逐只合计 == TOTAL EQUITIES
     assert stmt.recon.holdings_count == 4
     assert abs(stmt.recon.delta_usd) < 1.0
+
+
+def test_cash_extracted(citi_pdf):
+    stmt = ingest.ingest_pdf(citi_pdf, "x_30_Jun_2026.PDF")
+    by = {c.currency: c for c in stmt.cash_balances}
+    assert abs(by["USD"].market_value_usd - 719962.81) < 0.01
+    assert abs(by["HKD"].market_value_usd - 251969.03) < 0.01
+    assert abs(stmt.total_cash_usd - 971931.84) < 0.01
 
 
 def test_content_hash_stable(citi_pdf):

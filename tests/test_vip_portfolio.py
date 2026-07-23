@@ -21,7 +21,9 @@ def _stmt():
                       market_value_usd=961140.0, nominal_ccy="USD", market_value_nominal=961140.0),
     ]
     total = sum(h.market_value_usd for h in holds)
-    return BrokerStatement(content_hash="h1", period_end="2026-06-30", holdings=holds,
+    return BrokerStatement(content_hash="h1", period_end="2026-06-30",
+                           holdings=holds,
+                           cash_balances=[], total_cash_usd=971931.84,
                            recon=ReconResult(holdings_count=3, holdings_total_usd=total,
                                              statement_equities_total_usd=total, delta_usd=0.0, status="ok"))
 
@@ -40,11 +42,15 @@ def test_normalize_writes_regularized(wl):
 
 
 def test_materialize_to_sim(wl):
-    portfolio.normalize_statement(wl, _stmt(), account_ref="A1")
-    m = portfolio.materialize_portfolio(wl, as_of_date="2026-06-30", account_ref="A1")
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    m = portfolio.materialize_portfolio(wl, as_of_date="2026-06-30", account_ref="A1",
+                                        cash_total_usd=stmt.total_cash_usd)
     assert m["n_positions"] == 3
-    # 总权益 = 统一美元基币合计（港股用 $65,440 而非 HKD 513,181）
-    assert abs(m["total_equity"] - (200000.0 + 65440.92 + 961140.0)) < 1.0
+    # 总权益 = 持仓 + 现金（统一美元基币）
+    expected = 200000.0 + 65440.92 + 961140.0 + 971931.84
+    assert abs(m["total_equity"] - expected) < 1.0
+    assert abs(m["cash_balance"] - 971931.84) < 1.0
     # sim_positions 落地
     acct = wl.get_sim_account()
     pos = {p["ticker"]: p for p in wl.get_sim_positions(acct["id"])}
@@ -52,8 +58,9 @@ def test_materialize_to_sim(wl):
 
 
 def test_generate_report_with_number_guard(wl):
-    portfolio.normalize_statement(wl, _stmt(), account_ref="A1")
-    portfolio.materialize_portfolio(wl, account_ref="A1")
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
     summary = portfolio.build_portfolio_summary(wl)
     assert summary["n_holdings"] == 3
     # 叙事含一个真实值 + 一个编造值
@@ -67,8 +74,9 @@ def test_generate_report_with_number_guard(wl):
 
 
 def test_report_persisted_and_audited(wl):
-    portfolio.normalize_statement(wl, _stmt(), account_ref="A1")
-    portfolio.materialize_portfolio(wl, account_ref="A1")
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
     out = portfolio.generate_vip_report(wl, period="2026-06")
     conn = wl._connect()
     try:
@@ -88,8 +96,9 @@ def test_vip_roles_registered():
 @pytest.mark.asyncio
 async def test_advisor_narrative_passes_number_guard(wl, monkeypatch):
     """AI 叙事：真实数字放行、编造数字标未核到；无模型时降级为纯数据报告。"""
-    portfolio.normalize_statement(wl, _stmt(), account_ref="A1")
-    portfolio.materialize_portfolio(wl, account_ref="A1")
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
 
     class _FakeLLM:
         async def ainvoke(self, prompt):
@@ -109,8 +118,9 @@ async def test_advisor_narrative_passes_number_guard(wl, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_advisor_no_model_degrades(wl, monkeypatch):
-    portfolio.normalize_statement(wl, _stmt(), account_ref="A1")
-    portfolio.materialize_portfolio(wl, account_ref="A1")
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
     monkeypatch.setattr("bottleneck_hunter.llm_clients.factory.get_models_for_role",
                         lambda *a, **k: [])
     out = await portfolio.generate_vip_report_ai(wl, period="2026-06", user_id="u1")
