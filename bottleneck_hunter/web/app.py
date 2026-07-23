@@ -337,6 +337,9 @@ def create_app() -> FastAPI:
     app.include_router(oplog_router, prefix="/api/oplog")
     from bottleneck_hunter.web.translate_api import router as translate_router
     app.include_router(translate_router, prefix="/api/translate")
+    from bottleneck_hunter.web.vip_api import router as vip_router, set_store as vip_set_store
+    vip_set_store(_wl_store)
+    app.include_router(vip_router, prefix="/api/vip")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

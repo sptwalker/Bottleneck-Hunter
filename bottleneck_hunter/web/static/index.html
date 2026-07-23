@@ -38,6 +38,7 @@
       <span class="nav-flow-sep">|</span>
       <button class="nav-btn" data-view="aiconfig" role="tab" aria-selected="false">系统配置中心</button>
     </div>
+    <button class="nav-btn nav-btn-vip" id="btn-vip" data-view="vip" title="VIP 私人财务顾问" style="display:none">★ VIP 顾问</button>
     <button class="nav-btn nav-btn-icon nav-btn-admin" id="btn-admin" data-view="admin" title="用户管理中心" style="display:none">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 4.354a4 4 0 1 1 0 5.292M15 21H3v-1a6 6 0 0 1 12 0v1zm0 0h6v-1a6 6 0 0 0-9-5.197"/>
@@ -1539,6 +1540,37 @@
 </footer>
 
 <!-- Admin Modal -->
+<div id="view-vip" class="view">
+  <div class="wl-page-header">
+    <h2 class="wl-page-title">★ VIP 私人财务顾问</h2>
+    <p class="account-hint">导入券商月结单（PDF），系统解析持仓、生成投资分析报告。数据加密存储，仅你可见。</p>
+  </div>
+  <div class="vip-panel" style="max-width:960px;margin:0 auto;padding:16px">
+    <div class="account-section">
+      <h4>1. 上传月结单</h4>
+      <div class="account-form" style="align-items:center;gap:12px">
+        <input type="file" id="vip-file" accept="application/pdf,.pdf">
+        <select class="form-input" id="vip-market" style="max-width:120px">
+          <option value="us_stock">美股</option>
+          <option value="a_stock">A股</option>
+        </select>
+        <button class="btn btn-sm btn-primary" id="vip-upload-btn">上传并解析</button>
+        <span class="account-status" id="vip-upload-status"></span>
+      </div>
+      <div id="vip-docs" style="margin-top:12px"></div>
+    </div>
+    <div class="account-section">
+      <h4>2. 生成投资分析报告</h4>
+      <div class="account-form" style="align-items:center;gap:12px">
+        <label style="font-size:13px"><input type="checkbox" id="vip-with-ai" checked> 含 AI 顾问团队叙事</label>
+        <button class="btn btn-sm btn-primary" id="vip-report-btn">生成报告</button>
+        <span class="account-status" id="vip-report-status"></span>
+      </div>
+      <div id="vip-report" style="margin-top:16px;line-height:1.7"></div>
+    </div>
+  </div>
+</div>
+
 <div id="view-admin" class="view">
   <!-- 实时通知滚动区（仅 admin 用户管理页；position:fixed 靠右，不影响其它界面）-->
   <aside id="admin-notify-rail" aria-label="实时动态">
@@ -1918,5 +1950,6 @@
 </div>
 
 <script type="module" src="/static/js/account.js?v=2"></script>
+<script type="module" src="/static/js/vip.js?v=1"></script>
 </body>
 </html>

@@ -319,6 +319,13 @@ async def me(user: dict = Depends(get_current_user)):
     info = UserInfo(**db_user.model_dump()).model_dump()
     info["watchlist_count"] = _watchlist_count(db_user.id)
     info["watchlist_count_by_market"] = _watchlist_count_by_market(db_user.id)
+    # VIP 标记（前端据此显隐 VIP 顾问入口）：admin 直通 或 settings_json.vip==true
+    try:
+        import json as _json
+        _settings = _json.loads(db_user.settings_json or "{}")
+    except Exception:  # noqa: BLE001
+        _settings = {}
+    info["vip"] = bool(db_user.role == "admin" or _settings.get("vip"))
     return info
 
 
