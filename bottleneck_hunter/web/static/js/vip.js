@@ -80,9 +80,10 @@
     uploadBtn.disabled = true;
     setStatus('vip-upload-status', '上传解析中…', true);
     try {
+      const pwd = prompt('如月结单有密码，请输入（无密码可留空）:') || '';
       const fd = new FormData();
       fd.append('file', f);
-      const url = `/api/vip/statements/upload?market=${encodeURIComponent(marketEl.value)}`;
+      const url = `/api/vip/statements/upload?market=${encodeURIComponent(marketEl.value)}&pdf_password=${encodeURIComponent(pwd)}`;
       const r = await fetch(url, { method: 'POST', body: fd });
       const data = await r.json();
       if (!r.ok) { setStatus('vip-upload-status', '✗ ' + (data.detail || '解析失败'), false); return; }
@@ -178,17 +179,32 @@
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
+      let curEvent = '';
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += dec.decode(value, { stream: true });
         const lines = buf.split('\n');
         buf = lines.pop() || '';
-        for (const line of lines) {
+        for (const raw of lines) {
+          const line = raw.trimEnd();
+          if (line.startsWith('event:')) {
+            curEvent = line.slice(6).trim();
+            continue;
+          }
           if (!line.startsWith('data:')) continue;
           const data = JSON.parse(line.slice(5).trim());
-          if (data.session_id) currentSessionId = data.session_id;
-          if (data.text) { aiBox += data.text; }
+          if (curEvent === 'error') {
+            throw new Error(data.message || '咨询失败');
+          }
+          if (curEvent === 'session' && data.session_id) {
+            currentSessionId = data.session_id;
+          } else if (curEvent === 'chunk' && data.text) {
+            aiBox += data.text;
+          } else if (curEvent === 'done') {
+            if (data.session_id) currentSessionId = data.session_id;
+          }
+          curEvent = '';
         }
       }
       appendChat('assistant', aiBox);
@@ -200,11 +216,21 @@
     }
   }
 
+  function resetVipViewState() {
+    currentSessionId = '';
+    if (chatLog) chatLog.innerHTML = '';
+    if (chatInput) chatInput.value = '';
+    const report = document.getElementById('vip-report');
+    if (report) report.innerHTML = '';
+    setStatus('vip-chat-status', '', true);
+    setStatus('vip-report-status', '', true);
+  }
+
   chatSend.addEventListener('click', sendChat);
   if (chatNew) chatNew.addEventListener('click', () => { currentSessionId = ''; if (chatLog) chatLog.innerHTML = ''; setStatus('vip-chat-status', '已新建会话', true); });
 
 
-  if (marketEl) marketEl.addEventListener('change', () => { loadDocs(); loadDerivatives(); });
+  if (marketEl) marketEl.addEventListener('change', () => { resetVipViewState(); loadDocs(); loadDerivatives(); });
   // 进入 VIP 视图时刷新文档列表 / 衍生品列表
   const nav = document.getElementById('btn-vip');
   if (nav) nav.addEventListener('click', () => setTimeout(() => { loadDocs(); loadDerivatives(); }, 50));

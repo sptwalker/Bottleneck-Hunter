@@ -42,6 +42,13 @@ def test_list_no_pii_leak(store):
     assert "recon_flags_json" in rows[0] and "status" in rows[0]
 
 
+def test_list_financial_docs_market_filtered(store):
+    store.create_financial_doc("u1", content_hash="h1", market="us_stock", parsed_json="{}")
+    store.create_financial_doc("u1", content_hash="h2", market="a_stock", parsed_json="{}")
+    assert len(store.list_financial_docs("u1", market="us_stock")) == 1
+    assert len(store.list_financial_docs("u1", market="a_stock")) == 1
+
+
 def test_update_status_purge_raw(store):
     did = store.create_financial_doc("u1", content_hash="h1", raw_pdf_b64="cGRmYnl0ZXM=", parsed_json="{}")
     assert store.find_financial_doc_by_hash("u1", "h1")["raw_pdf_encrypted"]   # 原始密文在

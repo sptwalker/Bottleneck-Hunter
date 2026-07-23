@@ -362,13 +362,17 @@ class AuthStore:
         d.pop("raw_pdf_encrypted", None)  # 绝不外泄密文
         return d
 
-    def list_financial_docs(self, user_id: str, *, status: str | None = None,
+    def list_financial_docs(self, user_id: str, *, market: str | None = None,
+                            status: str | None = None,
                             limit: int = 100) -> list[dict]:
         """列文档（不含密文/明文 PII，仅元数据 + hint + status + recon flags），供前端队列/展示。"""
         q = "SELECT id, market, broker, doc_type, period_end, file_hint, content_hash, " \
             "recon_flags_json, status, parse_error, created_at, parsed_at " \
             "FROM financial_documents WHERE user_id = ?"
         params: list = [user_id]
+        if market:
+            q += " AND market = ?"
+            params.append(market)
         if status:
             q += " AND status = ?"
             params.append(status)

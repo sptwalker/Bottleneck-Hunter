@@ -339,10 +339,21 @@ def classify_pdf(pdf_source, pdf_password: str = "") -> str:
 def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: str, source_file_hash: str,
                          broker: str, rationale_ref: str = "") -> str:
     import json, uuid
+    # 幂等：重复上传同一文件保留原 id/created_at（不做 OR REPLACE 重建）
+    conn = wl_store._connect()
+    try:
+        q, p = wl_store._filtered(
+            "SELECT id FROM vip_derivative_terms WHERE source_file_hash=? AND product_family=? AND underlying_symbol=?",
+            (source_file_hash, term.product_family, term.underlying_symbol))
+        row = conn.execute(q, p).fetchone()
+        if row:
+            return row["id"]
+    finally:
+        conn.close()
     did = uuid.uuid4().hex[:12]
     with wl_store._write_conn() as conn:
         conn.execute(
-            f"""INSERT OR REPLACE INTO vip_derivative_terms
+            f"""INSERT INTO vip_derivative_terms
                (id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
                 currency, terms_json, rationale_ref, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
                VALUES (?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",

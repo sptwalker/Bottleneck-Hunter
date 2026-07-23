@@ -108,7 +108,7 @@ def _statement_from_doc(uid: str, doc_id: str):
 async def list_statements(market: str = "us_stock", user: dict = Depends(require_vip)):
     """列出该用户的月结单（元数据，无 PII 金额）。"""
     from bottleneck_hunter.auth.store import AuthStore
-    return {"documents": AuthStore().list_financial_docs(user["sub"])}
+    return {"documents": AuthStore().list_financial_docs(user["sub"], market=market)}
 
 
 @router.post("/derivatives/upload")

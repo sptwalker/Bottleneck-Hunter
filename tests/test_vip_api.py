@@ -88,6 +88,10 @@ def test_admin_upload_and_report(client, monkeypatch):
     # 列文档（无 PII 密文）
     docs = client.get("/api/vip/statements").json()["documents"]
     assert docs and "parsed_json_encrypted" not in docs[0]
+    # 按市场过滤真实生效
+    docs_us = client.get('/api/vip/statements?market=us_stock').json()['documents']
+    docs_cn = client.get('/api/vip/statements?market=a_stock').json()['documents']
+    assert len(docs_us) == 1 and docs_cn == []
 
     # 生成报告（无 AI，避免真实 LLM 调用）
     rr = client.post("/api/vip/reports/generate?with_ai=false&period=2026-06")
@@ -96,13 +100,18 @@ def test_admin_upload_and_report(client, monkeypatch):
     assert "持仓分析报告" in rep["report_md"] and "GOOGL" in rep["report_md"]
 
     # 上传一个日常衍生品文件 → 列表可见 → 报告自动附衍生品风险摘要
+    deriv_pdf = _nomura_deriv_pdf()
     dr = client.post("/api/vip/derivatives/upload?market=us_stock&broker=nomura",
-                     files={"file": ("oac.pdf", _nomura_deriv_pdf(), "application/pdf")})
+                     files={"file": ("oac.pdf", deriv_pdf, "application/pdf")})
     assert dr.status_code == 200, dr.text
     dres = dr.json()
     assert dres["kind"] == "accumulator"
+    # 重复上传同一文件应幂等（不重复新增）
+    dr2 = client.post("/api/vip/derivatives/upload?market=us_stock&broker=nomura",
+                      files={"file": ("oac.pdf", deriv_pdf, "application/pdf")})
+    assert dr2.status_code == 200
     items = client.get("/api/vip/derivatives").json()["items"]
-    assert items and items[0]["underlying_symbol"] == "BE"
+    assert len(items) == 1 and items[0]["underlying_symbol"] == "BE"
     rr2 = client.post("/api/vip/reports/generate?with_ai=false&period=2026-06")
     assert rr2.status_code == 200, rr2.text
     assert "衍生品 / 结构化产品风险摘要" in rr2.json()["report_md"]

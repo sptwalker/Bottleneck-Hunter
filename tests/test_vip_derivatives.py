@@ -98,6 +98,17 @@ def test_nomura_decumulator_payoff_direction():
     assert r["shares_decumulated"] == 160 and r["pnl"] < 0
 
 
+def test_save_derivative_term_dedup_stable_id(tmp_path):
+    from bottleneck_hunter.watchlist.store import WatchlistStore
+    wl = WatchlistStore(tmp_path / "wl.db").for_user("u1").for_market("us_stock")
+    term = d.DerivativeTerm("equity_accumulator", "MU", "USD", 365, {"afp": 1})
+    a = d.save_derivative_term(wl, term, source_file_name="x.pdf", source_file_hash="h1", broker="nomura")
+    b = d.save_derivative_term(wl, term, source_file_name="x.pdf", source_file_hash="h1", broker="nomura")
+    assert a == b
+    rows = d.list_derivative_terms(wl)
+    assert len(rows) == 1
+
+
 def test_classify_pdf():
     assert d.classify_pdf(str(ACC_MU)) in ("accumulator", "decumulator", "fund_report", "mli", "other")
     if NOMURA_ACC.exists():

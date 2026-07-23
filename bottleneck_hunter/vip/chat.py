@@ -58,6 +58,16 @@ def list_chat_sessions(wl_store, limit: int = 20) -> list[dict]:
         conn.close()
 
 
+def get_chat_session(wl_store, session_id: str) -> dict | None:
+    conn = wl_store._connect()
+    try:
+        q, p = wl_store._filtered("SELECT * FROM chat_sessions WHERE id = ?", (session_id,))
+        row = conn.execute(q, p).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def get_chat_messages(wl_store, session_id: str, limit: int = 100) -> list[dict]:
     conn = wl_store._connect()
     try:
@@ -105,7 +115,14 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
         return
     llm, provider, model = models[0]
 
-    sid = session_id or create_chat_session(wl_store, title=question[:40])
+    if session_id:
+        sess = get_chat_session(wl_store, session_id)
+        if not sess:
+            yield {"event": "error", "data": json.dumps({"message": "会话不存在或不属于当前市场"}, ensure_ascii=False)}
+            return
+        sid = session_id
+    else:
+        sid = create_chat_session(wl_store, title=question[:40])
     append_chat_message(wl_store, sid, "user", question)
     facts_text, summary = _build_facts(wl_store)
     prompt = _PROMPT.format(facts=facts_text, question=question)

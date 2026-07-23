@@ -54,3 +54,16 @@ def test_stream_vip_chat_and_persist(monkeypatch):
         msgs = chat.get_chat_messages(wl, events[0]["data"] and __import__('json').loads(events[0]["data"])["session_id"])
         assert len(msgs) == 2 and msgs[0]["role"] == "user" and msgs[1]["role"] == "assistant"
         assert "重要声明" in msgs[1]["content"]
+
+
+def test_stream_vip_chat_rejects_unknown_session(monkeypatch):
+    with tempfile.TemporaryDirectory() as d:
+        wl = WatchlistStore(Path(d)/"wl.db").for_user("u1").for_market("us_stock")
+        stmt = _stmt()
+        portfolio.normalize_statement(wl, stmt, account_ref="A1")
+        portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
+        monkeypatch.setattr("bottleneck_hunter.llm_clients.factory.get_models_for_role",
+                            lambda *a, **k: [(_FakeLLM(), "deepseek", "deepseek-chat")])
+        events = _collect(chat.stream_vip_chat(wl, user_id="u1", question="hi", session_id="missing"))
+        assert events and events[0]["event"] == "error"
+        assert chat.list_chat_sessions(wl) == []
