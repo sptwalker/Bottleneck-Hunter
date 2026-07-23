@@ -1,14 +1,20 @@
-"""P1 摄取管道：花旗私行月结单 PDF → 结构化持仓 → 语句内对账 → 加密落 financial_documents。
+"""P1/C3 摄取管道：PDF → 结构化持仓 → 语句内对账 → 加密落 financial_documents。
 
-支持范围（M1）：EQUITIES 子表（逐只持仓：代码/公司名/数量/市值）。
-固收/期权/结构化产品留 M3。
+当前已知支持：
+- `citi`（花旗私行综合月结单）→ **确定性解析器**（EQUITIES + CASH，已由真实 7 期月结单验证）
+
+C3 兼容架构：
+- `detect_broker()`：优先显式 broker hint，其次由 PDF 文本/文件名探测券商
+- `_PARSERS`：broker_id -> parser callable 注册表
+- `ingest_pdf()`：仅负责 dispatch；未知格式后续可接 `vip_statement_extract` 角色做 LLM fallback，
+  但不会在这里假装支持没见过的券商。
 
 花旗 fitz 行格式（每只持仓固定偏移，从 'Ticker X UW/UN/HK Equity' 行往前数）：
   i-10: 数量 (Quantity)
-  i-6:  市值 USD (Market Value)
+  i-6:  市值(原币 Market Value)
+  i-4:  美元总值 (Total Value USD) ← 统一口径
   i-3:  公司名 (Description)
-  i-1:  as-of date (30JUN26)
-  i:    Ticker 行
+  i:    Ticker 行 / (ETF 用 ISIN 行作锚)
 """
 from __future__ import annotations
 
@@ -226,22 +232,28 @@ def _reconcile(holdings: list[EquityHolding],
                        status="ok" if ok else "mismatch")
 
 
-# ── 公开入口 ──────────────────────────────────────────────────────────────
+# ── Broker 检测与 parser registry（C3）────────────────────────────────────
 
-def ingest_pdf(pdf_bytes: bytes, filename: str = "") -> BrokerStatement:
-    """解析 PDF → BrokerStatement（含对账结果）。不写库，纯解析。
+def detect_broker(pages: list[str], filename: str = "", hint: str = "") -> str:
+    """返回 broker id：显式 hint > 文本/文件名探测 > 'unknown'。"""
+    if hint:
+        h = hint.strip().lower()
+        if h in ("citi", "citibank", "citigroup"):
+            return "citi"
+    head = "\n".join(pages[:3]).lower()
+    fname = filename.lower()
+    if "citibank" in head or "citi private bank" in head or "integrated statement" in fname:
+        return "citi"
+    return "unknown"
 
-    调用方拿到 BrokerStatement 后：
-      - recon.status == "ok" / "no_statement_total" → 可落库（status="parsed_ok"）
-      - recon.status == "mismatch" → 落库 status="needs_review"，recon_flags 记 mismatch
-    """
-    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
-    pages = _extract_pages(pdf_bytes)
+
+def _parse_citi_statement(pages: list[str], filename: str, content_hash: str) -> BrokerStatement:
     holdings, total_eq = _parse_equities(pages)
     cash_balances, total_cash_usd = _parse_cash(pages)
     recon = _reconcile(holdings, total_eq)
     period = _parse_period(filename)
     return BrokerStatement(
+        broker="citi",
         content_hash=content_hash,
         period_end=period,
         holdings=holdings,
@@ -249,6 +261,29 @@ def ingest_pdf(pdf_bytes: bytes, filename: str = "") -> BrokerStatement:
         total_cash_usd=total_cash_usd,
         recon=recon,
     )
+
+
+_PARSERS = {
+    "citi": _parse_citi_statement,
+}
+
+
+# ── 公开入口 ──────────────────────────────────────────────────────────────
+
+
+def ingest_pdf(pdf_bytes: bytes, filename: str = "", broker_hint: str = "") -> BrokerStatement:
+    """解析 PDF → BrokerStatement（含对账结果）。不写库，纯解析。
+
+    仅做 broker dispatch；未知格式不在这里硬猜，直接抛 unsupported_broker。
+    调用方若要接 LLM fallback，应在 ingest_and_store(user_id 可用处) 处理。
+    """
+    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    pages = _extract_pages(pdf_bytes)
+    broker = detect_broker(pages, filename, broker_hint)
+    parser = _PARSERS.get(broker)
+    if not parser:
+        raise ValueError(f"unsupported_broker:{broker or 'unknown'}")
+    return parser(pages, filename, content_hash)
 
 
 def ingest_and_store(pdf_bytes: bytes, filename: str,
@@ -260,7 +295,7 @@ def ingest_and_store(pdf_bytes: bytes, filename: str,
     """
     from bottleneck_hunter.auth.store import AuthStore
 
-    stmt = ingest_pdf(pdf_bytes, filename)
+    stmt = ingest_pdf(pdf_bytes, filename, broker_hint=broker)
     store = AuthStore()
 
     # 幂等去重
@@ -281,7 +316,7 @@ def ingest_and_store(pdf_bytes: bytes, filename: str,
         user_id,
         content_hash=stmt.content_hash,
         market=market,
-        broker=broker,
+        broker=stmt.broker,
         period_end=stmt.period_end,
         file_name=filename,
         parsed_json=stmt.model_dump_json(),

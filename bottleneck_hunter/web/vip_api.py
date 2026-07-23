@@ -75,9 +75,11 @@ async def upload_statement(file: UploadFile = File(...),
             norm = portfolio.normalize_statement(wl, auth_doc, source_doc_id=res["doc_id"],
                                                  account_ref=account_ref)
             mat = portfolio.materialize_portfolio(wl, as_of_date=norm["as_of_date"],
-                                                  account_ref=account_ref)
+                                                  account_ref=account_ref,
+                                                  cash_total_usd=auth_doc.total_cash_usd)
             out.update({"normalized": norm, "n_positions": mat["n_positions"],
-                        "total_equity": mat["total_equity"]})
+                        "total_equity": mat["total_equity"],
+                        "cash_balance": mat["cash_balance"]})
     return out
 
 
