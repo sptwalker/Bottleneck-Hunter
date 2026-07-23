@@ -38,6 +38,7 @@ async def upload_statement(file: UploadFile = File(...),
                            market: str = "us_stock",
                            broker: str = "citi",
                            account_ref: str = "",
+                           pdf_password: str = "",
                            user: dict = Depends(require_vip)):
     """上传月结单 PDF → 摄取(加密入库) → parsed_ok 则规范化 + 物化到组合。
 
@@ -56,7 +57,8 @@ async def upload_statement(file: UploadFile = File(...),
     # 摄取 + 加密入库（幂等去重）
     try:
         res = ingest.ingest_and_store(raw, file.filename or "statement.pdf",
-                                      user_id=uid, market=market, broker=broker)
+                                      user_id=uid, market=market, broker=broker,
+                                      pdf_password=pdf_password)
     except Exception as e:  # noqa: BLE001
         logger.exception("VIP 摄取失败")
         raise HTTPException(status_code=422, detail=f"月结单解析失败: {e}") from e
@@ -74,9 +76,13 @@ async def upload_statement(file: UploadFile = File(...),
         if auth_doc:
             norm = portfolio.normalize_statement(wl, auth_doc, source_doc_id=res["doc_id"],
                                                  account_ref=account_ref)
+            nav = None
+            if getattr(auth_doc, "broker", "") == "nomura":
+                nav = (getattr(auth_doc, "account_summary", {}) or {}).get("net_asset_value_usd")
             mat = portfolio.materialize_portfolio(wl, as_of_date=norm["as_of_date"],
                                                   account_ref=account_ref,
-                                                  cash_total_usd=auth_doc.total_cash_usd)
+                                                  cash_total_usd=auth_doc.total_cash_usd,
+                                                  account_total_usd=nav)
             out.update({"normalized": norm, "n_positions": mat["n_positions"],
                         "total_equity": mat["total_equity"],
                         "cash_balance": mat["cash_balance"]})

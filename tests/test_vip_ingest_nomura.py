@@ -80,6 +80,7 @@ def test_parse_nomura_statement(nomura_pdf):
     assert abs(hk.market_value_usd - 3379.43) < 0.01
     us = next(h for h in stmt.holdings if h.ticker == "BE")
     assert abs(us.market_value_usd - 35444.52) < 0.01
+    # 合成样本不带 Performance Summary / NAV 段，故结单层总额未知，按 no_statement_total 处理
     assert stmt.recon.status == "no_statement_total"
 
 

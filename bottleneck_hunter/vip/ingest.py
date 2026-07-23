@@ -69,6 +69,7 @@ class BrokerStatement(BaseModel):
     holdings: list[EquityHolding] = []
     cash_balances: list[CashBalance] = []
     total_cash_usd: float = 0.0
+    account_summary: dict = {}      # 可选：完整账户层摘要（如 Nomura 的 NAV/负债/衍生品合计）
     recon: ReconResult
 
 
@@ -320,6 +321,36 @@ def _parse_nomura_cash(pages: list[str]) -> tuple[list[CashBalance], float]:
     return balances, total_cash_usd
 
 
+def _parse_nomura_summary(pages: list[str]) -> dict:
+    """抽 Nomura 账户层锚点（完整账户口径）：cash / equities / derivatives / total_liabilities / NAV。"""
+    lines = _clean_nomura_lines(pages)
+    summary = {
+        "cash_total_usd": 0.0,
+        "equities_total_usd": 0.0,
+        "derivatives_total_usd": 0.0,
+        "gross_asset_value_usd": 0.0,
+        "total_liabilities_usd": 0.0,
+        "net_asset_value_usd": 0.0,
+    }
+    for i, line in enumerate(lines):
+        if line == "Cash" and i + 17 < len(lines) and lines[i + 17].endswith('%'):
+            summary["cash_total_usd"] = _num(lines[i + 17]) or summary["cash_total_usd"]
+        elif line == "Equities" and i + 17 < len(lines) and lines[i + 17].endswith('%'):
+            summary["equities_total_usd"] = _num(lines[i + 17]) or summary["equities_total_usd"]
+        elif line == "Derivatives" and i + 17 < len(lines):
+            # 在 Asset Allocation 里，Derivatives 的 Total(USD) 列落在 +17
+            v = _num(lines[i + 17])
+            if v is not None:
+                summary["derivatives_total_usd"] = v
+        elif line == "Gross Asset Value" and i + 17 < len(lines):
+            summary["gross_asset_value_usd"] = _num(lines[i + 17]) or summary["gross_asset_value_usd"]
+        elif line == "Total Liabilities" and i + 17 < len(lines):
+            summary["total_liabilities_usd"] = _num(lines[i + 17]) or summary["total_liabilities_usd"]
+        elif line == "Net Asset Value" and i + 17 < len(lines):
+            summary["net_asset_value_usd"] = _num(lines[i + 17]) or summary["net_asset_value_usd"]
+    return summary
+
+
 def _nomura_symbol(company_line: str) -> str:
     m = re.search(r"\(([A-Z0-9]{1,6})\s+[A-Z]{2}\)", company_line)
     return m.group(1) if m else company_line.split()[0].strip().upper()
@@ -362,13 +393,16 @@ def _parse_nomura_equities(pages: list[str]) -> list[EquityHolding]:
 def _parse_nomura_statement(pages: list[str], filename: str, content_hash: str) -> BrokerStatement:
     holdings = _parse_nomura_equities(pages)
     cash_balances, total_cash_usd = _parse_nomura_cash(pages)
+    summary = _parse_nomura_summary(pages)
     period = _parse_nomura_asof(pages)
-    # 暂无明确 TOTAL EQUITIES 总计行锚，先按逐只和落 no_statement_total；后续若定位到合计行再收紧对账。
+    # Nomura 完整账户以 NAV 为总权益锚；持仓对子账（Equities）先不做 statement_total 对账。
     recon = ReconResult(holdings_count=len(holdings), holdings_total_usd=sum(h.market_value_usd for h in holdings),
-                       statement_equities_total_usd=None, delta_usd=None, status="no_statement_total")
+                       statement_equities_total_usd=summary.get("equities_total_usd") or None,
+                       delta_usd=None, status="no_statement_total")
     return BrokerStatement(
         broker="nomura", content_hash=content_hash, period_end=period,
-        holdings=holdings, cash_balances=cash_balances, total_cash_usd=total_cash_usd, recon=recon,
+        holdings=holdings, cash_balances=cash_balances, total_cash_usd=total_cash_usd,
+        account_summary=summary, recon=recon,
     )
 
 

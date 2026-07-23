@@ -112,11 +112,14 @@ def _upsert_position(wl_store, instrument_id, account_ref, as_of_date, *,
 # ── P5: 物化 —— 规范 positions → sim_account + sim_positions ──────────────
 
 def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
-                          cash_total_usd: float = 0.0) -> dict:
+                          cash_total_usd: float = 0.0,
+                          account_total_usd: float | None = None) -> dict:
     """把某快照日的规范 positions 投影到 sim_*，供决策引擎消费。
 
     先把旧 sim 快照冻结进 vip_reports(kind='import_snapshot')作溯源锚（M2），再清零重建。
-    market_value_base(统一美元)→ sim_positions.market_value；Σ持仓 + 现金(total_cash_usd)→ total_equity。
+    market_value_base(统一美元)→ sim_positions.market_value；
+    - 默认：总权益 = Σ持仓 + 现金(cash_total_usd)
+    - 若账户层有更权威锚（如 Nomura NAV），可显式传 account_total_usd 覆盖总权益口径
     返回 {account_id, n_positions, total_equity, cash_balance, snapshot_report_id}。
     """
     account = wl_store.get_sim_account()
@@ -136,7 +139,8 @@ def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
                                      unrealized_pnl=0, weight_pct=0)
 
     total_positions = sum(r["market_value_base"] for r in rows)
-    total_equity = total_positions + (cash_total_usd or 0.0)
+    computed_total = total_positions + (cash_total_usd or 0.0)
+    total_equity = account_total_usd if account_total_usd is not None else computed_total
     n = 0
     for r in rows:
         symbol = r["symbol"]
