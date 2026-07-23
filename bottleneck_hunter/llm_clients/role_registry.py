@@ -133,6 +133,14 @@ _INIT_ROLES = [
     RoleDefinition("bottleneck", "瓶颈分析", "bottleneck",
                    multi_model=True, max_slots=3,
                    capability_weights=_BOTTLENECK_WEIGHTS),
+    # VIP 私人财务顾问（新 group=vip；前端 AI 配置页据 group 分组）
+    RoleDefinition("vip_statement_extract", "VIP 月结单抽取", "vip",
+                   capability_weights=_PIPELINE_WEIGHTS, min_context=_HEAVY),
+    RoleDefinition("vip_advisor", "VIP 投资顾问（报告叙事）", "vip",
+                   capability_weights=_DECISION_WEIGHTS, min_context=_HEAVY),
+    RoleDefinition("vip_chat", "VIP 咨询顾问", "vip",
+                   multi_model=False, max_slots=1, min_context=_HEAVY,
+                   capability_weights=_DECISION_WEIGHTS),
 ]
 
 for _r in _INIT_ROLES:

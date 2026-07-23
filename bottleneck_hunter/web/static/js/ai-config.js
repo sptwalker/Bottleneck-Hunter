@@ -11,6 +11,7 @@ const GROUP_LABELS = {
   pipeline: '产业链管线',
   watchlist: '看板模块',
   bottleneck: '瓶颈交叉评分',
+  vip: 'VIP 私人财务顾问',
 };
 
 // 系统模块层级（流程顺序）—— 供分配页签 / 侧栏树 统一排序
@@ -18,6 +19,7 @@ const MODULE_TREE = [
   { module: '产业链分析', groups: ['pipeline', 'bottleneck'] },
   { module: '观察池',     groups: ['watchlist'] },
   { module: '决策中心',   groups: ['decision', 'committee'] },
+  { module: 'VIP 顾问',   groups: ['vip'] },
 ];
 
 const DIMENSION_LABELS = {

@@ -228,6 +228,72 @@ def render_report_md(summary: dict, narrative: str = "", period: str = "") -> st
     return compliance.with_disclaimer("\n".join(L))
 
 
+_ADVISOR_PROMPT = """你是一支资深私人财务顾问团队，为高净值客户的真实证券组合出具投资分析意见。
+下面是客户当前组合快照（统一美元口径，数据真实、请勿臆造任何数字）：
+
+{facts}
+
+请用简体中文、分三层给出专业意见，每层 2-4 句，务实不空泛，**只依据上面给出的数字**，
+不要编造快照里没有的价格/收益/占比：
+
+## 一、宏观研判
+（当前宏观与所处行业周期对该组合的影响判断）
+
+## 二、组合配置诊断
+（集中度、行业/单票暴露、结构性风险；点名占比过高的持仓）
+
+## 三、操作建议
+（给出方向性建议：加/减/持/对冲，说明理由；不承诺收益）
+
+要求：直接输出上述三段 Markdown，不要额外前言/结语/免责（系统会另加免责声明）。"""
+
+
+async def generate_advisor_narrative(summary: dict, *, user_id: str = "",
+                                     budget=None) -> dict:
+    """调 vip_advisor 角色生成分层叙事（宏观/配置/操作）。返回 {narrative, provider, model}。
+
+    facts=组合摘要；叙事回来后由 generate_vip_report 过 number_guard 标未核到数字。
+    预算不足或无可用模型 → narrative 空（报告降级为纯数据报告，不阻断）。
+    """
+    from bottleneck_hunter.llm_clients.factory import get_models_for_role
+
+    if budget is not None and not budget.can_spend():
+        return {"narrative": "", "provider": "", "model": "", "skipped": "budget"}
+    try:
+        results = get_models_for_role("vip_advisor", user_id=user_id, with_fallback=True)
+    except Exception:  # noqa: BLE001
+        results = []
+    if not results:
+        return {"narrative": "", "provider": "", "model": "", "skipped": "no_model"}
+    llm, provider, model = results[0]
+    facts = json.dumps(summary, ensure_ascii=False, default=str)
+    prompt = _ADVISOR_PROMPT.format(facts=facts)
+    try:
+        resp = await llm.ainvoke(prompt)
+        text = getattr(resp, "content", resp)
+        text = text if isinstance(text, str) else str(text)
+    except Exception as e:  # noqa: BLE001
+        return {"narrative": "", "provider": provider, "model": model, "error": str(e)[:200]}
+    if budget is not None:
+        try:
+            budget.record(0)   # token 计费由 LLM 层记；此处仅占位，避免重复计
+        except Exception:  # noqa: BLE001
+            pass
+    return {"narrative": text.strip(), "provider": provider, "model": model}
+
+
+async def generate_vip_report_ai(wl_store, *, period: str = "",
+                                 source_doc_ids: list | None = None,
+                                 user_id: str = "", budget=None) -> dict:
+    """异步：组合摘要 → vip_advisor 分层叙事 → number_guard → 落库。M1 报告的 AI 增强入口。"""
+    summary = build_portfolio_summary(wl_store)
+    nar = await generate_advisor_narrative(summary, user_id=user_id, budget=budget)
+    return generate_vip_report(
+        wl_store, period=period, narrative=nar.get("narrative", ""),
+        source_doc_ids=source_doc_ids,
+        model_provider=nar.get("provider", ""), model_name=nar.get("model", ""))
+
+
 def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
                         source_doc_ids: list | None = None,
                         model_provider: str = "", model_name: str = "") -> dict:

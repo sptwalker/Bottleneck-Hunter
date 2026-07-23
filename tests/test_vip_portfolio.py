@@ -76,3 +76,42 @@ def test_report_persisted_and_audited(wl):
     finally:
         conn.close()
     assert row and row["kind"] == "periodic" and row["period"] == "2026-06"
+
+
+def test_vip_roles_registered():
+    from bottleneck_hunter.llm_clients.role_registry import get_role
+    for k in ("vip_statement_extract", "vip_advisor", "vip_chat"):
+        r = get_role(k)
+        assert r is not None and r.group == "vip", k
+
+
+@pytest.mark.asyncio
+async def test_advisor_narrative_passes_number_guard(wl, monkeypatch):
+    """AI 叙事：真实数字放行、编造数字标未核到；无模型时降级为纯数据报告。"""
+    portfolio.normalize_statement(wl, _stmt(), account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1")
+
+    class _FakeLLM:
+        async def ainvoke(self, prompt):
+            # 叙事含真实总权益 + 一个编造数字
+            return type("R", (), {"content":
+                "## 一、宏观研判\n组合总权益 $1,226,580.92，半导体高暴露。\n"
+                "## 二、组合配置诊断\n前五大集中度偏高。\n"
+                "## 三、操作建议\n建议减持，另有臆造回报 $7,777,777.00。"})()
+
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.factory.get_models_for_role",
+                        lambda *a, **k: [(_FakeLLM(), "deepseek", "deepseek-chat")])
+    out = await portfolio.generate_vip_report_ai(wl, period="2026-06", user_id="u1")
+    assert "AI 分析" in out["report_md"]
+    assert "$7,777,777.00" in out["unverified"]          # 编造被抓
+    assert "$7,777,777.00 ⚠未核到" in out["report_md"]
+
+
+@pytest.mark.asyncio
+async def test_advisor_no_model_degrades(wl, monkeypatch):
+    portfolio.normalize_statement(wl, _stmt(), account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1")
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.factory.get_models_for_role",
+                        lambda *a, **k: [])
+    out = await portfolio.generate_vip_report_ai(wl, period="2026-06", user_id="u1")
+    assert out["report_id"] and "持仓分析报告" in out["report_md"]   # 无模型仍出纯数据报告
