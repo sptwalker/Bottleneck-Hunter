@@ -483,6 +483,99 @@ CREATE TABLE IF NOT EXISTS layer_performance (
     user_id         TEXT DEFAULT '',
     market          TEXT DEFAULT 'us_stock'
 );
+
+-- ══ VIP 私人财务顾问：规范组合模型（D1）+ 报告（D6）见 docs/VIP_ADVISOR_TECH_SPEC.md §2.2/§2.5 ══
+CREATE TABLE IF NOT EXISTS instruments (
+    id              TEXT PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'stock'
+                    CHECK(instrument_type IN
+                        ('stock','etf','fund','bond','cash','option','future','structured')),
+    name            TEXT DEFAULT '',
+    currency        TEXT NOT NULL DEFAULT 'USD',
+    exchange        TEXT DEFAULT '',
+    isin            TEXT DEFAULT '',
+    underlying      TEXT DEFAULT '',
+    option_type     TEXT DEFAULT '' CHECK(option_type IN ('','call','put')),
+    strike          REAL DEFAULT 0,
+    expiry          TEXT DEFAULT '',
+    multiplier      REAL DEFAULT 1,
+    extra           TEXT DEFAULT '{}',
+    source_doc_id   TEXT DEFAULT '',
+    source_page     INTEGER DEFAULT 0,
+    confidence      REAL DEFAULT 1.0 CHECK(confidence BETWEEN 0 AND 1),
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT DEFAULT '',
+    user_id         TEXT DEFAULT '',
+    market          TEXT DEFAULT 'us_stock',
+    UNIQUE(user_id, market, symbol, instrument_type, expiry, strike, option_type)
+);
+CREATE TABLE IF NOT EXISTS positions (
+    id                TEXT PRIMARY KEY,
+    instrument_id     TEXT NOT NULL,
+    account_ref       TEXT DEFAULT '',
+    as_of_date        TEXT NOT NULL,
+    quantity          REAL NOT NULL DEFAULT 0,
+    avg_cost          REAL DEFAULT 0,
+    currency          TEXT NOT NULL DEFAULT 'USD',
+    market_price      REAL DEFAULT 0,
+    market_value      REAL DEFAULT 0,
+    fx_rate           REAL DEFAULT 1.0,
+    market_value_base REAL DEFAULT 0,
+    cost_basis        REAL DEFAULT 0,
+    unrealized_pnl    REAL DEFAULT 0,
+    weight_pct        REAL DEFAULT 0,
+    source_doc_id     TEXT DEFAULT '',
+    source_page       INTEGER DEFAULT 0,
+    confidence        REAL DEFAULT 1.0 CHECK(confidence BETWEEN 0 AND 1),
+    created_at        TEXT NOT NULL,
+    user_id           TEXT DEFAULT '',
+    market            TEXT DEFAULT 'us_stock',
+    UNIQUE(user_id, market, account_ref, instrument_id, as_of_date),
+    FOREIGN KEY(instrument_id) REFERENCES instruments(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS transactions (
+    id            TEXT PRIMARY KEY,
+    instrument_id TEXT DEFAULT '',
+    account_ref   TEXT DEFAULT '',
+    txn_type      TEXT NOT NULL
+                  CHECK(txn_type IN
+                    ('buy','sell','dividend','interest','fee','tax',
+                     'deposit','withdrawal','split','transfer_in','transfer_out',
+                     'opt_exercise','opt_assign','opt_expire')),
+    trade_date    TEXT NOT NULL,
+    settle_date   TEXT DEFAULT '',
+    quantity      REAL DEFAULT 0,
+    price         REAL DEFAULT 0,
+    gross_amount  REAL DEFAULT 0,
+    fee           REAL DEFAULT 0,
+    tax           REAL DEFAULT 0,
+    net_amount    REAL DEFAULT 0,
+    currency      TEXT NOT NULL DEFAULT 'USD',
+    fx_rate       REAL DEFAULT 1.0,
+    external_id   TEXT DEFAULT '',
+    description   TEXT DEFAULT '',
+    source_doc_id TEXT DEFAULT '',
+    source_page   INTEGER DEFAULT 0,
+    confidence    REAL DEFAULT 1.0 CHECK(confidence BETWEEN 0 AND 1),
+    created_at    TEXT NOT NULL,
+    user_id       TEXT DEFAULT '',
+    market        TEXT DEFAULT 'us_stock',
+    UNIQUE(user_id, market, account_ref, external_id),
+    FOREIGN KEY(instrument_id) REFERENCES instruments(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS vip_reports (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'periodic'
+                 CHECK(kind IN ('periodic','alert','import_snapshot')),
+    period       TEXT DEFAULT '',
+    report_md    TEXT DEFAULT '',
+    payload_json TEXT DEFAULT '{}',
+    alert_key    TEXT DEFAULT '',
+    created_at   TEXT NOT NULL,
+    user_id      TEXT DEFAULT '',
+    market       TEXT DEFAULT 'us_stock'
+);
 """
 
 CREATE_INDEXES = """
@@ -974,4 +1067,58 @@ MIGRATIONS: list[str] = [
     "UPDATE institutional_holders SET user_id='__shared__' WHERE user_id!='__shared__'",
     "UPDATE analyst_ratings      SET user_id='__shared__' WHERE user_id!='__shared__'",
     "CREATE INDEX IF NOT EXISTS idx_snapshots_shared ON market_snapshots(user_id, ticker, date DESC)",
+    # ── VIP 规范组合模型 + 报告（老库补建；新库已在 CREATE_TABLES 建全）──
+    """CREATE TABLE IF NOT EXISTS instruments (
+        id TEXT PRIMARY KEY, symbol TEXT NOT NULL,
+        instrument_type TEXT NOT NULL DEFAULT 'stock'
+            CHECK(instrument_type IN ('stock','etf','fund','bond','cash','option','future','structured')),
+        name TEXT DEFAULT '', currency TEXT NOT NULL DEFAULT 'USD', exchange TEXT DEFAULT '',
+        isin TEXT DEFAULT '', underlying TEXT DEFAULT '',
+        option_type TEXT DEFAULT '' CHECK(option_type IN ('','call','put')),
+        strike REAL DEFAULT 0, expiry TEXT DEFAULT '', multiplier REAL DEFAULT 1, extra TEXT DEFAULT '{}',
+        source_doc_id TEXT DEFAULT '', source_page INTEGER DEFAULT 0,
+        confidence REAL DEFAULT 1.0 CHECK(confidence BETWEEN 0 AND 1),
+        created_at TEXT NOT NULL, updated_at TEXT DEFAULT '',
+        user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
+        UNIQUE(user_id, market, symbol, instrument_type, expiry, strike, option_type)
+    )""",
+    """CREATE TABLE IF NOT EXISTS positions (
+        id TEXT PRIMARY KEY, instrument_id TEXT NOT NULL, account_ref TEXT DEFAULT '',
+        as_of_date TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 0, avg_cost REAL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'USD', market_price REAL DEFAULT 0, market_value REAL DEFAULT 0,
+        fx_rate REAL DEFAULT 1.0, market_value_base REAL DEFAULT 0, cost_basis REAL DEFAULT 0,
+        unrealized_pnl REAL DEFAULT 0, weight_pct REAL DEFAULT 0,
+        source_doc_id TEXT DEFAULT '', source_page INTEGER DEFAULT 0,
+        confidence REAL DEFAULT 1.0 CHECK(confidence BETWEEN 0 AND 1),
+        created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
+        UNIQUE(user_id, market, account_ref, instrument_id, as_of_date),
+        FOREIGN KEY(instrument_id) REFERENCES instruments(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS transactions (
+        id TEXT PRIMARY KEY, instrument_id TEXT DEFAULT '', account_ref TEXT DEFAULT '',
+        txn_type TEXT NOT NULL CHECK(txn_type IN
+            ('buy','sell','dividend','interest','fee','tax','deposit','withdrawal','split',
+             'transfer_in','transfer_out','opt_exercise','opt_assign','opt_expire')),
+        trade_date TEXT NOT NULL, settle_date TEXT DEFAULT '', quantity REAL DEFAULT 0, price REAL DEFAULT 0,
+        gross_amount REAL DEFAULT 0, fee REAL DEFAULT 0, tax REAL DEFAULT 0, net_amount REAL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'USD', fx_rate REAL DEFAULT 1.0, external_id TEXT DEFAULT '',
+        description TEXT DEFAULT '', source_doc_id TEXT DEFAULT '', source_page INTEGER DEFAULT 0,
+        confidence REAL DEFAULT 1.0 CHECK(confidence BETWEEN 0 AND 1),
+        created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
+        UNIQUE(user_id, market, account_ref, external_id),
+        FOREIGN KEY(instrument_id) REFERENCES instruments(id) ON DELETE SET NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS vip_reports (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL DEFAULT 'periodic' CHECK(kind IN ('periodic','alert','import_snapshot')),
+        period TEXT DEFAULT '', report_md TEXT DEFAULT '', payload_json TEXT DEFAULT '{}',
+        alert_key TEXT DEFAULT '', created_at TEXT NOT NULL,
+        user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_instruments_symbol   ON instruments(user_id, market, symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_positions_asof       ON positions(user_id, market, account_ref, as_of_date)",
+    "CREATE INDEX IF NOT EXISTS idx_positions_instrument ON positions(instrument_id)",
+    "CREATE INDEX IF NOT EXISTS idx_transactions_date    ON transactions(user_id, market, account_ref, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_transactions_instr   ON transactions(instrument_id, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_vip_reports_user     ON vip_reports(user_id, market, kind, created_at)",
 ]
