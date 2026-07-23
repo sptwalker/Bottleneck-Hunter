@@ -11,8 +11,13 @@
   const derivFileEl = document.getElementById('vip-deriv-file');
   const derivUploadBtn = document.getElementById('vip-deriv-upload-btn');
   const reportBtn = document.getElementById('vip-report-btn');
+  const chatInput = document.getElementById('vip-chat-input');
+  const chatSend = document.getElementById('vip-chat-send');
+  const chatNew = document.getElementById('vip-chat-new');
+  const chatLog = document.getElementById('vip-chat-log');
   const btnVip = document.getElementById('btn-vip');
-  if (!uploadBtn || !reportBtn || !derivUploadBtn) return;
+  let currentSessionId = '';
+  if (!uploadBtn || !reportBtn || !derivUploadBtn || !chatSend) return;
 
   function setStatus(id, msg, ok) {
     const el = document.getElementById(id);
@@ -139,6 +144,65 @@
       reportBtn.disabled = false;
     }
   });
+
+  function appendChat(role, text) {
+    if (!chatLog) return;
+    const who = role === 'user' ? '你' : '顾问';
+    const div = document.createElement('div');
+    div.style.marginBottom = '10px';
+    div.innerHTML = `<strong>${who}：</strong>` + (window.marked && role === 'assistant'
+      ? window.marked.parse(text || '')
+      : `<pre style="white-space:pre-wrap;display:inline;margin:0">${String(text || '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</pre>`);
+    chatLog.appendChild(div);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  async function sendChat() {
+    const q = (chatInput.value || '').trim();
+    if (!q) return;
+    chatSend.disabled = true;
+    setStatus('vip-chat-status', '顾问思考中…', true);
+    appendChat('user', q);
+    chatInput.value = '';
+    let aiBox = '';
+    try {
+      const resp = await fetch('/api/vip/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: currentSessionId, question: q, market: marketEl.value }),
+      });
+      if (!resp.ok) {
+        const j = await resp.json().catch(() => ({}));
+        throw new Error(j.detail || `HTTP ${resp.status}`);
+      }
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          const data = JSON.parse(line.slice(5).trim());
+          if (data.session_id) currentSessionId = data.session_id;
+          if (data.text) { aiBox += data.text; }
+        }
+      }
+      appendChat('assistant', aiBox);
+      setStatus('vip-chat-status', '✓ 已回复', true);
+    } catch (e) {
+      setStatus('vip-chat-status', '✗ ' + e.message, false);
+    } finally {
+      chatSend.disabled = false;
+    }
+  }
+
+  chatSend.addEventListener('click', sendChat);
+  if (chatNew) chatNew.addEventListener('click', () => { currentSessionId = ''; if (chatLog) chatLog.innerHTML = ''; setStatus('vip-chat-status', '已新建会话', true); });
+
 
   if (marketEl) marketEl.addEventListener('change', () => { loadDocs(); loadDerivatives(); });
   // 进入 VIP 视图时刷新文档列表 / 衍生品列表

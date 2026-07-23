@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Request
+from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 from bottleneck_hunter.auth.dependencies import require_vip
+from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -207,3 +209,36 @@ async def get_report(report_id: str, market: str = "us_stock",
     if not row:
         raise HTTPException(status_code=404, detail="报告不存在")
     return dict(row)
+
+
+class ChatReq(BaseModel):
+    session_id: str = ""
+    question: str
+    market: str = "us_stock"
+
+
+@router.get("/chat/sessions")
+async def list_chat_sessions(market: str = "us_stock", user: dict = Depends(require_vip)):
+    from bottleneck_hunter.vip import chat
+    return {"sessions": chat.list_chat_sessions(_wl(user, market))}
+
+
+@router.get("/chat/sessions/{session_id}")
+async def get_chat_messages(session_id: str, market: str = "us_stock", user: dict = Depends(require_vip)):
+    from bottleneck_hunter.vip import chat
+    return {"messages": chat.get_chat_messages(_wl(user, market), session_id)}
+
+
+@router.post("/chat")
+async def stream_chat(req: ChatReq, request: Request, user: dict = Depends(require_vip)):
+    from bottleneck_hunter.vip import chat
+    wl = _wl(user, req.market)
+    budget = BudgetTracker(wl)
+
+    async def event_generator():
+        async for e in chat.stream_vip_chat(wl, user_id=user["sub"], question=req.question,
+                                            session_id=req.session_id, budget=budget):
+            if await request.is_disconnected():
+                break
+            yield e
+    return EventSourceResponse(event_generator())

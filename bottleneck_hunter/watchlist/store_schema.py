@@ -591,6 +591,22 @@ CREATE TABLE IF NOT EXISTS vip_derivative_terms (
     market            TEXT DEFAULT 'us_stock',
     UNIQUE(user_id, market, source_file_hash, product_family, underlying_symbol)
 );
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY, title TEXT DEFAULT '', summary TEXT DEFAULT '',
+    summarized_upto TEXT DEFAULT '', msg_count INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'active' CHECK(status IN ('active','archived')),
+    created_at TEXT NOT NULL, updated_at TEXT DEFAULT '',
+    user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock'
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')),
+    content TEXT DEFAULT '', tool_calls TEXT DEFAULT '[]', tool_name TEXT DEFAULT '',
+    provider TEXT DEFAULT '', model TEXT DEFAULT '',
+    in_tokens INTEGER DEFAULT 0, out_tokens INTEGER DEFAULT 0, fail_reason TEXT DEFAULT '',
+    created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
+    FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+);
 """
 
 CREATE_INDEXES = """
@@ -1138,6 +1154,22 @@ MIGRATIONS: list[str] = [
         created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
         UNIQUE(user_id, market, source_file_hash, product_family, underlying_symbol)
     )""",
+    """CREATE TABLE IF NOT EXISTS chat_sessions (
+        id TEXT PRIMARY KEY, title TEXT DEFAULT '', summary TEXT DEFAULT '',
+        summarized_upto TEXT DEFAULT '', msg_count INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'active' CHECK(status IN ('active','archived')),
+        created_at TEXT NOT NULL, updated_at TEXT DEFAULT '',
+        user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock'
+    )""",
+    """CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')),
+        content TEXT DEFAULT '', tool_calls TEXT DEFAULT '[]', tool_name TEXT DEFAULT '',
+        provider TEXT DEFAULT '', model TEXT DEFAULT '',
+        in_tokens INTEGER DEFAULT 0, out_tokens INTEGER DEFAULT 0, fail_reason TEXT DEFAULT '',
+        created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
+        FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_instruments_symbol   ON instruments(user_id, market, symbol)",
     "CREATE INDEX IF NOT EXISTS idx_positions_asof       ON positions(user_id, market, account_ref, as_of_date)",
     "CREATE INDEX IF NOT EXISTS idx_positions_instrument ON positions(instrument_id)",
@@ -1145,4 +1177,6 @@ MIGRATIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_transactions_instr   ON transactions(instrument_id, trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_vip_reports_user     ON vip_reports(user_id, market, kind, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_vip_deriv_user       ON vip_derivative_terms(user_id, market, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_market ON chat_sessions(user_id, market, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_chat_messages_session     ON chat_messages(session_id, created_at)",
 ]

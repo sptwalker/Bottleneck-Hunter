@@ -123,3 +123,30 @@ def test_report_without_holdings(client):
     client._set_user({"sub": "admin2", "role": "admin"})
     r = client.post("/api/vip/reports/generate?with_ai=false")
     assert r.status_code == 400   # 尚无持仓
+
+
+def test_chat_session_endpoints(client, monkeypatch):
+    client._set_user({"sub": "admin3", "role": "admin"})
+    # 先导入最小持仓，聊天 facts 才有内容
+    r = client.post("/api/vip/statements/upload?market=us_stock",
+                    files={"file": ("stmt_30_Jun_2026.pdf", _citi_pdf(), "application/pdf")})
+    assert r.status_code == 200
+
+    class _FakeLLM:
+        async def astream(self, prompt):
+            for x in ["组合总权益 $280,000。", "建议继续观察。"]:
+                yield type("C", (), {"content": x})()
+
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.factory.get_models_for_role",
+                        lambda *a, **k: [(_FakeLLM(), "deepseek", "deepseek-chat")])
+    # SSE 聊天
+    resp = client.post('/api/vip/chat', json={"question": "我的组合情况？", "market": "us_stock"})
+    assert resp.status_code == 200
+    txt = resp.text
+    assert 'event: session' in txt and 'event: done' in txt
+    # 会话列表
+    ss = client.get('/api/vip/chat/sessions').json()['sessions']
+    assert ss and ss[0]['status'] == 'active'
+    sid = ss[0]['id']
+    msgs = client.get(f'/api/vip/chat/sessions/{sid}').json()['messages']
+    assert len(msgs) == 2 and msgs[0]['role'] == 'user' and msgs[1]['role'] == 'assistant'
