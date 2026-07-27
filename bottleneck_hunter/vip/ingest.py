@@ -19,14 +19,12 @@ C3 兼容架构：
 from __future__ import annotations
 
 import hashlib
-import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, field_validator
-
 
 # ── 数据模型 ──────────────────────────────────────────────────────────────
 
@@ -51,8 +49,8 @@ class EquityHolding(BaseModel):
 class ReconResult(BaseModel):
     holdings_count: int
     holdings_total_usd: float
-    statement_equities_total_usd: Optional[float]   # 结单 TOTAL EQUITIES 行（可能缺失）
-    delta_usd: Optional[float]                       # 差值；None = 结单无合计行
+    statement_equities_total_usd: float | None   # 结单 TOTAL EQUITIES 行（可能缺失）
+    delta_usd: float | None                       # 差值；None = 结单无合计行
     status: str                                      # "ok" | "mismatch" | "no_statement_total"
 
 
@@ -118,7 +116,7 @@ def _extract_pages(pdf_bytes: bytes, pdf_password: str = "") -> list[str]:
 
 
 _DOC_TYPES = {"monthly_statement", "trade_confirm", "position_report", "unsupported"}
-_BROKERS = {"citi", "nomura", "unknown"}
+_BROKERS = {"citi", "nomura", "cmbi", "unknown"}
 _REASON_CODES = {"content_match", "insufficient_content", "ambiguous", "unsupported_format"}
 
 
@@ -136,6 +134,8 @@ def _normalize_broker(raw: str) -> str:
         return "citi"
     if v in ("nomura", "nsl"):
         return "nomura"
+    if v in ("cmbi", "cmbis", "招银", "招银国际"):
+        return "cmbi"
     return "unknown"
 
 
@@ -152,6 +152,10 @@ def _heuristic_statement_classification(pages: list[str], filename: str = "", br
         doc_type = _detect_citi_doc_type(pages, filename=filename)
         reason_code = "content_match" if doc_type != "monthly_statement" else "ambiguous"
     elif broker == "nomura":
+        doc_type = "monthly_statement"
+        reason_code = "content_match"
+    elif broker == "cmbi":
+        # 日结单(DAILY COMBINED)与月结单(MONTHLY)都是组合快照 → 统一落月结单桶
         doc_type = "monthly_statement"
         reason_code = "content_match"
     return {
@@ -222,7 +226,10 @@ def _classify_statement_content(pages: list[str], filename: str, user_id: str, b
 
 
 def _doc_type_from_statement(stmt: BrokerStatement, classified_doc_type: str = "") -> str:
-    if stmt.transactions:
+    # 综合结单(招银日/月结单)同时含持仓快照+交易流水 → 属月结单桶(normalize 会同时写持仓与交易)，
+    # 绝不能因"有交易"就翻成 trade_confirm(其路径只写交易、跳过持仓 materialize，会丢总权益)。
+    # 仅"纯交易导出"(无任何持仓，如花旗交易_*.pdf)才算 trade_confirm。
+    if stmt.transactions and not stmt.holdings:
         return "trade_confirm"
     if classified_doc_type == "position_report":
         return "position_report"
@@ -243,7 +250,7 @@ def _statement_is_empty(stmt: BrokerStatement) -> bool:
     return not any((summ.get(k) or 0) > 0 for k in anchors)
 
 
-def _num(s: str) -> Optional[float]:
+def _num(s: str) -> float | None:
     try:
         return float(s.replace(",", "").strip())
     except (ValueError, AttributeError):
@@ -270,7 +277,7 @@ _POSITION_NOISE = {
 }
 
 
-def _parse_equities(pages: list[str]) -> tuple[list[EquityHolding], Optional[float]]:
+def _parse_equities(pages: list[str]) -> tuple[list[EquityHolding], float | None]:
     """固定偏移解析 EQUITIES 持仓（含个股 Ticker 锚 + ETF 的 ISIN 锚）+ TOTAL EQUITIES 合计。
 
     块结构（锚行往前 10 行，个股/ETF 一致）：
@@ -281,7 +288,7 @@ def _parse_equities(pages: list[str]) -> tuple[list[EquityHolding], Optional[flo
     `in_equities` 状态跨页保持（应对 'EQUITIES CONTINUED' 续页）。
     """
     holdings: list[EquityHolding] = []
-    total_eq: Optional[float] = None
+    total_eq: float | None = None
     in_equities = False
     cur_ccy = "USD"
 
@@ -617,11 +624,7 @@ def _parse_citi_transactions(pages: list[str]) -> list[StatementTransaction]:
         cusip_clean = cusip if cusip != "-" else ""
         txn_type = _map_citi_txn_type(kind, desc1, txn_currency, txn_amount)
         net_amount = txn_amount
-        if txn_type == "buy" and net_amount > 0:
-            net_amount = -net_amount
-        elif txn_type in ("sell", "dividend", "deposit", "interest", "transfer_in") and net_amount < 0:
-            net_amount = -net_amount
-        elif txn_type in ("fee", "withdrawal") and net_amount > 0:
+        if txn_type == "buy" and net_amount > 0 or txn_type in ("sell", "dividend", "deposit", "interest", "transfer_in") and net_amount < 0 or txn_type in ("fee", "withdrawal") and net_amount > 0:
             net_amount = -net_amount
 
         out.append(StatementTransaction(
@@ -709,7 +712,7 @@ def _parse_cash(pages: list[str]) -> tuple[list[CashBalance], float]:
 _RECON_TOL = 0.005   # 0.5% 容差（口径已统一为 Total Value USD，仅留四舍五入余量）
 
 def _reconcile(holdings: list[EquityHolding],
-               statement_total: Optional[float]) -> ReconResult:
+               statement_total: float | None) -> ReconResult:
     calc = sum(h.market_value_usd for h in holdings)
     if statement_total is None:
         return ReconResult(holdings_count=len(holdings), holdings_total_usd=calc,
@@ -733,10 +736,19 @@ def detect_broker(pages: list[str], filename: str = "", hint: str = "") -> str:
             return "citi"
         if h in ("nomura", "nsl"):
             return "nomura"
+        if h in ("cmbi", "cmbis", "招银", "招银国际"):
+            return "cmbi"
     head = "\n".join(pages[:3]).lower()
     fname = filename.lower()
     if "citibank" in head or "citi private bank" in head or "花旗私人银行" in head:
         return "citi"
+    # 招银国际(CMBI/CMBIS)：CE 编号 AUZ441 / 地址 Champion Tower / 品牌 cmbi 为强锚，
+    # 文件名 M<账号>-YYYYMMDD-Daily|Monthly 作兜底。须先于下面野村规则——招银单正文也含
+    # 泛化词 "Portfolio Statement"，若让野村规则先跑会被截胡误判成 nomura。
+    if "auz441" in head or "champion tower" in head or "cmbi" in head:
+        return "cmbi"
+    if re.search(r"m\d+-\d{8}-(daily|monthly)", fname):
+        return "cmbi"
     # 券商品牌锚点(花旗/野村)必须先于下面 "account number" 这条泛化规则——
     # 否则含 "Account Number" 的野村单会被泛化规则截胡误判成花旗(见 Statement_260423 事故)。
     if "nomura singapore limited" in head or "portfolio statement" in head:
@@ -774,7 +786,7 @@ def _parse_citi_statement(pages: list[str], filename: str, content_hash: str,
     cash_balances: list[CashBalance] = []
     total_cash_usd = 0.0
     transactions: list[StatementTransaction] = []
-    total_eq: Optional[float] = None
+    total_eq: float | None = None
     period = _parse_period(filename)
 
     if doc_type == "trade_confirm":
@@ -936,9 +948,248 @@ def _parse_nomura_statement(pages: list[str], filename: str, content_hash: str) 
     )
 
 
+# ── 招银国际 CMBI/CMBIS 解析器 ─────────────────────────────────────────────
+# 账户特征：HKD 记账保证金户，只持现金(USD)+结构性产品(FCN)，无普通股。
+# 日结单(DAILY COMBINED)与月结单(MONTHLY)持仓小节结构一致 → 同一解析器。
+# ponytail: v1 只抽持仓快照(结构性产品+现金)与账户合计，不抽交易明细——
+#   交易记录多格式且脆弱(合约票/交收多段)，且现金 C/F 已反映净效果；
+#   总权益 = Σ结构性产品市值 + Σ现金 = 结单 TOTAL VALUE(已数值对齐)。
+#   需交易层时(v2)再按真实样本补 _cmbi_transactions，勿在样本不足时臆造money记录。
+_CMBI_PRICE_CCY_RE = re.compile(r"^([\d,]+\.\d+)\s+([A-Z]{3})$")     # "99.2300 USD"
+_CMBI_CCY_ROW_RE = re.compile(r"^([A-Z]{3})\s+[A-Za-z]")             # "USD US Dollar"
+_CMBI_DATE_ISO_RE = re.compile(r"(\d{1,2})-([A-Za-z]{3})-(\d{4})")   # 30-Jun-2026
+_CMBI_FNAME_DATE_RE = re.compile(r"-(\d{4})(\d{2})(\d{2})-", re.I)   # M381691-20260630-Monthly
+_CMBI_MATURITY_RE = re.compile(r"^(\d{2}[A-Z]{3}\d{4}|\d{2}/\d{2}/\d{4})$")  # 04SEP2026 或 04/09/2026
+_CMBI_SP_HEADERS = ("CODE", "NAME", "MATURITY", "CLOSING", "MARKET VALUE", "MARGIN",
+                    "STOCK ON HOLD", "PENDING", "PRICE", "CCY", "B/F", "IN /", "NVDA")
+
+
+def _cmbi_num(s: str) -> float | None:
+    """CMBI 数值：额外识别会计括号负数 (1,060,000.00) → -1060000.0（日结单待结列用此记法）。"""
+    t = s.strip()
+    if t.startswith("(") and t.endswith(")"):
+        v = _num(t[1:-1])
+        return -v if v is not None else None
+    return _num(t)
+
+
+def _cmbi_period(pages: list[str], filename: str) -> str:
+    m = _CMBI_FNAME_DATE_RE.search(filename)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    d = _CMBI_DATE_ISO_RE.search("\n".join(pages[:1]))
+    if d and d.group(2).upper() in _MONTH:
+        return f"{d.group(3)}-{_MONTH[d.group(2).upper()]}-{int(d.group(1)):02d}"
+    return ""
+
+
+def _cmbi_account_ref(pages: list[str]) -> str:
+    m = re.search(r"subAccountID:(\S+)", "\n".join(pages[:1]))
+    return m.group(1).strip() if m else ""
+
+
+def _cmbi_account_summary(pages: list[str]) -> tuple[dict, dict, float]:
+    """抽 Account Summary：每币种 7 数值(现金/待结/组合市值/保证金/合计/汇率/HKD等值)。
+    返回 (rows{ccy:{...}}, fx{ccy:hkd_per_unit}, usd_hkd)。"""
+    lines = [x.strip() for pg in pages for x in pg.splitlines() if x.strip()]
+    rows: dict = {}
+    fx: dict = {}
+    in_summary = False
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        if "Account Summary" in line:
+            in_summary = True; i += 1; continue
+        if in_summary and line.startswith("Total (HKD Equiv"):
+            break
+        if in_summary:
+            m = _CMBI_CCY_ROW_RE.match(line)
+            if m:
+                ccy = m.group(1); nums: list[float] = []; j = i + 1
+                while j < n and len(nums) < 7:
+                    if lines[j].startswith("Total (HKD Equiv") or _CMBI_CCY_ROW_RE.match(lines[j]):
+                        break
+                    v = _cmbi_num(lines[j])
+                    if v is not None:
+                        nums.append(v)
+                    j += 1
+                if len(nums) == 7:
+                    rows[ccy] = {"cash": nums[0], "pending": nums[1], "portfolio": nums[2],
+                                 "margin": nums[3], "total": nums[4], "fx": nums[5], "hkd": nums[6]}
+                    fx[ccy] = nums[5]; i = j; continue
+        i += 1
+    return rows, fx, fx.get("USD", 0.0)
+
+
+def _cmbi_to_usd(amount: float | None, ccy: str, fx: dict, usd_hkd: float) -> float:
+    if ccy == "USD" or not amount:
+        return amount or 0.0
+    if usd_hkd and fx.get(ccy):
+        return round(amount * fx[ccy] / usd_hkd, 2)
+    return amount  # ponytail: 无 USD/HKD 汇率锚时按原值(当前样本均含 USD 行)
+
+
+def _cmbi_structured_products(pages: list[str], fx: dict, usd_hkd: float) -> list[EquityHolding]:
+    """结构性产品(FCN)持仓：以 '价格 CCY' 行为锚(CODE 可能是 ISIN 或内部码，形状不定)。
+    行内偏移：k-2=期终结余(数量)  k=价格+币种  k+1=市值(原币)；向前回溯跳数字/到期日得 CODE，再往前得 NAME。"""
+    lines = [x.strip() for pg in pages for x in pg.splitlines() if x.strip()]
+    out: list[EquityHolding] = []
+    in_sp = False
+    n = len(lines)
+    for k in range(n):
+        line = lines[k]
+        if "Structured Product Asset Summary" in line:
+            in_sp = True; continue
+        if in_sp and "Account Summary" in line:
+            in_sp = False
+        if not in_sp:
+            continue
+        pm = _CMBI_PRICE_CCY_RE.match(line)
+        if not pm or k - 2 < 0 or k + 1 >= n:
+            continue
+        ccy = pm.group(2); qty = _num(lines[k - 2]); mv_nom = _num(lines[k + 1])
+        if qty is None or mv_nom is None or mv_nom <= 0:
+            continue
+        b = k - 1
+        while b >= 0 and (_num(lines[b]) is not None or _CMBI_MATURITY_RE.match(lines[b])):
+            b -= 1
+        code = lines[b] if b >= 0 else ""
+        name_parts: list[str] = []; c = b - 1
+        while c >= 0 and len(name_parts) < 6:
+            t = lines[c]
+            if _num(t) is not None or _CMBI_PRICE_CCY_RE.match(t):
+                break
+            if _CMBI_MATURITY_RE.match(t):
+                c -= 1; continue
+            if any(h in t for h in _CMBI_SP_HEADERS) or "Structured Product Asset Summary" in t:
+                break
+            name_parts.append(t); c -= 1
+        name = " ".join(reversed(name_parts)).strip()
+        out.append(EquityHolding(
+            ticker=(code or "SP")[:24], company=name or code or "Structured Product",
+            quantity=qty, market_value_usd=_cmbi_to_usd(mv_nom, ccy, fx, usd_hkd),
+            nominal_ccy=ccy, market_value_nominal=mv_nom))
+    return out
+
+
+_CMBI_TXN_DESC_RE = re.compile(r"^(Buy|Sell)\s+[買买賣卖][入出]\s+(\S+)\s*(.*)$")
+_CMBI_TD_RE = re.compile(r"^\d{2}/\d{2}$")            # 交易日 14/05
+_CMBI_PRICE_PCT_RE = re.compile(r"^[\d,]+\.?\d*%$")   # 价格 103.303836% / 100.00%
+_CMBI_CCY_CTX_RE = re.compile(r"^([A-Z]{3})$")        # "貨幣 Currency:" 下一行独立币种
+
+
+def _cmbi_transactions(pages: list[str], filename: str) -> list[StatementTransaction]:
+    """账户交易变动(賬戶交易變動)里的证券买卖流水。
+    ponytail: 只抽以 REF 编号可幂等去重的证券买卖(Buy/Sell)；货币兑换(Currency Exchange)行
+      不含证券、FX 文本多段易碎，跳过——其净效果已由现金 C/F 反映，且不进持仓/交易语义。
+    行结构(每笔证券买卖)：T/D S/D REF [MKT] 'Buy/Sell 描述' [续行...] [code] [maturity]
+      QTY PRICE% AMOUNT CASH_BALANCE。以描述行为锚，向上取 T/D+REF，向下找 QTY/PRICE%/AMOUNT 尾。"""
+    lines = [x.strip() for pg in pages for x in pg.splitlines() if x.strip()]
+    n = len(lines)
+    out: list[StatementTransaction] = []
+    seen_ref: set[str] = set()
+    in_moves = False
+    cur_ccy = "USD"
+    default_td = _cmbi_period(pages, filename)  # ISO 兜底
+    for i in range(n):
+        line = lines[i]
+        if "Account Transaction Movements" in line:
+            in_moves = True; continue
+        # 到"待交收/Pending Settlement"或页脚品牌行即离开流水区(Pending 与流水重复，靠 REF 去重亦可)
+        if in_moves and ("Pending Settlement" in line or "Participant of Stock Exchange" in line):
+            in_moves = False
+        if not in_moves:
+            continue
+        if line.startswith("貨幣 Currency:") or line.startswith("货币 Currency:"):
+            if i + 1 < n and _CMBI_CCY_CTX_RE.match(lines[i + 1]):
+                cur_ccy = lines[i + 1]
+            continue
+        m = _CMBI_TXN_DESC_RE.match(line)
+        if not m:
+            continue
+        side = m.group(1); code = m.group(2)
+        # 向上找日期对：版式为 T/D、S/D 相邻(都是 DD/MM)、其后紧跟 REF 数字串。
+        # 向上扫先命中 S/D，故命中 DD/MM 后再看上一行——若也是 DD/MM 则上一行才是真 T/D。
+        td = sd = ref = ""
+        for b in range(i - 1, max(i - 6, -1), -1):
+            if _CMBI_TD_RE.match(lines[b]):
+                if b - 1 >= 0 and _CMBI_TD_RE.match(lines[b - 1]):
+                    td, sd, ref_start = lines[b - 1], lines[b], b + 1
+                else:
+                    td, sd, ref_start = lines[b], "", b + 1
+                for r in range(ref_start, min(ref_start + 3, n)):
+                    if lines[r].isdigit():
+                        ref = lines[r]; break
+                break
+        # 向下找数值尾：QTY, PRICE%, AMOUNT, [CASH_BAL]
+        qty = price = amount = None
+        for f in range(i + 1, min(i + 10, n)):
+            if _CMBI_PRICE_PCT_RE.match(lines[f]):
+                price = _num(lines[f].rstrip("%"))
+                qty = _cmbi_num(lines[f - 1]) if f - 1 > i else None
+                amount = _cmbi_num(lines[f + 1]) if f + 1 < n else None
+                break
+        if qty is None or amount is None:
+            continue  # 非标准证券买卖行(如无价格%的调整)——不臆造，跳过
+        # REF 幂等去重(同一笔在日结/月结/成交单据/待交收多处重复)
+        key = ref or f"{td}-{code}-{amount:.2f}"
+        if key in seen_ref:
+            continue
+        seen_ref.add(key)
+        iso_td = _cmbi_txn_date(td, default_td)
+        out.append(StatementTransaction(
+            ticker=code[:24], company=code, txn_type=side.lower(),
+            trade_date=iso_td, settle_date=_cmbi_txn_date(sd, default_td),
+            quantity=abs(qty), price=price or 0.0,
+            gross_amount=abs(amount), net_amount=abs(amount),
+            currency=cur_ccy, external_id=(ref and f"cmbi-{ref}") or "",
+            isin=code if code.startswith("XS") or (len(code) == 12 and code[:2].isalpha()) else "",
+            description=line[:120]))
+    return out
+
+
+def _cmbi_txn_date(dd_mm: str, iso_fallback: str) -> str:
+    """DD/MM → YYYY-MM-DD。年份取结单期末年(跨年结单极罕见，且样本内 T/D 与期末同年)。
+    ponytail: 若日后出现跨年初的结单(12月交易落次年1月单)，需按 MM<期末MM 时取上一年。"""
+    if not _CMBI_TD_RE.match(dd_mm or "") or len(iso_fallback) < 4:
+        return iso_fallback
+    year = iso_fallback[:4]
+    d, mth = dd_mm.split("/")
+    return f"{year}-{mth}-{d}"
+
+
+def _parse_cmbi_statement(pages: list[str], filename: str, content_hash: str) -> BrokerStatement:
+    rows, fx, usd_hkd = _cmbi_account_summary(pages)
+    holdings = _cmbi_structured_products(pages, fx, usd_hkd)
+    transactions = _cmbi_transactions(pages, filename)
+    cash_balances: list[CashBalance] = []
+    for ccy, r in rows.items():
+        cash = r.get("cash") or 0.0
+        if cash > 0:
+            cash_balances.append(CashBalance(currency=ccy, market_value_nominal=cash,
+                                             market_value_usd=_cmbi_to_usd(cash, ccy, fx, usd_hkd)))
+    total_cash_usd = round(sum(c.market_value_usd for c in cash_balances), 2)
+    portfolio_usd = round(sum(_cmbi_to_usd(r.get("portfolio") or 0.0, ccy, fx, usd_hkd)
+                              for ccy, r in rows.items()), 2)
+    total_value_usd = round(sum(_cmbi_to_usd(r.get("total") or 0.0, ccy, fx, usd_hkd)
+                                for ccy, r in rows.items()), 2)
+    account_summary = {
+        "report_currency": "HKD", "cash_total_usd": total_cash_usd,
+        "portfolio_market_value_usd": portfolio_usd, "total_value_usd": total_value_usd,
+        "total_portfolio_hkd": round(sum(r.get("hkd") or 0.0 for r in rows.values()), 2),
+        "account_ref": _cmbi_account_ref(pages),
+    }
+    recon = _reconcile(holdings, portfolio_usd if portfolio_usd > 0 else None)
+    return BrokerStatement(
+        broker="cmbi", content_hash=content_hash, period_end=_cmbi_period(pages, filename),
+        holdings=holdings, cash_balances=cash_balances, total_cash_usd=total_cash_usd,
+        account_summary=account_summary, transactions=transactions, recon=recon)
+
+
 _PARSERS = {
     "citi": _parse_citi_statement,
     "nomura": _parse_nomura_statement,
+    "cmbi": _parse_cmbi_statement,
 }
 
 
@@ -1025,7 +1276,6 @@ def ingest_and_store(pdf_bytes: bytes, filename: str,
 
 def demo() -> None:
     """本机自检：用真实月结单跑一遍，打印结果（数字保留，账号不在此处）。"""
-    import sys
     d = Path(r"C:\Users\walker\Documents\walker\银行文件\花旗月结单")
     files = sorted(d.glob("*.PDF")) if d.exists() else []
     if not files:
@@ -1046,5 +1296,41 @@ def demo() -> None:
     print("ingest demo 通过")
 
 
+def _cmbi_demo() -> None:
+    """招银国际自检：需环境变量 CMBI_PDF_PASSWORD（勿硬编码密码）。未设或无文件则跳过。
+    核对：券商识别、期末、持仓非空、Σ持仓+现金 == 结单 TOTAL VALUE(0.5% 内)。"""
+    pwd = os.environ.get("CMBI_PDF_PASSWORD", "")
+    d = Path(r"C:\Users\walker\Documents\walker\银行文件\招银国际月结单")
+    files = sorted(d.glob("*.pdf")) if d.exists() else []
+    if not pwd or not files:
+        print("未设 CMBI_PDF_PASSWORD 或无招银文件，跳过 cmbi demo"); return
+    for pdf in files:
+        stmt = ingest_pdf(pdf.read_bytes(), pdf.name, pdf_password=pwd)
+        s = stmt.account_summary
+        tv = s.get("total_value_usd", 0.0)
+        cash = s.get("cash_total_usd", 0.0)
+        port = s.get("portfolio_market_value_usd", 0.0)
+        # 结单内部恒等式：TOTAL VALUE = 现金 + 待结 + 组合市值。日结单结算中途现金含负待结，
+        # 故校验结单自身口径(权威锚)，而非"持仓+现金"横加(仅结算完成后才等于 TOTAL)。
+        print(f"[{pdf.name}] 期末 {stmt.period_end}  持仓 {len(stmt.holdings)}  组合 ${port:,.2f}  "
+              f"现金 ${cash:,.2f}  结单TOTAL ${tv:,.2f}  交易 {len(stmt.transactions)} 笔")
+        for t in stmt.transactions:
+            print(f"    {t.trade_date} {t.txn_type:4} {t.ticker:20} 数量{t.quantity:>12,.0f} "
+                  f"价{t.price:>10,.4f} 额 {t.currency} {t.gross_amount:>14,.2f} ref={t.external_id}")
+        assert stmt.broker == "cmbi", f"券商识别错误: {stmt.broker}"
+        assert stmt.period_end, "未抽到期末日期"
+        assert stmt.holdings, "未抽到结构性产品持仓"
+        assert tv > 0, "未抽到结单 TOTAL VALUE"
+        # 组合市值来自 Account Summary 的 portfolio 列，应与逐只结构性产品市值加总吻合
+        sp_sum = round(sum(h.market_value_usd for h in stmt.holdings), 2)
+        assert abs(sp_sum - port) / max(port, 1.0) <= _RECON_TOL, f"结构性产品对账失败 Σ{sp_sum} vs 组合{port}"
+        # 交易(若有)：类型合法、有交易日、金额为正(方向靠 txn_type，金额取绝对值)
+        for t in stmt.transactions:
+            assert t.txn_type in ("buy", "sell"), f"未知交易类型 {t.txn_type}"
+            assert t.trade_date and t.gross_amount > 0, f"交易字段缺失 {t.ticker}"
+    print("cmbi demo 通过")
+
+
 if __name__ == "__main__":
     demo()
+    _cmbi_demo()

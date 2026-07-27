@@ -10,14 +10,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +129,6 @@ async def check_thesis_validity(
     pillars = store.get_pillars(thesis_id)
     ticker = thesis["ticker"]
 
-    snapshots = store.get_snapshots(ticker, days=30)
-    latest_snap = snapshots[-1] if snapshots else {}
-
     weakened = []
     broken = []
 
@@ -150,12 +146,13 @@ async def check_thesis_validity(
                          if e.get("pillar_id") == pillar["id"]
                          and e.get("direction") == "contradicting"]
 
-        if len(contradicting) >= 3:
-            store.update_pillar_status(pillar["id"], "weakened")
-            weakened.append(pillar["pillar_text"])
-        elif len(contradicting) >= 5:
+        # 先判更严重的 broken(≥5)，再判 weakened(≥3)——否则 ≥5 必先命中 ≥3，broken 分支永不可达
+        if len(contradicting) >= 5:
             store.update_pillar_status(pillar["id"], "broken")
             broken.append(pillar["pillar_text"])
+        elif len(contradicting) >= 3:
+            store.update_pillar_status(pillar["id"], "weakened")
+            weakened.append(pillar["pillar_text"])
 
     total = len(pillars)
     broken_count = len(broken)

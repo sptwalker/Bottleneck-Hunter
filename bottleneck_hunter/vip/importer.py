@@ -155,6 +155,7 @@ def _match_account_by_ref(accounts: list[dict], ref: str) -> dict | None:
 _BROKER_ALIASES = {
     "nomura": ("nomura", "nsl", "野村"),
     "citi": ("citi", "citibank", "citigroup", "花旗", "花旗环球"),
+    "cmbi": ("cmbi", "cmbis", "招银", "招银国际"),
 }
 
 
@@ -253,7 +254,8 @@ def _import_pdf(raw, filename, user_id, wl_store, market, account_ref, password)
 
 
 def _import_derivative(raw, filename, kind, wl_store, password, account_ref: str = "") -> ImportResult:
-    from bottleneck_hunter.vip import derivatives as drv, ingest
+    from bottleneck_hunter.vip import derivatives as drv
+    from bottleneck_hunter.vip import ingest
     broker = ""
     try:
         pages = ingest._extract_pages(raw, pdf_password=password)
@@ -360,11 +362,19 @@ def _import_statement(raw, filename, user_id, wl_store, market, account_ref, pas
                             key_metrics={"period_end": stmt.period_end, "broker": stmt.broker,
                                          "as_of_date": norm["as_of_date"]})
     nav = None
-    if getattr(stmt, "broker", "") == "nomura":
-        nav = (getattr(stmt, "account_summary", {}) or {}).get("net_asset_value_usd")
+    broker_id = getattr(stmt, "broker", "")
+    summary = getattr(stmt, "account_summary", {}) or {}
+    if broker_id == "nomura":
+        nav = summary.get("net_asset_value_usd")
         # 野村摘要抽取(_parse_nomura_summary 的固定列偏移)对当前版式不可靠：会把负债当 NAV(负值)、
         # 权益合计抽成 0。非正 NAV 不可信 → 回落 None，让 materialize 用"持仓+现金"算总权益。
         # ponytail: 拿到可复现的野村版式样本后，应改 _parse_nomura_summary 按列锚点定位以取回真实 NAV。
+        if not nav or nav <= 0:
+            nav = None
+    elif broker_id == "cmbi":
+        # 招银 TOTAL VALUE = 现金 + 待结 + 组合市值，是结单权威总权益锚。日结单结算中途现金仍含
+        # 待结的 FCN 付款(待结列为负)，直接"持仓+现金"会重复计其名义 → 必须用 TOTAL VALUE 覆盖。
+        nav = summary.get("total_value_usd")
         if not nav or nav <= 0:
             nav = None
     mat = portfolio.materialize_portfolio(wl_store, as_of_date=norm["as_of_date"],
@@ -410,6 +420,7 @@ def _norm_header(h) -> str:
 def parse_tabular(raw: bytes, file_type: str):
     """读 CSV/Excel 为 DataFrame（pandas 已是主依赖，统一处理两种格式 + 编码兜底）。"""
     import io
+
     import pandas as pd
     if file_type == "excel":
         return pd.read_excel(io.BytesIO(raw))          # openpyxl 后端
