@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BottleneckHunter — AI 产业链瓶颈选股</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=64">
+  <link rel="stylesheet" href="/static/css/style.css?v=67">
   <link rel="stylesheet" href="/static/css/admin.css?v=1">
   <script src="/static/vendor/echarts.min.js"></script>
   <script src="/static/vendor/d3.min.js"></script>
@@ -1542,53 +1542,364 @@
 
 <!-- Admin Modal -->
 <div id="view-vip" class="view">
-  <div class="wl-page-header">
-    <h2 class="wl-page-title">★ VIP 私人财务顾问</h2>
-    <p class="account-hint">导入券商月结单（PDF），系统解析持仓、生成投资分析报告。数据加密存储，仅你可见。</p>
-  </div>
-  <div class="vip-panel" style="max-width:960px;margin:0 auto;padding:16px">
-    <div class="account-section">
-      <h4>1. 上传月结单</h4>
-      <div class="account-form" style="align-items:center;gap:12px">
-        <input type="file" id="vip-file" accept="application/pdf,.pdf">
-        <select class="form-input" id="vip-market" style="max-width:120px">
+  <div class="wl-container">
+    <div class="st-header vip-toolbar">
+      <div>
+        <h2 class="wl-page-title">★ VIP 私人财务顾问</h2>
+        <p class="account-hint">导入券商月结单 / 导出流水 / 衍生品文件，形成真实账户工作台。数据加密存储，仅你可见。</p>
+      </div>
+      <div class="vip-toolbar-actions">
+        <select id="vip-market" class="wl-filter-select" style="display:none">
           <option value="us_stock">美股</option>
           <option value="a_stock">A股</option>
         </select>
-        <button class="btn btn-sm btn-primary" id="vip-upload-btn">上传并解析</button>
-        <span class="account-status" id="vip-upload-status"></span>
-      </div>
-      <div id="vip-docs" style="margin-top:12px"></div>
-    </div>
-    <div class="account-section">
-      <h4>2. 上传日常衍生品文件</h4>
-      <div class="account-form" style="align-items:center;gap:12px">
-        <input type="file" id="vip-deriv-file" accept="application/pdf,.pdf">
-        <button class="btn btn-sm btn-primary" id="vip-deriv-upload-btn">上传并建模</button>
-        <span class="account-status" id="vip-deriv-status"></span>
-      </div>
-      <div id="vip-deriv-list" style="margin-top:12px"></div>
-    </div>
-    <div class="account-section">
-      <h4>3. 实时咨询窗口</h4>
-      <div id="vip-chat-log" style="margin:12px 0; min-height:160px; max-height:360px; overflow:auto; background:#fff; border:1px solid var(--border); border-radius:12px; padding:12px"></div>
-      <div class="account-form" style="align-items:flex-end;gap:12px">
-        <textarea id="vip-chat-input" class="form-input" rows="3" placeholder="例如：我现在的累积器/减持器最大的风险是什么？现金够不够支持进一步波动？" style="min-height:88px;flex:1"></textarea>
-        <button class="btn btn-sm btn-primary" id="vip-chat-send">发送</button>
-      </div>
-      <div class="account-form" style="margin-top:8px;gap:12px;align-items:center">
-        <button class="btn btn-sm" id="vip-chat-new">新会话</button>
-        <span class="account-status" id="vip-chat-status"></span>
+        <select id="vip-account-ref" class="wl-filter-select" style="display:none">
+          <option value="">暂无可选账户</option>
+        </select>
+        <button class="btn btn-sm" id="vip-toolbar-import" type="button">导入中心</button>
+        <button class="btn btn-sm" id="vip-account-manage" type="button">管理账户</button>
+        <span id="vip-account-status" class="account-status"></span>
       </div>
     </div>
-    <div class="account-section">
-      <h4>4. 生成投资分析报告</h4>
-      <div class="account-form" style="align-items:center;gap:12px">
-        <label style="font-size:13px"><input type="checkbox" id="vip-with-ai" checked> 含 AI 顾问团队叙事</label>
-        <button class="btn btn-sm btn-primary" id="vip-report-btn">生成报告</button>
-        <span class="account-status" id="vip-report-status"></span>
+
+    <div class="vip-primary-tabs-wrap">
+      <div class="st-tabs vip-primary-tabs" id="vip-primary-tabs" role="tablist"></div>
+    </div>
+    <div class="st-tabs vip-sub-tabs" id="vip-account-subtabs" role="tablist" style="display:none"></div>
+    <p class="account-hint vip-account-heading" id="vip-account-heading" style="display:none"></p>
+
+    <div class="st-tab-pane active" id="vip-pane-dashboard" role="tabpanel">
+      <div class="st-stat-grid" id="vip-overview-stats">
+        <div class="st-stat-card">
+          <span class="st-stat-value" id="vip-total-equity">--</span>
+          <span class="st-stat-label">总权益</span>
+        </div>
+        <div class="st-stat-card">
+          <span class="st-stat-value" id="vip-cash-balance">--</span>
+          <span class="st-stat-label">可投资现金</span>
+        </div>
+        <div class="st-stat-card">
+          <span class="st-stat-value" id="vip-holdings-count">--</span>
+          <span class="st-stat-label">持仓数</span>
+        </div>
+        <div class="st-stat-card">
+          <span class="st-stat-value" id="vip-transaction-count">--</span>
+          <span class="st-stat-label">交易笔数</span>
+        </div>
+        <div class="st-stat-card">
+          <span class="st-stat-value" id="vip-net-inflow">--</span>
+          <span class="st-stat-label">累计净流入</span>
+        </div>
+        <div class="st-stat-card">
+          <span class="st-stat-value" id="vip-fee-total">--</span>
+          <span class="st-stat-label">累计费用</span>
+        </div>
       </div>
-      <div id="vip-report" style="margin-top:16px;line-height:1.7"></div>
+
+      <div class="st-perf-grid" style="margin-top:16px">
+        <div class="st-card">
+          <div class="st-card-header">
+            <h3>价值变化曲线</h3>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span id="vip-staleness-badge" class="vip-stale-badge" style="display:none"></span>
+              <button class="btn btn-sm" id="vip-account-log-btn" type="button">账户日志</button>
+            </div>
+          </div>
+          <div class="st-card-body">
+            <div id="vip-value-chart" style="width:100%;height:260px"></div>
+          </div>
+        </div>
+        <div class="st-card">
+          <div class="st-card-header"><h3>持仓构成</h3></div>
+          <div class="st-card-body">
+            <div id="vip-holdings-pie" style="width:100%;height:260px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="st-perf-grid" style="margin-top:16px">
+        <div class="st-card">
+          <div class="st-card-header"><h3>逐期收益率</h3></div>
+          <div class="st-card-body">
+            <div id="vip-returns-chart" style="width:100%;height:240px"></div>
+          </div>
+        </div>
+        <div class="st-card">
+          <div class="st-card-header"><h3>风险仪表盘</h3></div>
+          <div class="st-card-body">
+            <div class="st-stat-grid" id="vip-risk-grid">
+              <div class="st-stat-card"><span class="st-stat-value" id="vip-risk-top5">--</span><span class="st-stat-label">前五大集中度</span></div>
+              <div class="st-stat-card"><span class="st-stat-value" id="vip-risk-cash">--</span><span class="st-stat-label">现金占比</span></div>
+              <div class="st-stat-card"><span class="st-stat-value" id="vip-risk-drawdown">--</span><span class="st-stat-label">跨期最大回撤</span></div>
+              <div class="st-stat-card"><span class="st-stat-value" id="vip-risk-deriv">--</span><span class="st-stat-label">衍生品敞口数</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="st-card" style="margin-top:16px">
+        <div class="st-card-header">
+          <h3>账户管理</h3>
+          <button class="btn btn-sm" id="vip-overview-manage" type="button">管理账户</button>
+        </div>
+        <div class="st-card-body">
+          <p class="account-hint" style="margin-bottom:12px">子账户平等管理，导入成功后会同步刷新总览与对应子账户。</p>
+          <div id="vip-overview-accounts"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="st-tab-pane" id="vip-pane-import" role="tabpanel">
+      <div class="st-card">
+        <div class="st-card-header">
+          <h3>通用导入</h3>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="vip-import-account" class="st-select" style="min-width:220px">
+              <option value="">自动识别并归户</option>
+            </select>
+            <button class="btn btn-sm" id="vip-import-manage" type="button">管理账户</button>
+          </div>
+        </div>
+        <div class="st-card-body">
+          <p class="account-hint" style="margin-bottom:12px">上传任意券商月结单 / 交易导出（PDF）或交易流水表（CSV / Excel），系统自动识别类型并入库。可直接自动归户，也可手动指定子账户。加密文件请在弹窗中输入密码。</p>
+          <div id="vip-dropzone" class="vip-dropzone">
+            <input type="file" id="vip-import-file" accept=".pdf,.csv,.tsv,.txt,.xlsx,.xls" style="display:none">
+            <div class="vip-dropzone-inner">
+              <div style="font-size:14px;font-weight:600">拖拽文件到此处，或点击选择</div>
+              <div style="font-size:12px;color:var(--muted);margin-top:6px">支持 PDF / CSV / Excel，单文件 ≤ 20MB</div>
+            </div>
+          </div>
+          <div id="vip-import-results" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="st-card">
+          <div class="st-card-header"><h3>导入历史</h3></div>
+          <div class="st-card-body" style="max-height:360px;overflow-y:auto">
+            <table class="st-table">
+              <thead><tr><th>文件名</th><th>账户</th><th>时间</th><th>类型</th><th>状态</th><th>摘要 / 主要数据</th></tr></thead>
+              <tbody id="vip-imports-body"></tbody>
+            </table>
+            <p class="st-empty-hint" id="vip-imports-empty">暂无导入记录</p>
+          </div>
+        </div>
+        <div class="st-card" style="margin-top:16px">
+          <div class="st-card-header"><h3>数据体检 · 待补充</h3></div>
+          <div class="st-card-body"><div id="vip-missing"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="st-tab-pane" id="vip-pane-positions" role="tabpanel">
+      <div class="st-card">
+        <div class="st-card-header"><h3>最近持仓</h3></div>
+        <div class="st-card-body">
+          <table class="st-table">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>持仓数</th>
+                <th>成本价</th>
+                <th>当前价</th>
+                <th>市值</th>
+                <th>未实现盈亏</th>
+                <th>权重</th>
+              </tr>
+            </thead>
+            <tbody id="vip-positions-body"></tbody>
+          </table>
+          <p class="st-empty-hint" id="vip-positions-empty">暂无持仓记录</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="st-tab-pane" id="vip-pane-history" role="tabpanel">
+      <div class="st-card">
+        <div class="st-card-header">
+          <h3>历史交易</h3>
+          <div class="st-history-filters">
+            <input type="text" class="st-input" id="vip-history-ticker" placeholder="按 Ticker 筛选">
+            <select class="st-select" id="vip-history-type">
+              <option value="">全部类型</option>
+              <option value="buy">买入</option>
+              <option value="sell">卖出</option>
+              <option value="dividend">股息</option>
+              <option value="interest">利息</option>
+              <option value="fee">费用</option>
+              <option value="deposit">入金</option>
+              <option value="withdrawal">出金</option>
+            </select>
+            <input type="date" class="st-input" id="vip-history-start">
+            <input type="date" class="st-input" id="vip-history-end">
+            <button class="btn btn-sm" id="vip-history-search">搜索</button>
+          </div>
+        </div>
+        <div class="st-card-body">
+          <table class="st-table">
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>标的</th>
+                <th>类型</th>
+                <th>币种</th>
+                <th>金额</th>
+                <th>净额</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody id="vip-transactions-body"></tbody>
+          </table>
+          <p class="st-empty-hint" id="vip-transactions-empty">暂无交易记录</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="st-tab-pane" id="vip-pane-mandate" role="tabpanel">
+      <div class="st-card">
+        <div class="st-card-header"><h3>本账户投资纲领</h3></div>
+        <div class="st-card-body">
+          <p class="vip-form-intro">为该账户设定投资设想与目标——顾问报告、实时咨询与分层建议都会据此给出方向。标注<span class="vip-field-hard">硬约束</span>的项（回撤上限、排除清单）不可被建议突破。</p>
+
+          <div class="vip-form-section">
+            <h4>风险与目标</h4>
+            <div class="vip-form-grid">
+              <label class="vip-field">
+                <span class="vip-field-label">风险偏好</span>
+                <select id="vip-mn-risk" class="form-select">
+                  <option value="aggressive">激进（追求收益，容忍波动）</option>
+                  <option value="balanced">中性（收益与风险平衡）</option>
+                  <option value="conservative">保守（回撤敏感，优先防守）</option>
+                </select>
+              </label>
+              <label class="vip-field">
+                <span class="vip-field-label">持有周期取向</span>
+                <select id="vip-mn-horizon" class="form-select">
+                  <option value="short">短线（日/周）</option>
+                  <option value="swing">波段（月级）</option>
+                  <option value="long">长线（季/年）</option>
+                </select>
+              </label>
+              <label class="vip-field">
+                <span class="vip-field-label">年度收益目标 %</span>
+                <input type="number" id="vip-mn-return" class="form-input" min="0" max="200" step="1">
+              </label>
+              <label class="vip-field">
+                <span class="vip-field-label">最大可接受回撤 % <span class="vip-field-hard">· 硬约束</span></span>
+                <input type="number" id="vip-mn-drawdown" class="form-input" min="5" max="60" step="1">
+              </label>
+            </div>
+          </div>
+
+          <div class="vip-form-section">
+            <h4>专注方向</h4>
+            <div class="vip-form-grid">
+              <label class="vip-field">
+                <span class="vip-field-label">专注市场</span>
+                <input type="text" id="vip-mn-markets" class="form-input" placeholder="如：美股为主，少量港股">
+              </label>
+              <label class="vip-field">
+                <span class="vip-field-label">专注行业方向</span>
+                <input type="text" id="vip-mn-sectors" class="form-input" placeholder="如：AI 算力、半导体、云计算">
+              </label>
+            </div>
+          </div>
+
+          <div class="vip-form-section">
+            <h4>原则与约束</h4>
+            <div class="vip-form-grid">
+              <label class="vip-field vip-field--full">
+                <span class="vip-field-label">长期投资原则</span>
+                <textarea id="vip-mn-principles" class="form-textarea" rows="3" placeholder="如：只买看得懂的生意；估值过高不追；长期持有龙头，波段做减法"></textarea>
+              </label>
+              <label class="vip-field vip-field--full">
+                <span class="vip-field-label">排除 / 禁投清单 <span class="vip-field-hard">· 硬约束，不得推荐</span></span>
+                <textarea id="vip-mn-exclusions" class="form-textarea" rows="2" placeholder="如：白酒、纯题材小盘、杠杆 ETF"></textarea>
+              </label>
+            </div>
+          </div>
+
+          <div class="vip-mandate-actions">
+            <button class="btn btn-sm btn-primary" id="vip-mandate-save" type="button">保存纲领</button>
+            <span class="account-status" id="vip-mandate-status"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="st-tab-pane" id="vip-pane-advisory" role="tabpanel">
+      <div class="st-card">
+        <div class="st-card-header"><h3>顾问决策建议（逐仓 减 / 持 / 加）</h3></div>
+        <div class="st-card-body">
+          <p class="vip-form-intro">按本账户真实持仓 + 投资纲领 + L1 宏观（只读），出逐仓操作建议并经投委会 4 席评审。<b>仅供参考、不下单执行。</b></p>
+          <div class="vip-mandate-actions vip-mandate-actions--bare">
+            <button class="btn btn-sm btn-primary" id="vip-advisory-generate" type="button">生成建议</button>
+            <span class="account-status" id="vip-advisory-status"></span>
+          </div>
+          <div id="vip-advisory-history"></div>
+          <div id="vip-advisory-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="st-tab-pane" id="vip-pane-recommend" role="tabpanel">
+      <div class="st-card">
+        <div class="st-card-header"><h3>荐新建议（观察池 → 建仓 / 关注 / 规避）</h3></div>
+        <div class="st-card-body">
+          <p class="vip-form-intro">先按本账户可交易市场过滤观察池，剔除已持有 + 纲领排除后，结合档案 + 纲领 + L1 宏观挑新标的并经投委会 4 席评审。<b>仅供参考、不下单执行。</b></p>
+          <div class="vip-mandate-actions vip-mandate-actions--bare">
+            <button class="btn btn-sm btn-primary" id="vip-recommend-generate" type="button">生成建议</button>
+            <span class="account-status" id="vip-recommend-status"></span>
+          </div>
+          <div id="vip-recommend-history"></div>
+          <div id="vip-recommend-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="st-tab-pane" id="vip-pane-reports" role="tabpanel">
+      <div class="st-card" style="margin-bottom:16px">
+        <div class="st-card-header"><h3>生成顾问报告</h3></div>
+        <div class="st-card-body">
+          <div class="account-form" style="align-items:center;gap:12px;flex-wrap:wrap">
+            <label style="font-size:13px"><input type="checkbox" id="vip-with-ai" checked> 含 AI 顾问团队叙事</label>
+            <button class="btn btn-sm btn-primary" id="vip-report-btn">生成报告</button>
+            <span class="account-status" id="vip-report-status"></span>
+          </div>
+          <div id="vip-report" style="margin-top:16px;line-height:1.7"></div>
+        </div>
+      </div>
+      <div class="st-perf-grid">
+        <div class="st-card">
+          <div class="st-card-header"><h3>历史报告</h3></div>
+          <div class="st-card-body" id="vip-report-list">
+            <p class="st-empty-hint">暂无报告</p>
+          </div>
+        </div>
+        <div class="st-card">
+          <div class="st-card-header"><h3>报告内容</h3></div>
+          <div class="st-card-body">
+            <div id="vip-report-viewer" style="line-height:1.7"><p class="st-empty-hint">请选择左侧报告</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="st-tab-pane" id="vip-pane-chat" role="tabpanel">
+      <div class="st-card">
+        <div class="st-card-header"><h3>实时咨询窗口</h3></div>
+        <div class="st-card-body">
+          <div id="vip-chat-log" style="margin:12px 0; min-height:160px; max-height:360px; overflow:auto; background:#fff; border:1px solid var(--border); border-radius:12px; padding:12px"></div>
+          <div class="account-form" style="align-items:flex-end;gap:12px">
+            <textarea id="vip-chat-input" class="form-input" rows="3" placeholder="例如：我现在的累积器/减持器最大的风险是什么？现金够不够支持进一步波动？" style="min-height:88px;flex:1"></textarea>
+            <button class="btn btn-sm btn-primary" id="vip-chat-send">发送</button>
+          </div>
+          <div class="account-form" style="margin-top:8px;gap:12px;align-items:center">
+            <button class="btn btn-sm" id="vip-chat-new">新会话</button>
+            <span class="account-status" id="vip-chat-status"></span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -1900,7 +2211,7 @@
 
 <!-- 推荐配置弹窗已退役（智能调度取代静态推荐冻结）-->
 
-<script type="module" src="/static/js/app.js?v=81"></script>
+<script type="module" src="/static/js/app.js?v=95"></script>
 <script src="/static/js/syslog.js"></script>
 <script>
   window.addEventListener('error', e => {
@@ -1971,7 +2282,68 @@
   </div>
 </div>
 
+<!-- VIP 账户管理抽屉 -->
+<div class="drawer-overlay" id="vip-accounts-drawer" style="display:none">
+  <div class="drawer-panel">
+    <div class="drawer-header">
+      <h3>管理账户 <span id="vip-accounts-market" style="font-size:13px;color:var(--muted)"></span></h3>
+      <button class="drawer-close" id="vip-accounts-close">&#10005;</button>
+    </div>
+    <div class="drawer-body">
+      <div class="account-section">
+        <h4>账户列表</h4>
+        <table class="st-table" style="width:100%">
+          <thead><tr><th>名称</th><th>标识</th><th>机构</th><th>类型</th><th>首选</th><th>操作</th></tr></thead>
+          <tbody id="vip-accounts-tbody"></tbody>
+        </table>
+      </div>
+      <div class="account-section">
+        <h4 id="vip-account-form-title">新建账户</h4>
+        <div class="account-form">
+          <input type="text" id="vip-af-ref" placeholder="账户标识（如 CITI-1，创建后不可改）">
+          <input type="text" id="vip-af-name" placeholder="显示名称（留空则同标识）">
+          <input type="text" id="vip-af-inst" placeholder="银行/券商名称（可留空）">
+          <select id="vip-af-kind" class="wl-filter-select">
+            <option value="broker">券商</option>
+            <option value="bank">银行</option>
+          </select>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+            <input type="checkbox" id="vip-af-default"> 设为首选账户
+          </label>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-sm btn-primary" id="vip-af-save">保存</button>
+            <button class="btn btn-sm" id="vip-af-reset" style="display:none">取消编辑</button>
+          </div>
+          <span class="account-status" id="vip-af-status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="drawer-overlay" id="vip-log-drawer" style="display:none">
+  <div class="drawer-panel">
+    <div class="drawer-header">
+      <h3>账户日志 <span id="vip-log-account" style="font-size:13px;color:var(--muted)"></span></h3>
+      <button class="drawer-close" id="vip-log-close">&#10005;</button>
+    </div>
+    <div class="drawer-body">
+      <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+        <select id="vip-log-filter" class="wl-filter-select">
+          <option value="">全部事件</option>
+          <option value="projection">系统推算</option>
+          <option value="calibration">结算校准</option>
+          <option value="anomaly">异常提示</option>
+          <option value="settlement">到期结算</option>
+        </select>
+        <button class="btn btn-sm" id="vip-log-refresh" type="button">刷新</button>
+        <span style="font-size:12px;color:var(--muted)">逐条记录自动推算与校准；偏差过大会以警示色标注</span>
+      </div>
+      <div id="vip-log-list"><p class="st-empty-hint">加载中…</p></div>
+    </div>
+  </div>
+</div>
+
 <script type="module" src="/static/js/account.js?v=2"></script>
-<script type="module" src="/static/js/vip.js?v=1"></script>
 </body>
 </html>
