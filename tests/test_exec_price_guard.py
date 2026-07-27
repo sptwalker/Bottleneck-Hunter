@@ -107,6 +107,13 @@ def test_resting_order_validation_fail_holds_not_reject():
     assert store.rejected is None  # 没有被撤单
 
 
+def test_string_planned_price_no_typeerror():
+    """脏数据：target_price 是字符串 → 不再 '>' str vs int 崩溃，按数值处理转挂单。"""
+    store = _FakeStore(snapshot_close=200.0, planned_price="100.0", action="buy")
+    r = execute_trade(store, "p1")
+    assert r.get("rested") is True, r  # "100.0" 被 coerce 成 100.0，市价 200 不利→挂单
+
+
 if __name__ == "__main__":
     test_no_snapshot_refuses_fill()
     test_unfavorable_price_parks_as_resting()

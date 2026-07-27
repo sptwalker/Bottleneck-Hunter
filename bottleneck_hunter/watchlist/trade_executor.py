@@ -85,6 +85,10 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     planned_price = (plan.get("target_price")
                      or result_json.get("target_price")
                      or result_json.get("estimated_price", 0))
+    try:
+        planned_price = float(planned_price) if planned_price not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        planned_price = 0.0  # 挂单价脏数据(字符串/None)→按市价单处理，不再拿它跟市价比大小
 
     # 诚信/防前视偏差：成交必须基于真实市价快照。取不到真实快照时【拒绝成交】，
     # 绝不用 L4 规划时 LLM 估的目标价成交（那会用幻觉价污染 sim_trades / win_rate / 自进化回路）。

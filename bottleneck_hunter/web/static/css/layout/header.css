@@ -141,6 +141,24 @@
 .account-status.success { color: #16a34a; }
 .account-status.error { color: #dc2626; }
 
+/* ── VIP 校准新鲜度徽标 ── */
+.vip-stale-badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; cursor: default; }
+.vip-stale-ok    { background: rgba(34,197,94,.14);  color: #16a34a; }
+.vip-stale-warn  { background: rgba(245,158,11,.16); color: #d97706; }
+.vip-stale-alert { background: rgba(239,68,68,.16);  color: #dc2626; }
+
+/* ── VIP 账户日志 ── */
+#vip-log-list { display: flex; flex-direction: column; gap: 8px; }
+.vip-log-item { border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; padding: 8px 10px; }
+.vip-log-item.vip-log-info  { border-left-color: #6366f1; }
+.vip-log-item.vip-log-warn  { border-left-color: #f59e0b; background: rgba(245,158,11,.05); }
+.vip-log-item.vip-log-alert { border-left-color: #ef4444; background: rgba(239,68,68,.06); }
+.vip-log-head { display: flex; align-items: center; gap: 8px; }
+.vip-log-type { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--border); color: var(--muted); flex-shrink: 0; }
+.vip-log-title { font-size: 13px; font-weight: 600; flex: 1; }
+.vip-log-ts { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+.vip-log-detail { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+
 #btn-logout {
   padding: 0 6px;
   height: auto;

@@ -523,6 +523,25 @@ export function openCompanyDrawer(ctx) {
 
   setDrawerTab('info');
   loadDrawerTabData(entry, 'info');
+
+  // 池成员懒解析：VIP/分析等页面可能从未加载过观察池，wlState.entries 为空导致已入池标的
+  // 无法在上面的同步匹配中升级为全量视图。此处按需拉一次全量条目，命中则补全 id 并重载当前页签。
+  if (!entry.id && entry.ticker && !wlState.entries.length && !wlState._entriesLoaded) {
+    wlState._entriesLoaded = true;
+    apiFetch('').then(data => {
+      wlState.entries = data.entries || wlState.entries;
+      const hit = (wlState.entries || []).find(e => _sameTicker(e.ticker, entry.ticker));
+      if (hit && wlState.drawerEntry === entry) {  // 抽屉仍停留在同一标的才升级
+        entry.id = hit.id;
+        entry.tier = entry.tier || hit.tier;
+        entry.latest_snapshot = entry.latest_snapshot || hit.latest_snapshot;
+        if (hit.market) entry.market = hit.market;
+        wlState.drawerEntryId = entry.id;
+        document.querySelectorAll('.wl-drawer-tab[data-wl-only]').forEach(t => { t.style.display = ''; });
+        loadDrawerTabData(entry, wlState.drawerTab);
+      }
+    }).catch(() => {});
+  }
 }
 // 暴露到全局：交叉验证/L2/L3/模拟持仓等模块双击列表时调用，避免跨模块循环 import
 if (typeof window !== 'undefined') window.openCompanyDrawer = openCompanyDrawer;
@@ -622,7 +641,14 @@ async function loadScoreTab(entry) {
   }
   if (sc) entry._scorecard = sc;
   if (!sc) {
-    pane.innerHTML = '<div class="wl-empty" style="padding:40px;text-align:center;color:var(--muted)">暂无系统评分数据<br><span style="font-size:12px">该企业需经产业链分析(五维评分/预期差)或反向分析后才有评分</span></div>';
+    if (entry.id) {
+      // 已入池但无五维评分卡（如手动加入/未跑完整分析）：与观察池内表现完全一致
+      pane.innerHTML = '<div class="wl-empty" style="padding:40px;text-align:center;color:var(--muted)">暂无系统评分数据<br><span style="font-size:12px">该企业需经产业链分析(五维评分/预期差)或反向分析后才有评分</span></div>';
+    } else {
+      // 未入池：引导用户经反向分析入池，并给出完整企业代码
+      const code = entry.ticker || '';
+      pane.innerHTML = `<div class="wl-empty" style="padding:40px;text-align:center;color:var(--muted)">尚未进行系统评分<br><span style="font-size:12px">请先将该企业通过反向分析加入到观察池，企业代码为：<b style="color:var(--ink)">${code}</b></span></div>`;
+    }
     return;
   }
   pane.innerHTML = `<div class="wl-score-wrap">${buildDetailGrid(sc)}</div>`;

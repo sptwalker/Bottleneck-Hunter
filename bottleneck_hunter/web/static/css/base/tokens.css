@@ -15,6 +15,7 @@
   --accent-hover: oklch(0.48 0.15 250);
   --success:      oklch(0.55 0.12 155);
   --warning:      oklch(0.6 0.14 85);
+  --warning-strong: #b45309;   /* 深琥珀：浅底上可读的警示文字（AA 5.0:1）；--warning 偏浅仅宜作底/描边 */
   --danger:       oklch(0.55 0.15 25);
   --border:       oklch(0.88 0.005 250);
   --skeleton:     oklch(0.92 0.003 250);

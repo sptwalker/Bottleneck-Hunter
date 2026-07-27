@@ -11,6 +11,40 @@
   margin-bottom: 20px;
 }
 
+.vip-primary-tabs-wrap {
+  overflow-x: auto;
+  margin-bottom: 12px;
+}
+
+.vip-primary-tabs,
+.vip-sub-tabs {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.vip-primary-tabs::-webkit-scrollbar,
+.vip-sub-tabs::-webkit-scrollbar {
+  height: 6px;
+}
+
+.vip-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.vip-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vip-account-heading {
+  margin: -4px 0 16px;
+}
+
 .st-tab {
   position: relative;
   padding: 10px 20px;
@@ -408,6 +442,10 @@
   gap: 16px;
 }
 
+/* echarts 会往容器注入固定 px 宽的 canvas，grid 子项默认 min-width:auto 会以此为最小宽度下限、
+   顶破 1fr 轨道使图表被压窄；归零让轨道纯按 1fr 定宽，图表 width:100% 随之正确铺满 */
+.st-perf-grid > * { min-width: 0; }
+
 @media (max-width: 700px) {
   .st-perf-grid { grid-template-columns: 1fr; }
 }
@@ -529,3 +567,138 @@
 .st-pnl-pos { color: oklch(0.65 0.18 145); }
 .st-pnl-neg { color: oklch(0.65 0.18 25); }
 .st-pnl-zero { color: var(--muted); }
+
+/* ── VIP 通用导入拖拽区 ── */
+.vip-dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 28px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.vip-dropzone:hover,
+.vip-dropzone.dragover {
+  border-color: var(--primary, #6366f1);
+  background: rgba(99, 102, 241, .06);
+}
+.vip-import-row {
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+.vip-import-row.ok { border-left: 3px solid #22c55e; }
+.vip-import-row.dup { border-left: 3px solid #f59e0b; }
+.vip-import-row.bad { border-left: 3px solid #ef4444; }
+.vip-missing-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  background: rgba(148, 163, 184, .08);
+}
+.vip-missing-item.high { border-left: 3px solid #ef4444; }
+.vip-missing-item.medium { border-left: 3px solid #f59e0b; }
+.vip-missing-item.low { border-left: 3px solid #64748b; }
+
+/* ── VIP 投资纲领表单（分区网格，取代内联换行行布局）── */
+.vip-form-intro {
+  font-size: 13px; color: var(--muted); line-height: 1.6;
+  margin: 0 0 18px; padding: 10px 12px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+.vip-form-section { margin-bottom: 22px; }
+.vip-form-section:last-of-type { margin-bottom: 0; }
+.vip-form-section > h4 {
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .5px;
+  margin: 0 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.vip-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px 16px;
+}
+.vip-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.vip-field-label { font-size: 12px; color: var(--ink); font-weight: 500; }
+.vip-field .form-input, .vip-field .form-select, .vip-field .form-textarea { width: 100%; }
+.vip-field--full { grid-column: 1 / -1; }
+.vip-field-hard { color: var(--danger); font-weight: 600; }   /* 硬约束角标 */
+.vip-mandate-actions {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);
+}
+.vip-mandate-actions--bare { margin-top: 0; padding-top: 0; border-top: none; }   /* 顾问页复用按钮行但不要分隔线 */
+
+/* ── VIP 顾问决策 ── */
+.vip-adv-hist-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+#vip-advisory-history { margin-top: 14px; }
+.vip-adv-hist-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+.vip-adv-hist {
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); color: var(--ink); cursor: pointer; font-size: 12px;
+  transition: border-color var(--transition), background var(--transition);
+}
+.vip-adv-hist:hover { border-color: var(--accent); }
+.vip-adv-hist.active { border-color: var(--accent); background: oklch(0.55 0.15 250 / .08); }
+
+.vip-adv-meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.vip-adv-verdict {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  padding: 12px 14px; margin-bottom: 14px;
+  border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px; background: var(--bg);
+}
+.vip-adv-verdict.approve { border-left-color: var(--success); }
+.vip-adv-verdict.reject  { border-left-color: var(--danger); }
+.vip-adv-verdict.split   { border-left-color: var(--warning); }
+.vip-adv-verdict-badge { font-size: 14px; font-weight: 700; padding: 3px 12px; border-radius: 999px; color: #fff; }
+.vip-adv-verdict-badge.approve { background: var(--success); }
+.vip-adv-verdict-badge.reject  { background: var(--danger); }
+.vip-adv-verdict-badge.split   { background: var(--warning); color: var(--ink); }   /* 琥珀底用深字保对比度 */
+.vip-adv-verdict-count { font-size: 13px; color: var(--muted); }
+.vip-adv-verdict-caution { font-size: 12px; font-weight: 600; color: var(--danger); }
+
+.vip-adv-callout {
+  padding: 10px 12px; margin-bottom: 10px;
+  border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; background: var(--surface);
+}
+.vip-adv-callout.coverage { border-left-color: var(--warning); }
+.vip-adv-callout h4 {
+  margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .3px;
+}
+.vip-adv-callout p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink); }
+.vip-adv-callout.coverage p { color: var(--warning-strong); }
+
+.vip-adv-section-title {
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .5px; margin: 16px 0 8px;
+}
+.st-table-wrap { overflow-x: auto; }                       /* 窄屏横向滚动，避免 st-card overflow:hidden 裁列 */
+.vip-adv-table { min-width: 520px; }                       /* 5 列不被挤成竖条；窄屏改滚动 */
+.vip-adv-table td.vip-adv-cell-key { white-space: nowrap; }
+.vip-adv-table td.vip-adv-cell-deriv { color: var(--warning-strong); }
+
+.vip-action-pill, .vip-vote-pill {
+  display: inline-block; border-radius: 999px; font-weight: 700; color: #fff; white-space: nowrap;
+}
+.vip-action-pill { padding: 2px 12px; font-size: 12px; }
+.vip-vote-pill { padding: 2px 8px; font-size: 11px; }
+.vip-action-pill.buy,  .vip-vote-pill.yes     { background: var(--success); }
+.vip-action-pill.sell, .vip-vote-pill.no      { background: var(--danger); }
+.vip-action-pill.hold, .vip-vote-pill.abstain { background: var(--muted); }
+
+.vip-committee-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.vip-member-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--surface); }
+.vip-member-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.vip-member-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.vip-member-model { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.vip-member-card ul { margin: 6px 0 0; padding-left: 16px; }
+.vip-member-card li { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.vip-member-assess { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+
+.vip-adv-foot { margin-top: 12px; font-size: 12px; line-height: 1.5; }
+.vip-adv-foot.warn { color: var(--danger); }
+.vip-adv-foot.muted { color: var(--muted); }

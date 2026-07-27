@@ -1128,6 +1128,39 @@ def _format_recent_trades(recent_map: dict[str, list[dict]]) -> str:
             lines.append(f"{tk} {tr['side']} {tr['shares']}股 ({tr['date']})")
     return "\n".join(lines) if lines else "暂无近期已执行交易"
 
+def _format_constraints_for_prompt(constraints: dict, alloc_bounds: dict,
+                                   account: dict, positions: list[dict],
+                                   cash_balance: float) -> str:
+    """把【当前真实生效】的动态约束 + 组合现状余量格式化成 prompt 文本。
+
+    关键：LLM 必须看到 regime 收紧后的实际上限（如熊市单股 5%），否则会按
+    prompt 写死的宽松值（20%）生成计划，随后被 L4 硬校验大批拦截，用户无操作可执行。
+    """
+    equity = account.get("total_equity") or account.get("current_capital", 100000) or 100000
+    lines = [
+        f"- 可用现金：${cash_balance:,.0f}（占总资产 {cash_balance / equity * 100:.1f}%）",
+        f"- 单股持仓上限：总资产 {constraints.get('max_single_position_pct', 25):.0f}%",
+        f"- 单板块上限：总资产 {constraints.get('max_sector_pct', 40):.0f}%",
+        f"- 最低现金保留：总资产 {constraints.get('min_cash_pct', 15):.0f}%",
+        f"- 单笔金额上限：${constraints.get('max_single_trade_usd', 50000):,.0f}",
+        f"- 单日交易规模上限：总资产 {constraints.get('max_daily_turnover_pct', 30):.0f}%",
+    ]
+    if constraints.get("max_portfolio_beta"):
+        lines.append(f"- 组合 beta 上限：{constraints['max_portfolio_beta']:.2f}")
+    if alloc_bounds.get("equity_max") is not None:
+        lines.append(f"- 权益总仓位上限：总资产 {alloc_bounds['equity_max']:.0f}%")
+    # 组合现状：已用板块占比，帮 LLM 直接算出还能加多少
+    if positions and equity > 0:
+        by_sector: dict[str, float] = {}
+        for p in positions:
+            sec = p.get("sector", "") or "未分类"
+            by_sector[sec] = by_sector.get(sec, 0) + (p.get("market_value", 0) or 0)
+        hot = sorted(by_sector.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        if hot:
+            lines.append("- 当前板块占比：" + "，".join(
+                f"{s} {v / equity * 100:.1f}%" for s, v in hot))
+    return "\n".join(lines)
+
 def _repair_execution_plan(llm, ep: dict, violations: list[str],
                            account: dict, constraints: dict) -> dict | None:
     """P0.2 LLM 自修正：带违规详情重新生成单个执行计划。
@@ -1260,11 +1293,39 @@ async def run_execution_plans(
         recent_map = _recent_executed_by_ticker(store)
         recent_trades_text = _format_recent_trades(recent_map)
 
+        # P0.6 动态约束：按 L1 风险偏好 + regime 收紧的约束集。
+        # 先算好再注入 prompt，让 LLM 按【真实生效】的约束生成，而非 prompt 里写死的 20%/40%
+        # （否则 LLM 以为单股上限 20%，实际熊市校验按 5% 拦，生成的计划几乎必被拦→用户无操作可执行）。
+        from bottleneck_hunter.watchlist.constraint_validator import (
+            validate_execution_plan, max_compliant_shares, get_constraints_for_appetite,
+            validate_portfolio_beta, validate_against_regime)
+        macro = store.get_latest_macro_strategy()
+        macro_rj = (macro or {}).get("result_json", {}) if macro else {}
+        risk_appetite = (macro or {}).get("risk_appetite", "")
+        regime = macro_rj.get("regime", "sideways")
+        confidence = macro_rj.get("regime_confidence", 5)
+        alloc_bounds = get_allocation_bounds(regime, risk_appetite, confidence)
+        # 用户个人「单一持仓上限」是硬约束：与 L1 市场档位取更严者(min)，与 L2 同源(get_user_single_cap)，
+        # 确保 L4 硬校验也尊重个人设置——否则用户设 12% 上限，L4 仍按市场档位 20% 校验，个人约束形同虚设。
+        _user_cap = get_user_single_cap(store)
+        if _user_cap:
+            alloc_bounds["max_single_pct"] = min(alloc_bounds.get("max_single_pct", 100), _user_cap)
+        constraints = get_constraints_for_appetite(risk_appetite)
+        if alloc_bounds.get("max_single_pct"):
+            constraints["max_single_position_pct"] = min(
+                constraints.get("max_single_position_pct", 100), alloc_bounds["max_single_pct"])
+        if alloc_bounds.get("beta_limit"):
+            constraints["max_portfolio_beta"] = min(
+                constraints.get("max_portfolio_beta", 10), alloc_bounds["beta_limit"])
+        constraints_text = _format_constraints_for_prompt(
+            constraints, alloc_bounds, account, positions, cash_balance)
+
         prompt = (prompt_template
                   .replace("{market_context}", market_ctx)
                   .replace("{tactical_plans}", tactical_json)
                   .replace("{account_status}", account_json)
                   .replace("{available_cash}", f"{cash_balance:,.0f}")
+                  .replace("{constraints}", constraints_text)
                   .replace("{trade_feedback}", feedback_text)
                   .replace("{recent_trades}", recent_trades_text)
                   .replace("{user_preferences}", pref_text)
@@ -1292,27 +1353,7 @@ async def run_execution_plans(
         blocked = 0
         repaired = 0
 
-        # P0.6 动态约束：按 L1 风险偏好选择约束集
-        from bottleneck_hunter.watchlist.constraint_validator import (
-            validate_execution_plan, max_compliant_shares, get_constraints_for_appetite,
-            validate_portfolio_beta, validate_against_regime)
-        macro = store.get_latest_macro_strategy()
-        macro_rj = (macro or {}).get("result_json", {}) if macro else {}
-        risk_appetite = (macro or {}).get("risk_appetite", "")
-        regime = macro_rj.get("regime", "sideways")
-        confidence = macro_rj.get("regime_confidence", 5)
-        # B1: 统一约束真值源——用 L1 (regime×appetite×confidence) 的 alloc_bounds 收紧 appetite 级约束，
-        # 让"熊市防守单股 5%/beta 0.5"在 L4 硬校验真正生效（消除 REGIME_MAP vs REGIME_CONSTRAINTS 双真值源）
-        alloc_bounds = get_allocation_bounds(regime, risk_appetite, confidence)
-        constraints = get_constraints_for_appetite(risk_appetite)
-        if alloc_bounds.get("max_single_pct"):
-            constraints["max_single_position_pct"] = min(
-                constraints.get("max_single_position_pct", 100), alloc_bounds["max_single_pct"])
-        if alloc_bounds.get("beta_limit"):
-            constraints["max_portfolio_beta"] = min(
-                constraints.get("max_portfolio_beta", 10), alloc_bounds["beta_limit"])
-
-        # P2.1 构建 beta_map(从 company_profiles，缺失则降级)
+        existing_tickers = {ep["ticker"] for ep in store.get_pending_executions() if ep.get("ticker")}
         beta_map = {}
         for tk in set(list(entry_map.keys()) + [p["ticker"] for p in positions]):
             try:
