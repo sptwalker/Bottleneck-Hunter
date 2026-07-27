@@ -28,6 +28,7 @@ from bottleneck_hunter.watchlist.store_intel import _IntelMixin
 from bottleneck_hunter.watchlist.store_decision import _DecisionMixin
 from bottleneck_hunter.watchlist.store_committee import _CommitteeMixin
 from bottleneck_hunter.watchlist.store_simtrading import _SimTradingMixin
+from bottleneck_hunter.watchlist.store_vip_projection import _VipProjectionMixin
 from bottleneck_hunter.watchlist.store_research import _ResearchMixin
 from bottleneck_hunter.watchlist.store_ai_models import _AIModelsMixin
 from bottleneck_hunter.watchlist.store_oplog import _OpLogMixin
@@ -42,6 +43,7 @@ class WatchlistStore(
     _DecisionMixin,
     _CommitteeMixin,
     _SimTradingMixin,
+    _VipProjectionMixin,
     _ResearchMixin,
     _AIModelsMixin,
     _OpLogMixin,
@@ -226,6 +228,13 @@ class WatchlistStore(
             self._migrate_catalyst_market_from_entry(conn)
             self._migrate_market_labels_from_source(conn)
             self._migrate_normalize_astock_tickers(conn)
+            self._migrate_sim_account_per_account(conn)
+            self._migrate_vip_imports_account_ref(conn)
+            self._migrate_vip_derivative_terms_account_ref(conn)
+            self._migrate_vip_reports_account_ref(conn)
+            self._migrate_chat_sessions_account_ref(conn)
+            self._migrate_chat_messages_account_ref(conn)
+            self._migrate_purge_empty_account_ref(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -485,6 +494,305 @@ class WatchlistStore(
             logger.info("company_profiles 已折叠进共享桶 __shared__（每 ticker 保留最新一条）")
         except sqlite3.OperationalError as e:
             logger.warning("company_profiles 共享折叠失败（可忽略）: %s", e)
+
+
+    def _table_cols(self, conn, table: str) -> set[str]:
+        try:
+            return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except sqlite3.OperationalError:
+            return set()
+
+
+    def _table_sql(self, conn, table: str) -> str:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        return (row["sql"] or "") if row else ""
+
+
+    def _migrate_purge_empty_account_ref(self, conn) -> None:
+        """一次性清理历史 hidden default / 空 account_ref 残留数据（用户已授权删除旧数据）。
+
+        默认账户模型已废弃：account_ref='' 不再是合法业务账户。此迁移把所有空 ref
+        业务数据连同其 sim_account 挂的 sim_* 一并删除，避免删默认账户后留下孤儿脏数据。
+        """
+        # 先删空 ref sim_account 下挂的 sim_* 明细（按 account_id 关联）
+        try:
+            orphan_ids = [
+                r["id"] for r in conn.execute(
+                    "SELECT id FROM sim_account WHERE COALESCE(account_ref,'')=''"
+                ).fetchall()
+            ]
+            if orphan_ids:
+                ph = ",".join("?" for _ in orphan_ids)
+                for tbl in ("sim_positions", "sim_trades", "sim_fund_ops"):
+                    conn.execute(f"DELETE FROM {tbl} WHERE account_id IN ({ph})", orphan_ids)
+        except sqlite3.OperationalError as e:
+            logger.warning("清理空 ref sim_* 明细失败（可忽略）: %s", e)
+
+        # 再删所有按 account_ref 归属的业务表里的空 ref 行
+        for tbl in ("sim_account", "positions", "transactions", "vip_reports",
+                    "vip_derivative_terms", "vip_imports", "chat_sessions",
+                    "chat_messages", "vip_accounts"):
+            try:
+                conn.execute(f"DELETE FROM {tbl} WHERE COALESCE(account_ref,'')=''")
+            except sqlite3.OperationalError as e:
+                logger.warning("清理 %s 空 ref 失败（可忽略）: %s", tbl, e)
+
+
+    def _migrate_sim_account_per_account(self, conn) -> None:
+        """sim_account 从 market 单槽重建为 per-account 槽。"""
+        try:
+            cols = self._table_cols(conn, "sim_account")
+            if not cols:
+                return
+            ddl = self._table_sql(conn, "sim_account")
+            if "account_ref" in cols and "UNIQUE(user_id, market, account_ref)" in ddl:
+                return
+            has_account_ref = "account_ref" in cols
+            peak_expr = "COALESCE(peak_equity, 0)" if "peak_equity" in cols else "0"
+            account_ref_expr = "COALESCE(account_ref, '')" if has_account_ref else "''"
+            conn.execute("""
+                CREATE TABLE sim_account_new (
+                    id TEXT PRIMARY KEY,
+                    name TEXT DEFAULT '默认模拟账户',
+                    initial_capital REAL DEFAULT 100000.0,
+                    current_capital REAL DEFAULT 100000.0,
+                    cash_balance REAL DEFAULT 100000.0,
+                    total_equity REAL DEFAULT 100000.0,
+                    total_return_pct REAL DEFAULT 0.0,
+                    total_trades INTEGER DEFAULT 0,
+                    win_rate REAL DEFAULT 0.0,
+                    peak_equity REAL DEFAULT 0,
+                    account_ref TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT,
+                    user_id TEXT DEFAULT '',
+                    market TEXT DEFAULT 'us_stock',
+                    UNIQUE(user_id, market, account_ref)
+                )
+            """)
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO sim_account_new
+                (id, name, initial_capital, current_capital, cash_balance, total_equity,
+                 total_return_pct, total_trades, win_rate, peak_equity, account_ref,
+                 created_at, updated_at, user_id, market)
+                SELECT id, name, initial_capital, current_capital, cash_balance, total_equity,
+                       total_return_pct, total_trades, win_rate, {peak_expr}, {account_ref_expr},
+                       created_at, updated_at, COALESCE(user_id,''), COALESCE(market,'us_stock')
+                  FROM sim_account
+                """
+            )
+            conn.execute("DROP TABLE sim_account")
+            conn.execute("ALTER TABLE sim_account_new RENAME TO sim_account")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sim_account_user ON sim_account(user_id)")
+            logger.info("sim_account 已重建为 (user_id, market, account_ref) 多账户槽")
+        except sqlite3.OperationalError as e:
+            logger.warning("sim_account 多账户迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_vip_imports_account_ref(self, conn) -> None:
+        try:
+            cols = self._table_cols(conn, "vip_imports")
+            if not cols:
+                return
+            ddl = self._table_sql(conn, "vip_imports")
+            if "account_ref" in cols and "UNIQUE(user_id, market, account_ref, file_hash)" in ddl:
+                return
+            account_ref_expr = "COALESCE(account_ref, '')" if "account_ref" in cols else "''"
+            conn.execute("""
+                CREATE TABLE vip_imports_new (
+                    id TEXT PRIMARY KEY,
+                    file_name TEXT DEFAULT '',
+                    file_hash TEXT DEFAULT '',
+                    file_type TEXT DEFAULT '',
+                    detected_kind TEXT DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'imported'
+                        CHECK(status IN ('imported','duplicate','rejected','unparseable')),
+                    summary TEXT DEFAULT '',
+                    key_metrics_json TEXT DEFAULT '{}',
+                    reason TEXT DEFAULT '',
+                    account_ref TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    user_id TEXT DEFAULT '',
+                    market TEXT DEFAULT 'us_stock',
+                    UNIQUE(user_id, market, account_ref, file_hash)
+                )
+            """)
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO vip_imports_new
+                (id, file_name, file_hash, file_type, detected_kind, status, summary,
+                 key_metrics_json, reason, account_ref, created_at, user_id, market)
+                SELECT id, file_name, file_hash, file_type, detected_kind, status, summary,
+                       key_metrics_json, reason, {account_ref_expr}, created_at,
+                       COALESCE(user_id,''), COALESCE(market,'us_stock')
+                  FROM vip_imports
+                """
+            )
+            conn.execute("DROP TABLE vip_imports")
+            conn.execute("ALTER TABLE vip_imports_new RENAME TO vip_imports")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_vip_imports_user ON vip_imports(user_id, market, account_ref, created_at DESC)")
+            logger.info("vip_imports 已重建为按账户隔离")
+        except sqlite3.OperationalError as e:
+            logger.warning("vip_imports 多账户迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_vip_derivative_terms_account_ref(self, conn) -> None:
+        try:
+            cols = self._table_cols(conn, "vip_derivative_terms")
+            if not cols:
+                return
+            ddl = self._table_sql(conn, "vip_derivative_terms")
+            if "account_ref" in cols and "UNIQUE(user_id, market, account_ref, source_file_hash, product_family, underlying_symbol)" in ddl:
+                return
+            account_ref_expr = "COALESCE(account_ref, '')" if "account_ref" in cols else "''"
+            conn.execute("""
+                CREATE TABLE vip_derivative_terms_new (
+                    id TEXT PRIMARY KEY,
+                    source_file_name TEXT DEFAULT '',
+                    source_file_hash TEXT DEFAULT '',
+                    broker TEXT DEFAULT '',
+                    product_family TEXT DEFAULT '',
+                    underlying_symbol TEXT DEFAULT '',
+                    currency TEXT DEFAULT 'USD',
+                    terms_json TEXT DEFAULT '{}',
+                    rationale_ref TEXT DEFAULT '',
+                    account_ref TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    user_id TEXT DEFAULT '',
+                    market TEXT DEFAULT 'us_stock',
+                    UNIQUE(user_id, market, account_ref, source_file_hash, product_family, underlying_symbol)
+                )
+            """)
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO vip_derivative_terms_new
+                (id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
+                 currency, terms_json, rationale_ref, account_ref, created_at, user_id, market)
+                SELECT id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
+                       currency, terms_json, rationale_ref, {account_ref_expr}, created_at,
+                       COALESCE(user_id,''), COALESCE(market,'us_stock')
+                  FROM vip_derivative_terms
+                """
+            )
+            conn.execute("DROP TABLE vip_derivative_terms")
+            conn.execute("ALTER TABLE vip_derivative_terms_new RENAME TO vip_derivative_terms")
+            logger.info("vip_derivative_terms 已重建为按账户隔离")
+        except sqlite3.OperationalError as e:
+            logger.warning("vip_derivative_terms 多账户迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_vip_reports_account_ref(self, conn) -> None:
+        try:
+            cols = self._table_cols(conn, "vip_reports")
+            if not cols or "account_ref" in cols:
+                return
+            conn.execute("""
+                CREATE TABLE vip_reports_new (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL DEFAULT 'periodic'
+                         CHECK(kind IN ('periodic','alert','import_snapshot')),
+                    period TEXT DEFAULT '',
+                    report_md TEXT DEFAULT '',
+                    payload_json TEXT DEFAULT '{}',
+                    alert_key TEXT DEFAULT '',
+                    account_ref TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    user_id TEXT DEFAULT '',
+                    market TEXT DEFAULT 'us_stock'
+                )
+            """)
+            conn.execute("""
+                INSERT INTO vip_reports_new
+                (id, kind, period, report_md, payload_json, alert_key, account_ref, created_at, user_id, market)
+                SELECT id, kind, period, report_md, payload_json, alert_key, '', created_at,
+                       COALESCE(user_id,''), COALESCE(market,'us_stock')
+                  FROM vip_reports
+            """)
+            conn.execute("DROP TABLE vip_reports")
+            conn.execute("ALTER TABLE vip_reports_new RENAME TO vip_reports")
+            logger.info("vip_reports 已补 account_ref")
+        except sqlite3.OperationalError as e:
+            logger.warning("vip_reports 多账户迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_chat_sessions_account_ref(self, conn) -> None:
+        try:
+            cols = self._table_cols(conn, "chat_sessions")
+            if not cols or "account_ref" in cols:
+                return
+            conn.execute("""
+                CREATE TABLE chat_sessions_new (
+                    id TEXT PRIMARY KEY,
+                    title TEXT DEFAULT '',
+                    summary TEXT DEFAULT '',
+                    summarized_upto TEXT DEFAULT '',
+                    msg_count INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active' CHECK(status IN ('active','archived')),
+                    account_ref TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT DEFAULT '',
+                    user_id TEXT DEFAULT '',
+                    market TEXT DEFAULT 'us_stock'
+                )
+            """)
+            conn.execute("""
+                INSERT INTO chat_sessions_new
+                (id, title, summary, summarized_upto, msg_count, status, account_ref,
+                 created_at, updated_at, user_id, market)
+                SELECT id, title, summary, summarized_upto, msg_count, status, '',
+                       created_at, updated_at, COALESCE(user_id,''), COALESCE(market,'us_stock')
+                  FROM chat_sessions
+            """)
+            conn.execute("DROP TABLE chat_sessions")
+            conn.execute("ALTER TABLE chat_sessions_new RENAME TO chat_sessions")
+            logger.info("chat_sessions 已补 account_ref")
+        except sqlite3.OperationalError as e:
+            logger.warning("chat_sessions 多账户迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_chat_messages_account_ref(self, conn) -> None:
+        try:
+            cols = self._table_cols(conn, "chat_messages")
+            if not cols or "account_ref" in cols:
+                return
+            conn.execute("""
+                CREATE TABLE chat_messages_new (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')),
+                    content TEXT DEFAULT '',
+                    tool_calls TEXT DEFAULT '[]',
+                    tool_name TEXT DEFAULT '',
+                    provider TEXT DEFAULT '',
+                    model TEXT DEFAULT '',
+                    in_tokens INTEGER DEFAULT 0,
+                    out_tokens INTEGER DEFAULT 0,
+                    fail_reason TEXT DEFAULT '',
+                    account_ref TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    user_id TEXT DEFAULT '',
+                    market TEXT DEFAULT 'us_stock',
+                    FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("""
+                INSERT INTO chat_messages_new
+                (id, session_id, role, content, tool_calls, tool_name, provider, model,
+                 in_tokens, out_tokens, fail_reason, account_ref, created_at, user_id, market)
+                SELECT m.id, m.session_id, m.role, m.content, m.tool_calls, m.tool_name, m.provider, m.model,
+                       m.in_tokens, m.out_tokens, m.fail_reason, COALESCE(s.account_ref, ''),
+                       m.created_at, COALESCE(m.user_id,''), COALESCE(m.market,'us_stock')
+                  FROM chat_messages m
+             LEFT JOIN chat_sessions s ON s.id = m.session_id
+            """)
+            conn.execute("DROP TABLE chat_messages")
+            conn.execute("ALTER TABLE chat_messages_new RENAME TO chat_messages")
+            logger.info("chat_messages 已补 account_ref")
+        except sqlite3.OperationalError as e:
+            logger.warning("chat_messages 多账户迁移失败（可忽略）: %s", e)
 
 
     def _parse_json_fields(self, d: dict, dict_fields: tuple = (),

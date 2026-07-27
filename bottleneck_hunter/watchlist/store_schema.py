@@ -351,6 +351,22 @@ CREATE TABLE IF NOT EXISTS auto_reviews (
     created_at          TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS vip_accounts (
+    id                  TEXT PRIMARY KEY,
+    account_ref         TEXT DEFAULT '',
+    display_name        TEXT DEFAULT '',
+    institution_name    TEXT DEFAULT '',
+    account_kind        TEXT NOT NULL DEFAULT 'broker'
+                        CHECK(account_kind IN ('bank','broker')),
+    is_default          INTEGER DEFAULT 0,
+    sort_order          INTEGER DEFAULT 0,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT DEFAULT '',
+    user_id             TEXT DEFAULT '',
+    market              TEXT DEFAULT 'us_stock',
+    UNIQUE(user_id, market, account_ref)
+);
+
 CREATE TABLE IF NOT EXISTS sim_account (
     id                  TEXT PRIMARY KEY,
     name                TEXT DEFAULT '默认模拟账户',
@@ -361,8 +377,13 @@ CREATE TABLE IF NOT EXISTS sim_account (
     total_return_pct    REAL DEFAULT 0.0,
     total_trades        INTEGER DEFAULT 0,
     win_rate            REAL DEFAULT 0.0,
+    peak_equity         REAL DEFAULT 0,
+    account_ref         TEXT DEFAULT '',
     created_at          TEXT NOT NULL,
-    updated_at          TEXT
+    updated_at          TEXT,
+    user_id             TEXT DEFAULT '',
+    market              TEXT DEFAULT 'us_stock',
+    UNIQUE(user_id, market, account_ref)
 );
 
 CREATE TABLE IF NOT EXISTS sim_positions (
@@ -572,6 +593,7 @@ CREATE TABLE IF NOT EXISTS vip_reports (
     report_md    TEXT DEFAULT '',
     payload_json TEXT DEFAULT '{}',
     alert_key    TEXT DEFAULT '',
+    account_ref  TEXT DEFAULT '',
     created_at   TEXT NOT NULL,
     user_id      TEXT DEFAULT '',
     market       TEXT DEFAULT 'us_stock'
@@ -586,15 +608,34 @@ CREATE TABLE IF NOT EXISTS vip_derivative_terms (
     currency          TEXT DEFAULT 'USD',
     terms_json        TEXT DEFAULT '{}',
     rationale_ref     TEXT DEFAULT '',
+    account_ref       TEXT DEFAULT '',
     created_at        TEXT NOT NULL,
     user_id           TEXT DEFAULT '',
     market            TEXT DEFAULT 'us_stock',
-    UNIQUE(user_id, market, source_file_hash, product_family, underlying_symbol)
+    UNIQUE(user_id, market, account_ref, source_file_hash, product_family, underlying_symbol)
+);
+CREATE TABLE IF NOT EXISTS vip_imports (
+    id              TEXT PRIMARY KEY,
+    file_name       TEXT DEFAULT '',
+    file_hash       TEXT DEFAULT '',
+    file_type       TEXT DEFAULT '',   -- pdf / csv / excel / unknown
+    detected_kind   TEXT DEFAULT '',   -- monthly_statement / trade_confirm / accumulator / mli / unknown ...
+    status          TEXT NOT NULL DEFAULT 'imported'
+                    CHECK(status IN ('imported','duplicate','rejected','unparseable')),
+    summary         TEXT DEFAULT '',       -- 人类可读摘要（金额已脱敏，不存明文 PII）
+    key_metrics_json TEXT DEFAULT '{}',    -- {n_positions,n_transactions,period_end,broker,...} 非明文金额
+    reason          TEXT DEFAULT '',
+    account_ref     TEXT DEFAULT '',
+    created_at      TEXT NOT NULL,
+    user_id         TEXT DEFAULT '',
+    market          TEXT DEFAULT 'us_stock',
+    UNIQUE(user_id, market, account_ref, file_hash)
 );
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id TEXT PRIMARY KEY, title TEXT DEFAULT '', summary TEXT DEFAULT '',
     summarized_upto TEXT DEFAULT '', msg_count INTEGER DEFAULT 0,
     status TEXT DEFAULT 'active' CHECK(status IN ('active','archived')),
+    account_ref TEXT DEFAULT '',
     created_at TEXT NOT NULL, updated_at TEXT DEFAULT '',
     user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock'
 );
@@ -604,6 +645,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     content TEXT DEFAULT '', tool_calls TEXT DEFAULT '[]', tool_name TEXT DEFAULT '',
     provider TEXT DEFAULT '', model TEXT DEFAULT '',
     in_tokens INTEGER DEFAULT 0, out_tokens INTEGER DEFAULT 0, fail_reason TEXT DEFAULT '',
+    account_ref TEXT DEFAULT '',
     created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
     FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
 );
@@ -643,6 +685,7 @@ CREATE INDEX IF NOT EXISTS idx_sim_trades_ticker ON sim_trades(ticker, created_a
 CREATE INDEX IF NOT EXISTS idx_sim_positions_account ON sim_positions(account_id);
 CREATE INDEX IF NOT EXISTS idx_inst_holders_ticker ON institutional_holders(ticker, date DESC);
 CREATE INDEX IF NOT EXISTS idx_analyst_ratings_ticker ON analyst_ratings(ticker, date DESC);
+CREATE INDEX IF NOT EXISTS idx_vip_imports_user ON vip_imports(user_id, market, account_ref, created_at DESC);
 """
 
 MIGRATIONS: list[str] = [
@@ -998,6 +1041,8 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE sim_trades ADD COLUMN realized_pnl REAL",
     # ── Phase 2.5: sim_account 记录历史权益峰值，供账户级回撤熔断 ──
     "ALTER TABLE sim_account ADD COLUMN peak_equity REAL DEFAULT 0",
+    # ── VIP 账户排序：默认账户继续做兼容桶，真实账户按 sort_order 排序 ──
+    "ALTER TABLE vip_accounts ADD COLUMN sort_order INTEGER DEFAULT 0",
     # ── 反向分析归属：记录"从哪条正向分析记录发起"，使每条记录有独立的反向分析列表 ──
     "ALTER TABLE reverse_analyses ADD COLUMN owner_analysis_id TEXT DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_reverse_owner ON reverse_analyses(owner_analysis_id, market, user_id)",
@@ -1154,6 +1199,15 @@ MIGRATIONS: list[str] = [
         created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
         UNIQUE(user_id, market, source_file_hash, product_family, underlying_symbol)
     )""",
+    """CREATE TABLE IF NOT EXISTS vip_imports (
+        id TEXT PRIMARY KEY,
+        file_name TEXT DEFAULT '', file_hash TEXT DEFAULT '', file_type TEXT DEFAULT '',
+        detected_kind TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'imported' CHECK(status IN ('imported','duplicate','rejected','unparseable')),
+        summary TEXT DEFAULT '', key_metrics_json TEXT DEFAULT '{}', reason TEXT DEFAULT '',
+        created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
+        UNIQUE(user_id, market, file_hash)
+    )""",
     """CREATE TABLE IF NOT EXISTS chat_sessions (
         id TEXT PRIMARY KEY, title TEXT DEFAULT '', summary TEXT DEFAULT '',
         summarized_upto TEXT DEFAULT '', msg_count INTEGER DEFAULT 0,
@@ -1177,6 +1231,77 @@ MIGRATIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_transactions_instr   ON transactions(instrument_id, trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_vip_reports_user     ON vip_reports(user_id, market, kind, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_vip_deriv_user       ON vip_derivative_terms(user_id, market, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vip_imports_user     ON vip_imports(user_id, market, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_market ON chat_sessions(user_id, market, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_chat_messages_session     ON chat_messages(session_id, created_at)",
+    # ── VIP 每日系统推算（待校准）：与月结单真值层 positions 物理隔离，只在读时叠加，不进决策 ──
+    #    每日按最新收盘价重估股票市值(kind='stock_mtm')、按条款逐日重放衍生品(kind='deriv_accum')、
+    #    到期结算(kind='deriv_settle')；status 从 pending → 有新结算单后 calibrated/flagged。
+    """CREATE TABLE IF NOT EXISTS vip_projections (
+        id                TEXT PRIMARY KEY,
+        account_ref       TEXT DEFAULT '',
+        as_of_date        TEXT NOT NULL,
+        kind              TEXT NOT NULL DEFAULT 'stock_mtm'
+                          CHECK(kind IN ('stock_mtm','deriv_accum','deriv_settle')),
+        ticker            TEXT DEFAULT '',
+        quantity          REAL DEFAULT 0,
+        market_value_base REAL DEFAULT 0,
+        unrealized_pnl    REAL DEFAULT 0,
+        basis_json        TEXT DEFAULT '{}',     -- 推算依据：用了哪天收盘价/哪份条款/路径假设
+        status            TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','calibrated','flagged')),
+        confidence        REAL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+        calibrated_by_doc_id TEXT DEFAULT '',
+        calib_diff_pct    REAL,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT DEFAULT '',
+        user_id           TEXT DEFAULT '',
+        market            TEXT DEFAULT 'us_stock',
+        UNIQUE(user_id, market, account_ref, as_of_date, kind, ticker)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_vip_proj_acct ON vip_projections(user_id, market, account_ref, as_of_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_vip_proj_status ON vip_projections(user_id, market, status)",
+    # ── VIP 账户日志：逐条记录自动推算/校准/异常/结算，镜像 operation_log 模式，供账户日志窗口渲染 ──
+    """CREATE TABLE IF NOT EXISTS vip_account_log (
+        id           TEXT PRIMARY KEY,
+        account_ref  TEXT DEFAULT '',
+        ts           TEXT NOT NULL,
+        event_type   TEXT NOT NULL DEFAULT 'projection'
+                     CHECK(event_type IN ('projection','calibration','anomaly','settlement')),
+        title        TEXT NOT NULL,                 -- 白话标题
+        detail       TEXT DEFAULT '',               -- 白话详情
+        severity     TEXT DEFAULT 'info' CHECK(severity IN ('info','warn','alert')),
+        payload_json TEXT DEFAULT '{}',             -- 推算值/校准值/偏差等结构化数据
+        user_id      TEXT DEFAULT '',
+        market       TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_vip_acct_log ON vip_account_log(user_id, market, account_ref, ts DESC)",
+    # ── VIP 顾问决策（Phase B）：独立于决策中心 L1-L3 模拟盘的账户级建议层。──
+    #    吃 dossier+纲领+L1宏观(只读)+衍生品敞口 → 投委会4persona评审 → 每仓 减/持/加+理由+风险。
+    #    只出建议、不下单、不写 sim_* 表；result_json 存整份结构化建议 + 委员意见。
+    """CREATE TABLE IF NOT EXISTS vip_advisory (
+        id           TEXT PRIMARY KEY,
+        account_ref  TEXT DEFAULT '',
+        result_json  TEXT DEFAULT '{}',
+        provider     TEXT DEFAULT '',
+        model        TEXT DEFAULT '',
+        created_at   TEXT NOT NULL,
+        user_id      TEXT DEFAULT '',
+        market       TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_vip_advisory_acct ON vip_advisory(user_id, market, account_ref, created_at DESC)",
+    # ── VIP 个性化荐新（Phase C）：从观察池挑「尚未持有」的候选给 建仓/关注/规避 建议，与 advisory 互补。──
+    #    吃 dossier+纲领+L1宏观 + 候选池(list_all 去已持/纲领排除/取综合分前 N) → 投委会4persona评审。
+    #    只出建议、不下单、不写 sim_* 表；与 vip_advisory 同形 → getter 复用 _filtered 查询。
+    """CREATE TABLE IF NOT EXISTS vip_recommendations (
+        id           TEXT PRIMARY KEY,
+        account_ref  TEXT DEFAULT '',
+        result_json  TEXT DEFAULT '{}',
+        provider     TEXT DEFAULT '',
+        model        TEXT DEFAULT '',
+        created_at   TEXT NOT NULL,
+        user_id      TEXT DEFAULT '',
+        market       TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_vip_recommend_acct ON vip_recommendations(user_id, market, account_ref, created_at DESC)",
 ]

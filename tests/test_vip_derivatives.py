@@ -102,10 +102,10 @@ def test_save_derivative_term_dedup_stable_id(tmp_path):
     from bottleneck_hunter.watchlist.store import WatchlistStore
     wl = WatchlistStore(tmp_path / "wl.db").for_user("u1").for_market("us_stock")
     term = d.DerivativeTerm("equity_accumulator", "MU", "USD", 365, {"afp": 1})
-    a = d.save_derivative_term(wl, term, source_file_name="x.pdf", source_file_hash="h1", broker="nomura")
-    b = d.save_derivative_term(wl, term, source_file_name="x.pdf", source_file_hash="h1", broker="nomura")
+    a = d.save_derivative_term(wl, term, source_file_name="x.pdf", source_file_hash="h1", broker="nomura", account_ref="A1")
+    b = d.save_derivative_term(wl, term, source_file_name="x.pdf", source_file_hash="h1", broker="nomura", account_ref="A1")
     assert a == b
-    rows = d.list_derivative_terms(wl)
+    rows = d.list_derivative_terms(wl, account_ref="A1")
     assert len(rows) == 1
 
 

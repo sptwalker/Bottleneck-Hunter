@@ -102,6 +102,7 @@ class DerivativeTerm:
     tenor_days: int
     terms: dict
     source_file: str = ""
+    id: str = ""               # 落库记录 id（loader 回填；新抽取时为空）
 
 
 # ── 文本抽取 helper ───────────────────────────────────────────────────────
@@ -178,9 +179,11 @@ def extract_accumulator_terms(pdf_source, pdf_password: str = "") -> DerivativeT
         gp = _f(r"Guaranteed Period End Date\s*:?\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
         return DerivativeTerm(
             product_family=fam, underlying_symbol=symbol, currency=ccy, tenor_days=tenor, source_file=str(pdf_source),
-            terms={"initial_price": initial, "afp": afp, "knock_out_price": ko, "knock_out_direction": "up_and_out",
+            terms={"initial_price": initial, "afp": afp, "knock_out_price": ko,
+                   "knock_out_direction": "down_and_out" if fam == "equity_decumulator" else "up_and_out",
                    "daily_shares": ds, "step_up_daily_shares": stds, "max_nominal_shares": max_nom,
-                   "guaranteed_period_end": gp, "settlement_style": "physical_spot", "net_premium": 0.0},
+                   "guaranteed_period_end": gp, "settlement_style": "physical_spot", "net_premium": 0.0,
+                   "trade_date": trade_date, "expiry_date": termination, "tenor_days": tenor},
         )
 
     # Nomura 样本：12 Month USD Daily Accumulator/Decumulator（BE.N / PLTR.OQ）
@@ -207,7 +210,8 @@ def extract_accumulator_terms(pdf_source, pdf_password: str = "") -> DerivativeT
                "knock_out_direction": "down_and_out" if fam == "equity_decumulator" else "up_and_out",
                "daily_shares": ds, "step_up_daily_shares": stds, "gearing_ratio": gear,
                "max_nominal_shares": max_nom, "guaranteed_period_end": protected_end,
-               "settlement_style": "physical_spot", "net_premium": 0.0},
+               "settlement_style": "physical_spot", "net_premium": 0.0,
+               "trade_date": trade_date, "expiry_date": final_date, "tenor_days": tenor},
     )
 
 
@@ -258,6 +262,7 @@ def extract_mli_terms(pdf_source, pdf_password: str = "") -> DerivativeTerm:
             "knock_in_direction": "down_and_in",
             "settlement_style": "physical",
             "principal_protected_if_no_ki": True,
+            "tenor_days": tenor,
         },
     )
 
@@ -275,12 +280,11 @@ def payoff_accumulator(term: DerivativeTerm, final_price: float, *,
     ds = t.get("daily_shares", 0)
     stds = t.get("step_up_daily_shares", 0)
     afp = t.get("afp", 0.0)
-    ko = t.get("knock_out_price", 0.0)
-    days = int(days_observed or term.tenor_days)
+    days = term.tenor_days if days_observed is None else int(days_observed)
 
     if term.product_family == "equity_decumulator":
-        if knock_out_happened and final_price <= ko:
-            shares = ds  # 最保守：按 1 天 DS 近似
+        if knock_out_happened:
+            shares = ds  # 敲出即终止：按 1 天 DS 保守近似（路径依赖不假装精确）
         else:
             shares = days * (ds if final_price <= afp else stds)
         proceeds = shares * afp
@@ -289,8 +293,8 @@ def payoff_accumulator(term: DerivativeTerm, final_price: float, *,
                 "pnl": proceeds - market_value}
 
     # accumulator
-    if knock_out_happened and final_price >= ko:
-        shares = ds  # 最保守：按 1 天 DS（路径依赖,这里不假装精确）
+    if knock_out_happened:
+        shares = ds  # 敲出即终止：按 1 天 DS 保守近似（路径依赖不假装精确）
     else:
         shares = days * (ds if final_price >= afp else stds)
     cost = shares * afp
@@ -337,14 +341,15 @@ def classify_pdf(pdf_source, pdf_password: str = "") -> str:
 
 
 def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: str, source_file_hash: str,
-                         broker: str, rationale_ref: str = "") -> str:
+                         broker: str, rationale_ref: str = "", account_ref: str = "") -> str:
     import json, uuid
+    account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
     # 幂等：重复上传同一文件保留原 id/created_at（不做 OR REPLACE 重建）
     conn = wl_store._connect()
     try:
         q, p = wl_store._filtered(
-            "SELECT id FROM vip_derivative_terms WHERE source_file_hash=? AND product_family=? AND underlying_symbol=?",
-            (source_file_hash, term.product_family, term.underlying_symbol))
+            "SELECT id FROM vip_derivative_terms WHERE account_ref=? AND source_file_hash=? AND product_family=? AND underlying_symbol=?",
+            (account_ref, source_file_hash, term.product_family, term.underlying_symbol))
         row = conn.execute(q, p).fetchone()
         if row:
             return row["id"]
@@ -355,30 +360,78 @@ def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: st
         conn.execute(
             f"""INSERT INTO vip_derivative_terms
                (id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
-                currency, terms_json, rationale_ref, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
-               VALUES (?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
+                currency, terms_json, rationale_ref, account_ref, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
+               VALUES (?,?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
             (did, source_file_name, source_file_hash, broker, term.product_family, term.underlying_symbol,
-             term.currency, json.dumps(term.terms, ensure_ascii=False), rationale_ref, datetime.now().isoformat())
+             term.currency, json.dumps(term.terms, ensure_ascii=False), rationale_ref, account_ref, datetime.now().isoformat())
             + wl_store._user_insert_params() + wl_store._market_insert_params(),
         )
     return did
 
 
-def list_derivative_terms(wl_store, limit: int = 50) -> list[DerivativeTerm]:
+def update_derivative_term(wl_store, did: str, term: DerivativeTerm) -> bool:
+    """按 id 覆盖某条衍生品条款的可变字段（重抽回填用）。用户/市场隔离由 _filtered 保证。
+
+    返回是否命中并更新（未命中该用户名下的 id 则 False）。
+    """
     import json
+    with wl_store._write_conn() as conn:
+        q, p = wl_store._filtered(
+            """UPDATE vip_derivative_terms
+               SET product_family=?, underlying_symbol=?, currency=?, terms_json=?
+               WHERE id=?""",
+            (term.product_family, term.underlying_symbol, term.currency,
+             json.dumps(term.terms, ensure_ascii=False), did),
+        )
+        cur = conn.execute(q, p)
+        return cur.rowcount > 0
+
+
+def list_derivative_terms(wl_store, limit: int = 50, account_ref: str = "") -> list[DerivativeTerm]:
+    import json
+    account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
     conn = wl_store._connect()
     try:
         q, p = wl_store._filtered(
-            "SELECT * FROM vip_derivative_terms ORDER BY created_at DESC LIMIT ?", (limit,))
+            "SELECT * FROM vip_derivative_terms WHERE account_ref=? ORDER BY created_at DESC LIMIT ?", (account_ref, limit))
         rows = [dict(r) for r in conn.execute(q, p).fetchall()]
     finally:
         conn.close()
     out = []
     for r in rows:
+        t = json.loads(r["terms_json"] or "{}")
         out.append(DerivativeTerm(product_family=r["product_family"], underlying_symbol=r["underlying_symbol"],
-                                  currency=r["currency"], tenor_days=0,
-                                  terms=json.loads(r["terms_json"] or "{}"), source_file=r["source_file_name"]))
+                                  currency=r["currency"], tenor_days=int(t.get("tenor_days", 0) or 0),
+                                  terms=t, source_file=r["source_file_name"], id=r["id"]))
     return out
+
+
+def list_derivative_terms_all_accounts(wl_store, limit: int = 200) -> list[dict]:
+    import json
+
+    conn = wl_store._connect()
+    try:
+        q, p = wl_store._filtered(
+            "SELECT * FROM vip_derivative_terms ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+            table="vip_derivative_terms",
+        )
+        rows = [dict(r) for r in conn.execute(q, p).fetchall()]
+    finally:
+        conn.close()
+    items = []
+    for r in rows:
+        t = json.loads(r["terms_json"] or "{}")
+        items.append({
+            "product_family": r["product_family"],
+            "underlying_symbol": r["underlying_symbol"],
+            "currency": r["currency"],
+            "tenor_days": int(t.get("tenor_days", 0) or 0),
+            "terms": t,
+            "source_file": r["source_file_name"],
+            "account_ref": r.get("account_ref") or "",
+        })
+    return items
 
 
 def demo() -> None:

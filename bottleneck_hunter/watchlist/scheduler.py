@@ -227,6 +227,51 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
         return {}
 
 
+async def job_vip_project(market: str = "us_stock") -> None:
+    """VIP 每日系统推算：各用户各可见账户按最新收盘价重估股票市值，写推算层 + 账户日志（多用户）。
+
+    推算层与月结单真值层物理隔离、标注待校准，仅供账户页展示，绝不进入决策。
+    行情来自当日盘后价格更新(job_price_update)，故本任务排在盘后价格任务之后。
+    """
+    from bottleneck_hunter.vip import projection
+    for uid, store, _budget in _iter_users("vip_project"):
+        wl = store.for_market(market)
+        try:
+            accounts = wl.list_vip_accounts(include_hidden_default=False)
+            if not accounts:
+                continue
+            # 补价：VIP 私仓/衍生品标的里「观察池没有」的美股 ticker 当日无价源，
+            # 先喂进价格管线补齐当日收盘价，再重估，否则只能 carry-forward。
+            try:
+                need = projection.collect_priceable_symbols(wl, market)
+                if need:
+                    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+                    await fetch_price_batch(sorted(need), wl, market=market)
+                    logger.info("VIP 补价 (%s/user=%s): %d 只", market, uid[:8] if uid else "-", len(need))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("VIP 补价失败 (%s/user=%s): %s", market, uid[:8] if uid else "-", e)
+            n_acct = 0
+            for acct in accounts:
+                ref = (acct.get("account_ref") or "").strip()
+                if not ref:
+                    continue
+                try:
+                    res = projection.project_stock_mtm(wl, ref)
+                    if res.get("n_priced") or res.get("n_skipped"):
+                        n_acct += 1
+                except Exception as e:  # noqa: BLE001
+                    logger.error("VIP 推算失败 (%s/user=%s/acct=%s): %s", market, uid[:8] if uid else "-", ref, e)
+                try:
+                    projection.project_derivative_accrual(wl, ref)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("VIP 衍生品推算失败 (%s/user=%s/acct=%s): %s", market, uid[:8] if uid else "-", ref, e)
+            if n_acct:
+                _oplog(uid, "VIP 每日推算", market=market, detail=f"{n_acct} 个账户已按最新收盘价重估（待校准）")
+        except Exception as e:  # noqa: BLE001
+            logger.error("VIP 推算任务失败 (%s/user=%s): %s", market, uid[:8] if uid else "global", e)
+            _oplog(uid, "VIP 每日推算", market=market, error=str(e))
+
+
 async def job_daily_scan(market: str = "us_stock") -> dict:
     """每日扫描。
 
@@ -984,9 +1029,11 @@ async def job_poll_resting_orders() -> None:
 _JOB_SPECS = [
     ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US pre-market price update"),
     ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US post-market price update"),
+    ("us_vip_project",         job_vip_project,         {"market": "us_stock"}, _TZ_CN        , "daily",    "US VIP daily MTM projection"),
     ("us_daily_scan",          job_daily_scan,          {"market": "us_stock"}, _TZ_CN        , "daily",    "US daily news/SEC/options scan"),
     ("cn_price_premarket",     job_price_update,        {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock pre-market price update"),
     ("cn_price_postmarket",    job_price_update,        {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock post-market price update"),
+    ("cn_vip_project",         job_vip_project,         {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock VIP daily MTM projection"),
     ("cn_daily_scan",          job_daily_scan,          {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock daily news scan"),
     ("macro_update",           job_macro_update,        {},                     _TZ_CN        , "daily",    "Macro data update (VIX/Treasury/DXY)"),
     ("us_daily_decision",      job_daily_decision,      {"market": "us_stock"}, _TZ_CN        , "daily",    "Daily decision (L1-L4+committee)"),
@@ -1044,6 +1091,7 @@ def list_job_categories() -> dict[str, str]:
         # LLM 决策类 → 每用户
         "us_daily_decision": "daily_decision", "cn_daily_decision": "daily_decision",
         "us_catalyst_scan": "catalyst", "cn_catalyst_scan": "catalyst",
+        "us_vip_project": "vip_project", "cn_vip_project": "vip_project",
         "us_weekly_strategy": "weekly_strategy", "cn_weekly_strategy": "weekly_strategy",
         "us_auto_review": "auto_review", "cn_auto_review": "auto_review",
         "stale_refresh": "daily_decision",  # 情报/策略 LLM 兜底，随自动决策开关
@@ -1060,6 +1108,7 @@ def list_job_labels() -> dict[str, dict]:
         # 美股（北京时刻，已按美股时段前后换算；中国无夏令时故固定不漂移）
         "us_price_premarket":  {"label": "美股·盘前行情更新",      "desc": "开盘前采集行情快照",           "tz": "北京", "freq": "工作日"},
         "us_price_postmarket": {"label": "美股·盘后行情更新",      "desc": "收盘后更新行情与技术指标",     "tz": "北京", "freq": "工作日"},
+        "us_vip_project":      {"label": "美股·VIP每日推算",       "desc": "按最新收盘价重估持仓市值（待校准）", "tz": "北京", "freq": "工作日"},
         "us_daily_scan":       {"label": "美股·日报扫描",          "desc": "新闻 / SEC 文件 / 期权异动",    "tz": "北京", "freq": "工作日"},
         "macro_update":        {"label": "宏观数据更新",          "desc": "VIX / 美债 / 美元指数 / 北向资金", "tz": "北京", "freq": "工作日"},
         "us_daily_decision":   {"label": "美股·日常决策",          "desc": "L1-L4 分层决策 + 投委会评审",   "tz": "北京", "freq": "工作日"},
@@ -1075,6 +1124,7 @@ def list_job_labels() -> dict[str, dict]:
         # A股（北京时区）
         "cn_price_premarket":  {"label": "A股·盘前行情更新",       "desc": "开盘前采集行情快照",           "tz": "北京", "freq": "工作日"},
         "cn_price_postmarket": {"label": "A股·盘后行情更新",       "desc": "收盘后更新行情与技术指标",     "tz": "北京", "freq": "工作日"},
+        "cn_vip_project":      {"label": "A股·VIP每日推算",        "desc": "按最新收盘价重估持仓市值（待校准）", "tz": "北京", "freq": "工作日"},
         "cn_daily_scan":       {"label": "A股·日报扫描",           "desc": "新闻 / 公告",                   "tz": "北京", "freq": "工作日"},
         "cn_daily_decision":   {"label": "A股·日常决策",           "desc": "L1-L4 分层决策 + 投委会评审",   "tz": "北京", "freq": "工作日"},
         "cn_catalyst_scan":    {"label": "A股·催化剂扫描",         "desc": "检测/判定催化剂事件",           "tz": "北京", "freq": "工作日"},

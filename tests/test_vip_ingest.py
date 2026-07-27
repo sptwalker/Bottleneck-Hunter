@@ -67,9 +67,105 @@ def _make_citi_like_pdf() -> bytes:
     return doc.tobytes()
 
 
+def _make_citi_position_report_pdf() -> bytes:
+    import fitz
+
+    lines = [
+        "花旗私人银行",
+        "报告货币: CNY",
+        "资产级别 -  全部持仓",
+        "描述",
+        "账⼾号码",
+        "帐⼾描述",
+        "帐⼾代号",
+        "当前值",
+        "与前⼀天相⽐的变化",
+        "与前⼀天相⽐的变化率",
+        "名义单位",
+        "市价",
+        "资产级别",
+        "平均或单位成本",
+        "总成本基准",
+        "未实现盈/(亏)",
+        "未实现盈/(亏)%",
+
+        "Call Deposit (IB) USD",
+        "0/XXX468/002",
+        "7/XXX468/028",
+        "Investment Advisory Portfolio",
+        "-",
+        "CNY 28,530,606.13",
+        "$4,214,114.12",
+        "CNY 0.00",
+        "$0.00",
+        "0.00%",
+        "4,214,103.410",
+        "-",
+        "现⾦/投资现⾦",
+        "-",
+        "-",
+        "-",
+        "-",
+
+        "Alphabet Inc",
+        "Ticker/ISIN",
+        "GOOGL/US02079K3059",
+        "7/XXX468/028",
+        "Investment Advisory Portfolio",
+        "-",
+        "CNY 7,284,897.53",
+        "$1,076,016.03",
+        "CNY (559,512.42)",
+        "$(82,642.80)",
+        "(7.13)%",
+        "3,387.000",
+        "## $317.69",
+        "股票",
+        "$185.19",
+        "CNY 4,246,578.04",
+        "$627,240.95",
+        "CNY 3,038,319.49",
+        "$448,775.08",
+        "71.55%",
+
+        "Tencent Holdings Ltd (700 HK)",
+        "Ticker/ISIN",
+        "700/KYG875721634",
+        "7/XXX468/028",
+        "Investment Advisory Portfolio",
+        "-",
+        "CNY 459,020.68",
+        "HKD 531,568.80",
+        "CNY 0.00",
+        "HKD 0.00",
+        "0.00%",
+        "1,194.000",
+        "## HKD 445.20",
+        "股票",
+        "HKD 317.35",
+        "CNY 327,204.52",
+        "HKD 378,919.12",
+        "CNY 131,816.16",
+        "HKD 152,649.68",
+        "40.29%",
+
+        "仓盘",
+        "⻚⾯打印在 24 Jul 2026 8:58 AM (UTC+08:00) | 为以下客⼾准备: xxxxxxxxxx",
+    ]
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((36, 40), "\n".join(lines), fontsize=8)
+    return doc.tobytes()
+
+
 @pytest.fixture
 def citi_pdf():
     return _make_citi_like_pdf()
+
+
+@pytest.fixture
+def citi_position_pdf():
+    return _make_citi_position_report_pdf()
 
 
 def test_parse_holdings(citi_pdf):
@@ -117,6 +213,20 @@ def test_cash_extracted(citi_pdf):
     assert abs(stmt.total_cash_usd - 971931.84) < 0.01
 
 
+def test_parse_citi_position_report(citi_position_pdf):
+    stmt = ingest.ingest_pdf(citi_position_pdf, "全部-仓盘_24_Jul_2026_08_58_40.pdf", broker_hint="citi")
+    assert stmt.period_end == "2026-07-24"
+    assert stmt.recon.status == "no_statement_total"
+    assert {h.ticker for h in stmt.holdings} >= {"GOOGL", "700"}
+    googl = next(h for h in stmt.holdings if h.ticker == "GOOGL")
+    assert googl.quantity == 3387.0
+    assert abs(googl.market_value_usd - 1076016.03) < 0.01
+    tencent = next(h for h in stmt.holdings if h.ticker == "700")
+    assert tencent.nominal_ccy == "HKD"
+    assert abs(tencent.market_value_nominal - 531568.80) < 0.01
+    assert stmt.total_cash_usd > 4000000
+
+
 def test_content_hash_stable(citi_pdf):
     a = ingest.ingest_pdf(citi_pdf, "x.PDF", broker_hint="citi").content_hash
     b = ingest.ingest_pdf(citi_pdf, "x.PDF", broker_hint="citi").content_hash
@@ -161,3 +271,166 @@ def test_ingest_and_store_encrypts_and_dedups(citi_pdf, tmp_path, monkeypatch):
     flags = json.loads(raw["recon_flags_json"])
     assert flags["equities_recon"] == "ok"
     assert not any(isinstance(v, float) and v > 1000 for v in flags.values())  # 无金额
+
+
+def test_classify_statement_content_fallbacks(citi_position_pdf, monkeypatch):
+    from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
+
+    pages = ingest._extract_pages(citi_position_pdf)
+
+    def _run(mode: str):
+        if mode == "missing_key":
+            monkeypatch.setattr(
+                "bottleneck_hunter.llm_clients.factory.get_models_for_role",
+                lambda *a, **k: (_ for _ in ()).throw(MissingUserKeyError("anthropic")),
+            )
+        elif mode == "timeout":
+            class _TimeoutLLM:
+                def invoke(self, _messages):
+                    raise TimeoutError("slow")
+
+            monkeypatch.setattr(
+                "bottleneck_hunter.llm_clients.factory.get_models_for_role",
+                lambda *a, **k: [(_TimeoutLLM(), "anthropic", "claude")],
+            )
+        else:
+            class _BadLLM:
+                def invoke(self, _messages):
+                    return type("R", (), {"content": "{}"})()
+
+            monkeypatch.setattr(
+                "bottleneck_hunter.llm_clients.factory.get_models_for_role",
+                lambda *a, **k: [(_BadLLM(), "anthropic", "claude")],
+            )
+            monkeypatch.setattr(
+                "bottleneck_hunter.chain.json_utils.extract_json_object",
+                lambda _text: {"doc_type": "bad", "broker": "???", "confidence": "oops", "reason_code": "bad"},
+            )
+        return ingest._classify_statement_content(pages, "Integrated Statement for Jun 2026.pdf", user_id="u1")
+
+    for mode in ("missing_key", "timeout", "invalid_json"):
+        result = _run(mode)
+        assert result["source"] == "heuristic"
+        assert result["broker"] == "citi"
+        assert result["doc_type"] == "position_report"
+
+
+
+def test_ingest_and_store_llm_position_report_overrides_filename(citi_position_pdf, tmp_path, monkeypatch):
+    from bottleneck_hunter.auth import store as store_mod
+
+    monkeypatch.setattr(store_mod, "_DEFAULT_DB", tmp_path / "auth.db")
+
+    class _FakeLLM:
+        def invoke(self, _messages):
+            return type("R", (), {"content": (
+                '{"doc_type":"position_report","broker":"citi",'
+                '"confidence":0.97,"reason_code":"content_match"}'
+            )})()
+
+    monkeypatch.setattr(
+        "bottleneck_hunter.llm_clients.factory.get_models_for_role",
+        lambda *a, **k: [(_FakeLLM(), "anthropic", "claude")],
+    )
+
+    result = ingest.ingest_and_store(citi_position_pdf, "Integrated Statement for Jun 2026.pdf", user_id="u1")
+    assert result["duplicate"] is False
+    assert result["doc_type"] == "position_report"
+
+    doc = store_mod.AuthStore(tmp_path / "auth.db").get_financial_doc("u1", result["doc_id"])
+    assert doc and doc["doc_type"] == "position_report"
+
+
+
+def test_ingest_and_store_llm_trade_confirm_routes_with_hint(citi_pdf, tmp_path, monkeypatch):
+    import hashlib
+
+    from bottleneck_hunter.auth import store as store_mod
+
+    monkeypatch.setattr(store_mod, "_DEFAULT_DB", tmp_path / "auth.db")
+
+    class _FakeLLM:
+        def invoke(self, _messages):
+            return type("R", (), {"content": (
+                '{"doc_type":"trade_confirm","broker":"citi",'
+                '"confidence":0.96,"reason_code":"content_match"}'
+            )})()
+
+    monkeypatch.setattr(
+        "bottleneck_hunter.llm_clients.factory.get_models_for_role",
+        lambda *a, **k: [(_FakeLLM(), "anthropic", "claude")],
+    )
+
+    seen = {}
+
+    def _fake_ingest_pdf(pdf_bytes, filename="", broker_hint="", doc_type_hint="", pdf_password=""):
+        seen["broker_hint"] = broker_hint
+        seen["doc_type_hint"] = doc_type_hint
+        return ingest.BrokerStatement(
+            broker="citi",
+            period_end="2026-07-24",
+            content_hash=hashlib.sha256(pdf_bytes).hexdigest(),
+            holdings=[],
+            cash_balances=[],
+            total_cash_usd=0.0,
+            transactions=[ingest.StatementTransaction(
+                ticker="AAPL", txn_type="buy", trade_date="2026-07-24",
+                quantity=10, price=150.0, gross_amount=-1500.0, net_amount=-1500.0,
+                currency="USD", external_id="tc-1", account_ref="A1",
+            )],
+            recon=ingest.ReconResult(
+                holdings_count=0, holdings_total_usd=0.0,
+                statement_equities_total_usd=None, delta_usd=None,
+                status="no_statement_total",
+            ),
+        )
+
+    monkeypatch.setattr(ingest, "ingest_pdf", _fake_ingest_pdf)
+
+    result = ingest.ingest_and_store(citi_pdf, "statement.pdf", user_id="u1")
+    assert result["doc_type"] == "trade_confirm"
+    assert seen["broker_hint"] == "citi"
+    assert seen["doc_type_hint"] == "trade_confirm"
+
+    doc = store_mod.AuthStore(tmp_path / "auth.db").get_financial_doc("u1", result["doc_id"])
+    assert doc and doc["doc_type"] == "trade_confirm"
+
+
+# ── 野村 0 持仓事故三处修复回归 ──────────────────────────────────────────
+
+def _mk_stmt(broker="nomura", holdings=(), cash=(), txns=(), summary=None):
+    return ingest.BrokerStatement(
+        broker=broker, content_hash="x" * 64, period_end="",
+        holdings=list(holdings), cash_balances=list(cash), transactions=list(txns),
+        account_summary=summary or {},
+        recon=ingest.ReconResult(holdings_count=len(holdings), holdings_total_usd=0.0,
+                                 statement_equities_total_usd=None, delta_usd=None,
+                                 status="no_statement_total"),
+    )
+
+
+def test_detect_broker_nomura_not_stolen_by_generic_account_number():
+    """含 'Account Number' 的野村单必须判野村,不被泛化规则截胡成花旗(Statement_260423 事故)。"""
+    assert ingest.detect_broker(["Nomura Singapore Limited\nPortfolio Statement\nAccount Number: 1"]) == "nomura"
+    assert ingest.detect_broker(["CitiBank\nAccount Number: 9"]) == "citi"         # 花旗品牌优先
+    assert ingest.detect_broker(["X Broker\nAccount Number: 2"]) == "citi"          # 无品牌→泛化兜底花旗
+
+
+def test_statement_is_empty_predicate():
+    h = ingest.EquityHolding(ticker="AAA", company="AAA Inc", quantity=1,
+                             nominal_ccy="USD", market_value_nominal=10.0, market_value_usd=10.0)
+    assert ingest._statement_is_empty(_mk_stmt(holdings=[h])) is False       # 有持仓
+    assert ingest._statement_is_empty(_mk_stmt(summary={"net_asset_value_usd": 100})) is False  # 有正锚点
+    assert ingest._statement_is_empty(_mk_stmt(summary={"net_asset_value_usd": -8_760_666})) is True  # 负 NAV 不算锚点
+    assert ingest._statement_is_empty(_mk_stmt()) is True                    # 全空(irf/披露)
+
+
+def test_ingest_and_store_rejects_empty_monthly_statement(tmp_path, monkeypatch):
+    from bottleneck_hunter.auth import store as store_mod
+    monkeypatch.setattr(store_mod, "_DEFAULT_DB", tmp_path / "auth.db")
+    monkeypatch.setattr(ingest, "_extract_pages", lambda *a, **k: ["Nomura Singapore Limited"])
+    monkeypatch.setattr(ingest, "_classify_statement_content",
+                        lambda *a, **k: {"broker": "nomura", "doc_type": "monthly_statement"})
+    monkeypatch.setattr(ingest, "ingest_pdf", lambda *a, **k: _mk_stmt())      # 抽成 0 持仓
+    with pytest.raises(ValueError, match="unsupported_non_statement"):
+        ingest.ingest_and_store(b"%PDF-fake", "disclosure.pdf", user_id="u1")

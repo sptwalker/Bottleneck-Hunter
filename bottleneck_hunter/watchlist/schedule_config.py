@@ -22,6 +22,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     # 美股（北京时间；收盘后/开盘前留足余量）
     "us_price_premarket":     {"hour": 21, "minute": 0},   # US 开盘前（<21:30）抓前收
     "us_price_postmarket":    {"hour": 5,  "minute": 30},  # US 收盘后（>05:00）抓当日收盘
+    "us_vip_project":         {"hour": 5,  "minute": 50},  # 盘后价格之后：VIP 每日推算
     "us_daily_scan":          {"hour": 6,  "minute": 0},
     "macro_update":           {"hour": 5,  "minute": 45},
     "us_daily_decision":      {"hour": 6,  "minute": 30},  # 在数据 job 之后
@@ -37,6 +38,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     # A股（北京时间）
     "cn_price_premarket":     {"hour": 9,  "minute": 0},
     "cn_price_postmarket":    {"hour": 16, "minute": 0},
+    "cn_vip_project":         {"hour": 16, "minute": 20},  # 盘后价格之后：VIP 每日推算
     "cn_daily_scan":          {"hour": 18, "minute": 0},
     "cn_daily_decision":      {"hour": 18, "minute": 30},
     "cn_catalyst_scan":       {"hour": 8,  "minute": 0},

@@ -19,6 +19,7 @@ AUTO_UPDATE_DEFAULTS: dict[str, str] = {
     "weekly_strategy": "1",   # 周度 L1/L2 策略重生成
     "auto_review": "1",       # 卖出复盘 + 机会成本 + 偏好学习
     "catalyst": "1",          # 催化剂扫描与判定
+    "vip_project": "1",       # VIP 每日系统推算（按最新收盘价重估持仓，标注待校准）
     "full_refresh": "1",      # 周期性全量刷新（数据+决策一条龙）
     "stale_threshold_hours": "24",
 }
