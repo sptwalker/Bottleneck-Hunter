@@ -128,13 +128,18 @@ class TestJobDispatching:
         ) as mock_fetch:
             results = await job_price_update(market="us_stock")
 
-        # 验证 fetch_price_batch 被调用时的 tickers 参数只含美股
-        mock_fetch.assert_called_once()
-        call_args = mock_fetch.call_args
-        tickers_arg = call_args[0][0]  # 第一个位置参数
+        # 现在有两次调用：A 基准指数单独深抓(days=1000) + 观察池主价格拉取。
+        # 市场过滤断言只针对主价格调用（不带 days 的那次）。
+        main_calls = [c for c in mock_fetch.call_args_list if "days" not in c.kwargs]
+        assert len(main_calls) == 1
+        tickers_arg = main_calls[0][0][0]  # 主调用的第一个位置参数
         assert "AAPL" in tickers_arg
         assert "MSFT" in tickers_arg
         assert "SH600519" not in tickers_arg
+        # A: 基准指数(^GSPC)单独深抓、走同一 market 桶，供 VIP 净值对照/回测基准对齐
+        bench_calls = [c for c in mock_fetch.call_args_list if "days" in c.kwargs]
+        assert len(bench_calls) == 1 and bench_calls[0].kwargs["days"] == 1000
+        assert bench_calls[0][0][0] == ["^GSPC"]
 
     async def test_daily_scan_astock_skips_sec(self, store):
         """job_daily_scan(market="a_stock") 不调用 SEC 和 Options 管道。"""

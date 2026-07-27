@@ -106,6 +106,20 @@ MARKET_INDEX_KEYS: dict[str, list[str]] = {
     "hk_stock": ["hsi", "hstech"],
 }
 
+# 各市场净值曲线的默认对照基准（宽基指数）。code 复用上方指数元组、不另立代码表；
+# 从元组反查保证代码变更时不漂移。A股用沪深300、美股标普、港股恒指。
+_INDEX_CODE_MAP: dict[str, tuple[str, str]] = {
+    k: (code, label)
+    for k, code, label in (_GLOBAL_INDICATORS + _US_INDICATORS + _CN_INDICATORS + _HK_INDICATORS)
+}
+_BENCHMARK_KEY: dict[str, str] = {"us_stock": "sp500", "a_stock": "csi300", "hk_stock": "hsi"}
+
+
+def default_benchmark_ticker(market: str) -> tuple[str, str]:
+    """返回该市场净值对照用的默认基准 (yfinance 代码, 显示名)。未知市场退美股标普。"""
+    key = _BENCHMARK_KEY.get(market or "us_stock", "sp500")
+    return _INDEX_CODE_MAP.get(key, ("^GSPC", "标普500"))
+
 # 各市场「专属」宏观指标 key（_GLOBAL_INDICATORS 与 FRED 为全球共享、任何市场都可用，不在此列）。
 # 用于缓存兜底时剔除「他市专属」指标，避免 sp500/北向资金 等串味进另一市场的 L1 宏观口径。
 _MARKET_EXCLUSIVE_KEYS: dict[str, set[str]] = {

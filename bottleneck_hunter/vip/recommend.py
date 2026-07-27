@@ -23,7 +23,8 @@ from bottleneck_hunter.vip import portfolio, mandate as _mandate
 from bottleneck_hunter.vip import compliance, number_guard
 from bottleneck_hunter.vip.advisory import (
     _consensus, format_macro_for_prompt, build_committee_context,
-    committee_corpus, annotate_committee, reconcile_draft)  # 复用勿重写
+    committee_corpus, annotate_committee, reconcile_draft,
+    VIP_ROLE_CONTEXT, VIP_PT_RECOMMEND)  # 复用勿重写
 from bottleneck_hunter.chain.json_utils import extract_json_object
 
 _ACTIONS = {"关注", "建仓", "规避"}
@@ -257,6 +258,21 @@ async def generate_account_recommendations(wl_store, *, account_ref: str = "", u
         "provider": provider, "model": model,
         "disclaimer": compliance.DISCLAIMER_ZH,
     }
+
+    # ── C-1 复盘打点（record_prediction，只写不评）：为 5b 复盘启动数据时钟。role_context=vip_advisor +
+    #    prediction_type=vip_recommend 独占桶，与 sim 的 committee_*/vote 及 advisory 的 vip_advice 都区分开；
+    #    旁路容错——打点失败只 debug、绝不影响荐新主链路。记录 reconcile 后的最终动作。
+    try:
+        mkt = getattr(wl_store, "_market", "") or ""
+        for c in draft["candidates"]:
+            if c.get("ticker"):
+                wl_store.record_prediction(
+                    provider=provider, model=model, role_context=VIP_ROLE_CONTEXT,
+                    ticker=c["ticker"], prediction_type=VIP_PT_RECOMMEND,
+                    prediction_value=c["action"], market=mkt)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug("VIP recommend 复盘打点失败（不影响荐新）", exc_info=True)
 
     # ── 4) 落库（独立表，绝不写 sim_*）──
     rid = uuid.uuid4().hex[:12]

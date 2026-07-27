@@ -813,6 +813,34 @@ def _projection_point(wl_store, account_ref: str = "") -> dict | None:
     return {"as_of_date": latest_date, "total_equity": round(total, 2), "is_projected": True}
 
 
+def _rebase_benchmark(series: list[dict], snaps: list[dict]) -> bool:
+    """把指数收盘按每个 as_of_date 对齐(取 ≤ 该日最近收盘)并 rebase 到起始权益，
+    就地给 series 点加 benchmark_value。无有效收盘→不改、返回 False。"""
+    closes = sorted(((s["date"][:10], s["close"]) for s in snaps
+                     if s.get("close") and s.get("date")), key=lambda x: x[0])
+    if not series or not closes:
+        return False
+
+    def _on_or_before(d: str):
+        hit = None
+        for cd, cv in closes:
+            if cd <= d:
+                hit = cv
+            else:
+                break
+        return hit
+
+    base = _on_or_before(series[0]["as_of_date"])
+    if not base:
+        return False
+    base_eq = series[0]["total_equity"]
+    for pt in series:
+        c = _on_or_before(pt["as_of_date"])
+        if c:
+            pt["benchmark_value"] = round(base_eq * c / base, 2)
+    return True
+
+
 def value_series(wl_store, *, account_ref: str = "") -> dict:
     """按 positions.as_of_date 聚合 Σmarket_value_base → 价值曲线；派生逐期收益率。
 
@@ -852,7 +880,18 @@ def value_series(wl_store, *, account_ref: str = "") -> dict:
         pct = ((cur["total_equity"] - base) / base * 100) if base else 0.0
         returns.append({"period": cur["as_of_date"], "pct": round(pct, 2),
                         "is_projected": bool(cur.get("is_projected"))})
-    return {"series": series, "returns": returns}
+    # A: 叠加大盘基准对照（rebase 到起始权益，同轴可比）。指数无历史→不加键，诚实缺省。
+    benchmark_meta = None
+    if series:
+        from bottleneck_hunter.watchlist.macro_data import default_benchmark_ticker
+        bench_code, bench_label = default_benchmark_ticker(getattr(wl_store, "_market", "") or "us_stock")
+        try:
+            snaps = wl_store.get_snapshots(bench_code, days=1000)
+        except Exception:
+            snaps = []
+        if _rebase_benchmark(series, snaps):
+            benchmark_meta = {"ticker": bench_code, "label": bench_label}
+    return {"series": series, "returns": returns, "benchmark": benchmark_meta}
 
 
 def missing_data_report(wl_store, *, account_ref: str = "") -> list[dict]:
@@ -1078,3 +1117,32 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
         pass
 
     return {"report_id": rid, "report_md": report_md, "unverified": unverified}
+
+
+if __name__ == "__main__":
+    # ponytail 自检：_rebase_benchmark 纯逻辑（净值基准对齐 + rebase，money path）——DB 路径不入自检
+    # 1) 同起点、指数 +10% → 基准点 rebase 到起始权益后同比例 +10%
+    s = [{"as_of_date": "2026-01-01", "total_equity": 1000.0},
+         {"as_of_date": "2026-02-01", "total_equity": 900.0}]
+    assert _rebase_benchmark(s, [{"date": "2026-01-01", "close": 100.0},
+                                 {"date": "2026-02-01", "close": 110.0}]) is True
+    assert s[0]["benchmark_value"] == 1000.0 and s[1]["benchmark_value"] == 1100.0, s
+
+    # 2) 日期空洞：as_of_date 无恰好收盘 → 取 ≤ 该日最近收盘（不外推未来交易日）
+    s2 = [{"as_of_date": "2026-01-01", "total_equity": 1000.0},
+          {"as_of_date": "2026-02-15", "total_equity": 950.0}]
+    assert _rebase_benchmark(s2, [{"date": "2026-01-01", "close": 100.0},
+                                  {"date": "2026-02-10", "close": 120.0},
+                                  {"date": "2026-03-01", "close": 130.0}]) is True
+    assert s2[1]["benchmark_value"] == 1200.0, s2  # 取 02-10 收盘、不外推 03-01
+
+    # 3) 空 snaps → False、不写键（诚实缺省，不画假平线）
+    s3 = [{"as_of_date": "2026-01-01", "total_equity": 1000.0}]
+    assert _rebase_benchmark(s3, []) is False and "benchmark_value" not in s3[0]
+
+    # 4) 起始日早于最早收盘 → base 取不到 → False（账户历史超出已抓指数历史时的诚实缺省）
+    s4 = [{"as_of_date": "2025-06-01", "total_equity": 1000.0}]
+    assert _rebase_benchmark(s4, [{"date": "2026-01-01", "close": 100.0}]) is False
+    assert "benchmark_value" not in s4[0]
+
+    print("portfolio self-check OK")

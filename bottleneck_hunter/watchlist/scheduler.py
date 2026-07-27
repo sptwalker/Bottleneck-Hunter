@@ -200,6 +200,19 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
     if store is None:
         return {}
     tickers = store.get_tickers_by_market().get(market, [])  # unbound → 全体并集
+
+    # A: 基准指数单独深抓 ~4y 历史并落库，供 VIP 净值对照/回测基准对齐早期结算日。
+    #    与观察池票分开抓(days=1000)，避免整池深抓；best-effort，失败不影响主价格任务。
+    #    ponytail: 每轮重抓一只指数(幂等 INSERT OR REPLACE)成本可忽略；A股/港股指数代码
+    #    若某 fetcher 不认后缀则基准诚实缺省，主用例美股 ^GSPC 走 yfinance 稳。
+    try:
+        from bottleneck_hunter.watchlist.macro_data import default_benchmark_ticker
+        bench_code, _bench_label = default_benchmark_ticker(market)
+        if bench_code:
+            await fetch_price_batch([bench_code], store, days=1000, market=market)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("基准指数抓取失败 (%s): %s", market, e)
+
     if not tickers:
         return {}
 

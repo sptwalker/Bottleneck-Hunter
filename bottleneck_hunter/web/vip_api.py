@@ -711,6 +711,25 @@ async def post_account_recommend(market: str = "us_stock", account_ref: str = ""
     return out
 
 
+@router.get("/account/budget-reconciliation")
+async def get_budget_reconciliation(market: str = "us_stock", account_ref: str = "",
+                                    user: dict = Depends(require_vip)):
+    """B · 现金/仓位预算对照（只读、指示性）：advisory 加仓 + recommend 建仓的量化仓位加总，对照可投资现金给容量 sanity。
+    任一 pass 尚未生成则 partial=True（缺的 pass 不计入需求、判断偏乐观）。只提示、不约束生成、不下单。"""
+    from bottleneck_hunter.vip import advisory, recommend, portfolio
+    ref = (account_ref or "").strip()
+    if not ref:  # 空 ref 会经 build_account_dossier→get_sim_account('') 越界读决策中心模拟盘（见 memory:dc_sim_account_decoupled）
+        raise HTTPException(status_code=400, detail="请先选择具体子账户")
+    wl = _wl(user, market)
+    dossier = portfolio.build_account_dossier(wl, account_ref=ref)
+    adv = advisory.get_latest_advisory(wl, account_ref=ref)
+    rec = recommend.get_latest_recommendations(wl, account_ref=ref)
+    result = advisory.summarize_cash_budget(dossier, adv, rec)
+    result.update({"partial": (adv is None) or (rec is None),
+                   "has_advisory": adv is not None, "has_recommend": rec is not None})
+    return {"budget": result}
+
+
 class ChatReq(BaseModel):
     session_id: str = ""
     question: str

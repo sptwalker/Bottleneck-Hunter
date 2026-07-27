@@ -622,7 +622,7 @@ async function loadDashboard() {
 
   try {
     const vs = await vipGet(`/account/value-series?${params.toString()}`);
-    renderValueChart(vs.series || []);
+    renderValueChart(vs.series || [], vs.benchmark);
     renderReturnsChart(vs.returns || []);
     const dd = maxDrawdown((vs.series || []).map(s => s.total_equity));
     const el = document.getElementById('vip-risk-drawdown');
@@ -673,7 +673,7 @@ function maxDrawdown(vals) {
   return mdd;
 }
 
-function renderValueChart(series) {
+function renderValueChart(series, benchmark) {
   const el = document.getElementById('vip-value-chart');
   if (!el) return;
   if (!series.length) {
@@ -691,24 +691,39 @@ function renderValueChart(series) {
     if (projIdx > 0 && i === projIdx - 1) return s.total_equity;  // 虚线起点=最后一个实值点
     return null;
   });
+  // A: 大盘基准对照线——后端已 rebase 到起始权益(同轴可比)；指数无历史→benchmark 缺省→不画假线
+  const benchData = benchmark ? series.map(s => (s.benchmark_value ?? null)) : null;
   const dateSet = new Set(series.filter(s => s.is_projected).map(s => s.as_of_date));
+  const seriesOpt = [
+    { name: '实值', type: 'line', data: realData, smooth: true, symbolSize: 7, connectNulls: false,
+      lineStyle: { color: '#6366f1', width: 2 }, itemStyle: { color: '#6366f1' },
+      areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: '#6366f130' }, { offset: 1, color: '#6366f105' }] } } },
+    { name: '推算', type: 'line', data: projData, smooth: true, symbolSize: 8, symbol: 'diamond', connectNulls: true,
+      lineStyle: { color: '#f59e0b', width: 2, type: 'dashed' }, itemStyle: { color: '#f59e0b' } },
+  ];
+  if (benchData) {
+    seriesOpt.push({ name: '基准', type: 'line', data: benchData, smooth: true, symbol: 'none', connectNulls: true,
+      lineStyle: { color: '#94a3b8', width: 1.5, type: 'dashed' }, itemStyle: { color: '#94a3b8' } });
+  }
+  // notMerge=true：切换账户时基准线有/无会变，全量替换避免残留上一账户的灰线
   c.setOption({
-    grid: { top: 20, right: 20, bottom: 30, left: 64 },
+    legend: { data: benchData ? ['实值', '推算', '基准'] : ['实值', '推算'], top: 0, right: 8,
+              itemWidth: 18, itemHeight: 8, textStyle: { fontSize: 11 } },
+    grid: { top: 30, right: 20, bottom: 30, left: 64 },
     xAxis: { type: 'category', data: series.map(s => s.as_of_date), axisLabel: { fontSize: 11 }, name: hint, nameGap: 6 },
     yAxis: { type: 'value', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
     tooltip: { trigger: 'axis', formatter: p => {
-      const pt = p.find(x => x.value != null) || p[0];
-      const tag = dateSet.has(pt.name) ? '<br/><span style="color:#f59e0b">系统推算·待校准</span>' : '';
-      return `${pt.name}<br/>总权益: $${fmtNum(pt.value)}${tag}`;
+      const eq = p.find(x => (x.seriesName === '实值' || x.seriesName === '推算') && x.value != null);
+      const bench = p.find(x => x.seriesName === '基准' && x.value != null);
+      const name = (eq || bench || p[0]).name;
+      const tag = dateSet.has(name) ? '<br/><span style="color:#f59e0b">系统推算·待校准</span>' : '';
+      let out = name;
+      if (eq) out += `<br/>总权益: $${fmtNum(eq.value)}`;
+      if (bench) out += `<br/>基准(${benchmark.label}): $${fmtNum(bench.value)}`;
+      return out + tag;
     } },
-    series: [
-      { name: '实值', type: 'line', data: realData, smooth: true, symbolSize: 7, connectNulls: false,
-        lineStyle: { color: '#6366f1', width: 2 }, itemStyle: { color: '#6366f1' },
-        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: '#6366f130' }, { offset: 1, color: '#6366f105' }] } } },
-      { name: '推算', type: 'line', data: projData, smooth: true, symbolSize: 8, symbol: 'diamond', connectNulls: true,
-        lineStyle: { color: '#f59e0b', width: 2, type: 'dashed' }, itemStyle: { color: '#f59e0b' } },
-    ],
-  });
+    series: seriesOpt,
+  }, true);
 }
 
 function renderReturnsChart(returns) {
@@ -1061,6 +1076,29 @@ async function saveMandate(ref) {
   }
 }
 
+// B: 现金/仓位预算对照条（指示性）——顾问加仓 + 荐新建仓的已量化仓位加总 vs 可投资现金。
+// 跨两个 pass，内容相同，故同时写进 advisory/recommend 两个容器；旁路失败不影响主体。
+async function refreshBudgetBar(ref) {
+  const targets = ['vip-advisory-budget', 'vip-recommend-budget']
+    .map(id => document.getElementById(id)).filter(Boolean);
+  if (!targets.length || !ref) return;
+  let html = '';
+  try {
+    const { budget: b } = await vipGet(`/account/budget-reconciliation?account_ref=${encodeURIComponent(ref)}`);
+    if (b && (b.has_advisory || b.has_recommend)) {
+      const warn = !b.fits;
+      const color = warn ? '#b45309' : '#15803d', bg = warn ? '#fffbeb' : '#f0fdf4', bd = warn ? '#fde68a' : '#bbf7d0';
+      const fitTxt = warn ? `已量化新建仓超可投资现金 ${fmtNum(b.overcommit_pct, 1)}%` : '可投资现金可覆盖已量化新建仓';
+      html = `<div style="margin:8px 0;padding:8px 12px;border:1px solid ${bd};background:${bg};border-radius:8px;font-size:12.5px;color:${color}">` +
+        `<div><b>${warn ? '⚠' : '✓'} 预算对照（指示性）</b>：可投资现金 $${fmtNum(b.available_cash)} · 已量化新建仓需求 $${fmtNum(b.requested_new_buy)} · ${esc(fitTxt)}` +
+        (b.unquantified_adds ? ` · 另有 ${b.unquantified_adds} 项加/建仓未量化` : '') +
+        (b.partial ? ` · 仅含已生成 pass、结果偏乐观` : '') + `</div>` +
+        `<div style="margin-top:3px;color:var(--muted);font-size:11.5px">${esc(b.note)}</div></div>`;
+    }
+  } catch (_) { /* 预算条失败不影响建议主体 */ }
+  targets.forEach(t => { t.innerHTML = html; });
+}
+
 async function loadAdvisory() {
   if (requireConcreteAccount('advisory')) return;
   clearScopeHint('advisory');
@@ -1069,6 +1107,7 @@ async function loadAdvisory() {
   const btn = document.getElementById('vip-advisory-generate');
   if (btn) btn.onclick = () => runAdvisory(ref);
   setStatus('vip-advisory-status', '', true);
+  refreshBudgetBar(ref);  // 独立异步，与两 pass 建议并存
   if (body) body.innerHTML = '<p class="st-empty-hint">加载中…</p>';
   try {
     const { history } = await vipGet(`/account/advisory/history?account_ref=${encodeURIComponent(ref)}`);
@@ -1110,6 +1149,7 @@ async function runAdvisory(ref) {
     const { result } = await r.json();
     renderAdvisory(result);
     setStatus('vip-advisory-status', '✓ 已生成', true);
+    refreshBudgetBar(ref);  // 新建议可能改变加仓集 → 刷新预算对照
     try {  // 刷新历史列表（失败不影响已渲染的新建议）
       const { history } = await vipGet(`/account/advisory/history?account_ref=${encodeURIComponent(ref)}`);
       renderAdvisoryHistory(history || []);
@@ -1173,6 +1213,7 @@ async function loadRecommend() {
   const btn = document.getElementById('vip-recommend-generate');
   if (btn) btn.onclick = () => runRecommend(ref);
   setStatus('vip-recommend-status', '', true);
+  refreshBudgetBar(ref);  // 独立异步，与两 pass 建议并存
   if (body) body.innerHTML = '<p class="st-empty-hint">加载中…</p>';
   try {
     const { history } = await vipGet(`/account/recommend/history?account_ref=${encodeURIComponent(ref)}`);
@@ -1214,6 +1255,7 @@ async function runRecommend(ref) {
     const { result } = await r.json();
     renderRecommend(result);
     setStatus('vip-recommend-status', '✓ 已生成', true);
+    refreshBudgetBar(ref);  // 新荐新可能改变建仓集 → 刷新预算对照
     try {  // 刷新历史列表（失败不影响已渲染的新建议）
       const { history } = await vipGet(`/account/recommend/history?account_ref=${encodeURIComponent(ref)}`);
       renderRecommendHistory(history || []);

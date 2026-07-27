@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -20,6 +21,15 @@ from bottleneck_hunter.vip import compliance, number_guard
 from bottleneck_hunter.chain.json_utils import extract_json_object
 
 _ACTIONS = {"减仓", "持有", "加仓"}
+
+# ── C-1 复盘打点隔离常量（recommend.py 导入复用）──
+# VIP 建议的 record_prediction 打点必须与决策中心模拟盘校准物理隔离：sim 用 role_context="committee_{role}"
+# + prediction_type="vote"，二者聚合口径(get_model_accuracy_stats 按 role_context、get_calibration_weight 按
+# role_context+user_id+market)中**唯一干净隔离维度是 role_context**（user_id/market 与 sim 共享）。故 VIP 独占
+# role_context="vip_advisor" + 独立 prediction_type，则 sim 的 _consensus 读 committee_* 桶零污染，VIP 自身亦然。
+VIP_ROLE_CONTEXT = "vip_advisor"
+VIP_PT_ADVICE = "vip_advice"
+VIP_PT_RECOMMEND = "vip_recommend"
 
 
 def _now_iso() -> str:
@@ -355,6 +365,55 @@ def reconcile_draft(items: list[dict], action_key: str, downgrade_map: dict, com
     return False
 
 
+def _parse_weight(s: str) -> float | None:
+    """从软仓位串解析百分比中点（money path）：'3%-5%'→4.0；'5%'→5.0；区间取均值；无带%数字→None。
+    只认百分号数字，避免把理由里的其它数字误当仓位。"""
+    if not s:
+        return None
+    nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)\s*%", str(s))]
+    if not nums:
+        return None
+    return round(sum(nums) / len(nums), 2)  # 单值即其本身，区间取中点
+
+
+def summarize_cash_budget(dossier: dict, advisory_result: dict | None,
+                          recommend_result: dict | None) -> dict:
+    """指示性现金/仓位预算对照（只提示不约束）：把两个 pass 的建仓候选量化仓位加总，对照可投资现金给 sanity。
+
+    需求侧本不可精确量化（advisory 加仓无仓位量、现金是结算单静态口径），故结论仅 indicative：
+    - requested_new_buy = Σ(recommend 建仓候选软仓位中点% × total_equity)——仅统计「有明确仓位%」者；
+      无仓位%的建仓/所有 advisory 加仓 → 计入 unquantified_adds、不塞进 requested（不拿 0 冒充已量化）。
+    - available_cash = dossier.cash_balance（结算单口径、不含融资 buying_power）。
+    - fits / overcommit_pct 仅基于「已量化」部分；unquantified_adds>0 时判断偏乐观，note 明示口径。
+    """
+    total_equity = float(dossier.get("total_equity") or 0)
+    available = float(dossier.get("cash_balance") or 0)
+    requested = 0.0
+    unquantified = 0
+    for c in ((recommend_result or {}).get("candidates") or []):
+        if str(c.get("action", "")) != "建仓":
+            continue
+        w = _parse_weight(c.get("suggested_weight", ""))
+        if w is None:
+            unquantified += 1
+        else:
+            requested += w / 100.0 * total_equity
+    for h in ((advisory_result or {}).get("holdings") or []):
+        if str(h.get("action", "")) == "加仓":  # 加仓无仓位量 → 一律未量化
+            unquantified += 1
+    requested = round(requested, 2)
+    over = requested - available
+    fits = over <= 0
+    overcommit = round(over, 2) if over > 0 else 0.0
+    overcommit_pct = round(over / available * 100, 1) if (over > 0 and available > 0) else 0.0
+    tail = (f"另有 {unquantified} 项加仓/建仓未给出仓位量、未纳入需求合计，容量判断偏乐观。"
+            if unquantified else "")
+    return {"available_cash": round(available, 2), "requested_new_buy": requested,
+            "fits": fits, "overcommit": overcommit, "overcommit_pct": overcommit_pct,
+            "unquantified_adds": unquantified,
+            "note": "现金口径为结算单静态余额、不含融资(buying_power)，容量判断为指示性。" + tail}
+
+
 def _annotate(draft: dict, corpus: str) -> list[str]:
     """就地给草案文本里未在档案/纲领语料中出现的数字加⚠标注，返回未核到 token 列表。"""
     unverified: list[str] = []
@@ -441,6 +500,21 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
         "provider": provider, "model": model,
         "disclaimer": compliance.DISCLAIMER_ZH,
     }
+
+    # ── C-1 复盘打点（record_prediction，只写不评）：为 5b 复盘启动数据时钟，并给 VIP 自己的准确率信号。
+    #    role_context=vip_advisor 独占桶，与 sim 的 committee_*/vote 物理隔离；旁路容错——打点失败只 debug、
+    #    绝不影响建议主链路（仿 record_model_call 哲学）。记录的是 reconcile 后的最终动作。
+    try:
+        mkt = getattr(wl_store, "_market", "") or ""
+        for h in draft["holdings"]:
+            if h.get("ticker"):
+                wl_store.record_prediction(
+                    provider=provider, model=model, role_context=VIP_ROLE_CONTEXT,
+                    ticker=h["ticker"], prediction_type=VIP_PT_ADVICE,
+                    prediction_value=h["action"], market=mkt)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug("VIP advisory 复盘打点失败（不影响建议）", exc_info=True)
 
     # ── 4) 落库（独立表，绝不写 sim_*）──
     aid = uuid.uuid4().hex[:12]
@@ -661,5 +735,29 @@ if __name__ == "__main__":
     ks = [{"ticker": "AAPL", "action": "加仓", "reason": "强"}]
     assert reconcile_draft(ks, "action", {"加仓": "持有"}, {"verdict": "approve", "caution": False}) is False, ks
     assert ks[0]["action"] == "加仓" and ks[0]["reason"] == "强", ks       # approve 且不 caution→原样
+
+    # 11) B: _parse_weight —— 区间取中点 / 单值本身 / 无带%数字→None（不把非仓位数字误当仓位）
+    assert _parse_weight("3%-5%") == 4.0, _parse_weight("3%-5%")
+    assert _parse_weight("5%") == 5.0
+    assert _parse_weight("") is None and _parse_weight("适量") is None and _parse_weight(None) is None
+    assert _parse_weight("持有 3 只") is None
+
+    # 12) B: summarize_cash_budget —— 已量化建仓 vs 现金；加仓/无%建仓只计未量化不入需求
+    dossier_b = {"total_equity": 10000.0, "cash_balance": 1000.0}
+    one = summarize_cash_budget(dossier_b, None, {"candidates": [{"action": "建仓", "suggested_weight": "5%"}]})
+    assert one["requested_new_buy"] == 500.0 and one["fits"] is True, one            # 5%*10000=500 ≤ 1000
+    two = summarize_cash_budget(dossier_b, None, {"candidates": [
+        {"action": "建仓", "suggested_weight": "40%"}, {"action": "建仓", "suggested_weight": "40%"}]})
+    assert two["fits"] is False and two["overcommit_pct"] > 0, two                   # 8000 > 1000
+    adds = summarize_cash_budget(dossier_b, {"holdings": [
+        {"action": "加仓"}, {"action": "加仓"}, {"action": "持有"}]}, None)
+    assert adds["unquantified_adds"] == 2 and adds["requested_new_buy"] == 0.0, adds  # 加仓无仓位量→只计数
+    novol = summarize_cash_budget(dossier_b, None, {"candidates": [{"action": "建仓", "suggested_weight": ""}]})
+    assert novol["unquantified_adds"] == 1 and novol["requested_new_buy"] == 0.0, novol  # 建仓无%→不塞 0 进需求
+
+    # 13) C-1 隔离回归守卫：VIP 打点常量绝不撞 sim 的 role_context/prediction_type（防手滑致校准交叉污染）
+    assert VIP_PT_ADVICE not in ("vote",) and VIP_PT_RECOMMEND not in ("vote",)
+    assert not VIP_ROLE_CONTEXT.startswith("committee_")
+    assert VIP_PT_ADVICE != VIP_PT_RECOMMEND
 
     print("advisory self-check OK")
