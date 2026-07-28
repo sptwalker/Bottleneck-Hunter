@@ -87,10 +87,16 @@ curl -sG -H "Authorization: Bearer $GRAFANA_SA_TOKEN" \
 | 登录/鉴权异常 | `{container="bottleneck-hunter"} |= "auth" |~ "(?i)401|403|失败"` |
 | 定时任务 | `{container="bottleneck-hunter"} |= "scheduler"` |
 
-## 五、告警（可选，后续接）
+## 五、告警（已接：ERROR 激增自动告警）
 
-Grafana → Alerting 可对 LogQL 结果计数设阈值告警（如「5 分钟内 ERROR > 10」「出现『所有实时数据源均失败』」），
-通知走邮件/webhook。首版先保证采集+检索闭环，告警按需再配。
+已随栈自动装载一条告警（[error-rate.yaml](../deploy/grafana/provisioning/alerting/error-rate.yaml)）：
+**近 5 分钟 `bottleneck-hunter` 容器 ERROR 日志条数 > 10** 即触发，每分钟评估。
+
+- **通知渠道**：webhook，地址取 `.env` 的 `ALERT_WEBHOOK_URL`（飞书/钉钉/企业微信机器人、Slack incoming webhook、自建接收端皆可）。
+  未设置时落到 `example.invalid` 占位——**告警仍会触发并在 Grafana 内可见，仅投递失败**，设好即生效（非安全项，故软默认不 fail-closed）。
+- **改阈值**：改 error-rate.yaml 里 `evaluator.params` 的数字。
+- **改用邮件**：把 `contactPoints` 的 `type` 改为 `email`、填 `addresses`，并给 grafana 服务补 `GF_SMTP_*` 环境变量。
+- 想加更多规则（如「出现『所有实时数据源均失败』」），照此文件追加 `groups[].rules[]` 即可。
 
 ## 六、安全与运维须知
 

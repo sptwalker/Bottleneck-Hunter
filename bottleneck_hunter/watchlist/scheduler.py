@@ -71,7 +71,7 @@ def _iter_users(category: str | None = None):
 
     供后台任务使用：确保下游 LLM/数据源 KEY 严格按该用户解析（不会误用他人 KEY）。
     """
-    from bottleneck_hunter.auth.current_user import set_current_user, reset_current_user
+    from bottleneck_hunter.auth.current_user import reset_current_user, set_current_user
     for uid, store, budget in _get_active_user_stores(category):
         tok = set_current_user(uid)
         try:
@@ -490,8 +490,8 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
         us_tickers = by_market.get("us_stock", [])
         if us_tickers:
             from bottleneck_hunter.watchlist.institutional_pipeline import (
-                fetch_institutional_batch,
                 fetch_analyst_batch,
+                fetch_institutional_batch,
             )
             inst_result = await fetch_institutional_batch(us_tickers, store)
             analyst_result = await fetch_analyst_batch(us_tickers, store)
@@ -596,7 +596,11 @@ async def job_catalyst_scan() -> None:
         try:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Catalyst scan (%s) starting", label)
-            from bottleneck_hunter.watchlist.catalyst_monitor import check_catalyst_expiry, detect_catalysts, judge_expired_catalysts
+            from bottleneck_hunter.watchlist.catalyst_monitor import (
+                check_catalyst_expiry,
+                detect_catalysts,
+                judge_expired_catalysts,
+            )
             await _drain_sse(check_catalyst_expiry(store))
             await _drain_sse(judge_expired_catalysts(store))
             await _drain_sse(detect_catalysts(store, budget))
@@ -683,6 +687,26 @@ async def job_auto_review(market: str = "us_stock") -> None:
             logger.error("偏好学习 (user=%s) 失败: %s", uid[:8] if uid else "global", e)
 
 
+async def job_vip_advice_review(market: str = "us_stock") -> None:
+    """Phase 5b · VIP 建议复盘：把 C-1 打点的 pending 建议「再评即结」成准确率信号。
+
+    advice-only，纯逻辑（读共享行情 + 结 model_accuracy 的 VIP 桶），绝不写 sim_*。
+    跟随 VIP 每用户开关（vip_project 分类）。"""
+    for uid, store, budget in _iter_users("vip_project"):
+        try:
+            label = f"user={uid[:8]}" if uid else "global"
+            mstore = store.for_market(market)
+            from bottleneck_hunter.vip.advice_review import review_pending_advice
+            stats = review_pending_advice(mstore)
+            if stats["reviewed"] or stats["no_price"]:
+                logger.info("VIP 建议复盘 (%s/%s) 完成 — 结算 %d（对 %d）/ 无价跳过 %d",
+                            market, label, stats["reviewed"], stats["correct"], stats["no_price"])
+            else:
+                logger.debug("VIP 建议复盘 (%s/%s) 跳过 — 无待结建议", market, label)
+        except Exception as e:
+            logger.error("VIP 建议复盘 (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
+
+
 async def job_institutional_update() -> None:
     """每周全局更新美股机构持仓 & 分析师评级（yfinance 免费，落共享层，只受全局总开关）。"""
     store = _global_store()
@@ -695,8 +719,8 @@ async def job_institutional_update() -> None:
     store.update_pipeline_status("institutional", last_status="running", stocks_total=len(us_tickers))
     try:
         from bottleneck_hunter.watchlist.institutional_pipeline import (
-            fetch_institutional_batch,
             fetch_analyst_batch,
+            fetch_institutional_batch,
         )
         inst_results = await fetch_institutional_batch(us_tickers, store)
         analyst_results = await fetch_analyst_batch(us_tickers, store)
@@ -1053,10 +1077,12 @@ _JOB_SPECS = [
     ("us_catalyst_scan",       job_catalyst_scan,       {},                     _TZ_CN        , "daily",    "Catalyst scan & expiry check"),
     ("us_weekly_strategy",     job_weekly_strategy,     {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly macro strategy (L1+L2)"),
     ("us_auto_review",         job_auto_review,         {"market": "us_stock"}, _TZ_CN        , "daily",    "Auto review unreviewed sells"),
+    ("us_vip_advice_review",   job_vip_advice_review,   {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly VIP advice review (再评即结)"),
     ("cn_daily_decision",      job_daily_decision,      {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock daily decision (L1-L4+committee)"),
     ("cn_catalyst_scan",       job_catalyst_scan,       {},                     _TZ_CN,         "daily",    "A-stock catalyst scan & expiry"),
     ("cn_weekly_strategy",     job_weekly_strategy,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly macro strategy (L1+L2)"),
     ("cn_auto_review",         job_auto_review,         {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock auto review unreviewed sells"),
+    ("cn_vip_advice_review",   job_vip_advice_review,   {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly VIP advice review (再评即结)"),
     ("us_institutional_update", job_institutional_update, {},                   _TZ_CN        , "weekly",   "Weekly institutional holders & analyst ratings"),
     ("us_earnings_update",     job_earnings_update,     {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly earnings update (FMP, incl. consensus)"),
     ("cn_earnings_update",     job_earnings_update,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly earnings update (Tushare)"),
@@ -1105,6 +1131,7 @@ def list_job_categories() -> dict[str, str]:
         "us_daily_decision": "daily_decision", "cn_daily_decision": "daily_decision",
         "us_catalyst_scan": "catalyst", "cn_catalyst_scan": "catalyst",
         "us_vip_project": "vip_project", "cn_vip_project": "vip_project",
+        "us_vip_advice_review": "vip_project", "cn_vip_advice_review": "vip_project",
         "us_weekly_strategy": "weekly_strategy", "cn_weekly_strategy": "weekly_strategy",
         "us_auto_review": "auto_review", "cn_auto_review": "auto_review",
         "stale_refresh": "daily_decision",  # 情报/策略 LLM 兜底，随自动决策开关
@@ -1128,6 +1155,7 @@ def list_job_labels() -> dict[str, dict]:
         "us_catalyst_scan":    {"label": "美股·催化剂扫描",        "desc": "检测/判定催化剂事件",           "tz": "北京", "freq": "工作日"},
         "us_weekly_strategy":  {"label": "美股·每周策略重生成",    "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "北京", "freq": "每周"},
         "us_auto_review":      {"label": "美股·自动复盘",          "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
+        "us_vip_advice_review": {"label": "美股·VIP建议复盘",      "desc": "按最新行情再评 VIP 建议，结成准确率信号", "tz": "北京", "freq": "每周"},
         "us_institutional_update": {"label": "机构持仓 & 分析师评级", "desc": "13F 机构持仓与评级（仅美股）", "tz": "北京", "freq": "每周"},
         "us_earnings_update":  {"label": "美股·财报更新",          "desc": "FMP 财报（含机构一致预期）",   "tz": "北京", "freq": "每周"},
         "cn_earnings_update":  {"label": "A股·财报更新",           "desc": "Tushare 业绩快报/预告",        "tz": "北京", "freq": "每周"},
@@ -1143,6 +1171,7 @@ def list_job_labels() -> dict[str, dict]:
         "cn_catalyst_scan":    {"label": "A股·催化剂扫描",         "desc": "检测/判定催化剂事件",           "tz": "北京", "freq": "工作日"},
         "cn_weekly_strategy":  {"label": "A股·每周策略重生成",     "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "北京", "freq": "每周"},
         "cn_auto_review":      {"label": "A股·自动复盘",           "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
+        "cn_vip_advice_review": {"label": "A股·VIP建议复盘",       "desc": "按最新行情再评 VIP 建议，结成准确率信号", "tz": "北京", "freq": "每周"},
         # 新增
         "stale_refresh":       {"label": "陈旧兜底刷新",           "desc": "刷新超过阈值未更新的观察池标的", "tz": "轮询", "freq": "每隔N小时"},
         "resting_limit_poll":  {"label": "挂单撮合轮询",           "desc": "开市时段按限价尝试成交，到期自动取消", "tz": "轮询", "freq": "每小时"},

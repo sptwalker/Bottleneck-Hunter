@@ -6,6 +6,7 @@
  */
 
 import { fmtBJ } from './wizard-state.js';
+import { toast } from './utils/toast.js';
 
 /* ── 小工具 ─────────────────────────────────────── */
 const ROLE_LABELS = {
@@ -135,7 +136,7 @@ export function openReport(title, filename, bodyHtml) {
     + `document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},100);});`
     + `<\/script></body></html>`;
   const w = window.open('', '_blank');
-  if (!w) { alert('弹窗被拦截，请允许本站弹窗后重试'); return; }
+  if (!w) { toast('弹窗被拦截，请允许本站弹窗后重试'); return; }
   w.document.open(); w.document.write(shell); w.document.close();
 }
 

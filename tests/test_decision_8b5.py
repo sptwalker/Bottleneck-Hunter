@@ -1,13 +1,14 @@
 """Tests for 8B.5 — L1/L2 决策引擎、E2E 流程、BudgetTracker、数据收集"""
 
 import json
-import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
+import pytest
+
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.models import DegradationMode
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
 @pytest.fixture

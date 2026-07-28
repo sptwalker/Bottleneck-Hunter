@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position
 from bottleneck_hunter.watchlist.store import WatchlistStore
@@ -331,7 +331,7 @@ async def _run_trap_detector(ticker: str, progress: list) -> dict:
             prompt = f"""请判断以下情况是否存在（回答"是"或"否"并简要说明）：
 {check}
 格式：是或否|简要说明"""
-            response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+            response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)  # noqa: B023  立即 await，无延迟绑定后果
             parts = response.strip().split("|", 1)
             is_hit = parts[0].strip().startswith("是")
             evidence = parts[1].strip() if len(parts) > 1 else response.strip()

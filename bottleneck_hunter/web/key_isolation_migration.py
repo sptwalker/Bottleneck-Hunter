@@ -46,7 +46,7 @@ def migrate_global_keys_to_admin(auth_store, admin_user_id: str = "") -> int:
     except Exception:
         pass  # 无 system_config 读接口时按未迁移处理
 
-    from bottleneck_hunter.auth.crypto import encrypt, make_hint, decrypt
+    from bottleneck_hunter.auth.crypto import decrypt, encrypt, make_hint
 
     migrated = 0
 

@@ -2,6 +2,7 @@
  * admin.js — 管理后台面板（用户管理、邀请码、系统配置）
  */
 import { showConfirm } from './utils/confirm.js';
+import { toast } from './utils/toast.js';
 import { fmtBJ } from './wizard-state.js';
 
 let _currentTab = 'users';
@@ -87,6 +88,52 @@ export function initAdmin() {
   document.getElementById('admin-user-drawer-close')?.addEventListener('click', closeUserDrawer);
   const drawer = document.getElementById('admin-user-drawer');
   drawer?.addEventListener('click', (e) => { if (e.target === drawer) closeUserDrawer(); });
+
+  bindVipLock();
+}
+
+// ── VIP 解锁（隐私锁屏）────────────────────────────────
+function bindVipLock() {
+  const pw = document.getElementById('viplock-password');
+  const doUnlock = async () => {
+    const password = (pw?.value || '').trim();
+    if (!password) { toast('请输入登录密码'); return; }
+    try {
+      const r = await fetch('/api/vip/unlock', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      if (r.ok) {
+        if (pw) pw.value = '';
+        toast('VIP 已解锁，可切换到 ★ VIP 顾问查看');
+        window.dispatchEvent(new CustomEvent('vip-lock-changed'));
+        loadVipLockStatus();
+      } else {
+        toast(r.status === 401 ? '密码错误' : '解锁失败');
+      }
+    } catch (_) { toast('解锁失败'); }
+  };
+  document.getElementById('viplock-unlock')?.addEventListener('click', doUnlock);
+  pw?.addEventListener('keydown', (e) => { if (e.key === 'Enter') doUnlock(); });
+  document.getElementById('viplock-lock')?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/vip/lock', { method: 'POST' });
+      toast('VIP 已重新上锁');
+      window.dispatchEvent(new CustomEvent('vip-lock-changed'));
+      loadVipLockStatus();
+    } catch (_) { toast('操作失败'); }
+  });
+}
+
+async function loadVipLockStatus() {
+  const el = document.getElementById('viplock-status');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/vip/lock-status');
+    const unlocked = r.ok && (await r.json()).unlocked;
+    el.textContent = unlocked ? '当前：已解锁' : '当前：已锁定';
+    el.style.color = unlocked ? 'var(--success, #16a34a)' : 'var(--text-secondary, #888)';
+  } catch (_) { el.textContent = ''; }
 }
 
 function switchTab(tab) {
@@ -99,6 +146,7 @@ function switchTab(tab) {
   if (tab === 'users') loadUsers();
   else if (tab === 'invites') loadInviteCodes();
   else if (tab === 'config') loadConfig();
+  else if (tab === 'viplock') loadVipLockStatus();
   else if (tab === 'envtest') loadEnvTest();
 }
 
@@ -248,7 +296,7 @@ window._adminFreeze = async (userId) => {
     const res = await fetch(`/api/admin/users/${userId}/freeze`, { method: 'POST' });
     if (!res.ok) { const d = await res.json(); throw new Error(d.detail || res.status); }
     loadUsers();
-  } catch (err) { alert(`操作失败: ${err.message}`); }
+  } catch (err) { toast(`操作失败: ${err.message}`); }
 };
 
 window._adminUnfreeze = async (userId) => {
@@ -256,7 +304,7 @@ window._adminUnfreeze = async (userId) => {
     const res = await fetch(`/api/admin/users/${userId}/unfreeze`, { method: 'POST' });
     if (!res.ok) { const d = await res.json(); throw new Error(d.detail || res.status); }
     loadUsers();
-  } catch (err) { alert(`操作失败: ${err.message}`); }
+  } catch (err) { toast(`操作失败: ${err.message}`); }
 };
 
 window._adminDelete = async (userId, username) => {
@@ -265,14 +313,14 @@ window._adminDelete = async (userId, username) => {
     const res = await fetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
     if (!res.ok) { const d = await res.json(); throw new Error(d.detail || res.status); }
     loadUsers();
-  } catch (err) { alert(`删除失败: ${err.message}`); }
+  } catch (err) { toast(`删除失败: ${err.message}`); }
 };
 
 window._adminEditLimit = async (userId, username, current) => {
   const val = prompt(`设置用户 "${username}" 每个股市的观察池上限（美股、A股各自可容纳的股票数）：`, String(current ?? 24));
   if (val === null) return;
   const limit = parseInt(val, 10);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 500) { alert('请输入 1–500 之间的整数'); return; }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) { toast('请输入 1–500 之间的整数'); return; }
   try {
     const res = await fetch(`/api/admin/users/${userId}`, {
       method: 'PATCH',
@@ -281,7 +329,7 @@ window._adminEditLimit = async (userId, username, current) => {
     });
     if (!res.ok) { const d = await res.json(); throw new Error(d.detail || res.status); }
     loadUsers();
-  } catch (err) { alert(`设置失败: ${err.message}`); }
+  } catch (err) { toast(`设置失败: ${err.message}`); }
 };
 
 
@@ -324,7 +372,7 @@ async function loadInviteCodes() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         loadInviteCodes();
       } catch (err) {
-        alert(`生成失败: ${err.message}`);
+        toast(`生成失败: ${err.message}`);
       } finally {
         genBtn.disabled = false;
         genBtn.textContent = '批量生成';
@@ -391,7 +439,7 @@ window._adminRevokeCode = async (code) => {
     const res = await fetch(`/api/admin/invite-codes/${code}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     loadInviteCodes();
-  } catch (err) { alert(`操作失败: ${err.message}`); }
+  } catch (err) { toast(`操作失败: ${err.message}`); }
 };
 
 

@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-
 _DEFAULT_DB = Path(__file__).resolve().parents[2] / "data" / "watchlist.db"
 
 

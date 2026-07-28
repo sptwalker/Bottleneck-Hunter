@@ -1,9 +1,9 @@
 """P2+P5 端到端：BrokerStatement → 规范表 → sim_* → 报告，含多币种基币口径 + number_guard。"""
 import pytest
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.vip import portfolio
 from bottleneck_hunter.vip.ingest import BrokerStatement, EquityHolding, ReconResult, StatementTransaction
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
 @pytest.fixture
@@ -259,7 +259,7 @@ def test_report_number_guard(wl):
     stmt = _stmt()
     portfolio.normalize_statement(wl, stmt, account_ref="A1")
     portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
-    summary = portfolio.build_portfolio_summary(wl, account_ref="A1")
+    summary = portfolio.build_account_summary(wl, account_ref="A1")
     assert summary["n_holdings"] == 3
     narrative = f"组合总权益 ${summary['total_equity']:,.2f}，另有臆造收益 $8,888,888.00。"
     out = portfolio.generate_vip_report(wl, period="2026-06", narrative=narrative,

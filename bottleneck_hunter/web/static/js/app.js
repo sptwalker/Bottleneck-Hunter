@@ -3,13 +3,14 @@
  */
 
 import { resizeAll, initChartFullscreen, initChainTabs, initWizChainTabs, initWizFullscreen } from './charts.js';
+import { toast } from './utils/toast.js';
 import { initWizard } from './phases.js';
 import { refreshPhase4Watchlist } from './phase-views.js';
 import { initReverse } from './reverse.js';
 import { initWatchlist, refreshWatchlistOnEnter } from './watchlist.js';
 import { initDecision } from './decision.js';
 import { initSimTrading, ensureSimTradingLoaded } from './simtrading.js';
-import { initVip, ensureVipLoaded } from './vip.js';
+import { initVip, ensureVipLoaded, applyVipLock } from './vip.js';
 import { initAIConfig } from './ai-config.js';
 import { initAutoUpdate } from './auto-update.js';
 import { initDataReport } from './data-report.js';
@@ -45,7 +46,7 @@ export function showView(viewName) {
     }
   }
   if (viewName === 'vip') {
-    ensureVipLoaded();
+    applyVipLock();   // 先判解锁态：未解锁只显示「开发中」锁屏，解锁则内部触发 ensureVipLoaded
   }
   // 进入观察池视图即刷新列表，确保刚加入/删除的股票实时可见（无需手动刷新）
   if (viewName === 'watchlist') {
@@ -137,9 +138,9 @@ function initGuide() {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       render(markdown);       // 立即预览新内容
       loaded = true;
-      alert('新手必读已更新');
+      toast('新手必读已更新');
     } catch (e) {
-      alert(`上传失败：${e.message}`);
+      toast(`上传失败：${e.message}`);
     } finally {
       uploadInput.value = '';
     }

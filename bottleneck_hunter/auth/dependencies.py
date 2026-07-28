@@ -32,6 +32,7 @@ def require_vip(user: dict = Depends(get_current_user)) -> dict:
     if user.get("role") == "admin":
         return user
     import json
+
     from bottleneck_hunter.auth.store import AuthStore
     try:
         u = AuthStore().get_user_by_id(user.get("sub", ""))

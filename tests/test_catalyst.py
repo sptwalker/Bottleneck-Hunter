@@ -1,15 +1,15 @@
 """Tests for CatalystAnalyzer — 催化剂时间线分析。"""
 
-import json
 import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from bottleneck_hunter.chain.catalyst import CatalystAnalyzer, _extract_report_keywords
 from bottleneck_hunter.chain.models import (
     BottleneckReport,
     BottleneckScore,
-    CatalystTimeline,
     FinancialSnapshot,
     SupplierInfo,
     SupplierScorecard,

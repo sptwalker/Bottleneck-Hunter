@@ -7,7 +7,6 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 import jwt
 from fastapi import Response
@@ -15,7 +14,7 @@ from fastapi import Response
 logger = logging.getLogger(__name__)
 
 # JWT 密钥：优先从环境变量读取，否则首次运行自动生成
-_JWT_SECRET: Optional[str] = None
+_JWT_SECRET: str | None = None
 _JWT_ALGORITHM = "HS256"
 _JWT_EXPIRE_HOURS = 72  # token 有效期 3 天
 _COOKIE_NAME = "bh_token"
@@ -50,7 +49,7 @@ def create_token(user_id: str, username: str, role: str = "user") -> str:
     return jwt.encode(payload, _get_secret(), algorithm=_JWT_ALGORITHM)
 
 
-def verify_token(token: str) -> Optional[dict]:
+def verify_token(token: str) -> dict | None:
     """验证 JWT token。成功返回 payload dict，失败返回 None。"""
     try:
         payload = jwt.decode(token, _get_secret(), algorithms=[_JWT_ALGORITHM])

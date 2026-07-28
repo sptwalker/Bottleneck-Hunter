@@ -116,6 +116,7 @@ class _FakeWS:
 async def test_relay_connection_fetch_roundtrip():
     import asyncio
     import base64
+
     from bottleneck_hunter.web.egress_relay import RelayConnection
     ws = _FakeWS()
     conn = RelayConnection(ws, reachable=[])
@@ -145,6 +146,7 @@ async def test_client_handle_fetch_rejects_non_allowlist():
 
 async def test_client_handle_fetch_success():
     import base64
+
     from bottleneck_hunter.relay_client import _handle_fetch
     ws = _FakeWS()
     client = httpx.AsyncClient(transport=_mock_direct(b"RSSDATA"))
@@ -158,6 +160,7 @@ async def test_client_handle_fetch_success():
 # ── 真实 WS 端点：鉴权边界 + hello 注册（TestClient 打真握手，不碰 DB）──
 def _bare_app():
     from fastapi import FastAPI
+
     from bottleneck_hunter.web.egress_api import router
     app = FastAPI()
     app.include_router(router, prefix="/api/egress")
@@ -166,6 +169,7 @@ def _bare_app():
 
 def test_ws_rejects_non_admin():
     from starlette.testclient import TestClient
+
     from bottleneck_hunter.auth.jwt_utils import create_token
     tok = create_token("u1", "bob", role="user")
     client = TestClient(_bare_app())
@@ -179,7 +183,9 @@ def test_ws_rejects_non_admin():
 
 def test_ws_admin_registers_and_reports():
     import time
+
     from starlette.testclient import TestClient
+
     from bottleneck_hunter.auth.jwt_utils import create_token
     tok = create_token("admin1", "root", role="admin")
     client = TestClient(_bare_app())

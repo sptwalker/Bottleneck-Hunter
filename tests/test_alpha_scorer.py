@@ -1,9 +1,7 @@
 """Tests for AlphaScorer."""
 
-import pytest
 
 from bottleneck_hunter.chain.models import (
-    AlphaScore,
     FinancialSnapshot,
     MarketRegion,
     SupplierInfo,

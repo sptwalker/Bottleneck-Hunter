@@ -8,9 +8,10 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+
 from bottleneck_hunter.auth.dependencies import require_vip
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.store import WatchlistStore
@@ -24,10 +25,51 @@ _PDF_MAGIC = b"%PDF-"
 
 _store: WatchlistStore | None = None
 
+# VIP 锁屏：解锁态按用户 sub 存进程内存，服务重启即重新上锁（隐私友好，无需持久化）。
+# ponytail: 单进程内存集合；serve 为单 uvicorn 进程足够。若将来多 worker 部署需改共享存储（redis/db）。
+_unlocked_subs: set[str] = set()
+
 
 def set_store(store: WatchlistStore) -> None:
     global _store
     _store = store
+
+
+def require_vip_unlocked(user: dict = Depends(require_vip)) -> dict:
+    """在 require_vip 之上再要求「已解锁」：财务 PII 只做前端锁屏会被 F12 直接调 API 绕过，
+    故所有 VIP 数据路由都过这道后端门禁；未解锁返回 423，前端据此渲染「开发中」锁屏。"""
+    if user["sub"] not in _unlocked_subs:
+        raise HTTPException(status_code=423, detail="VIP 已锁定，请先在管理员菜单输入登录密码解锁")
+    return user
+
+
+class _VipUnlockReq(BaseModel):
+    password: str
+
+
+@router.get("/lock-status")
+async def vip_lock_status(user: dict = Depends(require_vip)):
+    """当前用户 VIP 是否已解锁（不需已解锁即可查，供前端决定显示锁屏还是内容）。"""
+    return {"unlocked": user["sub"] in _unlocked_subs}
+
+
+@router.post("/unlock")
+async def vip_unlock(body: _VipUnlockReq, user: dict = Depends(require_vip)):
+    """重新输入本人登录密码解锁 VIP。校验通过则本会话（进程存活期）解锁。"""
+    from bottleneck_hunter.auth.store import AuthStore
+    store = AuthStore()
+    u = store.get_user_by_id(user["sub"])
+    if not u or not store.verify_password(u, body.password):
+        raise HTTPException(status_code=401, detail="密码错误")
+    _unlocked_subs.add(user["sub"])
+    return {"unlocked": True}
+
+
+@router.post("/lock")
+async def vip_lock(user: dict = Depends(require_vip)):
+    """主动重新上锁（离开前隐藏内容）。"""
+    _unlocked_subs.discard(user["sub"])
+    return {"unlocked": False}
 
 
 def _wl(user: dict, market: str = "us_stock") -> WatchlistStore:
@@ -36,13 +78,23 @@ def _wl(user: dict, market: str = "us_stock") -> WatchlistStore:
     return _store.for_user(user["sub"]).for_market(market)
 
 
+def _resolve_ref(wl: WatchlistStore, account_ref: str) -> str:
+    """把空 account_ref 解析为具体子账户(单账户自动/多/无账户报 400)。
+    VIP 端点绝不放空 ref 下沉——空 ref 会经 get_sim_account("") 懒建决策中心自有模拟盘(预置本金)
+    并把幻影组合当真实持仓喂给档案/总览/LLM。见 memory dc_sim_account_decoupled。"""
+    try:
+        return wl.resolve_vip_account_ref(account_ref)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/statements/upload")
 async def upload_statement(file: UploadFile = File(...),
                            market: str = "us_stock",
                            broker: str = "citi",
                            account_ref: str = "",
                            pdf_password: str = "",
-                           user: dict = Depends(require_vip)):
+                           user: dict = Depends(require_vip_unlocked)):
     """上传月结单 PDF → 摄取(加密入库) → parsed_ok 则规范化 + 物化到组合。
 
     返回 {doc_id, status, recon, n_positions, total_equity}。
@@ -131,7 +183,7 @@ async def upload_trade_export(file: UploadFile = File(...),
                               broker: str = "citi",
                               account_ref: str = "",
                               pdf_password: str = "",
-                              user: dict = Depends(require_vip)):
+                              user: dict = Depends(require_vip_unlocked)):
     """上传花旗导出 PDF → 摄取(加密入库) → trade_confirm 则规范化到 transactions。"""
     raw = await file.read()
     if not raw or raw[:5] != _PDF_MAGIC:
@@ -190,7 +242,7 @@ async def upload_trade_export(file: UploadFile = File(...),
 
 
 @router.get("/accounts")
-async def list_accounts(market: str = "us_stock", user: dict = Depends(require_vip)):
+async def list_accounts(market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
     wl = _wl(user, market)
     accounts = wl.list_vip_accounts(include_hidden_default=False)
     default_account = next((a for a in accounts if a.get("is_default")), None)
@@ -210,7 +262,7 @@ class CreateAccountReq(BaseModel):
 
 
 @router.post("/accounts")
-async def create_account(req: CreateAccountReq, market: str = "us_stock", user: dict = Depends(require_vip)):
+async def create_account(req: CreateAccountReq, market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
     wl = _wl(user, market)
     try:
         account = wl.create_vip_account(
@@ -232,7 +284,7 @@ class ReorderAccountsReq(BaseModel):
 
 
 @router.patch("/accounts/order")
-async def reorder_accounts(req: ReorderAccountsReq, market: str = "us_stock", user: dict = Depends(require_vip)):
+async def reorder_accounts(req: ReorderAccountsReq, market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
     wl = _wl(user, market)
     try:
         accounts = wl.set_vip_account_order(req.account_refs)
@@ -264,7 +316,7 @@ def _update_account_payload(wl, account_ref: str, req: UpdateAccountReq) -> dict
 
 @router.patch("/accounts/{account_ref}")
 async def update_account(account_ref: str, req: UpdateAccountReq,
-                         market: str = "us_stock", user: dict = Depends(require_vip)):
+                         market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
     return _update_account_payload(_wl(user, market), account_ref, req)
 
 
@@ -275,7 +327,7 @@ class ClearAccountDataReq(BaseModel):
 @router.post("/accounts/clear-data")
 async def clear_account_data(req: ClearAccountDataReq,
                              market: str = "us_stock",
-                             user: dict = Depends(require_vip)):
+                             user: dict = Depends(require_vip_unlocked)):
     wl = _wl(user, market)
     try:
         result = wl.delete_vip_account_data(account_ref=req.account_ref)
@@ -285,7 +337,7 @@ async def clear_account_data(req: ClearAccountDataReq,
 
 
 @router.delete("/accounts/{account_ref}")
-async def delete_account(account_ref: str, market: str = "us_stock", user: dict = Depends(require_vip)):
+async def delete_account(account_ref: str, market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
     wl = _wl(user, market)
     try:
         result = wl.delete_vip_account(account_ref=account_ref)
@@ -298,14 +350,14 @@ async def delete_account(account_ref: str, market: str = "us_stock", user: dict 
 async def get_account_overview(market: str = "us_stock",
                                account_ref: str = "",
                                scope: str = "account",
-                               user: dict = Depends(require_vip)):
+                               user: dict = Depends(require_vip_unlocked)):
     from bottleneck_hunter.vip import portfolio
 
     wl = _wl(user, market)
     if scope == "all":
         overview = portfolio.build_total_overview(wl)
     else:
-        overview = portfolio.build_account_overview(wl, account_ref=account_ref)
+        overview = portfolio.build_account_overview(wl, account_ref=_resolve_ref(wl, account_ref))
     return {"overview": overview}
 
 
@@ -318,7 +370,7 @@ async def get_account_transactions(market: str = "us_stock",
                                    end_date: str = "",
                                    limit: int = 50,
                                    offset: int = 0,
-                                   user: dict = Depends(require_vip)):
+                                   user: dict = Depends(require_vip_unlocked)):
     from bottleneck_hunter.vip import portfolio
 
     wl = _wl(user, market)
@@ -331,9 +383,9 @@ async def get_account_transactions(market: str = "us_stock",
 @router.get("/account/positions")
 async def get_account_positions(market: str = "us_stock",
                                 account_ref: str = "",
-                                user: dict = Depends(require_vip)):
+                                user: dict = Depends(require_vip_unlocked)):
     wl = _wl(user, market)
-    acct = wl.get_sim_account(account_ref=account_ref)
+    acct = wl.get_sim_account(account_ref=_resolve_ref(wl, account_ref))
     positions = sorted(wl.get_sim_positions(acct["id"]),
                        key=lambda p: p.get("market_value", 0), reverse=True)
     return {"positions": positions}
@@ -344,7 +396,7 @@ async def import_file(file: UploadFile = File(...),
                      market: str = "us_stock",
                      account_ref: str = "",
                      pdf_password: str = "",
-                     user: dict = Depends(require_vip)):
+                     user: dict = Depends(require_vip_unlocked)):
     """通用导入入口：任意文件 → 自动判类型/内容 → 路由入库 → 统一 ImportResult。
 
     替代 /statements/upload、/exports/upload、/derivatives/upload（旧路由保留兼容）。
@@ -376,40 +428,43 @@ async def import_file(file: UploadFile = File(...),
 async def list_imports(market: str = "us_stock", limit: int = 100,
                        account_ref: str = "",
                        scope: str = "account",
-                       user: dict = Depends(require_vip)):
+                       user: dict = Depends(require_vip_unlocked)):
     """导入历史：文件名/时间/类型/状态/摘要/主要数据（金额已脱敏）。"""
     return {"imports": _wl(user, market).list_vip_imports(limit=limit, account_ref=account_ref, scope=scope)}
 
 
 @router.get("/account/value-series")
 async def get_value_series(market: str = "us_stock", account_ref: str = "", scope: str = "account",
-                           user: dict = Depends(require_vip)):
+                           user: dict = Depends(require_vip_unlocked)):
     """价值变化曲线 + 逐期收益率（按 positions.as_of_date 聚合派生）。"""
     from bottleneck_hunter.vip import portfolio
     if scope == "all":
         return portfolio.value_series(_wl(user, market))
-    return portfolio.value_series(_wl(user, market), account_ref=account_ref)
+    wl = _wl(user, market)
+    return portfolio.value_series(wl, account_ref=_resolve_ref(wl, account_ref))
 
 
 @router.get("/account/missing")
-async def get_missing(market: str = "us_stock", account_ref: str = "", user: dict = Depends(require_vip)):
+async def get_missing(market: str = "us_stock", account_ref: str = "", user: dict = Depends(require_vip_unlocked)):
     """数据体检：还缺哪些数据、如何补充。"""
     from bottleneck_hunter.vip import portfolio
-    return {"missing": portfolio.missing_data_report(_wl(user, market), account_ref=account_ref)}
+    wl = _wl(user, market)
+    return {"missing": portfolio.missing_data_report(wl, account_ref=_resolve_ref(wl, account_ref))}
 
 
 @router.get("/account/dossier")
 async def get_account_dossier(market: str = "us_stock", account_ref: str = "",
-                              user: dict = Depends(require_vip)):
+                              user: dict = Depends(require_vip_unlocked)):
     """Phase A · 账户完整档案：LLM 单一事实源。头条真实价值(结算单口径,不含衍生品估值)+
     逐仓成本/未实现盈亏 + 流水聚合 + 衍生品敞口(单列) + 价值曲线 + 数据新鲜度。"""
     from bottleneck_hunter.vip import portfolio
-    return portfolio.build_account_dossier(_wl(user, market), account_ref=account_ref)
+    wl = _wl(user, market)
+    return portfolio.build_account_dossier(wl, account_ref=_resolve_ref(wl, account_ref))
 
 
 @router.get("/account/mandate")
 async def get_account_mandate(market: str = "us_stock", account_ref: str = "",
-                             user: dict = Depends(require_vip)):
+                             user: dict = Depends(require_vip_unlocked)):
     """读取本账户投资纲领（用户设定的投资设想与目标，供 LLM 决策依据）。未设定返回默认档。"""
     from bottleneck_hunter.vip import mandate
     return {"mandate": mandate.load_mandate(_wl(user, market), account_ref=account_ref)}
@@ -417,7 +472,7 @@ async def get_account_mandate(market: str = "us_stock", account_ref: str = "",
 
 @router.put("/account/mandate")
 async def put_account_mandate(payload: dict, market: str = "us_stock", account_ref: str = "",
-                             user: dict = Depends(require_vip)):
+                             user: dict = Depends(require_vip_unlocked)):
     """保存本账户投资纲领（做范围 clamp + 枚举校验），返回规范化后的 dict。"""
     from bottleneck_hunter.vip import mandate
     saved = mandate.save_mandate(_wl(user, market), payload or {}, account_ref=account_ref)
@@ -427,7 +482,7 @@ async def put_account_mandate(payload: dict, market: str = "us_stock", account_r
 @router.get("/account/log")
 async def get_account_log(market: str = "us_stock", account_ref: str = "",
                           event_type: str = "", limit: int = 200,
-                          user: dict = Depends(require_vip)):
+                          user: dict = Depends(require_vip_unlocked)):
     """账户日志：逐条自动推算 / 校准 / 异常 / 结算记录（供账户日志窗口渲染）。"""
     wl = _wl(user, market)
     return {"log": wl.list_account_log(account_ref=account_ref, event_type=event_type, limit=limit)}
@@ -435,9 +490,9 @@ async def get_account_log(market: str = "us_stock", account_ref: str = "",
 
 @router.get("/account/staleness")
 async def get_account_staleness(market: str = "us_stock", account_ref: str = "",
-                                user: dict = Depends(require_vip)):
+                                user: dict = Depends(require_vip_unlocked)):
     """校准新鲜度：距上一份结算单校准已过多少天、最近一次推算日、待校准推算条数。"""
-    from datetime import date, datetime, timezone
+    from datetime import datetime, timezone
     wl = _wl(user, market)
     ref = (account_ref or "").strip()
 
@@ -473,7 +528,7 @@ async def get_account_staleness(market: str = "us_stock", account_ref: str = "",
 
 @router.post("/account/project-now")
 async def project_now(market: str = "us_stock", account_ref: str = "",
-                      user: dict = Depends(require_vip)):
+                      user: dict = Depends(require_vip_unlocked)):
     """手动触发一次每日股票重估推算（与定时任务同一逻辑，便于即时刷新/排障）。"""
     from bottleneck_hunter.vip import projection
     wl = _wl(user, market)
@@ -489,7 +544,7 @@ async def project_now(market: str = "us_stock", account_ref: str = "",
 
 
 @router.get("/statements")
-async def list_statements(market: str = "us_stock", user: dict = Depends(require_vip)):
+async def list_statements(market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
     """列出该用户的月结单（元数据，无 PII 金额）。"""
     from bottleneck_hunter.auth.store import AuthStore
     return {"documents": AuthStore().list_financial_docs(user["sub"], market=market)}
@@ -501,7 +556,7 @@ async def upload_derivative_file(file: UploadFile = File(...),
                                  broker: str = "nomura",
                                  account_ref: str = "",
                                  pdf_password: str = "",
-                                 user: dict = Depends(require_vip)):
+                                 user: dict = Depends(require_vip_unlocked)):
     """上传日常衍生品/结构票据文件 → 分类 → 条款抽取 → 落 vip_derivative_terms。"""
     raw = await file.read()
     if not raw or raw[:5] != _PDF_MAGIC:
@@ -510,6 +565,7 @@ async def upload_derivative_file(file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail="文件超过 20MB 上限")
 
     from hashlib import sha256
+
     from bottleneck_hunter.vip import derivatives as drv
     from bottleneck_hunter.web.oplog import record_operation
     uid = user["sub"]
@@ -534,7 +590,7 @@ async def upload_derivative_file(file: UploadFile = File(...),
 
 @router.get("/derivatives")
 async def list_derivatives(market: str = "us_stock", account_ref: str = "", scope: str = "account",
-                           user: dict = Depends(require_vip)):
+                           user: dict = Depends(require_vip_unlocked)):
     from bottleneck_hunter.vip import derivatives as drv
 
     wl = _wl(user, market)
@@ -556,7 +612,7 @@ async def list_derivatives(market: str = "us_stock", account_ref: str = "", scop
 async def reextract_derivative(did: str, file: UploadFile = File(...),
                                market: str = "us_stock",
                                pdf_password: str = "",
-                               user: dict = Depends(require_vip)):
+                               user: dict = Depends(require_vip_unlocked)):
     """重传原始结算单 → 重新抽取条款 → 按 id 覆盖 terms（回填 trade_date 等旧数据缺失字段）。
 
     仅更新条款内容，不改归属账户；id 命中用户/市场隔离由 update_derivative_term 保证。
@@ -592,12 +648,13 @@ async def reextract_derivative(did: str, file: UploadFile = File(...),
 @router.post("/reports/generate")
 async def generate_report(market: str = "us_stock", period: str = "",
                           account_ref: str = "",
-                          with_ai: bool = True, user: dict = Depends(require_vip)):
+                          with_ai: bool = True, user: dict = Depends(require_vip_unlocked)):
     """基于当前已物化组合生成持仓分析报告（with_ai=True 含顾问团队叙事）。"""
     from bottleneck_hunter.vip import portfolio
     from bottleneck_hunter.web.oplog import record_operation
 
     wl = _wl(user, market)
+    account_ref = _resolve_ref(wl, account_ref)
     acct = wl.get_sim_account(account_ref=account_ref)
     if not wl.get_sim_positions(acct["id"]):
         raise HTTPException(status_code=400, detail="尚无持仓，请先上传月结单")
@@ -618,7 +675,7 @@ async def generate_report(market: str = "us_stock", period: str = "",
 @router.get("/reports")
 async def list_reports(market: str = "us_stock", limit: int = 20,
                        account_ref: str = "",
-                       user: dict = Depends(require_vip)):
+                       user: dict = Depends(require_vip_unlocked)):
     """列出该用户的报告（periodic/alert，不含 import_snapshot）。"""
     wl = _wl(user, market)
     conn = wl._connect()
@@ -635,7 +692,7 @@ async def list_reports(market: str = "us_stock", limit: int = 20,
 @router.get("/reports/{report_id}")
 async def get_report(report_id: str, market: str = "us_stock",
                      account_ref: str = "",
-                     user: dict = Depends(require_vip)):
+                     user: dict = Depends(require_vip_unlocked)):
     wl = _wl(user, market)
     conn = wl._connect()
     try:
@@ -651,7 +708,7 @@ async def get_report(report_id: str, market: str = "us_stock",
 
 @router.get("/account/advisory")
 async def get_account_advisory(market: str = "us_stock", account_ref: str = "",
-                               user: dict = Depends(require_vip)):
+                               user: dict = Depends(require_vip_unlocked)):
     """读该账户最近一份顾问建议（进标签页回显）；无则返回 null。"""
     from bottleneck_hunter.vip import advisory
     return {"advisory": advisory.get_latest_advisory(_wl(user, market), account_ref=account_ref)}
@@ -659,7 +716,7 @@ async def get_account_advisory(market: str = "us_stock", account_ref: str = "",
 
 @router.get("/account/advisory/history")
 async def get_account_advisory_history(market: str = "us_stock", account_ref: str = "", limit: int = 20,
-                                       user: dict = Depends(require_vip)):
+                                       user: dict = Depends(require_vip_unlocked)):
     """该账户历史顾问建议列表（新→旧，每条含完整 result 供点选回看）。"""
     from bottleneck_hunter.vip import advisory
     return {"history": advisory.list_advisory(_wl(user, market), account_ref=account_ref, limit=limit)}
@@ -667,7 +724,7 @@ async def get_account_advisory_history(market: str = "us_stock", account_ref: st
 
 @router.post("/account/advisory")
 async def post_account_advisory(market: str = "us_stock", account_ref: str = "",
-                                user: dict = Depends(require_vip)):
+                                user: dict = Depends(require_vip_unlocked)):
     """生成账户顾问建议（吃 dossier+纲领+L1宏观+衍生品敞口 → 投委会评审 → 每仓 减/持/加）。只出建议不下单。"""
     from bottleneck_hunter.vip import advisory
     from bottleneck_hunter.web.oplog import record_operation
@@ -682,7 +739,7 @@ async def post_account_advisory(market: str = "us_stock", account_ref: str = "",
 
 @router.get("/account/recommend")
 async def get_account_recommend(market: str = "us_stock", account_ref: str = "",
-                                user: dict = Depends(require_vip)):
+                                user: dict = Depends(require_vip_unlocked)):
     """读该账户最近一份荐新建议（进标签页回显）；无则返回 null。"""
     from bottleneck_hunter.vip import recommend
     return {"recommendation": recommend.get_latest_recommendations(_wl(user, market), account_ref=account_ref)}
@@ -690,7 +747,7 @@ async def get_account_recommend(market: str = "us_stock", account_ref: str = "",
 
 @router.get("/account/recommend/history")
 async def get_account_recommend_history(market: str = "us_stock", account_ref: str = "", limit: int = 20,
-                                        user: dict = Depends(require_vip)):
+                                        user: dict = Depends(require_vip_unlocked)):
     """该账户历史荐新建议列表（新→旧，每条含完整 result 供点选回看）。"""
     from bottleneck_hunter.vip import recommend
     return {"history": recommend.list_recommendations(_wl(user, market), account_ref=account_ref, limit=limit)}
@@ -698,7 +755,7 @@ async def get_account_recommend_history(market: str = "us_stock", account_ref: s
 
 @router.post("/account/recommend")
 async def post_account_recommend(market: str = "us_stock", account_ref: str = "",
-                                 user: dict = Depends(require_vip)):
+                                 user: dict = Depends(require_vip_unlocked)):
     """生成账户荐新建议（吃 dossier+纲领+L1宏观 + 观察池候选 → 投委会评审 → 建仓/关注/规避）。只出建议不下单。"""
     from bottleneck_hunter.vip import recommend
     from bottleneck_hunter.web.oplog import record_operation
@@ -713,10 +770,10 @@ async def post_account_recommend(market: str = "us_stock", account_ref: str = ""
 
 @router.get("/account/budget-reconciliation")
 async def get_budget_reconciliation(market: str = "us_stock", account_ref: str = "",
-                                    user: dict = Depends(require_vip)):
+                                    user: dict = Depends(require_vip_unlocked)):
     """B · 现金/仓位预算对照（只读、指示性）：advisory 加仓 + recommend 建仓的量化仓位加总，对照可投资现金给容量 sanity。
     任一 pass 尚未生成则 partial=True（缺的 pass 不计入需求、判断偏乐观）。只提示、不约束生成、不下单。"""
-    from bottleneck_hunter.vip import advisory, recommend, portfolio
+    from bottleneck_hunter.vip import advisory, portfolio, recommend
     ref = (account_ref or "").strip()
     if not ref:  # 空 ref 会经 build_account_dossier→get_sim_account('') 越界读决策中心模拟盘（见 memory:dc_sim_account_decoupled）
         raise HTTPException(status_code=400, detail="请先选择具体子账户")
@@ -724,7 +781,7 @@ async def get_budget_reconciliation(market: str = "us_stock", account_ref: str =
     dossier = portfolio.build_account_dossier(wl, account_ref=ref)
     adv = advisory.get_latest_advisory(wl, account_ref=ref)
     rec = recommend.get_latest_recommendations(wl, account_ref=ref)
-    result = advisory.summarize_cash_budget(dossier, adv, rec)
+    result = advisory.summarize_cash_budget(dossier, adv, rec, wl_store=wl)
     result.update({"partial": (adv is None) or (rec is None),
                    "has_advisory": adv is not None, "has_recommend": rec is not None})
     return {"budget": result}
@@ -738,19 +795,19 @@ class ChatReq(BaseModel):
 
 
 @router.get("/chat/sessions")
-async def list_chat_sessions(market: str = "us_stock", account_ref: str = "", user: dict = Depends(require_vip)):
+async def list_chat_sessions(market: str = "us_stock", account_ref: str = "", user: dict = Depends(require_vip_unlocked)):
     from bottleneck_hunter.vip import chat
     return {"sessions": chat.list_chat_sessions(_wl(user, market), account_ref=account_ref)}
 
 
 @router.get("/chat/sessions/{session_id}")
-async def get_chat_messages(session_id: str, market: str = "us_stock", account_ref: str = "", user: dict = Depends(require_vip)):
+async def get_chat_messages(session_id: str, market: str = "us_stock", account_ref: str = "", user: dict = Depends(require_vip_unlocked)):
     from bottleneck_hunter.vip import chat
     return {"messages": chat.get_chat_messages(_wl(user, market), session_id, account_ref=account_ref)}
 
 
 @router.post("/chat")
-async def stream_chat(req: ChatReq, request: Request, user: dict = Depends(require_vip)):
+async def stream_chat(req: ChatReq, request: Request, user: dict = Depends(require_vip_unlocked)):
     from bottleneck_hunter.vip import chat
     wl = _wl(user, req.market)
     budget = BudgetTracker(wl)

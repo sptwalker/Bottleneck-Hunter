@@ -18,12 +18,11 @@ from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.auth.dependencies import get_current_user
 from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.web.api import _user_analysis_store
-from bottleneck_hunter.web.streaming._common import _sanitize
-from bottleneck_hunter.web.streaming.reverse import stream_reverse_analysis
-from bottleneck_hunter.web.streaming._common import _sse
-from bottleneck_hunter.web.streaming._notice import with_notices
 from bottleneck_hunter.web import refresh_guard
+from bottleneck_hunter.web.api import _user_analysis_store
+from bottleneck_hunter.web.streaming._common import _sanitize, _sse
+from bottleneck_hunter.web.streaming._notice import with_notices
+from bottleneck_hunter.web.streaming.reverse import stream_reverse_analysis
 
 logger = logging.getLogger(__name__)
 

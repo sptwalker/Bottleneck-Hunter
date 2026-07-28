@@ -236,10 +236,10 @@ async def _screen_async():
     max_suppliers = int(max_suppliers_str) if max_suppliers_str else 20
 
     # --- LLM setup ---
-    from bottleneck_hunter.llm_clients.factory import create_llm
-
     # 严格按用户隔离：CLI 无 web 登录态，需显式指定用户（其 KEY 存于加密表）。
     import os as _os
+
+    from bottleneck_hunter.llm_clients.factory import create_llm
     _cli_uid = _os.getenv("BH_CLI_USER_ID", "").strip()
     if not _cli_uid:
         console.print("[red]严格隔离模式：CLI 需设置 BH_CLI_USER_ID 指向你的用户 ID（其 API Key 存于配置中心）。[/red]")
@@ -324,7 +324,7 @@ async def _screen_async():
         logger.exception("Screening failed")
 
 
-def _display_hot_sectors(result: HotSectorResult, console: Console) -> None:
+def _display_hot_sectors(result: HotSectorResult, console: Console) -> None:  # noqa: F821  __future__ annotations 下不求值
     """Display hot sector detection results."""
 
     if result.all_ranked:

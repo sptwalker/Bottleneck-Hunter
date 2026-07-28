@@ -8,14 +8,12 @@
 - scheduler A 股公告管道集成
 """
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

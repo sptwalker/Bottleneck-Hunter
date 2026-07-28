@@ -463,10 +463,8 @@ def validate_against_regime(
     worst_bps = SLIPPAGE_CONFIG.get(market, SLIPPAGE_CONFIG["us_stock"])["max_bps"]
     worst_price = price * (1 + worst_bps / 10000)
     trade_amount = shares * worst_price
-    cash = account.get("cash_balance", 0)
     position_value = sum(p.get("market_value", 0) for p in positions)
 
-    cash_after = cash - trade_amount
     equity_after = position_value + trade_amount
     equity_pct = equity_after / total_equity * 100
 

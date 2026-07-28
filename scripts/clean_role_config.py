@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """诊断/清理 ai_role_config 脏配置。
 
 背景：get_models_for_role 优先级1(DB角色矩阵)历史上排在锁定主模型之前，导致

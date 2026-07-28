@@ -2,8 +2,8 @@
 import pytest
 
 fastapi_testclient = pytest.importorskip("fastapi.testclient")
-from fastapi.testclient import TestClient  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 
 def _citi_pdf() -> bytes:
@@ -254,9 +254,9 @@ def test_value_series_and_missing_require_explicit_or_unique_account(client):
 
 def test_value_series_multi_period_unit(tmp_path):
     """两期不同 as_of_date → 曲线两点 + 一段收益率（直接单测聚合 SQL）。"""
-    from bottleneck_hunter.watchlist.store import WatchlistStore
     from bottleneck_hunter.vip import portfolio
     from bottleneck_hunter.vip.ingest import BrokerStatement, EquityHolding, ReconResult
+    from bottleneck_hunter.watchlist.store import WatchlistStore
 
     wl = WatchlistStore(tmp_path / "wl2.db").for_user("u1").for_market("us_stock")
     wl.create_vip_account(account_ref="A1", display_name="账户1")

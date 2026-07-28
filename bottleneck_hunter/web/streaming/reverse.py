@@ -88,6 +88,7 @@ def _fetch_company_basic(ticker: str, market_enum: MarketRegion) -> dict:
     try:
         if market_enum == MarketRegion.A_STOCK:
             import akshare as ak  # 延迟导入，避免无 akshare 环境下加载失败
+
             from bottleneck_hunter.chain.financial_data import _extract_astock_code
             code = _extract_astock_code(ticker)
             if not code:

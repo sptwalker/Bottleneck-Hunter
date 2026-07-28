@@ -16,9 +16,9 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from bottleneck_hunter.vip import portfolio, derivatives, mandate as _mandate
-from bottleneck_hunter.vip import compliance, number_guard
 from bottleneck_hunter.chain.json_utils import extract_json_object
+from bottleneck_hunter.vip import compliance, derivatives, number_guard, portfolio
+from bottleneck_hunter.vip import mandate as _mandate
 
 _ACTIONS = {"减仓", "持有", "加仓"}
 
@@ -30,6 +30,25 @@ _ACTIONS = {"减仓", "持有", "加仓"}
 VIP_ROLE_CONTEXT = "vip_advisor"
 VIP_PT_ADVICE = "vip_advice"
 VIP_PT_RECOMMEND = "vip_recommend"
+
+
+def advisor_calibration(wl_store, provider: str, model: str) -> dict:
+    """F1 回接：读回本模型 vip_advisor 桶的历史校准权重(G5 复盘写入)，surfaced 给用户做可信度参考。
+    此前该权重算了却无人消费(committee 只读 committee_* 桶)——死信号。这里只读、advice-only、不改选型，
+    把'本模型历史 VIP 建议准不准'透明呈现，闭合 记录→校准→回看 的复盘环。
+    1.0=中性(无复盘数据或表现如常)；<1 历史偏差大宜更保守；>1 历史表现良好。"""
+    try:
+        w = wl_store.get_calibration_weight(provider, model, role_context=VIP_ROLE_CONTEXT)
+        w = float(w) if w and float(w) > 0 else 1.0
+    except Exception:  # noqa: BLE001 - 校准读取失败绝不影响建议主链路
+        w = 1.0
+    if abs(w - 1.0) < 1e-9:
+        note = "历史校准中性（暂无复盘数据或表现如常）"
+    elif w < 1.0:
+        note = f"本模型历史 VIP 建议校准 {w:.2f}x，偏低——本轮结论宜更保守看待"
+    else:
+        note = f"本模型历史 VIP 建议校准 {w:.2f}x，历史表现良好"
+    return {"calibration_weight": round(w, 2), "note": note}
 
 
 def _now_iso() -> str:
@@ -316,7 +335,7 @@ def committee_corpus(context: dict) -> str:
                       ensure_ascii=False, default=str)
 
 
-def annotate_committee(committee: dict, corpus: str) -> list[str]:
+def annotate_committee(committee: dict, corpus: str, foreign_values: list[float] | None = None) -> list[str]:
     """给委员叙述(assessment/key_concerns)里未在语料中出现的数字加 ⚠，就地写回 committee["members"]，返回未核到 token。
 
     corpus 须含 committee_corpus(context)（Phase 2 喂进委员会的真实数），否则委员引用合法数字会被误标。
@@ -326,8 +345,8 @@ def annotate_committee(committee: dict, corpus: str) -> list[str]:
     def ann(text: str) -> str:
         if not text:
             return text
-        unverified.extend(r["token"] for r in number_guard.verify_numbers(text, corpus) if r["status"] == "unverified")
-        return number_guard.annotate_unverified(text, corpus)
+        unverified.extend(r["token"] for r in number_guard.verify_numbers(text, corpus, foreign_values) if r["status"] == "unverified")
+        return number_guard.annotate_unverified(text, corpus, foreign_values=foreign_values)
 
     for m in committee.get("members", []):
         m["assessment"] = ann(m.get("assessment", ""))
@@ -376,18 +395,48 @@ def _parse_weight(s: str) -> float | None:
     return round(sum(nums) / len(nums), 2)  # 单值即其本身，区间取中点
 
 
+def _size_one_add(wl_store, ticker: str, hold: dict, total_equity: float) -> dict | None:
+    """给一只『加仓』标的估一档波动率缩放的指示性加仓量（INV-2/INV-4：接活 PositionSizer，替代"加仓不说加多少"）。
+    ref_price = market_value / shares（结算单 USD 口径）；vol 取近 60 日快照年化。
+    数据不足（无价/无快照/波动率算不出/股数为 0）→ None：宁可标未量化，绝不硬凑 0 冒充已量化。"""
+    from bottleneck_hunter.watchlist.position_sizing import PositionSizer
+    shares_held = float(hold.get("shares") or 0)
+    mv = float(hold.get("market_value") or 0)
+    price = mv / shares_held if (shares_held > 0 and mv > 0) else 0.0
+    if wl_store is None or price <= 0 or total_equity <= 0 or not ticker:
+        return None
+    try:
+        snaps = wl_store.get_snapshots(ticker, days=60)
+    except Exception:  # noqa: BLE001 - 取价失败绝不带崩预算对照
+        return None
+    closes = [float(s["close"]) for s in reversed(snaps or []) if s.get("close") not in (None, "")]
+    rets = [closes[i] / closes[i - 1] - 1.0 for i in range(1, len(closes)) if closes[i - 1] > 0]
+    vol = PositionSizer.compute_stock_volatility(rets)  # <5 样本→0.0
+    if vol <= 0:
+        return None
+    sized = PositionSizer.volatility_scaled(0.15, vol, total_equity, price)  # 目标年化波动15%，内含单仓≤20%钳制
+    if sized.get("shares", 0) <= 0:
+        return None
+    return {"ticker": ticker, "suggested_shares": sized["shares"],
+            "suggested_amount": sized["amount"], "target_weight_pct": sized["weight_pct"],
+            "vol_annual_pct": round(vol * 100, 1), "ref_price": round(price, 2)}
+
+
 def summarize_cash_budget(dossier: dict, advisory_result: dict | None,
-                          recommend_result: dict | None) -> dict:
+                          recommend_result: dict | None, *, wl_store=None) -> dict:
     """指示性现金/仓位预算对照（只提示不约束）：把两个 pass 的建仓候选量化仓位加总，对照可投资现金给 sanity。
 
-    需求侧本不可精确量化（advisory 加仓无仓位量、现金是结算单静态口径），故结论仅 indicative：
-    - requested_new_buy = Σ(recommend 建仓候选软仓位中点% × total_equity)——仅统计「有明确仓位%」者；
-      无仓位%的建仓/所有 advisory 加仓 → 计入 unquantified_adds、不塞进 requested（不拿 0 冒充已量化）。
+    需求侧本不可精确量化（现金是结算单静态口径），故结论仅 indicative：
+    - requested_new_buy = Σ(recommend 建仓候选软仓位中点% × total_equity)【有明确仓位%者】
+      + Σ(advisory 加仓的波动率缩放估算金额)【传 wl_store 且价/波动率可算者，见 _size_one_add】。
+      无仓位%的建仓 / 无法量化的加仓 → 计入 unquantified_adds、不塞进 requested（不拿 0 冒充已量化）。
+    - add_suggestions: 逐笔加仓的「建议股数/约 $金额/目标权重%/参考价/年化波动%/现金是否覆盖」（INV-4 可执行性）。
     - available_cash = dossier.cash_balance（结算单口径、不含融资 buying_power）。
-    - fits / overcommit_pct 仅基于「已量化」部分；unquantified_adds>0 时判断偏乐观，note 明示口径。
+    - fits / overcommit_pct / cash_coverage_pct 仅基于「已量化」部分；unquantified_adds>0 时判断偏乐观，note 明示口径。
     """
     total_equity = float(dossier.get("total_equity") or 0)
     available = float(dossier.get("cash_balance") or 0)
+    hold_map = {h.get("ticker"): h for h in (dossier.get("holdings") or []) if h.get("ticker")}
     requested = 0.0
     unquantified = 0
     for c in ((recommend_result or {}).get("candidates") or []):
@@ -398,30 +447,45 @@ def summarize_cash_budget(dossier: dict, advisory_result: dict | None,
             unquantified += 1
         else:
             requested += w / 100.0 * total_equity
+    add_suggestions: list[dict] = []
     for h in ((advisory_result or {}).get("holdings") or []):
-        if str(h.get("action", "")) == "加仓":  # 加仓无仓位量 → 一律未量化
+        if str(h.get("action", "")) != "加仓":
+            continue
+        sized = _size_one_add(wl_store, h.get("ticker", ""), hold_map.get(h.get("ticker", ""), {}), total_equity)
+        if sized is None:  # 加仓但价/波动率不可算（或未传 wl_store）→ 仍诚实计未量化
             unquantified += 1
+        else:
+            requested += sized["suggested_amount"]
+            add_suggestions.append(sized)
     requested = round(requested, 2)
     over = requested - available
     fits = over <= 0
     overcommit = round(over, 2) if over > 0 else 0.0
     overcommit_pct = round(over / available * 100, 1) if (over > 0 and available > 0) else 0.0
+    run = 0.0  # 逐笔累计现金是否覆盖（按建议顺序）
+    for s in add_suggestions:
+        run += s["suggested_amount"]
+        s["cash_covered"] = run <= available
+    cash_coverage_pct = round(available / requested * 100, 1) if requested > 0 else None
     tail = (f"另有 {unquantified} 项加仓/建仓未给出仓位量、未纳入需求合计，容量判断偏乐观。"
             if unquantified else "")
+    if add_suggestions:
+        tail += f"（{len(add_suggestions)} 项加仓已按波动率缩放估指示性档位：目标年化波动15%、单仓≤20%权益。）"
     return {"available_cash": round(available, 2), "requested_new_buy": requested,
             "fits": fits, "overcommit": overcommit, "overcommit_pct": overcommit_pct,
-            "unquantified_adds": unquantified,
+            "unquantified_adds": unquantified, "add_suggestions": add_suggestions,
+            "cash_coverage_pct": cash_coverage_pct,
             "note": "现金口径为结算单静态余额、不含融资(buying_power)，容量判断为指示性。" + tail}
 
 
-def _annotate(draft: dict, corpus: str) -> list[str]:
+def _annotate(draft: dict, corpus: str, foreign_values: list[float] | None = None) -> list[str]:
     """就地给草案文本里未在档案/纲领语料中出现的数字加⚠标注，返回未核到 token 列表。"""
     unverified: list[str] = []
     def ann(text: str) -> str:
         if not text:
             return text
-        unverified.extend(r["token"] for r in number_guard.verify_numbers(text, corpus) if r["status"] == "unverified")
-        return number_guard.annotate_unverified(text, corpus)
+        unverified.extend(r["token"] for r in number_guard.verify_numbers(text, corpus, foreign_values) if r["status"] == "unverified")
+        return number_guard.annotate_unverified(text, corpus, foreign_values=foreign_values)
     draft["portfolio_diagnosis"] = ann(draft["portfolio_diagnosis"])
     draft["cross_market_coverage"] = ann(draft["cross_market_coverage"])
     for h in draft["holdings"]:
@@ -437,13 +501,14 @@ def _annotate(draft: dict, corpus: str) -> list[str]:
 
 async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id: str = "", budget=None) -> dict:
     """生成并落库账户顾问建议。返回 {advisory_id, result}。空 ref/无持仓/无模型/预算不足 → 明确 error。"""
+    import asyncio
+
     from bottleneck_hunter.llm_clients.factory import get_models_for_role
     from bottleneck_hunter.watchlist.committee import MEMBERS, _review_single
-    import asyncio
 
     account_ref = (account_ref or "").strip()
     if not account_ref:
-        # 硬守卫：空 ref 会经 build_account_dossier→build_portfolio_summary→get_sim_account("")
+        # 硬守卫：空 ref 会经 build_account_dossier→build_account_summary→get_sim_account("")
         # 落到决策中心自有 sim_account('')（读、并惰性建 DC L4 模拟盘行）。前端 requireConcreteAccount 已挡，
         # 此处补后端防护，杜绝直连 API 越界读写决策中心模拟盘。见 memory:dc_sim_account_decoupled。
         return {"error": "请先选择具体子账户再生成顾问建议"}
@@ -482,8 +547,9 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
     corpus = (json.dumps(dossier, ensure_ascii=False, default=str)
               + "\n" + inputs["mandate_text"] + "\n" + inputs["macro_text"]
               + "\n" + committee_corpus(context))
-    unverified = _annotate(draft, corpus)
-    unverified = list(dict.fromkeys(unverified + annotate_committee(committee, corpus)))
+    fv = number_guard.foreign_derivative_values(dossier)  # 非美元衍生条款价：$令牌不得据此核实（跨币防误核）
+    unverified = _annotate(draft, corpus, fv)
+    unverified = list(dict.fromkeys(unverified + annotate_committee(committee, corpus, fv)))
 
     # ── 3b) 草案↔投委会对账：reject→加仓降持有、caution/split→加警示注（memory:vip_advisory_pass 用户已确认强度）──
     reconciled = reconcile_draft(draft["holdings"], "action", {"加仓": "持有"}, committee)
@@ -498,6 +564,7 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
         "unverified": unverified,
         "reconciled": reconciled,
         "provider": provider, "model": model,
+        "advisor_calibration": advisor_calibration(wl_store, provider, model),  # F1：surfaced 可信度
         "disclaimer": compliance.DISCLAIMER_ZH,
     }
 
@@ -529,6 +596,7 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
     # ── 5) 审计留痕（auth.db，无 PII 金额；与周期报告同口径 create_advice_audit）──
     try:
         import hashlib
+
         from bottleneck_hunter.auth.store import AuthStore
         uid = getattr(wl_store, "_user_id", "") or user_id or ""
         if uid:
@@ -755,9 +823,41 @@ if __name__ == "__main__":
     novol = summarize_cash_budget(dossier_b, None, {"candidates": [{"action": "建仓", "suggested_weight": ""}]})
     assert novol["unquantified_adds"] == 1 and novol["requested_new_buy"] == 0.0, novol  # 建仓无%→不塞 0 进需求
 
+    # 12b) B: 加仓量化（INV-2/INV-4 接活 PositionSizer）——传 wl_store 且价/波动率可算→给建议股数/金额/覆盖率
+    class _SnapStore:
+        def get_snapshots(self, tk, days=60):  # 25 日温和上行→年化波动率可算(>0)
+            return [{"close": 100 + i * 0.5} for i in range(25)]
+    dossier_q = {"total_equity": 100000.0, "cash_balance": 50000.0,
+                 "holdings": [{"ticker": "NVDA", "shares": 100, "market_value": 40000.0}]}  # 参考价 400
+    q = summarize_cash_budget(dossier_q, {"holdings": [{"ticker": "NVDA", "action": "加仓"}]},
+                              None, wl_store=_SnapStore())
+    assert len(q["add_suggestions"]) == 1 and q["unquantified_adds"] == 0, q      # 已量化→不再计未量化
+    sg = q["add_suggestions"][0]
+    assert sg["suggested_shares"] > 0 and sg["suggested_amount"] > 0, sg          # 有具体股数/金额
+    assert sg["target_weight_pct"] <= 20.0 + 1e-6, sg                            # 单仓≤20% 权益钳制生效
+    assert q["cash_coverage_pct"] is not None and sg["cash_covered"] is True, q   # 5万现金覆盖率有值且够
+    # 未传 wl_store（旧行为）→ 加仓仍诚实计未量化、不硬凑
+    q0 = summarize_cash_budget(dossier_q, {"holdings": [{"ticker": "NVDA", "action": "加仓"}]}, None)
+    assert q0["add_suggestions"] == [] and q0["unquantified_adds"] == 1, q0
+
     # 13) C-1 隔离回归守卫：VIP 打点常量绝不撞 sim 的 role_context/prediction_type（防手滑致校准交叉污染）
     assert VIP_PT_ADVICE not in ("vote",) and VIP_PT_RECOMMEND not in ("vote",)
     assert not VIP_ROLE_CONTEXT.startswith("committee_")
     assert VIP_PT_ADVICE != VIP_PT_RECOMMEND
+
+    # 14) F1 回接自检：advisor_calibration 读回 vip_advisor 桶权重并 surfaced（中性/偏低/良好/异常兜底）
+    class _CalStub:
+        def __init__(self, w): self._w = w
+        def get_calibration_weight(self, p, m, role_context="", market=""):
+            if self._w is None:
+                raise RuntimeError("boom")
+            assert role_context == VIP_ROLE_CONTEXT  # 必须读 vip_advisor 桶，不得串 committee_*
+            return self._w
+    assert advisor_calibration(_CalStub(1.0), "x", "y")["calibration_weight"] == 1.0
+    assert "中性" in advisor_calibration(_CalStub(1.0), "x", "y")["note"]
+    assert "保守" in advisor_calibration(_CalStub(0.7), "x", "y")["note"]        # <1 提醒更保守
+    assert advisor_calibration(_CalStub(1.3), "x", "y")["calibration_weight"] == 1.3
+    assert advisor_calibration(_CalStub(None), "x", "y")["calibration_weight"] == 1.0  # 异常兜底中性
+    assert advisor_calibration(_CalStub(0.0), "x", "y")["calibration_weight"] == 1.0   # 非正权重视作中性
 
     print("advisory self-check OK")

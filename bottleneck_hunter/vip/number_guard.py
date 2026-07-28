@@ -26,6 +26,52 @@ _TOKEN_RE = re.compile(
 )
 _NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 _REL_TOL = 0.01  # 1% 相对容差，吸收四舍五入
+_USD_CCY = {"", "usd", "us$", "$", "＄", "美元"}  # 视为美元口径（或未知→按美元处理，留在可信池）
+
+
+def foreign_derivative_values(dossier) -> list[float]:
+    """从账户档案的衍生品敞口里抽出「非美元」条款价格（afp/knock_out_price）。
+
+    这些是标的原生币种（如 HKD）的每股价格，与叙述的统一美元口径不同币种；档案把币种
+    (`currency`) 与价格放在**不同字段**，扁平化后防伪器看不到二者相邻，故须在这里按结构取出。
+    传给 verify_numbers 后，$（美元）令牌不再被这些外币数字误核——否则 HK$3.45 的敲出价会
+    "核实"掉一个凭空捏造的 $3.45 美元断言（跨币纯数值容差误判）。
+    """
+    out: list[float] = []
+    if not isinstance(dossier, dict):
+        return out
+    for d in (dossier.get("derivative_exposure") or []):
+        if str(d.get("currency", "")).strip().lower() in _USD_CCY:
+            continue  # 美元/未知币种条款价格是美元口径，保留在可信池
+        for k in ("afp", "knock_out_price"):
+            v = d.get(k)
+            try:
+                if v is not None:
+                    out.append(float(v))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _num_forms(v: float) -> set[str]:
+    """一个外币数值在扁平化 JSON facts 里可能出现的文本形态（供剔除用）。"""
+    forms = {repr(v), f"{v}"}
+    if v == int(v):
+        forms.add(str(int(v)))
+        forms.add(f"{int(v)}.0")
+    return forms
+
+
+def _approx_in(val: float, pool: list[float]) -> bool:
+    return any(abs(val - f) / max(abs(f), 1.0) <= _REL_TOL for f in pool)
+
+
+def _strip_values(text: str, values: list[float]) -> str:
+    """把外币数值的所有文本形态从 facts 文本中抹除（数字/点边界防误删 13.45 里的 3.45）。"""
+    for v in values:
+        for form in _num_forms(v):
+            text = re.sub(r"(?<![\d.])" + re.escape(form) + r"(?![\d.])", " ", text)
+    return text
 
 
 def _to_float(s: str) -> float | None:
@@ -49,11 +95,14 @@ def _facts_text(facts) -> str:
         return str(facts)
 
 
-def verify_numbers(text: str, facts) -> list[dict]:
+def verify_numbers(text: str, facts, foreign_values: list[float] | None = None) -> list[dict]:
     """抽出 text 中的金额/百分比 token，逐个在 facts 中核对。
 
     Returns: [{"token": str, "value": float|None, "status": "verified"|"unverified"}]
     facts 可为 str / dict / list（非 str 自动 JSON 序列化后匹配）。
+    foreign_values：非美元口径的 facts 数值（如 HKD 衍生品条款价，见 foreign_derivative_values）。
+      $（美元）令牌**不得**用这些外币数字核实——避免 HK$ 数量级的捏造美元断言被跨币容差放行。
+      非 $ 令牌（%/股数/净值）不受影响，仍用全量 facts。
     """
     if not text:
         return []
@@ -61,20 +110,27 @@ def verify_numbers(text: str, facts) -> list[dict]:
     fx_nocomma = fx.replace(",", "")
     fact_nums = [_to_float(m.group(0)) for m in _NUM_RE.finditer(fx)]
     fact_nums = [n for n in fact_nums if n is not None]
+    # 美元口径可信池 = 全量 facts 剔除外币数值（子串通道用抹除后的文本，容差通道用剔除后的数字池）
+    fv = [f for f in (foreign_values or []) if f is not None]
+    usd_fx_nocomma = _strip_values(fx_nocomma, fv).replace(",", "") if fv else fx_nocomma
+    usd_fact_nums = [n for n in fact_nums if not _approx_in(n, fv)] if fv else fact_nums
 
     out: list[dict] = []
     for m in _TOKEN_RE.finditer(text):
         tok = m.group(0)
         v = _to_float(tok)
         status = "unverified"
+        is_usd = tok[0] in "$＄"  # 美元令牌走剔除外币后的可信池
+        nocomma = usd_fx_nocomma if is_usd else fx_nocomma
+        pool = usd_fact_nums if is_usd else fact_nums
         # 通道1：数字串（去单位/符号/逗号）原样出现在 facts
         v_str = "" if v is None else (repr(v) if v != int(v) else str(int(v)))
         digits = v_str.lstrip("-")
-        if digits and digits in fx_nocomma:
+        if digits and digits in nocomma:
             status = "verified"
         # 通道2：数值 1% 相对容差匹配任一 facts 数字
         elif v is not None:
-            for f in fact_nums:
+            for f in pool:
                 denom = max(abs(f), 1.0)
                 if abs(v - f) / denom <= _REL_TOL:
                     status = "verified"
@@ -83,9 +139,10 @@ def verify_numbers(text: str, facts) -> list[dict]:
     return out
 
 
-def annotate_unverified(text: str, facts, marker: str = " ⚠未核到") -> str:
+def annotate_unverified(text: str, facts, marker: str = " ⚠未核到",
+                        foreign_values: list[float] | None = None) -> str:
     """把 text 中未核到的金额/百分比就地追加标记，供报告/聊天渲染层直接用。"""
-    results = {r["token"]: r["status"] for r in verify_numbers(text, facts)}
+    results = {r["token"]: r["status"] for r in verify_numbers(text, facts, foreign_values)}
     # 从后往前替换，避免位置漂移；只标 unverified，且每处只标一次
     marked = text
     for m in reversed(list(_TOKEN_RE.finditer(text))):
@@ -116,6 +173,24 @@ def demo() -> None:
     assert "$9,999,999.00 ⚠未核到" in marked
     assert "$1,205,022.50 ⚠未核到" not in marked
     assert "1030 股 ⚠未核到" not in marked
+
+    # 跨币防误核：HKD 衍生品条款价（afp 3.45 / KO 500）不得核验叙述里的美元 $3.45 / $500
+    dossier = {"total_equity": 1205022.5, "derivative_exposure": [
+        {"currency": "HKD", "afp": 3.45, "knock_out_price": 500.0},
+        {"currency": "USD", "afp": 7.89}]}  # USD 条款价留在可信池
+    fv = foreign_derivative_values(dossier)
+    assert set(fv) == {3.45, 500.0}, fv                      # 仅取非美元条款价
+    fdx = _facts_text(dossier)
+    # 无 foreign_values → 旧行为：$3.45 被 HKD afp 误核为 verified
+    assert verify_numbers("每股 $3.45", fdx)[0]["status"] == "verified"
+    # 带 foreign_values → $3.45 / $500（美元断言）被拦为 unverified（子串 + 容差两通道都堵）
+    assert verify_numbers("每股 $3.45", fdx, fv)[0]["status"] == "unverified"
+    assert verify_numbers("敲出 $500", fdx, fv)[0]["status"] == "unverified"
+    # 真实美元总权益仍可核；USD 币种条款价 $7.89 不误伤（未进 foreign）
+    assert verify_numbers("总权益 $1,205,022.50", fdx, fv)[0]["status"] == "verified"
+    assert verify_numbers("每股 $7.89", fdx, fv)[0]["status"] == "verified"
+    # 非 $ 令牌（%/裸数）不受 foreign_values 影响：500 股仍按全池核（此处无 500 股事实→unverified 属正常）
+    assert verify_numbers("占比 3.45%", fdx, fv)[0]["status"] == "verified"  # 3.45 在 facts 里，% 走全池
     print("number_guard 自检通过")
 
 

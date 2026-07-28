@@ -8,7 +8,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-
 RISK_FREE_RATE = 0.04
 TRADING_DAYS_PER_YEAR = 252
 

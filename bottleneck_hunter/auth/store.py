@@ -7,7 +7,6 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 import bcrypt as _bcrypt
 
@@ -32,7 +31,7 @@ _DEFAULT_DB = Path("data/auth.db")
 class AuthStore:
     """认证数据存储层。线程安全（每次调用建立新连接）。"""
 
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Path | None = None):
         self._db_path = db_path or _DEFAULT_DB
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_tables()
@@ -224,12 +223,12 @@ class AuthStore:
             settings_json=row["settings_json"] or "{}",
         )
 
-    def get_user_by_username(self, username: str) -> Optional[UserInDB]:
+    def get_user_by_username(self, username: str) -> UserInDB | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
             return self._row_to_user(row) if row else None
 
-    def get_user_by_id(self, user_id: str) -> Optional[UserInDB]:
+    def get_user_by_id(self, user_id: str) -> UserInDB | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             return self._row_to_user(row) if row else None
@@ -333,7 +332,7 @@ class AuthStore:
             )
         return did
 
-    def find_financial_doc_by_hash(self, user_id: str, content_hash: str) -> Optional[dict]:
+    def find_financial_doc_by_hash(self, user_id: str, content_hash: str) -> dict | None:
         """幂等去重查重：同用户同文件哈希已存在则返回其行（不解密）。"""
         with self._conn() as conn:
             row = conn.execute(
@@ -342,7 +341,7 @@ class AuthStore:
             ).fetchone()
             return dict(row) if row else None
 
-    def get_financial_doc(self, user_id: str, doc_id: str, *, decrypt_parsed: bool = False) -> Optional[dict]:
+    def get_financial_doc(self, user_id: str, doc_id: str, *, decrypt_parsed: bool = False) -> dict | None:
         """取一份文档。decrypt_parsed=True 时解密 parsed_json（仅在需处理解析结果时用，绝不入日志）。"""
         with self._conn() as conn:
             row = conn.execute(
@@ -380,6 +379,35 @@ class AuthStore:
         params.append(limit)
         with self._conn() as conn:
             return [dict(r) for r in conn.execute(q, tuple(params)).fetchall()]
+
+    def update_financial_doc_parse(self, user_id: str, doc_id: str, *,
+                                   parsed_json: str, recon_flags: dict | None = None,
+                                   status: str = "", doc_type: str = "", period_end: str = "") -> bool:
+        """重导刷新：同文件重传时用新解析覆盖 parsed_json（加密），随带更新 recon/状态/期末。
+
+        存量文档可能是旧 schema 解析（缺贷款等新增字段）→ 重导须刷新，否则复用旧解析永远拿不到新字段。
+        """
+        import json as _json
+
+        from .crypto import encrypt
+        now = _utcnow().isoformat()
+        sets = ["parsed_json_encrypted = ?", "parsed_at = ?", "updated_at = ?"]
+        vals: list = [encrypt(parsed_json) if parsed_json else "", now, now]
+        if recon_flags is not None:
+            sets.append("recon_flags_json = ?"); vals.append(_json.dumps(recon_flags, ensure_ascii=False))
+        if status:
+            sets.append("status = ?"); vals.append(status)
+        if doc_type:
+            sets.append("doc_type = ?"); vals.append(doc_type)
+        if period_end:
+            sets.append("period_end = ?"); vals.append(period_end)
+        vals += [user_id, doc_id]
+        with self._conn() as conn:
+            cur = conn.execute(
+                f"UPDATE financial_documents SET {', '.join(sets)} WHERE user_id = ? AND id = ?",
+                tuple(vals),
+            )
+            return cur.rowcount > 0
 
     def update_financial_doc_status(self, user_id: str, doc_id: str, status: str,
                                     *, parse_error: str = "", purge_raw: bool = False) -> bool:
@@ -428,7 +456,7 @@ class AuthStore:
             n2 = conn.execute("DELETE FROM advice_audit_trail WHERE user_id = ?", (user_id,)).rowcount
         return (n1 or 0) + (n2 or 0)
 
-    def get_user_by_email(self, email: str) -> Optional[UserInDB]:
+    def get_user_by_email(self, email: str) -> UserInDB | None:
         if not email:
             return None
         with self._conn() as conn:
@@ -511,7 +539,7 @@ class AuthStore:
 
     # ── 默认管理员 ────────────────────────────────────────
 
-    def ensure_default_admin(self) -> Optional[UserInDB]:
+    def ensure_default_admin(self) -> UserInDB | None:
         """如果无用户，创建 admin 并生成随机密码（仅终端打印一次）。"""
         if self.count_users() > 0:
             return None
@@ -538,7 +566,7 @@ class AuthStore:
                 codes.append(code)
         return codes
 
-    def validate_invite_code(self, code: str) -> Optional[InviteCode]:
+    def validate_invite_code(self, code: str) -> InviteCode | None:
         """验证邀请码：存在、未使用、未过期、未作废。"""
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM invite_codes WHERE code = ?", (code,)).fetchone()

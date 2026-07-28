@@ -1,8 +1,8 @@
 """Tests for hot sector detector."""
 
-import pytest
+from unittest.mock import patch
+
 import pandas as pd
-from unittest.mock import patch, MagicMock
 
 from bottleneck_hunter.chain.hot_sector import (
     HotSector,

@@ -3,6 +3,19 @@
    前缀: st-
    ============================================================ */
 
+/* ── VIP 锁屏（隐私保护，未解锁显示占位）── */
+.vip-lock-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+.vip-lock-text {
+  color: var(--text-secondary, #888);
+  font-size: 18px;
+  letter-spacing: 1px;
+}
+
 /* ── 标签页导航 ── */
 .st-tabs {
   display: flex;

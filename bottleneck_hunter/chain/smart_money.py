@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
 
 try:
     import akshare as ak
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 _SEMAPHORE = asyncio.Semaphore(4)
 
 
-def _safe_float(val, scale: float = 1.0) -> Optional[float]:
+def _safe_float(val, scale: float = 1.0) -> float | None:
     if val is None:
         return None
     try:
@@ -57,13 +56,13 @@ def _track_astock(code_6: str) -> SmartMoneySignal:
                     details.append(f"近5日主力净流入{total_flow:.0f}万")
                 elif total_flow > 0:
                     score += 0.5
-                    details.append(f"近5日主力小幅净流入")
+                    details.append("近5日主力小幅净流入")
                 elif total_flow < -500:
                     score -= 1.5
                     details.append(f"近5日主力净流出{abs(total_flow):.0f}万")
                 elif total_flow < 0:
                     score -= 0.5
-                    details.append(f"近5日主力小幅净流出")
+                    details.append("近5日主力小幅净流出")
     except Exception as e:
         logger.debug(f"资金流向获取失败 ({code_6}): {e}")
 
@@ -103,13 +102,13 @@ def _track_astock(code_6: str) -> SmartMoneySignal:
                     details.append(f"近5日北向净买入{total_nb:.0f}万")
                 elif total_nb > 0:
                     score += 0.5
-                    details.append(f"近5日北向小幅净买入")
+                    details.append("近5日北向小幅净买入")
                 elif total_nb < -2000:
                     score -= 1.5
                     details.append(f"近5日北向净卖出{abs(total_nb):.0f}万")
                 elif total_nb < 0:
                     score -= 0.5
-                    details.append(f"近5日北向小幅净卖出")
+                    details.append("近5日北向小幅净卖出")
     except Exception as e:
         logger.debug(f"北向资金数据获取失败 ({code_6}): {e}")
 
@@ -249,13 +248,13 @@ def _track_us_stock(ticker: str) -> SmartMoneySignal:
     return signal
 
 
-def _extract_astock_code(ticker: str) -> Optional[str]:
+def _extract_astock_code(ticker: str) -> str | None:
     # 全系统唯一 A股代码提取器（见 store_base）；容纳 600519 / 600519.SH/.SS / SH600519 等全部形态
     from bottleneck_hunter.watchlist.store_base import extract_astock_code
     return extract_astock_code(ticker)
 
 
-async def track_smart_money(supplier: SupplierInfo) -> Optional[SmartMoneySignal]:
+async def track_smart_money(supplier: SupplierInfo) -> SmartMoneySignal | None:
     """为单个供应商获取聪明钱信号。"""
     async with _SEMAPHORE:
         try:

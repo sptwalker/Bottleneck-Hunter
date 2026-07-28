@@ -457,7 +457,7 @@ def get_models_for_role(
     policy: dict = {}
     tier_of = None
     try:
-        from bottleneck_hunter.llm_clients.health import rank_providers, load_routing_policy, provider_tier
+        from bottleneck_hunter.llm_clients.health import load_routing_policy, provider_tier, rank_providers
         policy = load_routing_policy(uid, role_key)
         chain = rank_providers(chain, uid, _PRIMARY_PROVIDER, policy=policy, role_key=role_key)
         tier_of = provider_tier

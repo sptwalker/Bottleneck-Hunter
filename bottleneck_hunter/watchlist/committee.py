@@ -14,14 +14,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist.budget import BudgetTracker
-from bottleneck_hunter.watchlist.prompt_guard import sanitize_list
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position
+from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.prompt_guard import sanitize_list
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +94,8 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     # 备用：选一个与主模型不同、且**未熔断**的可用 provider（避免把已知失效的 provider 选进链白耗一轮）。
     # 候选池 = 用户全部已注册 provider + 应急链兜底，而非只试硬编码 4 家（否则用户配的其它模型拿不到备用多样性）。
     from bottleneck_hunter.auth.current_user import get_current_user_id
-    from bottleneck_hunter.llm_clients.health import health
     from bottleneck_hunter.llm_clients.factory import list_custom_provider_ids
+    from bottleneck_hunter.llm_clients.health import health
     uid = get_current_user_id()
     try:
         _universe = list_custom_provider_ids()
@@ -138,20 +138,20 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
     """
     last_err: Exception | None = None
     from bottleneck_hunter.auth.current_user import get_current_user_id
-    from bottleneck_hunter.llm_clients.health import health
     from bottleneck_hunter.llm_clients.fallback import classify_reason
+    from bottleneck_hunter.llm_clients.health import health
     uid = get_current_user_id()
     for idx, (llm, provider, model) in enumerate(chain):
         for attempt in range(max_retry):
             try:
-                content = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
+                content = await asyncio.to_thread(lambda: llm.invoke(prompt).content)  # noqa: B023  立即 await，无延迟绑定后果
                 health.record_success(uid, provider)  # 恢复：清该 provider 的失败计数
                 if idx > 0 or attempt > 0:
                     logger.info("委员 %s 经重试/降级成功（%s/%s, 第%d次）",
                                 role, provider, model, attempt + 1)
                 if idx > 0:
                     # 真正切到了备用模型 → 提示用户
-                    from bottleneck_hunter.llm_clients.fallback import push_notice, _build_message
+                    from bottleneck_hunter.llm_clients.fallback import _build_message, push_notice
                     fp, fm = chain[0][1], chain[0][2]
                     reason = classify_reason(last_err) if last_err else "调用异常"
                     push_notice(_build_message(fp, fm, reason, provider, model))

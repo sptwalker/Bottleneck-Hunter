@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pandas as pd
 
-from bottleneck_hunter.data_provider.base import BaseFetcher, StandardQuote, safe_float as _safe_float
+from bottleneck_hunter.data_provider.base import BaseFetcher, StandardQuote
+from bottleneck_hunter.data_provider.base import safe_float as _safe_float
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +83,6 @@ class EfinanceFetcher(BaseFetcher):
             if df is None or df.empty:
                 return None
             cols = df.columns.tolist()
-            # 用列名构建索引映射（适配中文列名变化）
-            col_idx = {c: i for i, c in enumerate(cols)}
 
             row = df[df.iloc[:, 0] == code]
             if row.empty:

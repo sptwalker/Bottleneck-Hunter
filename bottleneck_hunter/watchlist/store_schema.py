@@ -378,6 +378,7 @@ CREATE TABLE IF NOT EXISTS sim_account (
     total_trades        INTEGER DEFAULT 0,
     win_rate            REAL DEFAULT 0.0,
     peak_equity         REAL DEFAULT 0,
+    loan_balance        REAL DEFAULT 0,
     account_ref         TEXT DEFAULT '',
     created_at          TEXT NOT NULL,
     updated_at          TEXT,
@@ -1304,4 +1305,6 @@ MIGRATIONS: list[str] = [
         market       TEXT DEFAULT 'us_stock'
     )""",
     "CREATE INDEX IF NOT EXISTS idx_vip_recommend_acct ON vip_recommendations(user_id, market, account_ref, created_at DESC)",
+    # ── VIP 子账户已用贷款/负债（结单口径，统一美元）：总览与账户视图第四栏「贷款」数据源 ──
+    "ALTER TABLE sim_account ADD COLUMN loan_balance REAL DEFAULT 0",
 ]

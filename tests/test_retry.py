@@ -1,13 +1,12 @@
 """Tests for the unified retry and timeout framework."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from bottleneck_hunter.watchlist.retry import fetch_with_timeout, with_retry, get_http_client, close_http_client
 import bottleneck_hunter.watchlist.retry as retry_mod
-
+from bottleneck_hunter.watchlist.retry import close_http_client, fetch_with_timeout, get_http_client, with_retry
 
 # ---------------------------------------------------------------------------
 # @with_retry — sync
@@ -46,7 +45,7 @@ class TestWithRetrySync:
     def test_retry_exhausted(self, mock_sleep):
         @with_retry(max_retries=3, base_delay=0.01)
         def always_fail():
-            raise IOError("down")
+            raise OSError("down")
 
         with pytest.raises(IOError, match="down"):
             always_fail()

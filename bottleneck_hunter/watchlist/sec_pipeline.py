@@ -12,9 +12,7 @@ import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
-import httpx
-
-from bottleneck_hunter.watchlist.retry import with_retry, get_http_client
+from bottleneck_hunter.watchlist.retry import get_http_client, with_retry
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -93,7 +91,6 @@ async def _get_cik(ticker: str) -> str | None:
 @with_retry(max_retries=3, base_delay=2.0)
 async def _fetch_filings(cik: str, form_types: list[str], limit: int = 10) -> list[dict]:
     """Fetch recent filings from EDGAR."""
-    url = f"https://efts.sec.gov/LATEST/search-index?q=&dateRange=custom&startdt=2025-01-01&forms={','.join(form_types)}&entities={cik}"
     submissions_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
     client = get_http_client()
     await asyncio.sleep(0.15)  # SEC rate limit

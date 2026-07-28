@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # 请求 / 响应 模型
@@ -63,8 +60,8 @@ class UserInfo(BaseModel):
     watchlist_limit: int = 24
     watchlist_focus_pct: float = 0.25
     watchlist_normal_pct: float = 0.25
-    created_at: Optional[str] = None
-    last_login_at: Optional[str] = None
+    created_at: str | None = None
+    last_login_at: str | None = None
 
 
 class UserInDB(UserInfo):
@@ -80,8 +77,8 @@ class UserInDB(UserInfo):
 class InviteCode(BaseModel):
     code: str
     created_by: str = ""
-    used_by: Optional[str] = None
-    created_at: Optional[str] = None
-    used_at: Optional[str] = None
-    expires_at: Optional[str] = None
+    used_by: str | None = None
+    created_at: str | None = None
+    used_at: str | None = None
+    expires_at: str | None = None
     is_active: bool = True

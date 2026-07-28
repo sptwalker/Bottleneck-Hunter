@@ -3,9 +3,7 @@
 根因 #14：用户选 deepseek 却复用了 MiniMax 拆的 79 节点稀疏旧链（表头显示 deepseek，
 实际 chain.model_used=MiniMax-Text-01）。修复：get_fresh_chain 加模型匹配门 + low_power 跳过。
 """
-from datetime import datetime, timezone, timedelta
-
-import pytest
+from datetime import datetime, timedelta, timezone
 
 from bottleneck_hunter.chain.chain_store import ChainStore
 

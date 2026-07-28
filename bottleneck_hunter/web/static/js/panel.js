@@ -4,6 +4,7 @@
  */
 
 import { startScreening } from './pipeline.js';
+import { toast } from './utils/toast.js';
 import { showView } from './app.js';
 
 // provider → 默认模型映射：一律来自 /api/ai-config/providers（单一真源），不写死
@@ -168,7 +169,7 @@ async function handleStart() {
   const config = collectConfig();
   const err = validate(config);
   if (err) {
-    alert(err);
+    toast(err);
     return;
   }
 

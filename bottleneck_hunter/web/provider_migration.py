@@ -18,9 +18,9 @@ import os
 from dotenv import dotenv_values
 
 from bottleneck_hunter.llm_clients.factory import (
+    _BUILTIN_BASE_URLS,
     PROVIDER_KEY_MAP,
     PROVIDER_MODELS,
-    _BUILTIN_BASE_URLS,
 )
 
 logger = logging.getLogger(__name__)

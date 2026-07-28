@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 
 from bottleneck_hunter.web.streaming.reverse import (
-    _match_existing_bottleneck, _load_chain_context, _llm_identify_bottleneck,
+    _llm_identify_bottleneck,
+    _load_chain_context,
+    _match_existing_bottleneck,
 )
 
 

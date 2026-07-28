@@ -10,13 +10,13 @@ import asyncio
 import shutil
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 
 import pytest
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist import scheduler as S
 from bottleneck_hunter.watchlist import schedule_config as SC
+from bottleneck_hunter.watchlist import scheduler as S
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
 @pytest.fixture

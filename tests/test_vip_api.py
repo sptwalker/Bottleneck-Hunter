@@ -2,8 +2,8 @@
 import pytest
 
 fastapi_testclient = pytest.importorskip("fastapi.testclient")
-from fastapi.testclient import TestClient  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 
 def _citi_pdf() -> bytes:

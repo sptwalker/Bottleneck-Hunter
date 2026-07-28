@@ -1,10 +1,8 @@
 """Tests for FinalScorer — 统一最终评分。"""
 
-import pytest
 
 from bottleneck_hunter.chain.models import (
     AlphaScore,
-    FinalScore,
     MarketRegion,
     SupplierInfo,
     SupplierScorecard,

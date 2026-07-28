@@ -1,7 +1,7 @@
 """Phase 9A 绩效报告与调优系统测试"""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 

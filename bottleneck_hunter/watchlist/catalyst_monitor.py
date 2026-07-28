@@ -9,13 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position, get_models_for_role
+from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +278,6 @@ def judge_catalyst_outcome(
         return {"outcome": "failed", "impact": 0, "reason": "无预期日期，无法判定"}
 
     impact_level = catalyst.get("impact_level", "medium")
-    catalyst_type = catalyst.get("catalyst_type", "event")
     title = catalyst.get("title", "")
 
     # ── 收集价格数据：预期日期前后 5 天 ──
@@ -424,7 +423,6 @@ def get_catalyst_calendar(store: WatchlistStore, days: int = 30) -> dict:
          "by_category": {"earnings": [...], ...},
          "summary": {"total": N, "red": N, "yellow": N, "green": N}}
     """
-    from datetime import datetime, timezone, timedelta
 
     catalysts = store.get_upcoming_catalysts(days=days)
 
@@ -477,7 +475,7 @@ def generate_weekly_preview(store: WatchlistStore) -> dict:
          "categories": {"earnings": [...], "macro": [...]},
          "highlights": [...], "total": N}
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
 
     now = datetime.now(timezone.utc)
     week_start = now.strftime("%Y-%m-%d")

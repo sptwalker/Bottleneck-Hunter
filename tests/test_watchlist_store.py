@@ -1,8 +1,8 @@
 """Tests for WatchlistStore — 核心 CRUD、行情快照、新闻摘要、管道状态"""
 
 import pytest
-from bottleneck_hunter.watchlist.store import WatchlistStore
 
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 # ─────────────────────────────────────────────────────────
 # Fixtures

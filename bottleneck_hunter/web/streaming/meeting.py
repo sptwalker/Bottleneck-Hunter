@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import AsyncGenerator
 
 from bottleneck_hunter.web import phase_cache
 
 from ._common import (
-    logger,
     _sse,
+    logger,
 )
 
 
@@ -23,9 +22,9 @@ async def stream_roundtable(
     store=None,
 ) -> AsyncGenerator[dict, None]:
     """Phase 4.5: AI 投研圆桌会议。"""
-    from bottleneck_hunter.chain.models import SupplierScorecard, CrossValidationReport
-    from bottleneck_hunter.chain.roundtable import RoundtableMeeting
     from bottleneck_hunter.chain.meeting_data import MeetingDataFetcher
+    from bottleneck_hunter.chain.models import CrossValidationReport, SupplierScorecard
+    from bottleneck_hunter.chain.roundtable import RoundtableMeeting
 
     p1 = phase_cache.get_phase(analysis_id, 1)
     p2 = phase_cache.get_phase(analysis_id, 2)

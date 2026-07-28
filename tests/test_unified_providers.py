@@ -1,7 +1,5 @@
 """统一 Provider 管理（内置迁移 + 单一真源列表 + 删除彻底清理）自检。"""
 
-import os
-from pathlib import Path
 
 import pytest
 
@@ -115,8 +113,8 @@ def test_deleted_provider_not_resurrected(stores, monkeypatch, tmp_path):
 
 def test_build_providers_list_per_user(stores):
     """_build_providers_list：定义来自 custom_providers（共享），但 configured 严格按当前用户。"""
-    from bottleneck_hunter.web import ai_config_api as aic
     from bottleneck_hunter.auth.crypto import encrypt, make_hint
+    from bottleneck_hunter.web import ai_config_api as aic
 
     auth, _wl = stores
     auth.save_custom_provider("myglm", "我的 GLM", "https://open.bigmodel.cn/api/paas/v4",
@@ -146,8 +144,8 @@ def test_build_providers_list_per_user(stores):
 
 def test_create_llm_strict_isolation(monkeypatch):
     """严格隔离：显式 api_key 仍最优先；无用户 KEY 时不再回退 env/缓存，而是抛错。"""
-    from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
     from bottleneck_hunter.auth import current_user as CU
+    from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
     # env 全局 KEY 存在也不应被使用
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-old")
     # 注册 provider 元数据（不再含 KEY）

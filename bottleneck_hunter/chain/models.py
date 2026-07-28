@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
@@ -86,7 +85,7 @@ class ChainGraph(BaseModel):
     created_at: str = Field(default="", description="创建时间 ISO 格式")
     model_used: str = Field(default="", description="拆解使用的 LLM 模型名称")
 
-    def get_node(self, name: str) -> Optional[IndustryNode]:
+    def get_node(self, name: str) -> IndustryNode | None:
         return next((n for n in self.nodes if n.name == name), None)
 
     def get_nodes_at_layer(self, layer: int) -> list[IndustryNode]:
@@ -131,15 +130,15 @@ class BottleneckReport(BaseModel):
     layer: int
     scores: list[BottleneckScore]
     overall_score: float = Field(ge=0, le=10, description="Weighted average")
-    rank: Optional[int] = None
+    rank: int | None = None
     key_insights: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
-    cr3_estimate: Optional[int] = Field(None, ge=0, le=100, description="CR3 市场集中度(%)，来源见 cr3_source")
-    hhi_estimate: Optional[int] = Field(None, ge=0, le=10000, description="HHI 赫芬达尔指数，来源见 cr3_source")
+    cr3_estimate: int | None = Field(None, ge=0, le=100, description="CR3 市场集中度(%)，来源见 cr3_source")
+    hhi_estimate: int | None = Field(None, ge=0, le=10000, description="HHI 赫芬达尔指数，来源见 cr3_source")
     hhi_adjustments: list[str] = Field(default_factory=list, description="HHI 一致性校验的调整记录")
     # 集中度数据来源标注：区分真实计算 vs LLM 估算，供前端徽章与可信度判断
     cr3_source: str = Field("llm_estimate", description="'akshare'=板块成分股真实计算 | 'llm_estimate'=LLM估算")
-    concentration_detail: Optional[dict] = Field(None, description="真实集中度明细(板块名/公司数/CR5/Top公司)，仅 akshare 来源时有")
+    concentration_detail: dict | None = Field(None, description="真实集中度明细(板块名/公司数/CR5/Top公司)，仅 akshare 来源时有")
     # 可投性统计（H-12）：让"高瓶颈但无可投标的"在报告层可见，而非只在评估日志里
     total_supplier_count: int = Field(0, description="该瓶颈环节检索到的候选供应商总数")
     investable_supplier_count: int = Field(0, description="其中通过可投性过滤（市值/毛利/成交额/上市时长）的数量")
@@ -154,15 +153,15 @@ class SupplierInfo(BaseModel):
     name_cn: str = Field(default="", description="公司中文名称")
     ticker: str
     market: MarketRegion
-    market_cap: Optional[float] = Field(None, description="Market cap in local currency (亿 for A-stock, $B for US)")
+    market_cap: float | None = Field(None, description="Market cap in local currency (亿 for A-stock, $B for US)")
     sector: str
     description: str
-    market_share: Optional[float] = Field(None, description="Market share percentage if known")
+    market_share: float | None = Field(None, description="Market share percentage if known")
     key_products: list[str] = Field(default_factory=list)
-    revenue_growth: Optional[float] = None
-    gross_margin: Optional[float] = None
-    pe_ratio: Optional[float] = None
-    institution_holding_pct: Optional[float] = None
+    revenue_growth: float | None = None
+    gross_margin: float | None = None
+    pe_ratio: float | None = None
+    institution_holding_pct: float | None = None
     source: str = Field(default="llm", description="候选来源: llm / akshare / chain")
 
 
@@ -170,22 +169,22 @@ class QuarterlyDataPoint(BaseModel):
     """单季度财务数据点。"""
 
     report_date: str = Field(default="", description="报告期 e.g. 2025-03-31")
-    revenue_yi: Optional[float] = Field(None, description="营业总收入(亿)")
-    net_profit_yi: Optional[float] = Field(None, description="归母净利润(亿)")
-    gross_margin_pct: Optional[float] = Field(None, description="销售毛利率(%)")
-    roe_pct: Optional[float] = Field(None, description="净资产收益率(%)")
-    revenue_yoy_pct: Optional[float] = Field(None, description="营收同比增速(%)")
-    net_profit_yoy_pct: Optional[float] = Field(None, description="净利润同比增速(%)")
+    revenue_yi: float | None = Field(None, description="营业总收入(亿)")
+    net_profit_yi: float | None = Field(None, description="归母净利润(亿)")
+    gross_margin_pct: float | None = Field(None, description="销售毛利率(%)")
+    roe_pct: float | None = Field(None, description="净资产收益率(%)")
+    revenue_yoy_pct: float | None = Field(None, description="营收同比增速(%)")
+    net_profit_yoy_pct: float | None = Field(None, description="净利润同比增速(%)")
 
 
 class FinancialTrend(BaseModel):
     """多季度财务趋势分析结果。"""
 
     quarters: list[QuarterlyDataPoint] = Field(default_factory=list, description="近N个季度数据，按时间降序")
-    revenue_acceleration: Optional[float] = Field(None, description="营收加速度: 最近2Q平均增速 - 前2Q平均增速")
-    gross_margin_trend: Optional[float] = Field(None, description="毛利率趋势: 最近2Q均值 - 前2Q均值（百分点）")
+    revenue_acceleration: float | None = Field(None, description="营收加速度: 最近2Q平均增速 - 前2Q平均增速")
+    gross_margin_trend: float | None = Field(None, description="毛利率趋势: 最近2Q均值 - 前2Q均值（百分点）")
     consecutive_growth_quarters: int = Field(default=0, description="连续营收正增长季度数")
-    profit_acceleration: Optional[float] = Field(None, description="净利润加速度: 最近2Q平均增速 - 前2Q平均增速")
+    profit_acceleration: float | None = Field(None, description="净利润加速度: 最近2Q平均增速 - 前2Q平均增速")
     trend_summary: str = Field(default="", description="趋势一句话摘要")
 
 
@@ -195,28 +194,29 @@ class FinancialSnapshot(BaseModel):
     data_source: str = Field(default="", description="akshare_ths / yfinance / tencent")
     report_date: str = Field(default="", description="最近一期财报日期 e.g. 2025-12-31")
 
-    revenue_yi: Optional[float] = Field(None, description="营业总收入(亿)")
-    revenue_yoy_pct: Optional[float] = Field(None, description="营收同比增速(%)")
-    net_profit_yi: Optional[float] = Field(None, description="归母净利润(亿)")
-    net_profit_yoy_pct: Optional[float] = Field(None, description="净利润同比增速(%)")
-    gross_margin_pct: Optional[float] = Field(None, description="销售毛利率(%)")
-    roe_pct: Optional[float] = Field(None, description="净资产收益率(%)")
-    debt_ratio_pct: Optional[float] = Field(None, description="资产负债率(%)")
-    cashflow_per_share: Optional[float] = Field(None, description="每股经营现金流")
+    revenue_yi: float | None = Field(None, description="营业总收入(亿)")
+    revenue_yoy_pct: float | None = Field(None, description="营收同比增速(%)")
+    net_profit_yi: float | None = Field(None, description="归母净利润(亿)")
+    net_profit_yoy_pct: float | None = Field(None, description="净利润同比增速(%)")
+    gross_margin_pct: float | None = Field(None, description="销售毛利率(%)")
+    roe_pct: float | None = Field(None, description="净资产收益率(%)")
+    debt_ratio_pct: float | None = Field(None, description="资产负债率(%)")
+    cashflow_per_share: float | None = Field(None, description="每股经营现金流")
 
-    analyst_report_count: Optional[int] = Field(None, description="近期研报覆盖数")
-    analyst_rating: Optional[str] = Field(None, description="最新机构评级")
-    consensus_eps: Optional[float] = Field(None, description="一致预期 EPS（当年）")
-    consensus_pe: Optional[float] = Field(None, description="一致预期 PE（当年）")
+    analyst_report_count: int | None = Field(None, description="近期研报覆盖数")
+    analyst_rating: str | None = Field(None, description="最新机构评级")
+    consensus_eps: float | None = Field(None, description="一致预期 EPS（当年）")
+    consensus_pe: float | None = Field(None, description="一致预期 PE（当年）")
 
-    trend: Optional[FinancialTrend] = Field(None, description="多季度财务趋势")
+    trend: FinancialTrend | None = Field(None, description="多季度财务趋势")
 
-    volume_ratio: Optional[float] = Field(None, description="成交量动量: 过滤后10日均量/60日均量")
-    price_change_3m_pct: Optional[float] = Field(None, description="近3月涨幅(%)")
-    price_change_1m_pct: Optional[float] = Field(None, description="近1月涨幅(%)")
-    institution_holding_pct: Optional[float] = Field(None, description="机构持仓占流通股比例(%)")
+    volume_ratio: float | None = Field(None, description="成交量动量: 过滤后10日均量/60日均量")
+    price_change_3m_pct: float | None = Field(None, description="近3月涨幅(%)")
+    price_change_1m_pct: float | None = Field(None, description="近1月涨幅(%)")
+    institution_holding_pct: float | None = Field(None, description="机构持仓占流通股比例(%)")
     consecutive_volume_days: int = Field(default=0, description="连续放量天数(日成交量>60日均量×1.3)")
-    days_since_ipo: Optional[int] = Field(None, description="上市天数")
+    days_since_ipo: int | None = Field(None, description="上市天数")
+    avg_daily_amount_wan: float | None = Field(None, description="日均成交额(万，本币；A股万元/美股万美元)")
 
 
 class AlphaScore(BaseModel):
@@ -252,14 +252,14 @@ class MoatScore(BaseModel):
 class SmartMoneySignal(BaseModel):
     """聪明钱信号：机构/内部人行为数据。"""
 
-    institution_holding_change: Optional[float] = Field(None, description="机构持仓变动(%)")
-    insider_net_shares: Optional[float] = Field(None, description="内部人净买入股数(万股)")
-    northbound_net_buy: Optional[float] = Field(None, description="北向资金净买入(万元)")
-    margin_balance_change: Optional[float] = Field(None, description="融资余额变化(%)")
-    fund_flow_net: Optional[float] = Field(None, description="主力资金净流入(万元)")
-    lhb_net_buy: Optional[float] = Field(None, description="龙虎榜机构席位净买入(万元)")
-    short_interest_pct: Optional[float] = Field(None, description="做空占流通股比例(%)")
-    institution_count: Optional[int] = Field(None, description="持仓机构数量")
+    institution_holding_change: float | None = Field(None, description="机构持仓变动(%)")
+    insider_net_shares: float | None = Field(None, description="内部人净买入股数(万股)")
+    northbound_net_buy: float | None = Field(None, description="北向资金净买入(万元)")
+    margin_balance_change: float | None = Field(None, description="融资余额变化(%)")
+    fund_flow_net: float | None = Field(None, description="主力资金净流入(万元)")
+    lhb_net_buy: float | None = Field(None, description="龙虎榜机构席位净买入(万元)")
+    short_interest_pct: float | None = Field(None, description="做空占流通股比例(%)")
+    institution_count: int | None = Field(None, description="持仓机构数量")
     smart_money_score: float = Field(default=5.0, ge=0, le=10, description="聪明钱综合评分 0-10")
     signal_direction: str = Field(default="neutral", description="信号方向: bullish/neutral/bearish")
     details: list[str] = Field(default_factory=list, description="信号明细说明")
@@ -292,8 +292,8 @@ class FinalScore(BaseModel):
     final_score: float = Field(ge=0, le=10, description="最终综合评分")
     quality_weight: float = Field(default=0.55, description="质量权重")
     alpha_weight: float = Field(default=0.45, description="预期差权重")
-    credibility: Optional[float] = Field(None, ge=0, le=10, description="事实核查可信度(FactCheck)")
-    quality_adjusted: Optional[float] = Field(None, ge=0, le=10, description="credibility调整后的quality")
+    credibility: float | None = Field(None, ge=0, le=10, description="事实核查可信度(FactCheck)")
+    quality_adjusted: float | None = Field(None, ge=0, le=10, description="credibility调整后的quality")
 
 
 class SupplierScorecard(BaseModel):
@@ -310,13 +310,13 @@ class SupplierScorecard(BaseModel):
     overall_score: float = Field(ge=0, le=10)
     strengths: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(default_factory=list)
-    financial_snapshot: Optional[FinancialSnapshot] = Field(None, description="真实财务数据快照")
-    alpha: Optional[AlphaScore] = Field(None, description="预期差评分")
-    moat: Optional[MoatScore] = Field(None, description="竞争护城河评分")
-    smart_money: Optional[SmartMoneySignal] = Field(None, description="聪明钱信号")
-    catalyst: Optional[CatalystTimeline] = Field(None, description="催化剂时间线")
-    final: Optional[FinalScore] = Field(None, description="统一最终评分")
-    fact_check_recommendation: Optional[str] = Field(None, description="事实核查建议: PASS/REVIEW/REJECT")
+    financial_snapshot: FinancialSnapshot | None = Field(None, description="真实财务数据快照")
+    alpha: AlphaScore | None = Field(None, description="预期差评分")
+    moat: MoatScore | None = Field(None, description="竞争护城河评分")
+    smart_money: SmartMoneySignal | None = Field(None, description="聪明钱信号")
+    catalyst: CatalystTimeline | None = Field(None, description="催化剂时间线")
+    final: FinalScore | None = Field(None, description="统一最终评分")
+    fact_check_recommendation: str | None = Field(None, description="事实核查建议: PASS/REVIEW/REJECT")
 
     @model_serializer(mode="wrap")
     def _serialize_with_dimension_scores(self, handler):

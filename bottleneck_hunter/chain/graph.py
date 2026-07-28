@@ -8,7 +8,6 @@ Orchestrates the full pipeline:
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph import END, StateGraph
@@ -17,13 +16,8 @@ from bottleneck_hunter.chain.bottleneck import BottleneckAnalyzer
 from bottleneck_hunter.chain.cross_validation import CrossValidator
 from bottleneck_hunter.chain.decomposer import ChainDecomposer
 from bottleneck_hunter.chain.models import (
-    BottleneckReport,
-    ChainGraph,
-    CrossValidationReport,
     MarketRegion,
     ScreeningResult,
-    SupplierInfo,
-    SupplierScorecard,
 )
 from bottleneck_hunter.chain.supplier_eval import SupplierEvaluator
 from bottleneck_hunter.chain.supplier_search import SupplierSearcher

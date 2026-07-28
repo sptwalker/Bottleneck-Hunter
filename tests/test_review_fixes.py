@@ -2,7 +2,7 @@
 import pytest
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist.store_base import validate_ticker, normalize_ticker
+from bottleneck_hunter.watchlist.store_base import normalize_ticker, validate_ticker
 
 
 @pytest.fixture

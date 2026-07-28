@@ -9,14 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator
 
-from bottleneck_hunter.llm_clients.factory import get_llm_for_position
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.chain.json_utils import extract_json_object
+from bottleneck_hunter.llm_clients.factory import get_llm_for_position
+from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 

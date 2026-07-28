@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field
 
 from bottleneck_hunter.auth.dependencies import get_current_user, require_admin
 from bottleneck_hunter.llm_clients.factory import (
-    PROVIDER_KEY_MAP,
     _FALLBACK_CHAIN,
+    PROVIDER_KEY_MAP,
     _user_has_llm_key,
     create_llm,
     get_custom_provider,

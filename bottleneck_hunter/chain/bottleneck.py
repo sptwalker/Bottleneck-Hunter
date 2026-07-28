@@ -14,25 +14,28 @@ from pathlib import Path
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.chain.models import (
     BottleneckDimension,
     BottleneckReport,
     BottleneckScore,
     ChainGraph,
 )
-from bottleneck_hunter.chain.json_utils import extract_json_object
 
 logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 # Default weights for overall score calculation
+# 去重：scarcity 与 irreplaceability 高度相关(ρ≈0.8)，二者合计从 0.50 降到 0.40，
+# 释放的 0.10 分给相对正交的 supply_demand_gap(+0.05) 与 tech_barrier(+0.05)，
+# 避免"稀缺+不可替代"这对近似重复因子主导综合分。分行业权重见 INDUSTRY_WEIGHTS。
 DEFAULT_WEIGHTS: dict[BottleneckDimension, float] = {
-    BottleneckDimension.SCARCITY: 0.25,
-    BottleneckDimension.IRREPLACEABILITY: 0.25,
-    BottleneckDimension.SUPPLY_DEMAND_GAP: 0.20,
+    BottleneckDimension.SCARCITY: 0.20,
+    BottleneckDimension.IRREPLACEABILITY: 0.20,
+    BottleneckDimension.SUPPLY_DEMAND_GAP: 0.25,
     BottleneckDimension.PRICING_POWER: 0.15,
-    BottleneckDimension.TECH_BARRIER: 0.15,
+    BottleneckDimension.TECH_BARRIER: 0.20,
 }
 
 # 分行业瓶颈评分权重 —— 不同行业的瓶颈特征侧重不同

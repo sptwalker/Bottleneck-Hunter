@@ -65,6 +65,10 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=false
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      # ERROR 告警投递地址（webhook：飞书/钉钉/企业微信机器人/Slack/自建均可）。
+      # 未在 .env 设置时落到占位地址：告警仍触发并在 Grafana 内可见，仅投递失败(无害)，
+      # 设置后即生效。非安全项，故给软默认(不像 admin 密码 fail-closed)。见 alerting/error-rate.yaml。
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-https://example.invalid/set-ALERT_WEBHOOK_URL-in-env}
     depends_on:
       - loki
 

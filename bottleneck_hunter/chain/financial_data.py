@@ -7,7 +7,6 @@ import logging
 import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 try:
     import akshare as ak
@@ -76,7 +75,7 @@ def _compute_trend(quarters: list[QuarterlyDataPoint]) -> FinancialTrend:
     return trend
 
 
-def _safe_float(val, scale: float = 1.0) -> Optional[float]:
+def _safe_float(val, scale: float = 1.0) -> float | None:
     if val is None:
         return None
     try:
@@ -86,7 +85,7 @@ def _safe_float(val, scale: float = 1.0) -> Optional[float]:
         return None
 
 
-def _safe_int(val) -> Optional[int]:
+def _safe_int(val) -> int | None:
     if val is None:
         return None
     try:
@@ -97,7 +96,7 @@ def _safe_int(val) -> Optional[int]:
 
 def _compute_volume_metrics(
     volumes: list[float], closes: list[float],
-) -> tuple[Optional[float], Optional[float], Optional[float], int]:
+) -> tuple[float | None, float | None, float | None, int]:
     """从日线数据计算成交量动量（含异常值过滤）和涨幅。
 
     Returns:
@@ -136,6 +135,17 @@ def _compute_volume_metrics(
         chg_1m = round((closes[-1] / closes[-20] - 1) * 100, 1)
 
     return volume_ratio, chg_3m, chg_1m, consecutive
+
+
+def _avg_daily_amount_wan(amounts: list[float]) -> float | None:
+    """日均成交额(万本币)：取最近≤60日成交额均值 / 1e4。有效天数<20 返回 None(不误杀)。
+
+    A股传入 df 的「成交额」列(元)，美股传入 [Volume×Close] (美元)。
+    """
+    vals = [a for a in amounts[-60:] if a and a > 0]
+    if len(vals) < 20:
+        return None
+    return round(sum(vals) / len(vals) / 1e4, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +341,8 @@ def _fetch_astock_financial(code_6: str) -> FinancialSnapshot:
             snap.price_change_3m_pct = c3m
             snap.price_change_1m_pct = c1m
             snap.consecutive_volume_days = consec
+            if "成交额" in df_hist.columns:
+                snap.avg_daily_amount_wan = _avg_daily_amount_wan(df_hist["成交额"].tolist())
     except Exception as e:
         logger.debug(f"AKShare 日线数据获取失败 ({code_6}): {e}")
 
@@ -403,7 +415,6 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
         # 多季度趋势数据
         try:
             qf = stock.quarterly_financials
-            qi = stock.quarterly_income_stmt
             if qf is not None and not qf.empty:
                 quarters: list[QuarterlyDataPoint] = []
                 for col_date in list(qf.columns)[:8]:
@@ -444,6 +455,9 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
                 snap.price_change_3m_pct = c3m
                 snap.price_change_1m_pct = c1m
                 snap.consecutive_volume_days = consec
+                snap.avg_daily_amount_wan = _avg_daily_amount_wan(
+                    [v * c for v, c in zip(vols, cls_prices)]
+                )
         except Exception as e:
             logger.debug(f"yfinance 日线数据获取失败 ({ticker}): {e}")
 
@@ -462,7 +476,7 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
 # 对外入口
 # ---------------------------------------------------------------------------
 
-def _extract_astock_code(ticker: str) -> Optional[str]:
+def _extract_astock_code(ticker: str) -> str | None:
     """从 ticker (如 '600519.SH' 或 '688012') 中提取 6 位纯数字代码。"""
     # 全系统唯一 A股代码提取器（见 store_base）；容纳 600519 / 600519.SH/.SS / SH600519 等全部形态
     from bottleneck_hunter.watchlist.store_base import extract_astock_code
@@ -490,7 +504,7 @@ def _overlay_hub_financials(base: FinancialSnapshot, rec: dict) -> None:
         base.data_source = f"{base.data_source}+{src}" if base.data_source else src
 
 
-async def fetch_financial_snapshot(supplier: SupplierInfo, user_id: str = "") -> Optional[FinancialSnapshot]:
+async def fetch_financial_snapshot(supplier: SupplierInfo, user_id: str = "") -> FinancialSnapshot | None:
     """为单个供应商拉取财务快照。失败返回 None。
 
     免费直连做基线（含量价/IPO/A股一致预期），再用 DataHub 多源（FMP/Tiingo/AV/Tushare）

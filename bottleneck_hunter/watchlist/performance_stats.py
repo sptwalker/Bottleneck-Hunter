@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 

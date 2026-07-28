@@ -1,5 +1,4 @@
 """数据源调度选择器自检 — 质量梯队 / 档内均衡 / 额度阀。不打网、不碰库。"""
-import time
 
 import bottleneck_hunter.data_provider.scheduler as sch
 

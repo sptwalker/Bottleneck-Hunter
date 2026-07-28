@@ -3,7 +3,7 @@ import os
 
 from fastapi import Response
 
-from bottleneck_hunter.auth.jwt_utils import set_auth_cookie, get_cookie_name
+from bottleneck_hunter.auth.jwt_utils import get_cookie_name, set_auth_cookie
 from bottleneck_hunter.web.auth_api import _cookie_secure
 
 

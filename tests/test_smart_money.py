@@ -1,18 +1,19 @@
 """Tests for smart_money — 聪明钱追踪。"""
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
-import pandas as pd
+from unittest.mock import MagicMock, patch
 
+import pandas as pd
+import pytest
+
+from bottleneck_hunter.chain.models import MarketRegion, SmartMoneySignal, SupplierInfo
 from bottleneck_hunter.chain.smart_money import (
+    _extract_astock_code,
     _safe_float,
     _track_astock,
     _track_us_stock,
-    _extract_astock_code,
-    track_smart_money,
     track_batch,
+    track_smart_money,
 )
-from bottleneck_hunter.chain.models import MarketRegion, SmartMoneySignal, SupplierInfo
 
 
 def _make_supplier(name="TestCo", ticker="600519.SH", market=MarketRegion.A_STOCK):

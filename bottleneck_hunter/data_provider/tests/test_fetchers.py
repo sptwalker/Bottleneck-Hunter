@@ -1,5 +1,4 @@
 """快速验证三个新数据源的可用性"""
-import sys
 
 # === 1. efinance ===
 print("=" * 50)

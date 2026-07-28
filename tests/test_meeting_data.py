@@ -1,8 +1,9 @@
 """Tests for MeetingDataFetcher — 会前数据预取。"""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 import pandas as pd
+import pytest
 
 from bottleneck_hunter.chain.meeting_data import MeetingDataFetcher, _safe_float
 

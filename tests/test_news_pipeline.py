@@ -20,7 +20,6 @@ from bottleneck_hunter.watchlist.news_pipeline import (
 )
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

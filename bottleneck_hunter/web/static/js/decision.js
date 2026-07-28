@@ -619,7 +619,7 @@ async function handleBlockedAction(e) {
     await loadOverview();
     await loadBlocked();
   } catch (err) {
-    alert('恢复失败: ' + err.message);
+    toast('恢复失败: ' + err.message);
     btn.disabled = false;
     btn.textContent = '恢复到待确认';
   }
@@ -689,7 +689,7 @@ async function handleRestingAction(e) {
     await dcFetch(`/executions/${encodeURIComponent(planId)}/cancel-resting`, { method: 'POST' });
     await loadResting();
   } catch (err) {
-    alert('取消失败: ' + err.message);
+    toast('取消失败: ' + err.message);
     btn.disabled = false;
     btn.textContent = '取消挂单';
   }
@@ -706,10 +706,10 @@ async function handlePendingAction(e) {
     clearBtn.textContent = '清空中...';
     try {
       const res = await dcFetch(`/executions/clear-all?market=${encodeURIComponent(dcState.market)}`, { method: 'POST' });
-      alert(`已清空 ${res.cleared} 条操作`);
+      toast(`已清空 ${res.cleared} 条操作`);
       await loadOverview();
     } catch (err) {
-      alert('清空失败: ' + err.message);
+      toast('清空失败: ' + err.message);
       clearBtn.disabled = false;
       clearBtn.textContent = '清空所有操作';
     }
@@ -728,13 +728,13 @@ async function handlePendingAction(e) {
     if (action === 'confirm') {
       const res = await dcFetch(`/executions/${encodeURIComponent(planId)}/confirm`, { method: 'POST' });
       if (res.status === 'resting') {
-        alert(`未达限价，已转为挂单等待成交：挂单价 ${fmtNum(res.limit_price, 2)}，当前市价 ${fmtNum(res.market_price, 2)}。开市每小时轮询撮合，最长 2 周。`);
+        toast(`未达限价，已转为挂单等待成交：挂单价 ${fmtNum(res.limit_price, 2)}，当前市价 ${fmtNum(res.market_price, 2)}。开市每小时轮询撮合，最长 2 周。`);
       } else {
         const trade = res.trade || {};
         const msg = trade.error
           ? `执行失败: ${trade.error}`
           : `${trade.side === 'buy' ? '买入' : '卖出'} ${trade.ticker} ${trade.shares}股 @ ${fmtNum(trade.price, 2)}`;
-        alert(msg);
+        toast(msg);
       }
     } else {
       const reason = prompt('拒绝原因（可选）:') || '';
@@ -746,7 +746,7 @@ async function handlePendingAction(e) {
     await loadOverview();
     if (window.appState) window.appState.tradingDirty = true;
   } catch (e) {
-    alert('操作失败: ' + e.message);
+    toast('操作失败: ' + e.message);
   } finally {
     // 无论成功/业务错误(200 带 error)/网络异常，都恢复按钮，避免卡在"执行中"不可再点。
     // 若成功，loadOverview 会重渲染换掉整卡；若失败(已回滚 pending)，按钮恢复可再点/可取消。
@@ -2063,7 +2063,7 @@ async function sendConsult() {
 /* ── 导出报告（HTML / PDF）───────────────────────── */
 function exportDecisionReport() {
   const data = dcState.overview;
-  if (!data) { alert('暂无决策数据，请先加载决策中心'); return; }
+  if (!data) { toast('暂无决策数据，请先加载决策中心'); return; }
   const mkt = dcState.market === 'a_stock' ? 'A股' : dcState.market === 'hk_stock' ? '港股' : '美股';
   const date = new Date().toISOString().slice(0, 10);
   openReport('决策中心总结报告', `决策总结_${mkt}_${date}.html`, buildDecisionReport(data, dcState.market));
@@ -2071,7 +2071,7 @@ function exportDecisionReport() {
 
 function exportMeetingReport() {
   const m = dcState.currentMeeting;
-  if (!m) { alert('暂无会议数据'); return; }
+  if (!m) { toast('暂无会议数据'); return; }
   const type = m.meeting_type === 'committee' ? '投委会纪要' : '圆桌会议纪要';
   const tk = (Array.isArray(m.tickers_discussed) ? m.tickers_discussed : []).join('-');
   const fname = `${type}${tk ? '_' + tk : ''}_${(m.created_at || '').slice(0, 10)}.html`;

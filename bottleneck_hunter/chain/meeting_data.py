@@ -9,14 +9,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _SEMAPHORE = asyncio.Semaphore(6)
 
 
-def _safe_float(val: Any, scale: float = 1.0) -> Optional[float]:
+def _safe_float(val: Any, scale: float = 1.0) -> float | None:
     if val is None:
         return None
     try:
@@ -214,7 +214,7 @@ class MeetingDataFetcher:
 
             news = data.get("news", [])
             if news:
-                lines.append(f"- 近期新闻:")
+                lines.append("- 近期新闻:")
                 for title in news[:3]:
                     lines.append(f"  - {title}")
 

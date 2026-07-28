@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,8 +15,7 @@ from bottleneck_hunter.chain.models import (
     MarketRegion,
     SupplierInfo,
 )
-from bottleneck_hunter.chain.supplier_search import SupplierSearcher, _try_akshare_search
-
+from bottleneck_hunter.chain.supplier_search import SupplierSearcher
 
 # ---------------------------------------------------------------------------
 # Fixtures

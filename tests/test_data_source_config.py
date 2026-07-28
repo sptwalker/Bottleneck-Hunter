@@ -102,8 +102,8 @@ def test_resolve_key_db_then_env(tmp_path, monkeypatch):
 def test_resolve_key_no_cross_user_borrow(tmp_path, monkeypatch):
     """严格隔离：没配 key 的用户不得借用别人的 key；无 user 上下文也不借用（后台亦严格）。"""
     import bottleneck_hunter.auth.store as store_mod
-    from bottleneck_hunter.auth.crypto import encrypt
     from bottleneck_hunter.auth import current_user as CU
+    from bottleneck_hunter.auth.crypto import encrypt
     s = _store(tmp_path)
     s.save_data_source_key("owner", "finnhub", "", encrypt("owner-key"), make_hint("owner-key"))
     monkeypatch.setattr(store_mod, "AuthStore", lambda *a, **k: s)

@@ -15,17 +15,17 @@ import asyncio
 import json
 import logging
 from collections import Counter
+from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncGenerator
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
-from bottleneck_hunter.watchlist.budget import BudgetTracker
-from bottleneck_hunter.watchlist.regime_mapper import get_allocation_bounds, format_bounds_for_prompt
-from bottleneck_hunter.watchlist.persona import format_persona_for_prompt, get_user_single_cap
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position, get_models_for_role
+from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.persona import format_persona_for_prompt, get_user_single_cap
+from bottleneck_hunter.watchlist.regime_mapper import format_bounds_for_prompt, get_allocation_bounds
+from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ def _sse(event: str, **data) -> dict:
 # 决策层 LLM 调用的输出 token 上限：L2/L3 要产出完整 JSON(多板块配置/多标的战术)，
 # provider 默认上限偏小 → 输出被截断 → JSON 解析失败(曾致 L2/L3 整层无产出)。可用环境覆盖。
 import os as _os
+
 _DECISION_MAX_TOKENS = int(_os.getenv("BH_DECISION_MAX_TOKENS", "8192"))
 
 
@@ -1297,8 +1298,12 @@ async def run_execution_plans(
         # 先算好再注入 prompt，让 LLM 按【真实生效】的约束生成，而非 prompt 里写死的 20%/40%
         # （否则 LLM 以为单股上限 20%，实际熊市校验按 5% 拦，生成的计划几乎必被拦→用户无操作可执行）。
         from bottleneck_hunter.watchlist.constraint_validator import (
-            validate_execution_plan, max_compliant_shares, get_constraints_for_appetite,
-            validate_portfolio_beta, validate_against_regime)
+            get_constraints_for_appetite,
+            max_compliant_shares,
+            validate_against_regime,
+            validate_execution_plan,
+            validate_portfolio_beta,
+        )
         macro = store.get_latest_macro_strategy()
         macro_rj = (macro or {}).get("result_json", {}) if macro else {}
         risk_appetite = (macro or {}).get("risk_appetite", "")

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bottleneck_hunter.watchlist.trade_executor import execute_trade, _auto_review_sell
 from bottleneck_hunter.watchlist.constraint_validator import ValidationResult
+from bottleneck_hunter.watchlist.trade_executor import _auto_review_sell, execute_trade
 
 
 def _pass_validation(*args, **kwargs):

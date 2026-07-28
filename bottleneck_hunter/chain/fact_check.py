@@ -12,10 +12,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bottleneck_hunter.chain.models import (
-        SupplierScorecard,
-        FinancialSnapshot,
-        SmartMoneySignal,
         BottleneckReport,
+        SupplierScorecard,
     )
 
 logger = logging.getLogger(__name__)
@@ -399,11 +397,11 @@ def _judge_direction(field: str, value: float, scorecard: SupplierScorecard) -> 
 def demo():
     """自测:构造假数据验证逻辑。"""
     from bottleneck_hunter.chain.models import (
-        SupplierInfo,
-        SupplierScorecard,
         FinancialSnapshot,
         FinancialTrend,
         MarketRegion,
+        SupplierInfo,
+        SupplierScorecard,
     )
 
     # Case 1: 硬矛盾 — 声称"财务健康"但毛利趋势-5pp
@@ -520,8 +518,8 @@ def demo():
 
 
 def apply_fact_check_to_scorecards(
-    scorecards: list["SupplierScorecard"],
-    bottleneck_reports: list["BottleneckReport"] | None = None,
+    scorecards: list[SupplierScorecard],
+    bottleneck_reports: list[BottleneckReport] | None = None,
 ) -> list[FactCheckReport]:
     """对一批 scorecard 批量运行 FactCheck,并就地调整其 overall_score。
 

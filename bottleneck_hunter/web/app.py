@@ -10,8 +10,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
@@ -35,42 +35,65 @@ logging.basicConfig(
 from bottleneck_hunter.auth.jwt_utils import get_cookie_name, verify_token
 from bottleneck_hunter.auth.migration import run_migration
 from bottleneck_hunter.auth.store import AuthStore
+from bottleneck_hunter.watchlist.retry import close_http_client
+from bottleneck_hunter.watchlist.scheduler import init_scheduler, shutdown_scheduler
+from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.web.admin_api import router as admin_router
+from bottleneck_hunter.web.admin_api import set_stores as admin_set_stores
+from bottleneck_hunter.web.ai_config_api import (
+    router as ai_config_router,
+)
+from bottleneck_hunter.web.ai_config_api import (
+    set_auth_store as aic_set_auth_store,
+)
+from bottleneck_hunter.web.ai_config_api import (
+    set_store as aic_set_store,
+)
 from bottleneck_hunter.web.api import router
-from bottleneck_hunter.web.auth_api import router as auth_router, set_auth_store, set_wl_store as auth_set_wl_store
-from bottleneck_hunter.web.watchlist_api import router as watchlist_router, set_store as wl_set_store, set_auth_store as wl_set_auth_store
-from bottleneck_hunter.web.decision_api import router as decision_router, set_store as dc_set_store
-from bottleneck_hunter.web.trading_api import router as trading_router, set_store as st_set_store
-from bottleneck_hunter.web.user_api import router as user_router, set_auth_store as user_set_auth_store
-from bottleneck_hunter.web.admin_api import router as admin_router, set_stores as admin_set_stores
-from bottleneck_hunter.web.syslog_api import router as syslog_router, init_broadcaster, shutdown_broadcaster
+from bottleneck_hunter.web.auth_api import router as auth_router
+from bottleneck_hunter.web.auth_api import set_auth_store
+from bottleneck_hunter.web.auth_api import set_wl_store as auth_set_wl_store
 from bottleneck_hunter.web.custom_provider_api import (
     router as custom_provider_router,
-    set_auth_store as cp_set_auth_store,
 )
-from bottleneck_hunter.web.data_source_api import (
-    router as data_source_router,
-    set_auth_store as ds_set_auth_store,
+from bottleneck_hunter.web.custom_provider_api import (
+    set_auth_store as cp_set_auth_store,
 )
 from bottleneck_hunter.web.data_report_api import (
     router as data_report_router,
+)
+from bottleneck_hunter.web.data_report_api import (
     set_stores as data_report_set_stores,
 )
-from bottleneck_hunter.web.ai_config_api import (
-    router as ai_config_router,
-    set_store as aic_set_store,
-    set_auth_store as aic_set_auth_store,
+from bottleneck_hunter.web.data_source_api import (
+    router as data_source_router,
 )
+from bottleneck_hunter.web.data_source_api import (
+    set_auth_store as ds_set_auth_store,
+)
+from bottleneck_hunter.web.decision_api import router as decision_router
+from bottleneck_hunter.web.decision_api import set_store as dc_set_store
 from bottleneck_hunter.web.reverse_api import (
     router as reverse_router,
+)
+from bottleneck_hunter.web.reverse_api import (
     set_store as reverse_set_store,
 )
 from bottleneck_hunter.web.settings_api import (
     router as settings_router,
+)
+from bottleneck_hunter.web.settings_api import (
     set_stores as settings_set_stores,
 )
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist.scheduler import init_scheduler, shutdown_scheduler
-from bottleneck_hunter.watchlist.retry import close_http_client
+from bottleneck_hunter.web.syslog_api import init_broadcaster, shutdown_broadcaster
+from bottleneck_hunter.web.syslog_api import router as syslog_router
+from bottleneck_hunter.web.trading_api import router as trading_router
+from bottleneck_hunter.web.trading_api import set_store as st_set_store
+from bottleneck_hunter.web.user_api import router as user_router
+from bottleneck_hunter.web.user_api import set_auth_store as user_set_auth_store
+from bottleneck_hunter.web.watchlist_api import router as watchlist_router
+from bottleneck_hunter.web.watchlist_api import set_auth_store as wl_set_auth_store
+from bottleneck_hunter.web.watchlist_api import set_store as wl_set_store
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -161,6 +184,7 @@ async def lifespan(app: FastAPI):
     # 企业档案一次性回填（后台线程，不阻塞启动；幂等，只跑一次）
     try:
         import threading
+
         from bottleneck_hunter.dataflows.store import AnalysisStore
         threading.Thread(target=lambda: AnalysisStore().backfill_company_archive(),
                          daemon=True, name="archive-backfill").start()
@@ -179,7 +203,9 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).info("Watchlist scheduler started")
         # 启动补跑：重启后立即刷新数据源健康巡检（治「停机跨过巡检点 → 当次漏检」）
         try:
-            from datetime import datetime, timedelta, timezone as _tz
+            from datetime import datetime, timedelta
+            from datetime import timezone as _tz
+
             from bottleneck_hunter.watchlist.scheduler import job_datasource_report
             scheduler.add_job(job_datasource_report, "date",
                               run_date=datetime.now(_tz.utc) + timedelta(seconds=30),
@@ -243,7 +269,7 @@ class AuthMiddleware:
                 scope["state"] = {}
             scope["state"]["user"] = user_payload
             # 设置请求级「当前用户」上下文：供下游 LLM/数据源 KEY 严格按用户解析
-            from bottleneck_hunter.auth.current_user import set_current_user, reset_current_user
+            from bottleneck_hunter.auth.current_user import reset_current_user, set_current_user
             _uctx = set_current_user(user_payload.get("sub", ""))
             try:
                 await self.app(scope, receive, send)
@@ -303,6 +329,7 @@ def create_app() -> FastAPI:
 
     # 严格隔离：用户未配置 KEY → 统一 400 友好提示（而非 500）
     from fastapi.responses import JSONResponse
+
     from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
 
     @app.exception_handler(MissingUserKeyError)
@@ -337,7 +364,8 @@ def create_app() -> FastAPI:
     app.include_router(oplog_router, prefix="/api/oplog")
     from bottleneck_hunter.web.translate_api import router as translate_router
     app.include_router(translate_router, prefix="/api/translate")
-    from bottleneck_hunter.web.vip_api import router as vip_router, set_store as vip_set_store
+    from bottleneck_hunter.web.vip_api import router as vip_router
+    from bottleneck_hunter.web.vip_api import set_store as vip_set_store
     vip_set_store(_wl_store)
     app.include_router(vip_router, prefix="/api/vip")
 
@@ -362,6 +390,7 @@ def create_app() -> FastAPI:
         旧 healthcheck 打 /（静态文件）→ 调度器死了/DB 锁死仍返回绿灯，掩盖故障。
         """
         from fastapi.responses import JSONResponse
+
         from bottleneck_hunter.watchlist.scheduler import is_scheduler_running
         checks = {"scheduler": is_scheduler_running()}
         try:

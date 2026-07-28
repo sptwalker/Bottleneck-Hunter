@@ -17,8 +17,6 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
-
 
 # ── Black-Scholes 纯函数（D4 规格，先供 MLI / 后续标准期权）──────────────
 
@@ -120,12 +118,12 @@ def _read_pdf_text(pdf_source, pages: int = 6, pdf_password: str = "") -> str:
     return "\n".join(page.get_text() for page in doc[:pages])
 
 
-def _f(pat: str, text: str, group=1, flags=re.I) -> Optional[str]:
+def _f(pat: str, text: str, group=1, flags=re.I) -> str | None:
     m = re.search(pat, text, flags)
     return m.group(group).strip() if m else None
 
 
-def _ff(pat: str, text: str, group=1) -> Optional[float]:
+def _ff(pat: str, text: str, group=1) -> float | None:
     s = _f(pat, text, group)
     if s is None:
         return None
@@ -315,9 +313,7 @@ def payoff_mli_booster(term: DerivativeTerm, final_price: float, *,
     cap = t.get("max_upside_pct", 0.5)
     upside = max(final_price / strike - 1.0, 0.0)
     upside = min(upside * pf, cap)
-    if not knock_in_happened:
-        redemption = investment_amount * (1.0 + upside)
-    elif final_price >= strike:
+    if not knock_in_happened or final_price >= strike:
         redemption = investment_amount * (1.0 + upside)
     else:
         # down-and-in put：跌破 strike 后按标的跌幅承损
@@ -342,7 +338,8 @@ def classify_pdf(pdf_source, pdf_password: str = "") -> str:
 
 def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: str, source_file_hash: str,
                          broker: str, rationale_ref: str = "", account_ref: str = "") -> str:
-    import json, uuid
+    import json
+    import uuid
     account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
     # 幂等：重复上传同一文件保留原 id/created_at（不做 OR REPLACE 重建）
     conn = wl_store._connect()

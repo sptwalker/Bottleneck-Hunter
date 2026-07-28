@@ -181,7 +181,7 @@ def _llm_statement_classification(pages: list[str], filename: str, user_id: str)
         "你是 VIP 对账单导入分类器。只做封闭枚举判断，不做自由发挥。\n"
         "必须只返回一个 JSON 对象，字段固定：\n"
         '{"doc_type":"monthly_statement|trade_confirm|position_report|unsupported",'
-        '"broker":"citi|nomura|unknown","confidence":0-1,'
+        '"broker":"citi|nomura|cmbi|unknown","confidence":0-1,'
         '"reason_code":"content_match|insufficient_content|ambiguous|unsupported_format"}\n'
         "优先依据正文内容；文件名只作弱参考。若信息不足，宁可给 unsupported/unknown，也不要猜。"
     )
@@ -212,17 +212,31 @@ def _llm_statement_classification(pages: list[str], filename: str, user_id: str)
     }
 
 
+def _merge_classification(heuristic: dict, llm_result: dict | None) -> dict:
+    """合并启发式与 LLM 分类。LLM 负责细分 doc_type，broker 身份以确定性品牌锚为准。
+
+    - LLM 缺失/无结果 → 用启发式。
+    - 启发式判为 cmbi(招银)→ 直接用启发式：LLM 分类 prompt 的 broker 枚举**不含 cmbi**，对招银单必然
+      猜成 citi/nomura，进而在 ingest_pdf 强制走错解析器、抽空后报 unsupported_non_statement:citi。cmbi 由
+      auz441/champion tower/cmbi 品牌 + 文件名 M…-Daily|Monthly 判定，确定性、绝不误报，故不容 LLM 猜测覆盖。
+    - LLM 报 unknown 而启发式有值 → 回填启发式 broker（保留 LLM 的 doc_type 细分）。
+    """
+    if not llm_result:
+        return heuristic
+    if heuristic["broker"] == "cmbi":
+        return heuristic
+    if llm_result["broker"] == "unknown" and heuristic["broker"] != "unknown":
+        llm_result["broker"] = heuristic["broker"]
+    return llm_result
+
+
 def _classify_statement_content(pages: list[str], filename: str, user_id: str, broker_hint: str = "") -> dict:
     heuristic = _heuristic_statement_classification(pages, filename=filename, broker_hint=broker_hint)
     try:
         llm_result = _llm_statement_classification(pages, filename, user_id)
     except Exception:  # noqa: BLE001 - 无 key / 超时 / 非法 JSON 均静默退回规则
         return heuristic
-    if not llm_result:
-        return heuristic
-    if llm_result["broker"] == "unknown" and heuristic["broker"] != "unknown":
-        llm_result["broker"] = heuristic["broker"]
-    return llm_result
+    return _merge_classification(heuristic, llm_result)
 
 
 def _doc_type_from_statement(stmt: BrokerStatement, classified_doc_type: str = "") -> str:
@@ -726,6 +740,23 @@ def _reconcile(holdings: list[EquityHolding],
                        status="ok" if ok else "mismatch")
 
 
+# 覆盖率守卫：状态 no_statement_total（未做总额对账）却仍带权益子账锚 statement_equities_total_usd
+# 时，真实抽出的持仓合计若显著低于该锚 = 有持仓被静默漏解析、NAV 将被低估却当权威物化。
+# 例：野村结单本带 Equities 合计但刻意"先不做对账"（见 _parse_nomura_statement），漏一只即无从自检。
+_COVERAGE_MIN = 0.95  # 持仓合计/权益锚 低于此 → 疑似漏解析转 needs_review。ponytail: 校准旋钮——
+                      # 权益锚与持仓同口径(均不含现金)，拿到真实野村样本核对后可收紧至 _RECON_TOL
+
+
+def _coverage_shortfall(recon: ReconResult) -> float | None:
+    """no_statement_total 且有权益锚时返回持仓覆盖率(holdings/anchor)；无锚/无持仓/已对账→None。"""
+    if recon.status != "no_statement_total" or recon.holdings_count <= 0:
+        return None
+    anchor = recon.statement_equities_total_usd
+    if not anchor or anchor <= 0:
+        return None
+    return recon.holdings_total_usd / anchor
+
+
 # ── Broker 检测与 parser registry（C3）────────────────────────────────────
 
 def detect_broker(pages: list[str], filename: str = "", hint: str = "") -> str:
@@ -779,6 +810,19 @@ def _detect_citi_doc_type(pages: list[str], filename: str = "") -> str:
     return "monthly_statement"
 
 
+def _citi_loan_outstanding_usd(pages: list[str]) -> float:
+    """花旗综合月结单已用融资：`Total Margin Loans Outstanding` 下一数值行（美元口径）。
+    无融资/非月结单 → 0。ponytail: 只认该权威合计行，逐笔 Loan Account 汇总留待有需要再加。"""
+    lines = [x.strip() for pg in pages for x in pg.splitlines()]
+    for i, line in enumerate(lines):
+        if line == "Total Margin Loans Outstanding":
+            for j in range(i + 1, min(i + 4, len(lines))):
+                v = _num(lines[j])
+                if v is not None:
+                    return round(abs(v), 2)
+    return 0.0
+
+
 def _parse_citi_statement(pages: list[str], filename: str, content_hash: str,
                           doc_type_hint: str = "") -> BrokerStatement:
     doc_type = doc_type_hint or _detect_citi_doc_type(pages, filename)
@@ -826,6 +870,7 @@ def _parse_citi_statement(pages: list[str], filename: str, content_hash: str,
         total_cash_usd=total_cash_usd,
         transactions=transactions,
         recon=recon,
+        account_summary={"loan_outstanding_usd": _citi_loan_outstanding_usd(pages)},
     )
 
 
@@ -881,6 +926,8 @@ def _parse_nomura_summary(pages: list[str]) -> dict:
             summary["total_liabilities_usd"] = _num(lines[i + 17]) or summary["total_liabilities_usd"]
         elif line == "Net Asset Value" and i + 17 < len(lines):
             summary["net_asset_value_usd"] = _num(lines[i + 17]) or summary["net_asset_value_usd"]
+    # 已用贷款/负债（统一美元，取绝对值——结单里 Total Liabilities 为负数表示）
+    summary["loan_outstanding_usd"] = round(abs(summary["total_liabilities_usd"]), 2)
     return summary
 
 
@@ -1021,12 +1068,14 @@ def _cmbi_account_summary(pages: list[str]) -> tuple[dict, dict, float]:
     return rows, fx, fx.get("USD", 0.0)
 
 
-def _cmbi_to_usd(amount: float | None, ccy: str, fx: dict, usd_hkd: float) -> float:
+def _cmbi_to_usd(amount: float | None, ccy: str, fx: dict, usd_hkd: float) -> float | None:
+    """折美元。缺 USD/HKD 汇率锚时返回 None（绝不静默按原值——HKD/GBP 当 USD 混入会污染总权益）。
+    调用方须把 None 视作"该行不可折美元" → 触发 fx_incomplete → 整单转人工复核。"""
     if ccy == "USD" or not amount:
         return amount or 0.0
     if usd_hkd and fx.get(ccy):
         return round(amount * fx[ccy] / usd_hkd, 2)
-    return amount  # ponytail: 无 USD/HKD 汇率锚时按原值(当前样本均含 USD 行)
+    return None
 
 
 def _cmbi_structured_products(pages: list[str], fx: dict, usd_hkd: float) -> list[EquityHolding]:
@@ -1067,7 +1116,7 @@ def _cmbi_structured_products(pages: list[str], fx: dict, usd_hkd: float) -> lis
         name = " ".join(reversed(name_parts)).strip()
         out.append(EquityHolding(
             ticker=(code or "SP")[:24], company=name or code or "Structured Product",
-            quantity=qty, market_value_usd=_cmbi_to_usd(mv_nom, ccy, fx, usd_hkd),
+            quantity=qty, market_value_usd=_cmbi_to_usd(mv_nom, ccy, fx, usd_hkd) or 0.0,
             nominal_ccy=ccy, market_value_nominal=mv_nom))
     return out
 
@@ -1162,24 +1211,39 @@ def _parse_cmbi_statement(pages: list[str], filename: str, content_hash: str) ->
     rows, fx, usd_hkd = _cmbi_account_summary(pages)
     holdings = _cmbi_structured_products(pages, fx, usd_hkd)
     transactions = _cmbi_transactions(pages, filename)
+    # 缺锚检测：任一实际出现的非美元币种(账户小节行 + 结构性产品名义币)无 USD/HKD 汇率锚 →
+    # 无法折美元，总权益口径不可信。绝不静默按原值横加(HKD 当 USD) → 整单转人工复核。
+    needed = set(rows.keys()) | {h.nominal_ccy for h in holdings}
+    fx_incomplete = any(c != "USD" and not (usd_hkd and fx.get(c)) for c in needed)
     cash_balances: list[CashBalance] = []
     for ccy, r in rows.items():
         cash = r.get("cash") or 0.0
         if cash > 0:
             cash_balances.append(CashBalance(currency=ccy, market_value_nominal=cash,
-                                             market_value_usd=_cmbi_to_usd(cash, ccy, fx, usd_hkd)))
+                                             market_value_usd=_cmbi_to_usd(cash, ccy, fx, usd_hkd) or 0.0))
     total_cash_usd = round(sum(c.market_value_usd for c in cash_balances), 2)
-    portfolio_usd = round(sum(_cmbi_to_usd(r.get("portfolio") or 0.0, ccy, fx, usd_hkd)
+    portfolio_usd = round(sum((_cmbi_to_usd(r.get("portfolio") or 0.0, ccy, fx, usd_hkd) or 0.0)
                               for ccy, r in rows.items()), 2)
-    total_value_usd = round(sum(_cmbi_to_usd(r.get("total") or 0.0, ccy, fx, usd_hkd)
+    total_value_usd = round(sum((_cmbi_to_usd(r.get("total") or 0.0, ccy, fx, usd_hkd) or 0.0)
                                 for ccy, r in rows.items()), 2)
     account_summary = {
         "report_currency": "HKD", "cash_total_usd": total_cash_usd,
         "portfolio_market_value_usd": portfolio_usd, "total_value_usd": total_value_usd,
         "total_portfolio_hkd": round(sum(r.get("hkd") or 0.0 for r in rows.values()), 2),
         "account_ref": _cmbi_account_ref(pages),
+        # 已用贷款/保证金（结单 Account Summary 的 margin 列，折美元）；招银若未动用融资则为 0
+        "loan_outstanding_usd": round(sum((_cmbi_to_usd(r.get("margin") or 0.0, ccy, fx, usd_hkd) or 0.0)
+                                          for ccy, r in rows.items()), 2),
+        "fx_incomplete": fx_incomplete,
     }
     recon = _reconcile(holdings, portfolio_usd if portfolio_usd > 0 else None)
+    if fx_incomplete:
+        # 缺锚：total_value_usd 是欠计(缺锚行按 0 计入)的假值。强制非白名单状态 → importer 不物化其 NAV
+        # (importer 仅在 recon.status∈{ok,no_statement_total} 时用 total_value_usd 作 NAV)。
+        recon = ReconResult(holdings_count=recon.holdings_count,
+                            holdings_total_usd=recon.holdings_total_usd,
+                            statement_equities_total_usd=recon.statement_equities_total_usd,
+                            delta_usd=recon.delta_usd, status="fx_incomplete")
     return BrokerStatement(
         broker="cmbi", content_hash=content_hash, period_end=_cmbi_period(pages, filename),
         holdings=holdings, cash_balances=cash_balances, total_cash_usd=total_cash_usd,
@@ -1224,17 +1288,8 @@ def ingest_and_store(pdf_bytes: bytes, filename: str,
     content_hash = hashlib.sha256(pdf_bytes).hexdigest()
     store = AuthStore()
 
-    # 幂等去重
-    existing = store.find_financial_doc_by_hash(user_id, content_hash)
-    if existing:
-        return {
-            "doc_id": existing["id"],
-            "status": existing["status"],
-            "recon": {},
-            "duplicate": True,
-            "doc_type": existing.get("doc_type", ""),
-        }
-
+    # 重导即重解析：同文件手里就有新鲜 bytes，若之前直接复用旧 doc 就丢弃新解析，
+    # 存量旧 schema 解析（缺贷款等新增字段）永远刷不出来 → 一律先解析，再决定 UPDATE 还是 INSERT。
     stmt = ingest_pdf(
         pdf_bytes,
         filename,
@@ -1257,6 +1312,21 @@ def ingest_and_store(pdf_bytes: bytes, filename: str,
     }
     if stmt.recon.status == "mismatch":
         recon_flags["delta_flag"] = "fail"
+    # 无总额对账但权益锚显示持仓覆盖不全 → 疑似漏解析，NAV 会被低估，转人工复核不自动物化
+    coverage = _coverage_shortfall(stmt.recon)
+    if coverage is not None and coverage < _COVERAGE_MIN:
+        db_status = "needs_review"
+        recon_flags["coverage_shortfall"] = round(coverage, 4)
+        recon_flags["delta_flag"] = "coverage"
+
+    # 幂等去重：同文件已在库 → 用新解析刷新 parsed_json（保持 doc 身份不变），下游拿到最新 account_summary
+    existing = store.find_financial_doc_by_hash(user_id, content_hash)
+    if existing:
+        store.update_financial_doc_parse(user_id, existing["id"],
+                                         parsed_json=stmt.model_dump_json(), recon_flags=recon_flags,
+                                         status=db_status, doc_type=doc_type, period_end=stmt.period_end)
+        return {"doc_id": existing["id"], "status": db_status,
+                "recon": stmt.recon.model_dump(), "duplicate": True, "doc_type": doc_type}
 
     doc_id = store.create_financial_doc(
         user_id,
@@ -1276,6 +1346,31 @@ def ingest_and_store(pdf_bytes: bytes, filename: str,
 
 def demo() -> None:
     """本机自检：用真实月结单跑一遍，打印结果（数字保留，账号不在此处）。"""
+    # 覆盖率守卫纯逻辑自检（无需真实 PDF，恒运行）
+    def _mk(st, ht, an, n=1):
+        return ReconResult(holdings_count=n, holdings_total_usd=ht,
+                           statement_equities_total_usd=an, delta_usd=None, status=st)
+    assert _coverage_shortfall(_mk("no_statement_total", 90.0, 100.0)) == 0.9   # 有锚→算覆盖率
+    assert _coverage_shortfall(_mk("no_statement_total", 100.0, None)) is None  # 无锚→放行
+    assert _coverage_shortfall(_mk("no_statement_total", 100.0, 100.0, n=0)) is None  # 无持仓→放行
+    assert _coverage_shortfall(_mk("ok", 90.0, 100.0)) is None                  # 已对账→不介入
+    assert 0.90 < _COVERAGE_MIN <= 1.0 and (0.90 / 1.0) < _COVERAGE_MIN         # 10% 缺口会被拦
+
+    # 分类合并纯逻辑自检（无需 PDF/LLM）：招银单必须不被 LLM 的 broker 猜测覆盖
+    _cmbi_h = {"broker": "cmbi", "doc_type": "monthly_statement", "confidence": 0.51, "reason_code": "content_match", "source": "heuristic"}
+    _citi_h = {"broker": "citi", "doc_type": "trade_confirm", "confidence": 0.51, "reason_code": "content_match", "source": "heuristic"}
+    # LLM 误判招银为 citi → 仍以启发式 cmbi 为准（这就是 unsupported_non_statement:citi 的根因）
+    assert _merge_classification(_cmbi_h, {"broker": "citi", "doc_type": "unsupported"})["broker"] == "cmbi"
+    # LLM 缺失 → 用启发式
+    assert _merge_classification(_cmbi_h, None)["broker"] == "cmbi"
+    # 非招银：LLM 报 unknown → 回填启发式 broker，保留 LLM 的 doc_type 细分
+    _m = _merge_classification(_citi_h, {"broker": "unknown", "doc_type": "position_report"})
+    assert _m["broker"] == "citi" and _m["doc_type"] == "position_report"
+
+    # 花旗已用融资抽取：认权威合计行的下一数值，取绝对值；无该行 → 0
+    assert _citi_loan_outstanding_usd(["Total Margin Loans Outstanding\n11,435,214.48\nHong Kong"]) == 11435214.48
+    assert _citi_loan_outstanding_usd(["no liabilities section here"]) == 0.0
+
     d = Path(r"C:\Users\walker\Documents\walker\银行文件\花旗月结单")
     files = sorted(d.glob("*.PDF")) if d.exists() else []
     if not files:
@@ -1292,7 +1387,7 @@ def demo() -> None:
         ccy = "" if h.nominal_ccy == "USD" else f"  [{h.nominal_ccy} {h.market_value_nominal:,.0f}]"
         print(f"    {h.ticker:6} {h.company[:28]:28} {h.quantity:>8,.0f}股  ${h.market_value_usd:>14,.2f}{ccy}")
     assert stmt.recon.holdings_count > 0, "未抽到持仓"
-    assert stmt.recon.status in ("ok", "no_statement_total", "mismatch")
+    assert stmt.recon.status in ("ok", "no_statement_total", "mismatch", "fx_incomplete")
     print("ingest demo 通过")
 
 
@@ -1331,6 +1426,22 @@ def _cmbi_demo() -> None:
     print("cmbi demo 通过")
 
 
+def _cmbi_fx_selfcheck() -> None:
+    """缺锚守卫自检(不需 PDF)：_cmbi_to_usd 缺 USD/HKD 锚必返 None，绝不静默按原值当美元。"""
+    fx_ok = {"USD": 7.8, "HKD": 1.0}  # usd_hkd = fx["USD"] = 7.8；各行 fx 为"该币→HKD"率(HKD→HKD=1.0)
+    assert _cmbi_to_usd(780.0, "HKD", fx_ok, 7.8) == 100.0, "HKD 折美元错"
+    assert _cmbi_to_usd(100.0, "USD", fx_ok, 7.8) == 100.0, "USD 直取错"
+    # 缺锚(无 USD 行→usd_hkd=0)：非美元必须 None，不得回落原值(否则 HKD 780 会当 USD 780 混入总权益)
+    assert _cmbi_to_usd(780.0, "HKD", {}, 0.0) is None, "缺锚未拦截：HKD 被当原值"
+    assert _cmbi_to_usd(500.0, "GBP", fx_ok, 7.8) is None, "缺该币种汇率未拦截"
+    # 缺锚检测谓词(与 _parse_cmbi_statement 内联同式)：任一非美元币无锚 → fx_incomplete
+    needed = {"USD", "HKD"}
+    assert any(c != "USD" and not (0.0 and {}.get(c)) for c in needed), "缺锚 fx_incomplete 应为真"
+    assert not any(c != "USD" and not (7.8 and fx_ok.get(c)) for c in needed), "有锚不应误判"
+    print("cmbi fx 缺锚守卫自检 通过")
+
+
 if __name__ == "__main__":
+    _cmbi_fx_selfcheck()
     demo()
     _cmbi_demo()

@@ -12,10 +12,13 @@ from unittest.mock import patch
 
 import pytest
 
-from bottleneck_hunter.chain.industry_concentration import (
-    _concentration_from_mcaps, _mcap_to_yi, _extract_keywords, compute_concentration,
-)
 from bottleneck_hunter.chain.bottleneck import BottleneckAnalyzer
+from bottleneck_hunter.chain.industry_concentration import (
+    _concentration_from_mcaps,
+    _extract_keywords,
+    _mcap_to_yi,
+    compute_concentration,
+)
 from bottleneck_hunter.chain.models import ChainGraph, IndustryNode, LayerType
 
 

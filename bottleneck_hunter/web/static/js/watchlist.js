@@ -3,6 +3,7 @@
  * 表格/卡片双模式 + 搜索/筛选/排序 + 详情抽屉 + UZI 分析
  */
 import { showConfirm } from './utils/confirm.js';
+import { toast } from './utils/toast.js';
 import { fmtBJ } from './wizard-state.js';
 import { buildDetailGrid } from './phase-views.js';
 
@@ -44,16 +45,7 @@ const wlState = {
 /* ── Toast 通知 ─────────────────────────────────────── */
 
 function showToast(msg, type = 'success', duration = 3000) {
-  let el = document.getElementById('bh-toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'bh-toast';
-    document.body.appendChild(el);
-  }
-  el.className = `bh-toast bh-toast--${type} bh-toast--show`;
-  el.textContent = msg;
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => el.classList.remove('bh-toast--show'), duration);
+  toast(msg, type, duration);
 }
 
 /* ── API helpers ──────────────────────────────────────── */

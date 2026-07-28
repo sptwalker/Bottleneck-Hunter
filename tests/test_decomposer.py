@@ -1,8 +1,9 @@
 """Tests for chain decomposer."""
 
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from bottleneck_hunter.chain.decomposer import ChainDecomposer
 from bottleneck_hunter.chain.models import LayerType

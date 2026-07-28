@@ -4,6 +4,7 @@
  */
 
 import { renderPhase1, renderPhase2Table, renderPhase3Table, renderPhase4Table, renderScatterPlot, renderRadarChart, renderBarCompare, renderAlphaStack, setP2SelectionCallback, getP2SelectedTickers, resetP2Selection } from './phase-views.js';
+import { toast } from './utils/toast.js';
 import { onProvidersChange, getProviders } from './settings.js';
 import { state, logMsg, clearLog, getScoreColor, scoreNeedsDarkText, SCORE_COLORS, getMainModel, formatMarkdown } from './wizard-state.js';
 import { readSSEStream } from './sse.js';
@@ -1444,7 +1445,7 @@ function initCtxMenu() {
     const product = document.getElementById('ctx-product')?.value?.trim();
     const market = document.getElementById('ctx-market')?.value || 'us_stock';
     const model = document.getElementById('ctx-model')?.value || '';
-    if (!sector || !product) { alert('请输入产业方向和终端产品'); return; }
+    if (!sector || !product) { toast('请输入产业方向和终端产品'); return; }
     if (ctxTarget) {
       const idx = parseInt(ctxTarget.dataset.idx);
       const sectors = loadSectors();
@@ -1498,7 +1499,7 @@ export function initWizard() {
   document.getElementById('wiz-start-custom')?.addEventListener('click', () => {
     const sector = document.getElementById('wiz-sector')?.value?.trim();
     const product = document.getElementById('wiz-product')?.value?.trim();
-    if (!sector || !product) { alert('请输入产业方向和终端产品'); return; }
+    if (!sector || !product) { toast('请输入产业方向和终端产品'); return; }
     const market = document.getElementById('wiz-market')?.value || 'us_stock';
     resetForNewAnalysis();
     applySectorConfig({ sector, product, market });
@@ -1509,7 +1510,7 @@ export function initWizard() {
   document.getElementById('wiz-auto-start')?.addEventListener('click', () => {
     const sectors = loadSectors();
     if (!sectors.length || !sectors[0].sector || !sectors[0].product) {
-      alert('请先配置至少一个赛道'); return;
+      toast('请先配置至少一个赛道'); return;
     }
     const s = sectors[0];
     resetForNewAnalysis();
@@ -1651,7 +1652,7 @@ export function initWizard() {
   document.getElementById('wiz-p4-run')?.addEventListener('click', () => runPhase4());
   document.getElementById('wiz-p4-back')?.addEventListener('click', () => goToPhase(3));
   document.getElementById('wiz-p4-save')?.addEventListener('click', () => {
-    alert('分析结果已自动保存');
+    toast('分析结果已自动保存');
     goToPhase(0);
   });
 
@@ -2004,7 +2005,7 @@ async function loadWizardAnalysis(analysisId) {
     logMsg('历史分析载入完成', 'done');
   } catch (err) {
     logMsg(`载入失败: ${err.message}`, 'error');
-    alert(`载入分析失败: ${err.message}`);
+    toast(`载入分析失败: ${err.message}`);
   }
 }
 
@@ -2061,7 +2062,7 @@ async function loadAllHistory() {
           loadAllHistory();
           loadWizardHistory();
         } catch (err) {
-          alert(`删除失败: ${err.message}`);
+          toast(`删除失败: ${err.message}`);
         }
       });
     });
@@ -2231,7 +2232,7 @@ function applyHotScanSelections() {
   const body = document.getElementById('hot-modal-body');
   if (!body) return;
   const checked = body.querySelectorAll('input[type="checkbox"]:checked');
-  if (checked.length === 0) { alert('请至少勾选一个推荐赛道'); return; }
+  if (checked.length === 0) { toast('请至少勾选一个推荐赛道'); return; }
 
   const sectors = loadSectors();
   checked.forEach(cb => {

@@ -6,28 +6,29 @@ import asyncio
 import json
 import logging
 import math
-import os
 from datetime import datetime, timezone
-from typing import Optional
-
 from pathlib import Path
 
-from dotenv import dotenv_values, set_key
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from bottleneck_hunter.web.streaming import (
-    stream_screening, run_cross_validation, run_refresh_suppliers, run_retry_bottleneck,
-    stream_phase1, stream_phase2, stream_phase4, stream_roundtable,
-)
+from bottleneck_hunter.auth.dependencies import get_current_user
+from bottleneck_hunter.chain.supplier_eval import FinalScorer
 from bottleneck_hunter.web import phase_cache
+from bottleneck_hunter.web.streaming import (
+    run_cross_validation,
+    run_refresh_suppliers,
+    run_retry_bottleneck,
+    stream_phase1,
+    stream_phase2,
+    stream_phase4,
+    stream_roundtable,
+    stream_screening,
+)
 from bottleneck_hunter.web.streaming._common import _sse
 from bottleneck_hunter.web.streaming._notice import with_notices
-from bottleneck_hunter.chain.supplier_eval import FinalScorer
-
-from bottleneck_hunter.auth.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class ScreenRequest(BaseModel):
     top_n: int = Field(default=5, ge=3, le=10)
     language: str = Field(default="zh")
     market: str = Field(default="us_stock")
-    max_market_cap_yi: Optional[float] = 200
+    max_market_cap_yi: float | None = 200
     max_suppliers: int = Field(default=20, ge=1, le=50)
     provider: str = Field(default="openai")
     model: str = Field(default="gpt-5.5")
@@ -122,7 +123,7 @@ async def cross_validate(req: CrossValidateRequest, user: dict = Depends(get_cur
 class RefreshSuppliersRequest(BaseModel):
     bottleneck_reports: list[dict]
     market: str = "us_stock"
-    max_market_cap_yi: Optional[float] = 200
+    max_market_cap_yi: float | None = 200
     max_suppliers: int = 20
     language: str = "zh"
     provider: str = "openai"
@@ -171,8 +172,8 @@ class RefetchDataRequest(BaseModel):
 @router.post("/refetch-data")
 async def refetch_data(req: RefetchDataRequest, user: dict = Depends(get_current_user)):
     """为指定 ticker 重新拉取财务数据和聪明钱信号。"""
-    from bottleneck_hunter.chain.models import SupplierInfo, MarketRegion
     from bottleneck_hunter.chain.financial_data import fetch_batch
+    from bottleneck_hunter.chain.models import MarketRegion, SupplierInfo
     from bottleneck_hunter.chain.smart_money import track_batch as smart_money_batch
 
     region = MarketRegion.A_STOCK if req.market == "a_stock" else MarketRegion.US_STOCK
@@ -200,7 +201,7 @@ class Phase1Request(BaseModel):
     provider: str = "openai"
     model: str = ""
     market: str = "us_stock"
-    max_market_cap_yi: Optional[float] = 200
+    max_market_cap_yi: float | None = 200
     force_refresh_chain: bool = Field(default=False, description="强制重建产业链，忽略已缓存版本")
     allow_fallback: bool = Field(default=False, description="放行智能调度/自动替换（用户在主模型失败弹窗选切换备用后重发）")
 
@@ -287,7 +288,7 @@ class Phase2Request(BaseModel):
     analysis_id: str
     shortlist_config: ShortlistConfig = Field(default_factory=ShortlistConfig)
     market: str = "us_stock"
-    max_market_cap_yi: Optional[float] = 200
+    max_market_cap_yi: float | None = 200
     max_suppliers: int = Field(default=20, ge=1, le=50)
     language: str = "zh"
     provider: str = "openai"
@@ -895,9 +896,10 @@ async def get_ai_reports(analysis_id: str, user: dict = Depends(get_current_user
 @router.post("/ai-report")
 async def ai_report(req: AiReportRequest, user: dict = Depends(get_current_user)):
     """AI 生成横向对比报告或图表解读，返回 SSE 流。生成完毕后自动持久化。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
     from bottleneck_hunter.chain.models import SupplierScorecard
     from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_position
-    from langchain_core.messages import SystemMessage, HumanMessage
 
     _user_store = _user_analysis_store(user)
     p2 = phase_cache.get_phase(req.analysis_id, 2)
@@ -1072,11 +1074,11 @@ LLM 对供应商在瓶颈环节中的竞争力评估，5 个维度等权平均�
     if req.report_type == "chart_interp":
         chart_prompts = {
             "scatter": f"""{three_section_fmt.format(
-concept='''请介绍"质量分 vs 预期差散点图"的基本概念：
+concept=f'''请介绍"质量分 vs 预期差散点图"的基本概念：
 - X 轴表示质量分（0-10），即 LLM 对供应商在瓶颈环节竞争力的综合评估
 - Y 轴表示预期差/Alpha（0-10），即市场尚未充分定价的程度
-- 气泡大小对应推荐分高低（推荐分 = quality^{wq} × alpha^{wa} 几何均值）
-- 四个象限的含义：右上=高质量+高预期差（最优）、左上=高Alpha低质量（投机型）、右下=高质量低Alpha（已充分定价）、左下=双低（规避区）'''.format(wq=w_q, wa=w_a),
+- 气泡大小对应推荐分高低（推荐分 = quality^{w_q} × alpha^{w_a} 几何均值）
+- 四个象限的含义：右上=高质量+高预期差（最优）、左上=高Alpha低质量（投机型）、右下=高质量低Alpha（已充分定价）、左下=双低（规避区）''',
 analysis='''请结合方法论背景和数据，对散点分布进行系统解读：
 1. 识别右上象限的"双高"标的，解释它们为何同时兼具质量和预期差
 2. 指出左上象限（高Alpha低质量）的标的，评估其投机性和风险
@@ -1132,7 +1134,7 @@ analysis='''请结合方法论背景和数据，对堆叠图进行系统解读�
 
 {company_summary}
 
-{chart_prompts.get(req.chart_type, f"请对图表给出 3-5 句精炼解读，指出最值得关注的模式。")}"""
+{chart_prompts.get(req.chart_type, "请对图表给出 3-5 句精炼解读，指出最值得关注的模式。")}"""
     else:
         prompt = f"""{methodology}
 
@@ -1346,6 +1348,7 @@ async def save_settings(req: SaveSettingsRequest, user: dict = Depends(get_curre
 async def test_providers(user: dict = Depends(get_current_user)):
     """测试所有已配置 Key 的 Provider 能否正常调用 LLM。"""
     from langchain_core.messages import HumanMessage
+
     from bottleneck_hunter.llm_clients.factory import create_llm, resolve_provider_model
 
     user_id = user.get("sub", "")
@@ -1403,6 +1406,7 @@ class ValidateModelsRequest(BaseModel):
 async def _test_llm(provider: str, model: str, label: str) -> dict:
     """测试单个 LLM 模型是否可用。供 validate_models 和 meeting preflight 复用。"""
     from langchain_core.messages import HumanMessage
+
     from bottleneck_hunter.llm_clients.factory import create_llm
     try:
         llm = create_llm(provider, model, with_fallback=False)

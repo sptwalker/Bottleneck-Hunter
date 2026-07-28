@@ -1,7 +1,6 @@
 """VIP P0 公共件：number_guard 防幻觉数字 + compliance 免责声明。"""
-from bottleneck_hunter.vip import number_guard as ng
 from bottleneck_hunter.vip import compliance as cp
-
+from bottleneck_hunter.vip import number_guard as ng
 
 _FACTS = "GOOGL 数量 1030 股，市值 $1,205,022.50，占比 60.86%，未实现盈亏 $656,223.00；期权 5 contracts；净值 12.34"
 

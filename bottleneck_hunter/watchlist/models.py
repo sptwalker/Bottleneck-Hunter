@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -47,7 +45,7 @@ class WatchlistEntry(BaseModel):
     tier_rank: int = 0
     composite_score: float = 0.0
     source: str = "manual"  # "phase4" | "manual"
-    source_analysis_id: Optional[str] = None
+    source_analysis_id: str | None = None
     sector: str = ""
     bottleneck_node: str = ""
     added_at: str = ""
@@ -63,20 +61,20 @@ class WatchlistEntry(BaseModel):
 class MarketSnapshot(BaseModel):
     ticker: str
     date: str  # YYYY-MM-DD
-    open: Optional[float] = None
-    high: Optional[float] = None
-    low: Optional[float] = None
-    close: Optional[float] = None
-    volume: Optional[int] = None
-    market_cap: Optional[float] = None
-    pe_ratio: Optional[float] = None
-    change_pct: Optional[float] = None
-    rsi_14: Optional[float] = None
-    macd: Optional[float] = None
-    macd_signal: Optional[float] = None
-    macd_hist: Optional[float] = None
-    sma_20: Optional[float] = None
-    sma_50: Optional[float] = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: int | None = None
+    market_cap: float | None = None
+    pe_ratio: float | None = None
+    change_pct: float | None = None
+    rsi_14: float | None = None
+    macd: float | None = None
+    macd_signal: float | None = None
+    macd_hist: float | None = None
+    sma_20: float | None = None
+    sma_50: float | None = None
     fetched_at: str = ""
 
 
@@ -113,8 +111,8 @@ class InsiderTrade(BaseModel):
     insider_title: str = ""
     transaction_type: str = ""  # "buy" | "sell" | "exercise"
     shares: int = 0
-    price: Optional[float] = None
-    total_value: Optional[float] = None
+    price: float | None = None
+    total_value: float | None = None
     date: str = ""
     source_filing_id: str = ""
     fetched_at: str = ""
@@ -125,10 +123,10 @@ class OptionsActivity(BaseModel):
     ticker: str
     date: str = ""
     unusual_volume: bool = False
-    put_call_ratio: Optional[float] = None
+    put_call_ratio: float | None = None
     total_call_volume: int = 0
     total_put_volume: int = 0
-    max_oi_strike: Optional[float] = None
+    max_oi_strike: float | None = None
     max_oi_expiry: str = ""
     notable_trades: list[dict] = Field(default_factory=list)
     fetched_at: str = ""
@@ -139,11 +137,11 @@ class EarningsReport(BaseModel):
     ticker: str
     report_date: str = ""
     fiscal_quarter: str = ""
-    eps_actual: Optional[float] = None
-    eps_estimate: Optional[float] = None
-    eps_surprise_pct: Optional[float] = None
-    revenue_actual: Optional[float] = None
-    revenue_estimate: Optional[float] = None
+    eps_actual: float | None = None
+    eps_estimate: float | None = None
+    eps_surprise_pct: float | None = None
+    revenue_actual: float | None = None
+    revenue_estimate: float | None = None
     guidance: str = ""
     fetched_at: str = ""
 
@@ -168,10 +166,10 @@ class LlmUsageRecord(BaseModel):
 
 class PipelineStatus(BaseModel):
     pipeline_name: str
-    last_run_at: Optional[str] = None
+    last_run_at: str | None = None
     last_status: str = "idle"  # idle | running | success | error
     last_error: str = ""
-    next_run_at: Optional[str] = None
+    next_run_at: str | None = None
     stocks_processed: int = 0
     stocks_total: int = 0
 
@@ -187,19 +185,19 @@ class AddToWatchlistRequest(BaseModel):
     market: str = "us_stock"
     tier: WatchlistTier = WatchlistTier.TRACK
     source: str = "manual"
-    source_analysis_id: Optional[str] = None
+    source_analysis_id: str | None = None
     sector: str = ""
     bottleneck_node: str = ""
     notes: str = ""
 
 
 class UpdateWatchlistRequest(BaseModel):
-    tier: Optional[WatchlistTier] = None
-    tier_rank: Optional[int] = None
-    notes: Optional[str] = None
-    is_active: Optional[bool] = None
+    tier: WatchlistTier | None = None
+    tier_rank: int | None = None
+    notes: str | None = None
+    is_active: bool | None = None
 
 
 class UpdateBudgetRequest(BaseModel):
-    daily_limit_usd: Optional[float] = None
-    monthly_limit_usd: Optional[float] = None
+    daily_limit_usd: float | None = None
+    monthly_limit_usd: float | None = None

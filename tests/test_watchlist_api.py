@@ -4,8 +4,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from bottleneck_hunter.web.watchlist_api import router, set_store
 from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.web.watchlist_api import router, set_store
 
 
 @pytest.fixture

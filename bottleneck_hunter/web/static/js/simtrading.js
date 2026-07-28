@@ -2,6 +2,7 @@
  * simtrading.js — 模拟交易独立模块
  */
 import { showConfirm } from './utils/confirm.js';
+import { toast } from './utils/toast.js';
 import { fmtBJ } from './wizard-state.js';
 
 const ST_API = '/api/trading';
@@ -288,7 +289,7 @@ async function removePosition(posId) {
     await stFetch(`/positions/${posId}`, { method: 'DELETE' });
     loadPositionsTab();
   } catch (e) {
-    alert('删除失败: ' + e.message);
+    toast('删除失败: ' + e.message);
   }
 }
 
@@ -440,7 +441,7 @@ async function adjustFunds() {
   const type = document.getElementById('st-fund-type')?.value;
   const amount = parseFloat(document.getElementById('st-fund-amount')?.value);
   const note = document.getElementById('st-fund-note')?.value?.trim() || '';
-  if (!amount || amount <= 0) { alert('请输入有效金额'); return; }
+  if (!amount || amount <= 0) { toast('请输入有效金额'); return; }
   try {
     await stFetch('/account/adjust-funds', {
       method: 'POST',
@@ -451,7 +452,7 @@ async function adjustFunds() {
     loadFundHistory();
     loadAccountData();
   } catch (e) {
-    alert('操作失败: ' + e.message);
+    toast('操作失败: ' + e.message);
   }
 }
 
@@ -502,7 +503,7 @@ async function approveTuning(id) {
   try {
     await stFetch(`/tuning/${id}/approve`, { method: 'POST' });
     loadTuningProposals();
-  } catch (e) { alert('批准失败: ' + e.message); }
+  } catch (e) { toast('批准失败: ' + e.message); }
 }
 
 async function rejectTuning(id) {
@@ -510,7 +511,7 @@ async function rejectTuning(id) {
   try {
     await stFetch(`/tuning/${id}/reject?reason=${encodeURIComponent(reason)}`, { method: 'POST' });
     loadTuningProposals();
-  } catch (e) { alert('拒绝失败: ' + e.message); }
+  } catch (e) { toast('拒绝失败: ' + e.message); }
 }
 
 /* ── 删除经验卡片 ── */
@@ -519,7 +520,7 @@ async function deleteExperienceCard(cardId) {
   try {
     await stFetch(`/experience/${cardId}`, { method: 'DELETE' });
     loadExperienceCards();
-  } catch (e) { alert('删除失败: ' + e.message); }
+  } catch (e) { toast('删除失败: ' + e.message); }
 }
 
 /* ── 初始化 ── */

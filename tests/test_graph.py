@@ -1,6 +1,5 @@
 """Tests for ChainGraph 模型方法（models.py 中定义的图遍历）。"""
 
-import pytest
 
 from bottleneck_hunter.chain.models import (
     ChainGraph,

@@ -29,6 +29,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "us_catalyst_scan":       {"hour": 7,  "minute": 0},
     "us_weekly_strategy":     {"day_of_week": "sat", "hour": 10, "minute": 0},
     "us_auto_review":         {"hour": 7,  "minute": 30},
+    "us_vip_advice_review":   {"day_of_week": "sun", "hour": 13, "minute": 0},  # 周日午后，与周末数据任务错峰
     "us_institutional_update": {"day_of_week": "sat", "hour": 11, "minute": 0},
     "us_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
     "cn_earnings_update":     {"day_of_week": "sat", "hour": 12, "minute": 0},   # 与美股财报错峰
@@ -45,6 +46,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     # A股周末任务与美股错峰半小时，避免两市同刻并发写导致的锁竞争
     "cn_weekly_strategy":     {"day_of_week": "sat", "hour": 10, "minute": 30},
     "cn_auto_review":         {"hour": 20, "minute": 15},
+    "cn_vip_advice_review":   {"day_of_week": "sun", "hour": 13, "minute": 30},  # 与美股 VIP 复盘错峰半小时
     # 新增任务
     "stale_refresh":          {"interval_hours": 6},
     "resting_limit_poll":     {"interval_hours": 1},   # 挂单撮合轮询（开市时段每小时）

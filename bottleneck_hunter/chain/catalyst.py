@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage

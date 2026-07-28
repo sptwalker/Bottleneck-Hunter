@@ -8,7 +8,6 @@ FastAPI 序列化抛 'Out of range float values are not JSON compliant: nan'。
 from __future__ import annotations
 
 import json
-import math
 
 from bottleneck_hunter.web.streaming._common import _sanitize
 

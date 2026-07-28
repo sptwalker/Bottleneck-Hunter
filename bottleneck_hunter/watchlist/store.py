@@ -8,31 +8,36 @@ schema DDL 见 store_schema.py，底层 helper 见 store_base.py。
 from __future__ import annotations
 
 import json
-import sqlite3
 import logging
+import sqlite3
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from bottleneck_hunter.watchlist.store_base import _DEFAULT_DB, _get_db_lock
 from contextlib import contextmanager
+
+from bottleneck_hunter.watchlist.store_ai_models import _AIModelsMixin
+from bottleneck_hunter.watchlist.store_base import _DEFAULT_DB, _get_db_lock
+from bottleneck_hunter.watchlist.store_budget import _BudgetMixin
+from bottleneck_hunter.watchlist.store_committee import _CommitteeMixin
+from bottleneck_hunter.watchlist.store_decision import _DecisionMixin
+from bottleneck_hunter.watchlist.store_i18n import _I18nMixin
+from bottleneck_hunter.watchlist.store_intel import _IntelMixin
+from bottleneck_hunter.watchlist.store_market_data import _MarketDataMixin
+from bottleneck_hunter.watchlist.store_oplog import _OpLogMixin
+from bottleneck_hunter.watchlist.store_research import _ResearchMixin
+from bottleneck_hunter.watchlist.store_schema import (
+    CREATE_INDEXES as _CREATE_INDEXES,
+)
 from bottleneck_hunter.watchlist.store_schema import (
     CREATE_TABLES as _CREATE_TABLES,
-    CREATE_INDEXES as _CREATE_INDEXES,
+)
+from bottleneck_hunter.watchlist.store_schema import (
     MIGRATIONS as _MIGRATIONS,
 )
-from bottleneck_hunter.watchlist.store_watchlist import _WatchlistMixin
-from bottleneck_hunter.watchlist.store_market_data import _MarketDataMixin
-from bottleneck_hunter.watchlist.store_budget import _BudgetMixin
-from bottleneck_hunter.watchlist.store_intel import _IntelMixin
-from bottleneck_hunter.watchlist.store_decision import _DecisionMixin
-from bottleneck_hunter.watchlist.store_committee import _CommitteeMixin
 from bottleneck_hunter.watchlist.store_simtrading import _SimTradingMixin
 from bottleneck_hunter.watchlist.store_vip_projection import _VipProjectionMixin
-from bottleneck_hunter.watchlist.store_research import _ResearchMixin
-from bottleneck_hunter.watchlist.store_ai_models import _AIModelsMixin
-from bottleneck_hunter.watchlist.store_oplog import _OpLogMixin
-from bottleneck_hunter.watchlist.store_i18n import _I18nMixin
+from bottleneck_hunter.watchlist.store_watchlist import _WatchlistMixin
 
 
 class WatchlistStore(
@@ -62,7 +67,7 @@ class WatchlistStore(
         self._init_db()
 
 
-    def for_user(self, user_id: str, *, tier_caps: dict[str, int] | None = None) -> "WatchlistStore":
+    def for_user(self, user_id: str, *, tier_caps: dict[str, int] | None = None) -> WatchlistStore:
         """返回绑定指定用户的 store 克隆（共享同一 DB 和写锁）。
 
         tier_caps: 该用户生效的分档容量 {focus, normal, track}；由 API 层按用户上限
@@ -77,7 +82,7 @@ class WatchlistStore(
         return clone
 
 
-    def for_market(self, market: str) -> "WatchlistStore":
+    def for_market(self, market: str) -> WatchlistStore:
         """返回绑定指定市场的 store 克隆（共享同一 DB 和写锁）。"""
         clone = object.__new__(WatchlistStore)
         clone._db_path = self._db_path

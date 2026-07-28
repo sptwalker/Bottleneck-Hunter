@@ -1,4 +1,5 @@
 import asyncio
+
 from bottleneck_hunter.watchlist.price_pipeline import _fetch_via_manager
 
 

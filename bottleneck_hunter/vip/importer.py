@@ -67,14 +67,10 @@ def dispatch_import(raw: bytes, filename: str, *, user_id: str, wl_store,
                 account_candidates=account_candidates,
             )
 
-    # 去重：同文件已在导入历史 → duplicate（不重复入库，也不新增历史行；UNIQUE 已保证唯一）
-    existing = _find_import(wl_store, file_hash, account_ref=resolved_account_ref)
-    if existing:
-        return ImportResult(status="duplicate", file_name=filename, file_type=file_type,
-                            detected_kind=existing.get("detected_kind", ""),
-                            summary="该文件此前已导入过", reason="",
-                            key_metrics=existing.get("key_metrics", {}),
-                            resolved_account_ref=resolved_account_ref)
+    # 去重：同文件已在导入历史。不直接短路——normalize/materialize 皆按 doc_id 幂等（持仓快照覆盖、
+    # 交易 upsert、贷款账户级回填），重跑不重复计数，却能回填代码升级后新增的字段（如贷款）。
+    # 仍标记为已回填（复用重导），不新增历史行。
+    is_redo = _find_import(wl_store, file_hash, account_ref=resolved_account_ref) is not None
 
     if file_type == "pdf":
         result = _import_pdf(raw, filename, user_id, wl_store, market, resolved_account_ref, password)
@@ -88,6 +84,11 @@ def dispatch_import(raw: bytes, filename: str, *, user_id: str, wl_store,
         result.summary = f"{result.summary}（已自动归户）" if result.summary else "已自动归户"
     result.resolved_account_ref = resolved_account_ref
     result.account_candidates = account_candidates
+    if is_redo:
+        # 复用重导：回填已完成，提示用户这是重跑而非首次导入；不新增历史行（UNIQUE 已保证唯一）
+        if result.status == "imported":
+            result.summary = f"{result.summary}（重复导入，已回填最新字段）" if result.summary else "已回填最新字段"
+        return result
     wl_store.create_vip_import(
         file_name=filename, file_hash=file_hash, file_type=result.file_type,
         detected_kind=result.detected_kind, status=result.status,
@@ -117,8 +118,10 @@ def _detect_file_type(raw: bytes, filename: str) -> str:
 
 def _find_import(wl_store, file_hash: str, account_ref: str = "") -> dict | None:
     # ponytail: 线性扫描导入历史（单用户量小）；量大再加按 hash 的索引查询方法
+    # 只有"真正入库"的历史才算重复拦重试；rejected/unparseable/needs_* 是失败态，
+    # 修好解析后必须允许重导（否则一次失败会用一行 vip_imports 永久毒化该文件的重试）。
     for row in wl_store.list_vip_imports(limit=2000, account_ref=account_ref):
-        if row.get("file_hash") == file_hash:
+        if row.get("file_hash") == file_hash and row.get("status") in ("imported", "duplicate"):
             return row
     return None
 
@@ -379,7 +382,8 @@ def _import_statement(raw, filename, user_id, wl_store, market, account_ref, pas
             nav = None
     mat = portfolio.materialize_portfolio(wl_store, as_of_date=norm["as_of_date"],
                                           account_ref=account_ref,
-                                          cash_total_usd=stmt.total_cash_usd, account_total_usd=nav)
+                                          cash_total_usd=stmt.total_cash_usd, account_total_usd=nav,
+                                          loan_total_usd=summary.get("loan_outstanding_usd"))
     if mat.get("guard_skipped"):
         return _guarded_result(filename, "monthly_statement", stmt, norm["as_of_date"], mat["guard_skipped"])
     return ImportResult("imported", filename, "pdf", "monthly_statement",

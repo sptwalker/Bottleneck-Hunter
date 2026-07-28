@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 
 # 复用 persona 的档位标签，避免重造（风险偏好/持有周期两档语义一致）
-from bottleneck_hunter.watchlist.persona import _RISK_LABELS, _HORIZON_LABELS
+from bottleneck_hunter.watchlist.persona import _HORIZON_LABELS, _RISK_LABELS
 
 MANDATE_KEY = "vip_mandate"          # 实际存储 key = f"{MANDATE_KEY}::{account_ref}"
 MANDATE_CATEGORY = "vip_mandate"

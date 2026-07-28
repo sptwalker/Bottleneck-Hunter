@@ -147,6 +147,10 @@
 .vip-stale-warn  { background: rgba(245,158,11,.16); color: #d97706; }
 .vip-stale-alert { background: rgba(239,68,68,.16);  color: #dc2626; }
 
+/* ── VIP 总权益 KPI 结算口径小字 ── */
+.vip-eq-asof { display: block; margin-top: 3px; font-size: 11px; line-height: 1.3; color: #94a3b8; }
+.vip-eq-asof--proj { color: #d97706; }
+
 /* ── VIP 账户日志 ── */
 #vip-log-list { display: flex; flex-direction: column; gap: 8px; }
 .vip-log-item { border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; padding: 8px 10px; }

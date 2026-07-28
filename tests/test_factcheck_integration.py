@@ -8,16 +8,16 @@
 """
 
 import pytest
+
+from bottleneck_hunter.chain.fact_check import apply_fact_check_to_scorecards
 from bottleneck_hunter.chain.models import (
-    SupplierInfo,
-    SupplierScorecard,
     FinancialSnapshot,
     FinancialTrend,
-    BottleneckReport,
     MarketRegion,
+    SupplierInfo,
+    SupplierScorecard,
 )
-from bottleneck_hunter.chain.fact_check import apply_fact_check_to_scorecards
-from bottleneck_hunter.chain.supplier_eval import FinalScorer, AlphaScorer
+from bottleneck_hunter.chain.supplier_eval import AlphaScorer, FinalScorer
 
 
 def test_factcheck_adjusts_quality_and_flows_to_final_score():

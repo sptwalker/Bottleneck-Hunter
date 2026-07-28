@@ -5,14 +5,10 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 from bottleneck_hunter.watchlist import uzi_runner
 from bottleneck_hunter.watchlist.uzi_runner import (
-    ANALYSIS_TYPES,
     _extract_summary,
     _mock_deep_analysis,
     _mock_investor_panel,
@@ -20,7 +16,6 @@ from bottleneck_hunter.watchlist.uzi_runner import (
     _type_label,
     run_uzi_analysis,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

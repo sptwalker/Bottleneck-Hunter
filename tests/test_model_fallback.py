@@ -20,8 +20,12 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 import bottleneck_hunter.llm_clients.factory as F
 from bottleneck_hunter.llm_clients import fallback as FB
 from bottleneck_hunter.llm_clients.fallback import (
-    FallbackChatModel, begin_notices, drain_notices, push_notice,
-    classify_reason, _build_message,
+    FallbackChatModel,
+    _build_message,
+    begin_notices,
+    classify_reason,
+    drain_notices,
+    push_notice,
 )
 
 

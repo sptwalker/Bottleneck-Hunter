@@ -3,14 +3,12 @@
 对应 G-3（prompt 注入）、G-6（LLM 成本硬上限）、G-4（跨用户隔离安全失败）。
 运行：pytest tests/test_phase3_security.py -q
 """
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from bottleneck_hunter.watchlist.prompt_guard import sanitize_external_text, sanitize_list
 from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.prompt_guard import sanitize_external_text, sanitize_list
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 

@@ -131,11 +131,11 @@ class TestStaleTickers:
 class TestHealthEndpoint:
     def test_health_returns_pipelines_and_stale(self, store):
         """/health 端点应返回管道状态和过期 ticker"""
-        from fastapi.testclient import TestClient
-        from bottleneck_hunter.web.watchlist_api import router, set_store
-        from bottleneck_hunter.auth.dependencies import get_current_user
-
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from bottleneck_hunter.auth.dependencies import get_current_user
+        from bottleneck_hunter.web.watchlist_api import router, set_store
         app = FastAPI()
         app.include_router(router, prefix="/api/watchlist")
         app.dependency_overrides[get_current_user] = lambda: {"sub": ""}  # 测试注入用户，绕过 AuthMiddleware

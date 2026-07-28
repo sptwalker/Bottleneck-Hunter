@@ -14,13 +14,13 @@ from pathlib import Path
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from bottleneck_hunter.chain.json_utils import strip_fences
 from bottleneck_hunter.chain.investability_filter import InvestabilityFilter
+from bottleneck_hunter.chain.json_utils import strip_fences
 from bottleneck_hunter.chain.models import (
     AlphaScore,
     BottleneckReport,
-    FinancialSnapshot,
     FinalScore,
+    FinancialSnapshot,
     MarketRegion,
     MoatScore,
     SupplierInfo,

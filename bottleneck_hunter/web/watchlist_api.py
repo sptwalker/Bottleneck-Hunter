@@ -56,7 +56,12 @@ def _get_store() -> WatchlistStore:
 
 def _resolve_tier_caps(user_id: str) -> dict[str, int]:
     """按「用户上限（无则全局默认） × 全局比例配置」推导该用户的分档容量。"""
-    from bottleneck_hunter.watchlist.tier_limits import derive_tier_caps, DEFAULT_TOTAL, DEFAULT_FOCUS_PCT, DEFAULT_NORMAL_PCT
+    from bottleneck_hunter.watchlist.tier_limits import (
+        DEFAULT_FOCUS_PCT,
+        DEFAULT_NORMAL_PCT,
+        DEFAULT_TOTAL,
+        derive_tier_caps,
+    )
     if _auth_store is None:
         return derive_tier_caps()
     total = DEFAULT_TOTAL
@@ -168,8 +173,8 @@ async def refresh_pipeline(pipeline: str, request: Request, market: str | None =
 @router.post("/refresh-intelligence")
 async def refresh_intelligence(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """SSE 流：刷新所有股票的情报聚合"""
-    from bottleneck_hunter.watchlist.strategy_engine import refresh_intelligence_all
     from bottleneck_hunter.watchlist.budget import BudgetTracker
+    from bottleneck_hunter.watchlist.strategy_engine import refresh_intelligence_all
 
     store = _user_store(user).for_market(market)
     budget = BudgetTracker(store)
@@ -195,8 +200,8 @@ async def refresh_intelligence(request: Request, market: str = "us_stock", user:
 @router.post("/refresh-strategy")
 async def refresh_strategy(request: Request, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """SSE 流：刷新所有股票的策略生成"""
-    from bottleneck_hunter.watchlist.strategy_engine import refresh_strategy_all
     from bottleneck_hunter.watchlist.budget import BudgetTracker
+    from bottleneck_hunter.watchlist.strategy_engine import refresh_strategy_all
 
     store = _user_store(user).for_market(market)
     budget = BudgetTracker(store)

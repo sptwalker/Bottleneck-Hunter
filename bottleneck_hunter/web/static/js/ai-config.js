@@ -1,3 +1,4 @@
+import { toast } from './utils/toast.js';
 /**
  * ai-config.js — 统一 AI 配置页面
  * 区块: Provider 管理 / 综合测试 / 模型分配矩阵 / 调度看板
@@ -492,12 +493,12 @@ async function saveCustomProvider() {
   const api_key = document.getElementById('aic-custom-key')?.value.trim();
   const default_model = document.getElementById('aic-custom-model')?.value.trim();
 
-  if (!display_name) { alert('请输入显示名称'); return; }
-  if (!provider_id) { alert('请输入标识符 ID'); return; }
-  if (!default_model) { alert('请输入默认模型'); return; }
+  if (!display_name) { toast('请输入显示名称'); return; }
+  if (!provider_id) { toast('请输入标识符 ID'); return; }
+  if (!default_model) { toast('请输入默认模型'); return; }
   // base_url 可留空：openai/anthropic/google 走各自 SDK 官方端点；其余 OpenAI 兼容必须填
   if (!base_url && !['openai', 'anthropic', 'google'].includes(provider_id)) {
-    alert('请输入 API 地址（仅 openai/anthropic/google 可留空走官方端点）');
+    toast('请输入 API 地址（仅 openai/anthropic/google 可留空走官方端点）');
     return;
   }
 
@@ -529,10 +530,10 @@ async function saveCustomProvider() {
       if (incrBtn) { incrBtn.style.display = ''; incrBtn.classList.add('aic-incr-flash'); }
     } else {
       const err = await resp.json().catch(() => ({}));
-      alert(err.detail || '保存失败');
+      toast(err.detail || '保存失败');
     }
   } catch (e) {
-    alert('网络错误: ' + e.message);
+    toast('网络错误: ' + e.message);
   }
 }
 
@@ -542,7 +543,7 @@ async function testFormConfig() {
   const model = document.getElementById('aic-custom-model')?.value.trim() || '';
   const base_url = document.getElementById('aic-custom-url')?.value.trim() || '';
   const api_key = document.getElementById('aic-custom-key')?.value.trim() || '';
-  if (!provider) { alert('请先填写 Provider'); return; }
+  if (!provider) { toast('请先填写 Provider'); return; }
   if (btn) { btn.disabled = true; btn.textContent = '测试中...'; }
   try {
     const resp = await fetch(`${API}/test/one`, {
@@ -554,13 +555,13 @@ async function testFormConfig() {
     try { data = await resp.json(); } catch { /* 非 JSON */ }
     if (!resp.ok) {
       const detail = (data && (data.detail || data.error)) || '';
-      alert(`测试请求失败 (HTTP ${resp.status})${detail ? '：' + (typeof detail === 'string' ? detail : JSON.stringify(detail)) : '；请确认已登录并刷新页面'}`);
+      toast(`测试请求失败 (HTTP ${resp.status})${detail ? '：' + (typeof detail === 'string' ? detail : JSON.stringify(detail)) : '；请确认已登录并刷新页面'}`);
       return;
     }
-    if (data.ok) alert(`连接成功！\n模型: ${data.model || model}`);
-    else alert(`连接失败：${data.error || '未返回错误信息'}`);
+    if (data.ok) toast(`连接成功！\n模型: ${data.model || model}`);
+    else toast(`连接失败：${data.error || '未返回错误信息'}`);
   } catch (e) {
-    alert('测试失败: ' + e.message);
+    toast('测试失败: ' + e.message);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '测试连通性'; }
   }
@@ -573,14 +574,14 @@ async function testCustomProvider(id, btn) {
     const data = await resp.json();
     const dot = document.querySelector(`.aic-provider-item[data-pid="${id}"] .aic-provider-status`);
     if (data.ok) {
-      alert(`连接成功！\n模型: ${data.model || id}`);
+      toast(`连接成功！\n模型: ${data.model || id}`);
       if (dot) dot.className = 'aic-provider-status aic-status-ok';
     } else {
-      alert(`连接失败: ${data.error || '未知错误'}`);
+      toast(`连接失败: ${data.error || '未知错误'}`);
       if (dot) dot.className = 'aic-provider-status aic-status-fail';
     }
   } catch (e) {
-    alert('测试失败: ' + e.message);
+    toast('测试失败: ' + e.message);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '测试'; }
   }
@@ -611,10 +612,10 @@ async function deleteCustomProvider(id, name) {
       await loadRoles();
       setStatus('aic-provider-status', 'Provider 已删除', 'ok');
     } else {
-      alert('删除失败');
+      toast('删除失败');
     }
   } catch (e) {
-    alert('网络错误: ' + e.message);
+    toast('网络错误: ' + e.message);
   }
 }
 
@@ -627,10 +628,10 @@ async function setProviderPrimary(id, name) {
       window.invalidateFollowModel?.();  // 失效卡片预解析缓存，主模型改动即时反映
       setStatus('aic-provider-status', `已将「${name}」设为主要模型（默认+兜底优先）`, 'ok');
     } else {
-      alert(resp.status === 403 ? '仅管理员可设置主要模型' : '设置主要失败');
+      toast(resp.status === 403 ? '仅管理员可设置主要模型' : '设置主要失败');
     }
   } catch (e) {
-    alert('网络错误: ' + e.message);
+    toast('网络错误: ' + e.message);
   }
 }
 
@@ -653,10 +654,10 @@ async function toggleProviderActive(id, name, currentlyActive) {
         setStatus('aic-provider-status', `已启用「${name}」`, 'ok');
       }
     } else {
-      alert(resp.status === 403 ? '仅管理员可启用/禁用 Provider' : '操作失败');
+      toast(resp.status === 403 ? '仅管理员可启用/禁用 Provider' : '操作失败');
     }
   } catch (e) {
-    alert('网络错误: ' + e.message);
+    toast('网络错误: ' + e.message);
   }
 }
 

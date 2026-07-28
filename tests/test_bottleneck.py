@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from bottleneck_hunter.chain.bottleneck import (
     DEFAULT_WEIGHTS,
     BottleneckAnalyzer,
@@ -82,14 +80,14 @@ class TestWeightedScore:
             BottleneckScore(dimension=BottleneckDimension.TECH_BARRIER, score=9.0, reasoning="r"),
         ]
         result = analyzer._weighted_score(scores)
-        expected = (8.0 * 0.25 + 6.0 * 0.25 + 7.0 * 0.20 + 5.0 * 0.15 + 9.0 * 0.15)
+        expected = (8.0 * 0.20 + 6.0 * 0.20 + 7.0 * 0.25 + 5.0 * 0.15 + 9.0 * 0.20)
         assert abs(result - expected) < 1e-6
 
     def test_single_dimension(self):
         analyzer = self._make_analyzer()
         scores = [BottleneckScore(dimension=BottleneckDimension.SCARCITY, score=10.0, reasoning="r")]
         result = analyzer._weighted_score(scores)
-        expected = 10.0 * 0.25 / 1.0
+        expected = 10.0 * 0.20 / 1.0
         assert abs(result - expected) < 1e-6
 
     def test_empty_scores(self):

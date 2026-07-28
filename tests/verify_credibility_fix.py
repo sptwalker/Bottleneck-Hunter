@@ -5,8 +5,8 @@ from pathlib import Path
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from bottleneck_hunter.chain.models import SupplierScorecard, SupplierInfo, AlphaScore, FinalScore
 from bottleneck_hunter.chain.fact_check import apply_fact_check_to_scorecards
+from bottleneck_hunter.chain.models import AlphaScore, SupplierInfo, SupplierScorecard
 from bottleneck_hunter.chain.supplier_eval import FinalScorer
 
 

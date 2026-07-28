@@ -180,8 +180,9 @@ def project_derivative_accrual(wl_store, account_ref: str, as_of: str = "") -> d
     MLI booster 无本金参数无法折算基准市值，暂跳过（记 info 日志）。
     标的价来自 Step A 补齐的 market_snapshots；KO 判定扫起始日以来的收盘价。
     """
-    from bottleneck_hunter.vip.derivatives import list_derivative_terms, payoff_accumulator
     import numpy as np
+
+    from bottleneck_hunter.vip.derivatives import list_derivative_terms, payoff_accumulator
 
     account_ref = (account_ref or "").strip()
     as_of = (as_of or "").strip() or _now_iso()[:10]

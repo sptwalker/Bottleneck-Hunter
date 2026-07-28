@@ -555,9 +555,10 @@ async def llm_recommend_hot_sectors(
     2. 用 LLM 生成结构化推荐（保证可靠输出）
     3. 结果缓存30分钟
     """
-    from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_position, MissingUserKeyError
-    from langchain_core.messages import SystemMessage, HumanMessage
+    from langchain_core.messages import HumanMessage, SystemMessage
+
     from bottleneck_hunter.auth.current_user import get_current_user_id
+    from bottleneck_hunter.llm_clients.factory import MissingUserKeyError, create_llm, get_llm_for_position
 
     # 缓存键含 user：热点榜由该用户自己的 key/预算生成，不跨用户复用
     cache_key = f"{get_current_user_id()}::{provider}::{model}"

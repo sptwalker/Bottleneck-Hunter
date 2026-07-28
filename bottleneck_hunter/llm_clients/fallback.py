@@ -297,11 +297,16 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
     （严格隔离 + 跳过被禁用）。不再只提供硬编码 4 家应急链——否则主模型失效时，
     用户配的其它 provider 无法被自动替换。"""
     # 延迟导入避免与 factory 循环依赖
-    from bottleneck_hunter.llm_clients.factory import (
-        _FALLBACK_CHAIN, _user_has_llm_key, create_llm, resolve_provider_model,
-        is_provider_active, get_primary_provider, list_custom_provider_ids,
-    )
     from bottleneck_hunter.auth.current_user import get_current_user_id
+    from bottleneck_hunter.llm_clients.factory import (
+        _FALLBACK_CHAIN,
+        _user_has_llm_key,
+        create_llm,
+        get_primary_provider,
+        is_provider_active,
+        list_custom_provider_ids,
+        resolve_provider_model,
+    )
 
     uid = user_id or get_current_user_id()
     out = []
@@ -334,7 +339,7 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
     # build_fallback_candidates 不知具体角色，用全局策略(role_key='')。
     # 无数据/无策略 → rank_providers 稳定排序保持原顺序（平滑退化为现状）。
     try:
-        from bottleneck_hunter.llm_clients.health import rank_providers, load_routing_policy
+        from bottleneck_hunter.llm_clients.health import load_routing_policy, rank_providers
         policy = load_routing_policy(uid, "")
         ranked = rank_providers([c[1] for c in out], uid, get_primary_provider(), policy=policy)
         pos = {p: i for i, p in enumerate(ranked)}

@@ -2,11 +2,12 @@
 
 运行：pytest tests/test_resting_orders.py -q
 """
+from datetime import datetime
+
 import pytest
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.market_hours import is_market_open
-from datetime import datetime
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
 @pytest.fixture
@@ -87,7 +88,8 @@ def test_market_hours_gate():
 if __name__ == "__main__":
     import sys
     m = sys.modules[__name__]
-    import tempfile, pathlib
+    import pathlib
+    import tempfile
     for name in [n for n in dir(m) if n.startswith("test_")]:
         fn = getattr(m, name)
         if "store" in fn.__code__.co_varnames:

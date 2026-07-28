@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 from bottleneck_hunter.chain.models import FinancialSnapshot, SupplierInfo
 
@@ -34,7 +33,8 @@ class InvestabilityFilter:
     Args:
         min_market_cap: 最低市值阈值（A 股单位: 亿；美股单位: $B）。默认 15 亿 / $1.5B。
         min_gross_margin: 最低毛利率阈值 (%)。默认 20。
-        min_daily_volume: 最低日均成交额 ($K)。默认 500（即 $500K）。
+        min_daily_amount_astock_wan: A股 最低日均成交额（万元）。默认 5000（即 ¥5000万/日）。
+        min_daily_amount_us_wan: 美股 最低日均成交额（万美元）。默认 500（即 $5M/日）。
         min_listing_days: 最短上市天数。默认 365（约 1 年）。
     """
 
@@ -42,12 +42,14 @@ class InvestabilityFilter:
         self,
         min_market_cap: float = 15.0,
         min_gross_margin: float = 20.0,
-        min_daily_volume: float = 500.0,
+        min_daily_amount_astock_wan: float = 5000.0,
+        min_daily_amount_us_wan: float = 500.0,
         min_listing_days: int = 365,
     ):
         self.min_market_cap = min_market_cap
         self.min_gross_margin = min_gross_margin
-        self.min_daily_volume = min_daily_volume
+        self.min_daily_amount_astock_wan = min_daily_amount_astock_wan
+        self.min_daily_amount_us_wan = min_daily_amount_us_wan
         self.min_listing_days = min_listing_days
 
     def check(
@@ -95,22 +97,22 @@ class InvestabilityFilter:
         else:
             scores["gross_margin"] = "N/A"
 
-        # ---- 规则 3: 日均成交额 ----
-        # 当前数据模型中没有直接的日均成交额字段，
-        # 如果未来添加了该字段，可在此处检查。
-        # 目前跳过（数据缺失不误杀）。
-        avg_daily_volume: Optional[float] = None
-        if avg_daily_volume is not None:
-            scores["daily_volume_k"] = avg_daily_volume
-            if avg_daily_volume < self.min_daily_volume:
+        # ---- 规则 3: 日均成交额（流动性，本币万元，市场感知阈值） ----
+        avg_amt = financial.avg_daily_amount_wan if financial else None
+        if avg_amt is not None:
+            is_a = supplier.market == "a_stock"
+            min_amt = self.min_daily_amount_astock_wan if is_a else self.min_daily_amount_us_wan
+            unit = "万元" if is_a else "万美元"
+            scores["daily_amount_wan"] = avg_amt
+            if avg_amt < min_amt:
                 reasons.append(
-                    f"流动性不足 (日均成交额 ${avg_daily_volume:.0f}K < 阈值 ${self.min_daily_volume:.0f}K)"
+                    f"流动性不足 (日均成交额 {avg_amt:.0f}{unit} < 阈值 {min_amt:.0f}{unit})"
                 )
         else:
-            scores["daily_volume_k"] = "N/A"
+            scores["daily_amount_wan"] = "N/A"
 
         # ---- 规则 4: 上市时间 ----
-        days_since_ipo: Optional[int] = None
+        days_since_ipo: int | None = None
         if financial and financial.days_since_ipo is not None:
             days_since_ipo = financial.days_since_ipo
 
@@ -164,3 +166,19 @@ class InvestabilityFilter:
             )
 
         return passed, rejected
+
+
+if __name__ == "__main__":
+    # ponytail: 流动性闸门自检 — 缺失跳过 / 低于阈值淘汰 / 达标通过（A股/美股各一遍）
+    f = InvestabilityFilter()
+    sup_a = SupplierInfo(name="测A", ticker="600000", market="a_stock",
+                         market_cap=100.0, sector="金融", description="")
+    sup_us = SupplierInfo(name="TestUS", ticker="AAA", market="us_stock",
+                          market_cap=100.0, sector="tech", description="")
+    assert f.check(sup_a, FinancialSnapshot()).passed, "缺失应跳过不误杀"
+    r = f.check(sup_a, FinancialSnapshot(avg_daily_amount_wan=100.0))
+    assert not r.passed and any("流动性" in x for x in r.reasons), r.reasons
+    assert f.check(sup_a, FinancialSnapshot(avg_daily_amount_wan=8000.0)).passed, "A股达标应通过"
+    assert not f.check(sup_us, FinancialSnapshot(avg_daily_amount_wan=100.0)).passed, "美股<$5M应淘汰"
+    assert f.check(sup_us, FinancialSnapshot(avg_daily_amount_wan=900.0)).passed, "美股达标应通过"
+    print("investability liquidity gate OK")

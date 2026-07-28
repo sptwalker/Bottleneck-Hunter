@@ -1,6 +1,7 @@
 """卖出指令持仓校验 —— 杜绝“卖无持仓/超量卖”的明显错误执行命令。"""
 from bottleneck_hunter.watchlist.constraint_validator import (
-    validate_execution_plan, max_compliant_shares,
+    max_compliant_shares,
+    validate_execution_plan,
 )
 
 # 宽松约束：只让持仓校验起作用，避免被金额/额度上限干扰

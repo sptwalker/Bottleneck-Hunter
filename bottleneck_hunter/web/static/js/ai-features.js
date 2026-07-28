@@ -3,6 +3,7 @@
  */
 
 import { state, logMsg, getMainModel, formatMarkdown, fmtBJ } from './wizard-state.js';
+import { toast } from './utils/toast.js';
 import { readSSEStream } from './sse.js';
 import { openReport, buildRoundtableReport } from './report-export.js';
 
@@ -252,7 +253,7 @@ function showMeetingExport() {
 
 export function exportMeeting() {
   const m = state.meetingResult;
-  if (!m || !(m.final_ranking && m.final_ranking.length)) { alert('暂无圆桌会议结果可导出'); return; }
+  if (!m || !(m.final_ranking && m.final_ranking.length)) { toast('暂无圆桌会议结果可导出'); return; }
   const tk = (m.final_ranking || []).map(r => r.ticker).filter(Boolean).join('-');
   const date = new Date().toISOString().slice(0, 10);
   const fname = `圆桌会议纪要${tk ? '_' + tk : ''}_${date}.html`;

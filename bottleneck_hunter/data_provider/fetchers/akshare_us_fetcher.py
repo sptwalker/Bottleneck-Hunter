@@ -12,7 +12,8 @@ import re
 
 import pandas as pd
 
-from bottleneck_hunter.data_provider.base import BaseFetcher, StandardQuote, safe_float as _safe_float
+from bottleneck_hunter.data_provider.base import BaseFetcher, StandardQuote
+from bottleneck_hunter.data_provider.base import safe_float as _safe_float
 
 logger = logging.getLogger(__name__)
 

@@ -11,9 +11,9 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.watchlist.constraint_validator import ValidationResult
 from bottleneck_hunter.watchlist import trade_executor
+from bottleneck_hunter.watchlist.constraint_validator import ValidationResult
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
 def _seed_snapshot(store, ticker, close):

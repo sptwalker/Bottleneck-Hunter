@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections import defaultdict
 from collections.abc import AsyncGenerator
 
 from bottleneck_hunter.chain.bottleneck import BottleneckAnalyzer
 from bottleneck_hunter.chain.catalyst import CatalystAnalyzer
-from bottleneck_hunter.chain.cross_validation import CrossValidator
 from bottleneck_hunter.chain.decomposer import ChainDecomposer
 from bottleneck_hunter.chain.financial_data import fetch_batch
 from bottleneck_hunter.chain.models import MarketRegion
@@ -20,18 +18,17 @@ from bottleneck_hunter.llm_clients.factory import create_llm, get_llm_for_positi
 from bottleneck_hunter.web import phase_cache
 
 from ._common import (
-    logger,
-    STEP_LABELS,
     MARKET_MAP,
-    _sse,
-    _sanitize,
-    drain_task_queue,
-    _run_decompose_with_progress,
+    STEP_LABELS,
     _run_bottleneck_with_progress,
-    _run_supplier_search_with_progress,
+    _run_decompose_with_progress,
     _run_supplier_eval_with_progress,
+    _run_supplier_search_with_progress,
+    _sanitize,
+    _sse,
+    drain_task_queue,
+    logger,
 )
-
 
 # ===========================================================================
 # Phase 分步流水线
@@ -78,8 +75,8 @@ def _primary_failed_event(stage: str, reason: str, provider: str, model: str):
     can_switch = False
     backup_hint = ""
     try:
-        from bottleneck_hunter.llm_clients.fallback import build_fallback_candidates
         from bottleneck_hunter.auth.current_user import get_current_user_id
+        from bottleneck_hunter.llm_clients.fallback import build_fallback_candidates
         cands = build_fallback_candidates(provider or "", model or "", get_current_user_id())
         can_switch = len(cands) > 0
         if cands:
@@ -466,7 +463,6 @@ async def stream_phase2(
         se_start_ts = _time.monotonic()
         se_heartbeat_count = 0
         se_eval_done = 0
-        se_eval_current = ""
 
         while True:
             try:
@@ -481,7 +477,7 @@ async def stream_phase2(
                     try:
                         import json as _json
                         d = _json.loads(msg) if isinstance(msg, str) else msg
-                        se_eval_current = d.get("message", "")
+                        _se_eval_current = d.get("message", "")  # noqa: F841  SSE 心跳解析校验，值暂不消费
                     except Exception:
                         logger.debug("SSE 消息解析跳过")
             except asyncio.TimeoutError:

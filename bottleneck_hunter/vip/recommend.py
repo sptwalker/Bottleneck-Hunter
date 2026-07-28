@@ -19,13 +19,20 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from bottleneck_hunter.vip import portfolio, mandate as _mandate
-from bottleneck_hunter.vip import compliance, number_guard
-from bottleneck_hunter.vip.advisory import (
-    _consensus, format_macro_for_prompt, build_committee_context,
-    committee_corpus, annotate_committee, reconcile_draft,
-    VIP_ROLE_CONTEXT, VIP_PT_RECOMMEND)  # 复用勿重写
 from bottleneck_hunter.chain.json_utils import extract_json_object
+from bottleneck_hunter.vip import compliance, number_guard, portfolio
+from bottleneck_hunter.vip import mandate as _mandate
+from bottleneck_hunter.vip.advisory import (
+    VIP_PT_RECOMMEND,
+    VIP_ROLE_CONTEXT,  # 复用勿重写
+    _consensus,
+    advisor_calibration,
+    annotate_committee,
+    build_committee_context,
+    committee_corpus,
+    format_macro_for_prompt,
+    reconcile_draft,
+)
 
 _ACTIONS = {"关注", "建仓", "规避"}
 _DEFAULT_ACTION = "关注"
@@ -163,7 +170,7 @@ def _validate_draft(raw: str) -> dict:
     return {"portfolio_note": str(data.get("portfolio_note", "")).strip(), "candidates": cands}
 
 
-def _annotate(draft: dict, corpus: str) -> list[str]:
+def _annotate(draft: dict, corpus: str, foreign_values: list[float] | None = None) -> list[str]:
     """给草案文本里未在档案/纲领语料中出现的数字加⚠，返回未核到 token。
     只扫 reason/risk/fit + portfolio_note——suggested_weight 是软仓位建议（非事实断言），标⚠会误导，不扫。"""
     unverified: list[str] = []
@@ -171,8 +178,8 @@ def _annotate(draft: dict, corpus: str) -> list[str]:
     def ann(text: str) -> str:
         if not text:
             return text
-        unverified.extend(r["token"] for r in number_guard.verify_numbers(text, corpus) if r["status"] == "unverified")
-        return number_guard.annotate_unverified(text, corpus)
+        unverified.extend(r["token"] for r in number_guard.verify_numbers(text, corpus, foreign_values) if r["status"] == "unverified")
+        return number_guard.annotate_unverified(text, corpus, foreign_values=foreign_values)
 
     draft["portfolio_note"] = ann(draft["portfolio_note"])
     for c in draft["candidates"]:
@@ -189,9 +196,10 @@ def _annotate(draft: dict, corpus: str) -> list[str]:
 
 async def generate_account_recommendations(wl_store, *, account_ref: str = "", user_id: str = "", budget=None) -> dict:
     """生成并落库账户荐新建议。返回 {recommendation_id, result}。空 ref/无持仓/空池/无模型/预算不足 → 明确 error。"""
+    import asyncio
+
     from bottleneck_hunter.llm_clients.factory import get_models_for_role
     from bottleneck_hunter.watchlist.committee import MEMBERS, _review_single
-    import asyncio
 
     account_ref = (account_ref or "").strip()
     if not account_ref:
@@ -240,8 +248,9 @@ async def generate_account_recommendations(wl_store, *, account_ref: str = "", u
     corpus = (json.dumps(dossier, ensure_ascii=False, default=str)
               + "\n" + inputs["mandate_text"] + "\n" + inputs["macro_text"]
               + "\n" + committee_corpus(context))
-    unverified = _annotate(draft, corpus)
-    unverified = list(dict.fromkeys(unverified + annotate_committee(committee, corpus)))
+    fv = number_guard.foreign_derivative_values(dossier)  # 非美元衍生条款价：$令牌不得据此核实（跨币防误核）
+    unverified = _annotate(draft, corpus, fv)
+    unverified = list(dict.fromkeys(unverified + annotate_committee(committee, corpus, fv)))
 
     # ── 3b) 草案↔投委会对账：reject→建仓降关注、caution/split→加警示注（memory:vip_advisory_pass 用户已确认强度）──
     reconciled = reconcile_draft(draft["candidates"], "action", {"建仓": "关注"}, committee)
@@ -256,6 +265,7 @@ async def generate_account_recommendations(wl_store, *, account_ref: str = "", u
         "unverified": unverified,
         "reconciled": reconciled,
         "provider": provider, "model": model,
+        "advisor_calibration": advisor_calibration(wl_store, provider, model),  # F1：surfaced 可信度
         "disclaimer": compliance.DISCLAIMER_ZH,
     }
 
@@ -287,6 +297,7 @@ async def generate_account_recommendations(wl_store, *, account_ref: str = "", u
     # ── 5) 审计留痕（auth.db，无 PII 金额；advice_type 复用 recommendation，靠 kind=new_pick 与周期报告区分）──
     try:
         import hashlib
+
         from bottleneck_hunter.auth.store import AuthStore
         uid = getattr(wl_store, "_user_id", "") or user_id or ""
         if uid:

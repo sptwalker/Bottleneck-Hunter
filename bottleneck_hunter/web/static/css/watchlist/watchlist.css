@@ -1479,6 +1479,7 @@
 .bh-toast--success { background: #059669; }
 .bh-toast--warning { background: #d97706; }
 .bh-toast--error   { background: #dc2626; }
+.bh-toast--info    { background: #334155; }
 
 /* ── 管道 hover 提示 ─── */
 #wl-pipe-summary span[title] {

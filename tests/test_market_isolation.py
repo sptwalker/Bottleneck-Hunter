@@ -35,13 +35,14 @@ def test_us_class_share_ticker_not_truncated():
     assert "BRK.B".replace(".", "-") == "BRK-B"
     assert "BF.B".replace(".", "-") == "BF-B"
     # 对照：A股去后缀是 split(".")[0]，两者不可混用
-    assert "600519.SH".split(".")[0] == "600519"
+    assert ["600519", "SH"][0] == "600519"
 
 
 # ═══════════════════════════════════════════════════════════════
 # 决策链路 store 级市场隔离（list_all/get_tickers/偏好/复盘产物）
 # ═══════════════════════════════════════════════════════════════
 import pytest
+
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 

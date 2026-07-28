@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections import defaultdict
 from collections.abc import AsyncGenerator
 from datetime import datetime
-from pathlib import Path
 
 from bottleneck_hunter.chain.bottleneck import BottleneckAnalyzer
 from bottleneck_hunter.chain.catalyst import CatalystAnalyzer
@@ -22,16 +20,15 @@ from bottleneck_hunter.chain.supplier_search import SupplierSearcher
 from bottleneck_hunter.llm_clients.factory import create_llm
 
 from ._common import (
-    logger,
-    STEP_LABELS,
     MARKET_MAP,
-    _sanitize,
+    STEP_LABELS,
+    _run_bottleneck_with_progress,
+    _run_decompose_with_progress,
+    _run_supplier_eval_with_progress,
+    _run_supplier_search_with_progress,
     _sse,
     drain_task_queue,
-    _run_decompose_with_progress,
-    _run_bottleneck_with_progress,
-    _run_supplier_search_with_progress,
-    _run_supplier_eval_with_progress,
+    logger,
 )
 
 
@@ -114,7 +111,7 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
         from bottleneck_hunter.llm_clients.factory import get_models_for_role
         bottleneck_llms = get_models_for_role("bottleneck")
         if not bottleneck_llms:
-            bottleneck_llms = [(deep_llm, provider, model)]
+            bottleneck_llms = [(deep_llm, config.provider, config.model)]
         analyzer = BottleneckAnalyzer(llms=bottleneck_llms, language=config.language,
                                       industry=config.sector, market=getattr(config, "market", ""))
 

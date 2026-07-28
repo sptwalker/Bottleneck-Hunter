@@ -1,6 +1,6 @@
 """决策中心纪律修复（批 A）单元测试：硬止损/前视偏差/质量门落杆/L2钳制。"""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 

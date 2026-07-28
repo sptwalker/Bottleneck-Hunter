@@ -360,7 +360,6 @@ async def copy_ai_config_to_me(req: CopyAiConfigReq, user: dict = Depends(_requi
     if not src:
         raise HTTPException(status_code=400, detail="源用户无可拷贝的 AI 配置")
 
-    import os
     copied, roles = 0, set()
     for c in src:
         _wl_store.upsert_role_config(
@@ -414,7 +413,10 @@ async def revoke_invite_code(code: str, user: dict = Depends(_require_admin)):
 @router.get("/config")
 async def get_config(user: dict = Depends(_require_admin)):
     from bottleneck_hunter.watchlist.tier_limits import (
-        DEFAULT_TOTAL, DEFAULT_FOCUS_PCT, DEFAULT_NORMAL_PCT, derive_tier_caps,
+        DEFAULT_FOCUS_PCT,
+        DEFAULT_NORMAL_PCT,
+        DEFAULT_TOTAL,
+        derive_tier_caps,
     )
     store = _auth()
     total = int(store.get_config("default_watchlist_limit", str(DEFAULT_TOTAL)))
@@ -494,6 +496,7 @@ async def update_smtp_config(req: UpdateSmtpConfigRequest, user: dict = Depends(
 async def test_smtp(req: SmtpTestRequest, user: dict = Depends(_require_admin)):
     """用当前生效的 SMTP 配置发送一封测试邮件。"""
     import asyncio
+
     from bottleneck_hunter.auth.email_sender import resolve_smtp_config, send_test_email, smtp_configured
     store = _auth()
     cfg = resolve_smtp_config(store)
@@ -510,9 +513,9 @@ async def test_smtp(req: SmtpTestRequest, user: dict = Depends(_require_admin)):
 @router.post("/env-test")
 async def env_test(user: dict = Depends(_require_admin)):
     """从服务器实测各境外/境内站点连通性，返回逐条结果。供境内部署诊断网络/代理。"""
+    import asyncio
     import os
     import time
-    import asyncio
     from datetime import datetime, timezone
 
     # 探测目标：境外(需代理/常被墙) + 境内(对照，应始终通)
@@ -605,8 +608,9 @@ async def get_stats(user: dict = Depends(_require_admin)):
         except Exception:
             pass
     try:
-        from bottleneck_hunter.dataflows.store import AnalysisStore
         import sqlite3
+
+        from bottleneck_hunter.dataflows.store import AnalysisStore
         conn = sqlite3.connect(str(AnalysisStore().db_path))
         total_analyses = conn.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]
         conn.close()

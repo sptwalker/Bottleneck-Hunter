@@ -2,13 +2,10 @@
 
 import json
 
-import pytest
-
 from bottleneck_hunter.watchlist.strategy_engine import (
-    _parse_strategy_response,
     _compute_strategy_diff,
+    _parse_strategy_response,
 )
-
 
 SAMPLE_RESPONSE = """## 情报摘要
 AAPL最近表现强劲，技术面呈现多头趋势。

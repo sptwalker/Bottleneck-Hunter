@@ -9,19 +9,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.llm_clients.factory import PROVIDER_MODELS
-from bottleneck_hunter.web import refresh_guard  # 每用户并发闸：决策各重活互斥，防重复触发/断线重发双跑
-
 from bottleneck_hunter.auth.dependencies import get_current_user
+from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.web import refresh_guard  # 每用户并发闸：决策各重活互斥，防重复触发/断线重发双跑
 
 logger = logging.getLogger(__name__)
 
@@ -449,8 +445,9 @@ async def get_enhanced_calendar(days: int = 30, market: str = "us_stock", user: 
 async def get_catalysts_calendar(month: str | None = None, market: str = "us_stock", user: dict = Depends(get_current_user)):
     """按日期分组返回催化剂事件，格式：{"2026-06-24": [...], ...}"""
     store = _user_store(user).for_market(market)
-    from datetime import datetime as _dt, timezone as _tz
     import calendar
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
 
     if month:
         try:
@@ -834,7 +831,8 @@ async def get_decision_trace(ticker: str, market: str = "us_stock", user: dict =
         })
 
     # L3 战术
-    from datetime import datetime as _dt, timezone as _tz
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
     today = _dt.now(_tz.utc).strftime("%Y-%m-%d")
     tactical = store.get_tactical_plan_for_ticker(ticker, today)
     if tactical:

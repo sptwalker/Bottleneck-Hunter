@@ -87,8 +87,10 @@ async def test_api_key(req: TestApiKeyRequest, user: dict = Depends(get_current_
     - 不传 api_key: 用已保存的 KEY 测试
     """
     import asyncio
+
     from langchain_core.messages import HumanMessage
-    from bottleneck_hunter.llm_clients.factory import create_llm, PROVIDER_KEY_MAP, get_custom_provider
+
+    from bottleneck_hunter.llm_clients.factory import PROVIDER_KEY_MAP, create_llm, get_custom_provider
 
     provider = req.provider.lower().strip()
     if provider not in PROVIDER_KEY_MAP and not get_custom_provider(provider):

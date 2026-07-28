@@ -1,19 +1,18 @@
 """Tests for RoundtableMeeting — AI 投研圆桌会议。"""
 
 import json
-import pytest
-from collections import defaultdict
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from bottleneck_hunter.chain.roundtable import RoundtableMeeting, ROLES
+import pytest
+
 from bottleneck_hunter.chain.models import (
     CrossValidationReport,
     MeetingMessage,
-    MeetingRanking,
     ModelValidation,
     SupplierInfo,
     SupplierScorecard,
 )
+from bottleneck_hunter.chain.roundtable import ROLES, RoundtableMeeting
 
 
 def _make_scorecard(name="TestCo", ticker="TEST", score=7.0, node="瓶颈A"):

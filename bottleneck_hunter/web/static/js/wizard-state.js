@@ -2,6 +2,8 @@
  * wizard-state.js — Wizard 共享状态与工具函数
  */
 
+import { toast as _toast } from './utils/toast.js';
+
 /* ── Wizard 状态 ───────────────────────────── */
 export const state = {
   currentPhase: 0,
@@ -66,21 +68,9 @@ export function logMsg(text, level = 'info') {
   if (logBtn && panel.style.display === 'none') logBtn.classList.add('has-unread');
 }
 
-/* ── 全局 Toast（自包含，不依赖外部 CSS）──────────── */
-let _toastWrap = null;
+/* ── 全局 Toast —— 委托统一实现（utils/toast.js），保留原签名与默认 5s ── */
 export function toast(msg, type = 'info', duration = 5000) {
-  if (!_toastWrap) {
-    _toastWrap = document.createElement('div');
-    _toastWrap.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none';
-    document.body.appendChild(_toastWrap);
-  }
-  const bg = type === 'error' ? '#dc2626' : type === 'warn' ? '#d97706' : type === 'success' ? '#16a34a' : '#334155';
-  const el = document.createElement('div');
-  el.style.cssText = `background:${bg};color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;max-width:70vw;box-shadow:0 4px 16px rgba(0,0,0,.25);opacity:0;transition:opacity .2s;pointer-events:auto`;
-  el.textContent = msg;
-  _toastWrap.appendChild(el);
-  requestAnimationFrame(() => { el.style.opacity = '1'; });
-  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 250); }, duration);
+  _toast(msg, type, duration);
 }
 
 /** 模型自动替换提示：系统日志(warn) + 顶部 Toast。全站统一入口。 */

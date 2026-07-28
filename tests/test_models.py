@@ -13,12 +13,10 @@ from bottleneck_hunter.chain.models import (
     FinancialSnapshot,
     IndustryNode,
     LayerType,
+    MarketRegion,
     ModelValidation,
-    ScreeningResult,
     SupplierInfo,
     SupplierScorecard,
-    ValidationResult,
-    MarketRegion,
 )
 
 

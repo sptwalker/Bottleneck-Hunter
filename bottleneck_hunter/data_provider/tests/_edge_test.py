@@ -1,5 +1,6 @@
 """边界情况测试"""
 import asyncio
+
 from bottleneck_hunter.data_provider import get_fetcher_manager
 
 

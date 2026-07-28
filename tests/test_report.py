@@ -1,7 +1,6 @@
 """Tests for report generator."""
 
 from bottleneck_hunter.chain.models import (
-    BottleneckDimension,
     BottleneckReport,
     BottleneckScore,
     ChainGraph,

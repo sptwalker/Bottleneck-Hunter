@@ -151,15 +151,15 @@ class _WatchlistMixin:
             # 行业统一为细中文：已是中文的保留；英文/粗名(如 "Technology") 用 company_profiles.industry 映射
             # （focus/normal 入库未带 sector，且 yfinance sector 偏粗英文——统一显示细中文）
             from bottleneck_hunter.watchlist.industry_zh import to_zh_sector
+            from bottleneck_hunter.watchlist.store_market_data import SHARED_UID
             tickers = [e["ticker"] for e in entries]
             profs: dict[str, dict] = {}
             if tickers:
                 ph = ",".join("?" * len(tickers))
-                pq = f"SELECT ticker, sector, industry FROM company_profiles WHERE ticker IN ({ph})"
-                pp: tuple = tuple(tickers)
-                if self._user_id:
-                    pq += " AND user_id = ?"
-                    pp = pp + (self._user_id,)
+                # company_profiles 存于共享桶(SHARED_UID)，与 save/get_company_profile 一致；
+                # 严禁按调用方 self._user_id 过滤——那样永远查不到共享档，行业全部退回原始(多为空)。
+                pq = f"SELECT ticker, sector, industry FROM company_profiles WHERE ticker IN ({ph}) AND user_id = ?"
+                pp: tuple = tuple(tickers) + (SHARED_UID,)
                 profs = {r["ticker"]: {"sector": r["sector"] or "", "industry": r["industry"] or ""}
                          for r in conn.execute(pq, pp).fetchall()}
             for e in entries:

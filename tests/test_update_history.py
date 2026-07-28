@@ -3,7 +3,6 @@
 覆盖：📢 标记解析（各格式/别名/多行）、合并去重排序、以及真实临时 git repo 的端到端提取。
 """
 import importlib.util
-import json
 import subprocess
 from pathlib import Path
 

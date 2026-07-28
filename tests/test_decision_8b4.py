@@ -1,8 +1,8 @@
 """Tests for 8B.4 — 闭环反馈系统：催化剂时效 + 复盘 CRUD + 经验卡片 + API 端点"""
 
-import json
-import pytest
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
@@ -333,10 +333,11 @@ class TestDecisionAPIFeedback:
     @pytest.fixture
     def client(self, store):
         s, *_ = store
+        from fastapi import FastAPI
         from fastapi.testclient import TestClient
+
         # 复盘/反馈/经验卡片端点已迁至 trading_api（挂载于 /api/trading）
         from bottleneck_hunter.web.trading_api import router, set_store
-        from fastapi import FastAPI
 
         app = FastAPI()
         app.include_router(router, prefix="/api/trading")

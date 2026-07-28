@@ -1,12 +1,10 @@
 """邮箱验证注册 + 账户管理 —— store 与 email_sender 单元测试。"""
 
-import tempfile
-from pathlib import Path
 
 import pytest
 
-from bottleneck_hunter.auth.store import AuthStore
 from bottleneck_hunter.auth import email_sender
+from bottleneck_hunter.auth.store import AuthStore
 
 
 @pytest.fixture

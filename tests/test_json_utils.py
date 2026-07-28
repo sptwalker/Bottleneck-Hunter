@@ -5,9 +5,9 @@ import json
 import pytest
 
 from bottleneck_hunter.chain.json_utils import (
-    strip_fences,
-    extract_json_object,
     extract_json_array,
+    extract_json_object,
+    strip_fences,
 )
 
 

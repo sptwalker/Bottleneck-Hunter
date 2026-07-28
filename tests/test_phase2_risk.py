@@ -3,9 +3,9 @@
 对应改进方案 2.5（账户级 stop-loss/circuit-breaker）、2.2（分行业权重级联）。
 运行：pytest tests/test_phase2_risk.py -q
 """
-from bottleneck_hunter.watchlist.constraint_validator import check_account_circuit_breaker
-from bottleneck_hunter.chain.bottleneck import BottleneckAnalyzer, DEFAULT_WEIGHTS
+from bottleneck_hunter.chain.bottleneck import DEFAULT_WEIGHTS, BottleneckAnalyzer
 from bottleneck_hunter.chain.models import BottleneckDimension as D
+from bottleneck_hunter.watchlist.constraint_validator import check_account_circuit_breaker
 
 
 class TestCircuitBreaker:

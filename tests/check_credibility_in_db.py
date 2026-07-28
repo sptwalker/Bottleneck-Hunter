@@ -1,6 +1,6 @@
 """检查数据库中 credibility 字段是否正确保存"""
-import sqlite3
 import json
+import sqlite3
 
 conn = sqlite3.connect('data/analyses.db')
 cursor = conn.cursor()
@@ -50,7 +50,7 @@ if latest[4]:
         if quality_adjusted is not None:
             has_quality_adjusted += 1
 
-    print(f"\n=== 统计 ===")
+    print("\n=== 统计 ===")
     print(f"有 fact_check_recommendation 的: {has_recommendation}/5")
     print(f"有 credibility 的: {has_credibility}/5")
     print(f"有 quality_adjusted 的: {has_quality_adjusted}/5")

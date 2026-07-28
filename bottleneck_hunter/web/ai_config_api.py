@@ -22,7 +22,6 @@ from bottleneck_hunter.llm_clients.factory import (
 )
 from bottleneck_hunter.llm_clients.role_registry import (
     ROLE_REGISTRY,
-    list_roles,
 )
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
@@ -288,12 +287,11 @@ async def test_comprehensive(request: Request, incremental: bool = False,
         configured = [(p, m) for p, m in configured if (p, m) not in fully_tested]
 
     async def _stream():
+        from bottleneck_hunter.llm_clients.role_registry import _BOTTLENECK_WEIGHTS
         from bottleneck_hunter.web.model_tester import (
-            TEST_DIMENSIONS,
             compute_composite_score,
             run_comprehensive_test,
         )
-        from bottleneck_hunter.llm_clients.role_registry import _BOTTLENECK_WEIGHTS
 
         total = len(configured)
         all_results = []
@@ -352,8 +350,8 @@ async def test_comprehensive(request: Request, incremental: bool = False,
 @router.get("/test/results")
 async def get_test_results(user: dict = Depends(get_current_user)):
     """获取最近的综合测试结果。"""
-    from bottleneck_hunter.web.model_tester import compute_composite_score
     from bottleneck_hunter.llm_clients.role_registry import _BOTTLENECK_WEIGHTS
+    from bottleneck_hunter.web.model_tester import compute_composite_score
 
     store = _get_store(user)
     uid = user.get("sub", "")

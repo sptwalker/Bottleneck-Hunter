@@ -11,8 +11,8 @@
 import pytest
 
 import bottleneck_hunter.llm_clients.factory as F
-from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
 from bottleneck_hunter.auth import current_user as CU
+from bottleneck_hunter.llm_clients.factory import MissingUserKeyError
 
 
 @pytest.fixture(autouse=True)

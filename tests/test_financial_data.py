@@ -1,6 +1,5 @@
 """Tests for financial_data.py — mocked, no network calls."""
 
-import asyncio
 from unittest.mock import MagicMock, patch
 
 import pandas as pd

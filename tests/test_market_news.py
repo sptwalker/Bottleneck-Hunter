@@ -2,8 +2,6 @@
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from bottleneck_hunter.watchlist import news_pipeline as np
 
 
@@ -58,7 +56,7 @@ class TestFetchMarketNews:
 
 class TestMarketIndexKeys:
     def test_index_keys_present(self):
-        from bottleneck_hunter.watchlist.macro_data import MARKET_INDEX_KEYS, _CN_INDICATORS, _US_INDICATORS
+        from bottleneck_hunter.watchlist.macro_data import _CN_INDICATORS, _US_INDICATORS, MARKET_INDEX_KEYS
         us_keys = {k for k, *_ in _US_INDICATORS}
         cn_keys = {k for k, *_ in _CN_INDICATORS}
         assert {"sp500", "nasdaq"} <= us_keys

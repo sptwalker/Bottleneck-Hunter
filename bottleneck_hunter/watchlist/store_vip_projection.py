@@ -72,6 +72,8 @@ class _VipProjectionMixin:
         *,
         account_ref: str = "",
         as_of_date: str = "",
+        since_date: str = "",
+        until_date: str = "",
         kind: str = "",
         status: str = "",
     ) -> list[dict]:
@@ -82,6 +84,10 @@ class _VipProjectionMixin:
                 clauses.append("account_ref=?"); params.append(account_ref)
             if as_of_date:
                 clauses.append("as_of_date=?"); params.append(as_of_date)
+            if since_date:
+                clauses.append("as_of_date>=?"); params.append(since_date)
+            if until_date:
+                clauses.append("as_of_date<=?"); params.append(until_date)
             if kind:
                 clauses.append("kind=?"); params.append(kind)
             if status:

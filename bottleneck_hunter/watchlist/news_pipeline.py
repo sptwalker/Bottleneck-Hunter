@@ -21,7 +21,7 @@ except ImportError:
 
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.models import DegradationMode
-from bottleneck_hunter.watchlist.retry import with_retry, get_http_client, fetch_with_timeout
+from bottleneck_hunter.watchlist.retry import fetch_with_timeout, get_http_client, with_retry
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)

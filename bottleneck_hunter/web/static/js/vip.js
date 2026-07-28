@@ -4,6 +4,12 @@
  */
 import { showConfirm, showChoice } from './utils/confirm.js';
 import { fmtBJ } from './wizard-state.js';
+import { toast } from './utils/toast.js';
+
+// 币种符号：交易表金额是原币口径(ingest gross_amount=原币)，须按行 currency 取符号；
+// 而 KPI/图表用 market_value_base=统一美元，故那里的 $ 是正确的、勿改。
+const _CCY_SYM = { USD: '$', CNY: '¥', HKD: 'HK$', EUR: '€', GBP: '£', JPY: '¥', SGD: 'S$', AUD: 'A$' };
+function ccySym(code) { const c = String(code || '').toUpperCase(); return _CCY_SYM[c] || (c ? c + ' ' : '$'); }
 
 const VIP_ALL_ACCOUNTS = '__all__';
 const VIP_PRIMARY_OVERVIEW = 'overview';
@@ -28,6 +34,7 @@ const vipState = {
   charts: {},
   accounts: [],
   accountsError: '',
+  unlocked: false,   // VIP 锁屏：未解锁只显示「开发中」占位，不拉任何数据
 };
 
 function market() { return document.getElementById('vip-market')?.value || 'us_stock'; }
@@ -434,6 +441,11 @@ async function loadAccountLog() {
   }
 }
 const VIP_LOG_TYPE_LABEL = { projection: '推算', calibration: '校准', anomaly: '异常', settlement: '结算' };
+const VIP_TXN_TYPE_LABEL = {
+  buy: '买入', sell: '卖出', dividend: '分红', interest: '利息', fee: '费用', tax: '税费',
+  deposit: '入金', withdrawal: '出金', split: '拆合股', transfer_in: '转入', transfer_out: '转出',
+  opt_exercise: '期权行权', opt_assign: '期权指派', opt_expire: '期权到期', other: '其他',
+};
 const VIP_LOG_SEV_CLASS = { info: 'vip-log-info', warn: 'vip-log-warn', alert: 'vip-log-alert' };
 function renderAccountLog(rows) {
   if (!rows.length) return '<p class="st-empty-hint">暂无日志；系统每日推算与结算单校准的记录会自动出现在这里。</p>';
@@ -537,6 +549,7 @@ function loadTab(tab) {
   }
 }
 export function ensureVipLoaded() {
+  if (vipState.unlocked !== true) return;   // 未解锁：不渲染、不拉数据（后端也会 423 拦截，此为前端防线）
   const key = currentTabCacheKey();
   // 面板在各账户页签间共用，只保存一份 DOM；切换到不同 key 必须重渲，否则残留上一个账户的数值
   if (vipState.shownKey[vipState.activeTab] !== key) {
@@ -548,6 +561,32 @@ export function ensureVipLoaded() {
   requestAnimationFrame(() => {
     Object.values(vipState.charts).forEach(c => { if (c && !c.isDisposed?.()) c.resize(); });
   });
+}
+
+// 进入 VIP 视图时拉解锁态，切换锁屏 / 内容显隐。解锁则继续正常渲染。
+export async function applyVipLock() {
+  let unlocked = false;
+  try {
+    const r = await fetch('/api/vip/lock-status');
+    if (r.ok) unlocked = !!(await r.json()).unlocked;
+  } catch (_) {}
+  vipState.unlocked = unlocked;
+  const lock = document.getElementById('vip-lock-screen');
+  const content = document.getElementById('vip-content');
+  if (lock) lock.style.display = unlocked ? 'none' : '';
+  if (content) content.style.display = unlocked ? '' : 'none';
+  if (unlocked) {
+    vipState.shownKey = {};   // 刚解锁：强制重渲，避免复用锁定期空缓存
+    // 账户列表在锁定期不可拉（后端 423），故解锁后（或上次拉取失败时）在此首次加载
+    if (!vipState.accounts?.length || vipState.accountsError) {
+      await loadVipAccounts(VIP_ALL_ACCOUNTS);
+      renderPrimaryTabs();
+      renderAccountSubtabs();
+      updateAccountHeading();
+      showActivePane();
+    }
+    ensureVipLoaded();
+  }
 }
 
 function vipChart(id) {
@@ -581,15 +620,15 @@ async function loadDashboard() {
       el('vip-total-equity', '$' + fmtNum(overview.total_equity));
       el('vip-cash-balance', '$' + fmtNum(overview.cash_balance));
       el('vip-holdings-count', String(overview.n_accounts ?? 0));
+      el('vip-loan-total', overview.total_loan == null ? '--' : '$' + fmtNum(overview.total_loan));
       el('vip-transaction-count', String(overview.n_holdings ?? 0));
-      el('vip-net-inflow', overview.total_loan_limit == null ? '--' : '$' + fmtNum(overview.total_loan_limit));
-      el('vip-fee-total', String(overview.transaction_count ?? 0));
+      el('vip-net-inflow', String(overview.transaction_count ?? 0));
       setLabel('vip-total-equity', '账户总价值');
       setLabel('vip-cash-balance', '现金总价值');
       setLabel('vip-holdings-count', '子账户数');
+      setLabel('vip-loan-total', '总贷款');
       setLabel('vip-transaction-count', '持仓总数');
-      setLabel('vip-net-inflow', '总贷款额度');
-      setLabel('vip-fee-total', '交易总笔数');
+      setLabel('vip-net-inflow', '交易总笔数');
       const total = overview.total_equity || 0;
       const cashPct = total ? (overview.cash_balance || 0) / total * 100 : 0;
       el('vip-risk-top5', fmtNum(overview.top5_concentration_pct || 0, 1) + '%');
@@ -601,15 +640,15 @@ async function loadDashboard() {
       el('vip-total-equity', '$' + fmtNum(overview.total_equity));
       el('vip-cash-balance', '$' + fmtNum(overview.cash_balance));
       el('vip-holdings-count', String(overview.n_holdings ?? 0));
+      el('vip-loan-total', overview.loan_balance == null ? '--' : '$' + fmtNum(overview.loan_balance));
       el('vip-transaction-count', String(overview.transaction_count ?? 0));
       el('vip-net-inflow', '$' + fmtNum((overview.net_inflow || 0) - (overview.net_outflow || 0)));
-      el('vip-fee-total', '$' + fmtNum(overview.fee_total));
       setLabel('vip-total-equity', '总权益');
       setLabel('vip-cash-balance', '可投资现金');
       setLabel('vip-holdings-count', '持仓数');
+      setLabel('vip-loan-total', '贷款');
       setLabel('vip-transaction-count', '交易笔数');
       setLabel('vip-net-inflow', '累计净流入');
-      setLabel('vip-fee-total', '累计费用');
       const total = overview.total_equity || 0;
       const cashPct = total ? (overview.cash_balance || 0) / total * 100 : 0;
       el('vip-risk-top5', fmtNum(overview.top5_concentration_pct || 0, 1) + '%');
@@ -618,12 +657,13 @@ async function loadDashboard() {
       const box = document.getElementById('vip-overview-accounts');
       if (box) box.innerHTML = '<p class="st-empty-hint">当前页为子账户视图；账户管理请回到个人资产总览。</p>';
     }
-  } catch (_) {}
+  } catch (_) { toast('账户总览加载失败，请重试', 'error'); }
 
   try {
     const vs = await vipGet(`/account/value-series?${params.toString()}`);
     renderValueChart(vs.series || [], vs.benchmark);
     renderReturnsChart(vs.returns || []);
+    setEquityAsOf(vs.series || []);  // 总权益 KPI 挂"结算截至X日"角标，推算尾段醒目提示
     const dd = maxDrawdown((vs.series || []).map(s => s.total_equity));
     const el = document.getElementById('vip-risk-drawdown');
     if (el) el.textContent = fmtNum(dd, 1) + '%';
@@ -664,8 +704,24 @@ async function renderStaleness(ref) {
   }
 }
 
-function maxDrawdown(vals) {
-  let peak = -Infinity, mdd = 0;
+// 总权益 KPI 诚实标注：KPI 值取自最近"结算快照"(确认口径)，推算只在图表尾段。
+// 挂一行"结算截至X日"小字；若序列含推算尾段，则改用琥珀色提示图表尾段为系统推算。
+function setEquityAsOf(series) {
+  const val = document.getElementById('vip-total-equity');
+  if (!val) return;
+  const card = val.parentElement;
+  let note = card.querySelector('.vip-eq-asof');
+  if (!note) { note = document.createElement('span'); note.className = 'vip-eq-asof'; card.appendChild(note); }
+  const reals = (series || []).filter(s => !s.is_projected);
+  const asOf = reals.length ? reals[reals.length - 1].as_of_date : '';
+  if (!asOf) { note.style.display = 'none'; return; }
+  const hasProj = (series || []).some(s => s.is_projected);
+  note.style.display = '';
+  note.className = 'vip-eq-asof' + (hasProj ? ' vip-eq-asof--proj' : '');
+  note.textContent = hasProj ? `结算截至 ${asOf}·图表尾段为推算` : `结算截至 ${asOf}`;
+}
+
+function maxDrawdown(vals) {  let peak = -Infinity, mdd = 0;
   for (const v of vals) {
     if (v > peak) peak = v;
     if (peak > 0) mdd = Math.max(mdd, (peak - v) / peak * 100);
@@ -974,7 +1030,7 @@ async function loadPositions() {
   if (!body) return;
   try {
     const { positions } = await vipGet(`/account/positions?account_ref=${encodeURIComponent(selectedAccountRef())}`);
-    if (!positions?.length) { body.innerHTML = ''; if (empty) empty.style.display = ''; return; }
+    if (!positions?.length) { body.innerHTML = ''; if (empty) { empty.textContent = '暂无持仓记录'; empty.style.display = ''; } return; }
     if (empty) empty.style.display = 'none';
     body.innerHTML = positions.map(p => {
       const pnl = p.unrealized_pnl || 0;
@@ -986,7 +1042,7 @@ async function loadPositions() {
         `<td>$${fmtNum(p.avg_cost)}</td><td>$${fmtNum(p.current_price)}</td><td>$${fmtNum(p.market_value)}</td>` +
         `<td class="${cls}">${pnl >= 0 ? '+' : '-'}$${fmtNum(Math.abs(pnl))}</td><td>${fmtNum(p.weight_pct, 1)}%</td></tr>`;
     }).join('');
-  } catch (_) { if (empty) empty.style.display = ''; }
+  } catch (_) { body.innerHTML = ''; if (empty) { empty.textContent = '加载失败，请重试'; empty.style.display = ''; } toast('持仓加载失败，请重试', 'error'); }
 }
 
 async function loadTransactions() {
@@ -1009,16 +1065,17 @@ async function loadTransactions() {
   params.set('limit', '200');
   try {
     const { transactions } = await vipGet(`/account/transactions?${params.toString()}`);
-    if (!transactions?.length) { body.innerHTML = ''; if (empty) empty.style.display = ''; return; }
+    if (!transactions?.length) { body.innerHTML = ''; if (empty) { empty.textContent = '暂无交易记录'; empty.style.display = ''; } return; }
     if (empty) empty.style.display = 'none';
     body.innerHTML = transactions.map(x => {
       const net = x.net_amount || 0;
       const cls = net > 0 ? 'st-pnl-pos' : net < 0 ? 'st-pnl-neg' : 'st-pnl-zero';
+      const cs = ccySym(x.currency);  // 金额为原币口径，按行币种取符号
       return `<tr><td>${esc(x.trade_date)}</td><td>${esc(x.symbol || x.company || '—')}</td>` +
-        `<td>${esc(x.txn_type)}</td><td>${esc(x.currency || '')}</td><td>$${fmtNum(x.gross_amount)}</td>` +
-        `<td class="${cls}">${net >= 0 ? '+' : '-'}$${fmtNum(Math.abs(net))}</td><td>${esc(x.description || '')}</td></tr>`;
+        `<td>${esc(VIP_TXN_TYPE_LABEL[x.txn_type] || x.txn_type || '—')}</td><td>${esc(x.currency || '')}</td><td>${cs}${fmtNum(x.gross_amount)}</td>` +
+        `<td class="${cls}">${net >= 0 ? '+' : '-'}${cs}${fmtNum(Math.abs(net))}</td><td>${esc(x.description || '')}</td></tr>`;
     }).join('');
-  } catch (_) { if (empty) empty.style.display = ''; }
+  } catch (_) { body.innerHTML = ''; if (empty) { empty.textContent = '加载失败，请重试'; empty.style.display = ''; } toast('历史交易加载失败，请重试', 'error'); }
 }
 
 async function loadMandate() {
@@ -1093,6 +1150,12 @@ async function refreshBudgetBar(ref) {
         `<div><b>${warn ? '⚠' : '✓'} 预算对照（指示性）</b>：可投资现金 $${fmtNum(b.available_cash)} · 已量化新建仓需求 $${fmtNum(b.requested_new_buy)} · ${esc(fitTxt)}` +
         (b.unquantified_adds ? ` · 另有 ${b.unquantified_adds} 项加/建仓未量化` : '') +
         (b.partial ? ` · 仅含已生成 pass、结果偏乐观` : '') + `</div>` +
+        (b.add_suggestions?.length
+          ? `<div style="margin-top:5px">加仓量化（波动率缩放·指示性${b.cash_coverage_pct != null ? `，现金覆盖率 ${fmtNum(b.cash_coverage_pct, 0)}%` : ''}）：` +
+            b.add_suggestions.map(s => `<span style="display:inline-block;margin:2px 6px 0 0;padding:1px 6px;border-radius:6px;background:rgba(0,0,0,.05)">` +
+              `${esc(s.ticker)} 建议 ${fmtNum(s.suggested_shares, 0)} 股 · 约 $${fmtNum(s.suggested_amount)} · 目标权重 ${fmtNum(s.target_weight_pct, 1)}%` +
+              (s.cash_covered ? '' : ' · <span style="color:#b45309">现金不足</span>') + `</span>`).join('') + `</div>`
+          : '') +
         `<div style="margin-top:3px;color:var(--muted);font-size:11.5px">${esc(b.note)}</div></div>`;
     }
   } catch (_) { /* 预算条失败不影响建议主体 */ }
@@ -1448,6 +1511,8 @@ export function initVip() {
   vipState.inited = true;
   gateVipButton();
   window.addEventListener('resize', () => Object.values(vipState.charts).forEach(c => c?.resize?.()));
+  // 管理员在管理菜单解锁/上锁后广播，此处同步锁屏态（用户若正停在 VIP 视图即时刷新）
+  window.addEventListener('vip-lock-changed', () => { if (window.appState?.view === 'vip') applyVipLock(); });
 
   bindImportCenter();
   bindReportGen();
@@ -1492,11 +1557,5 @@ export function initVip() {
     invalidateVipCache({ accountRef: selectedImportAccountRef(), includeOverview: false });
     ensureVipLoaded();
   });
-  loadVipAccounts(VIP_ALL_ACCOUNTS).then(() => {
-    renderPrimaryTabs();
-    renderAccountSubtabs();
-    updateAccountHeading();
-    showActivePane();
-    ensureVipLoaded();
-  });
+  // 账户列表改由 applyVipLock() 在解锁后首次加载（锁定期拉取会被后端 423 拦下）
 }

@@ -96,8 +96,8 @@ class AutoUpdatePatch(BaseModel):
 
 @router.get("/auto-update")
 async def get_auto_update(user: dict = Depends(get_current_user)):
-    from bottleneck_hunter.watchlist.scheduler import get_job_statuses, list_job_categories, list_job_labels
     from bottleneck_hunter.watchlist.schedule_config import get_global_schedule, is_global_enabled
+    from bottleneck_hunter.watchlist.scheduler import get_job_statuses, list_job_categories, list_job_labels
 
     store = _user_store(user)
     cfg = store.get_auto_update_config()
@@ -183,7 +183,7 @@ async def get_schedule(admin: dict = Depends(require_admin)):
 
 @router.patch("/schedule")
 async def patch_schedule(req: SchedulePatch, admin: dict = Depends(require_admin)):
-    from bottleneck_hunter.watchlist.schedule_config import set_global_schedule, set_global_enabled
+    from bottleneck_hunter.watchlist.schedule_config import set_global_enabled, set_global_schedule
     from bottleneck_hunter.watchlist.scheduler import reschedule_all_from_config
     if req.global_enabled is not None:
         set_global_enabled(_auth_store, req.global_enabled)

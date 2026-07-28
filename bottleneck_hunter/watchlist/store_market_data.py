@@ -423,7 +423,7 @@ class _MarketDataMixin:
             return
         with self._write_conn() as conn:
             conn.execute(
-                f"""INSERT OR REPLACE INTO company_profiles
+                """INSERT OR REPLACE INTO company_profiles
                    (ticker, raw_json, sector, industry, description, website,
                     employees, country, exchange, currency, fetched_at, user_id)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",

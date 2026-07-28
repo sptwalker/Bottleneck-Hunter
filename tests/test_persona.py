@@ -2,7 +2,10 @@
 import json
 
 from bottleneck_hunter.watchlist.persona import (
-    format_persona_for_prompt, get_user_single_cap, load_style, DEFAULT_STYLE,
+    DEFAULT_STYLE,
+    format_persona_for_prompt,
+    get_user_single_cap,
+    load_style,
 )
 
 

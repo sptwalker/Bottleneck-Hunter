@@ -20,7 +20,7 @@ try:
 except ImportError:
     ak = None  # type: ignore[assignment]
 
-from bottleneck_hunter.watchlist.retry import with_retry, fetch_with_timeout
+from bottleneck_hunter.watchlist.retry import fetch_with_timeout, with_retry
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)

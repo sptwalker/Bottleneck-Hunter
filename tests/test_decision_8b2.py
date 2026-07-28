@@ -1,14 +1,11 @@
 """Tests for 8B.2 — L3 战术计划、L4 执行方案、投委会评审"""
 
-import asyncio
 import json
-import os
-import tempfile
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from bottleneck_hunter.watchlist.store import WatchlistStore
-
 
 # ─────────────────────────────────────────────────────────
 # 辅助工具
@@ -452,10 +449,12 @@ class TestDecisionAPI:
     @pytest.fixture
     def client(self, store):
         s, *_ = store
-        from fastapi.testclient import TestClient
-        from bottleneck_hunter.web.decision_api import router, set_store
-        from bottleneck_hunter.web.trading_api import router as trading_router, set_store as trading_set_store
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from bottleneck_hunter.web.decision_api import router, set_store
+        from bottleneck_hunter.web.trading_api import router as trading_router
+        from bottleneck_hunter.web.trading_api import set_store as trading_set_store
 
         app = FastAPI()
         app.include_router(router, prefix="/api/decision")

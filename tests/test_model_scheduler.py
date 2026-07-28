@@ -104,8 +104,8 @@ def test_validate_output(text, ok):
 
 # ── /model-assignments 端点契约 ────────────────────────
 def test_model_assignments_endpoint_contract(tmp_path, monkeypatch):
-    from bottleneck_hunter.watchlist.store import WatchlistStore
     import bottleneck_hunter.web.decision_api as D
+    from bottleneck_hunter.watchlist.store import WatchlistStore
 
     D.set_store(WatchlistStore(str(tmp_path / "t.db")))
     # 注入：L2_strategic 有手填矩阵配置（factory 自建默认 store，故 monkeypatch 其读取函数）
@@ -128,9 +128,10 @@ def test_model_assignments_endpoint_contract(tmp_path, monkeypatch):
 
 def _patch_assignments(monkeypatch, manual_role, manual_provider, picks_for_role):
     """给 _build_assignments 注入：某角色有手填配置 + get_models_for_role 返回指定 picks。"""
+    import tempfile
+
     import bottleneck_hunter.web.decision_api as D
     from bottleneck_hunter.watchlist.store import WatchlistStore
-    import tempfile
     D.set_store(WatchlistStore(str(tempfile.mkdtemp() + "/t.db")))
 
     def fake_load(role, uid):

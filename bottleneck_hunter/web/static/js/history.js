@@ -3,6 +3,7 @@
  */
 
 import { showView } from './app.js';
+import { toast } from './utils/toast.js';
 import { fmtBJ } from './wizard-state.js';
 import {
   renderChain, renderBottlenecks, renderSuppliers,
@@ -160,7 +161,7 @@ async function loadAnalysis(id) {
     showView('screen');
 
   } catch (err) {
-    alert(`加载分析失败: ${err.message}`);
+    toast(`加载分析失败: ${err.message}`);
   }
 }
 
@@ -173,7 +174,7 @@ async function deleteAnalysis(id) {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     fetchHistory(); // 刷新列表
   } catch (err) {
-    alert(`删除失败: ${err.message}`);
+    toast(`删除失败: ${err.message}`);
   }
 }
 

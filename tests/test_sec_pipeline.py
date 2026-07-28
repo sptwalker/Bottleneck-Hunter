@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bottleneck_hunter.watchlist.sec_pipeline import (
-    _load_cik_map,
-    _get_cik,
-    _fetch_filings,
-    _parse_insider_trades_from_filings,
-    _fetch_one,
-    fetch_sec_batch,
     _CIK_CACHE,
+    _fetch_filings,
+    _fetch_one,
+    _get_cik,
+    _load_cik_map,
+    _parse_insider_trades_from_filings,
+    fetch_sec_batch,
 )
 
 
@@ -227,7 +227,7 @@ class TestParseInsiderTrades:
             t1 = await _parse_insider_trades_from_filings("0000320193", "AAPL", filings)
             t2 = await _parse_insider_trades_from_filings("0000320193", "AAPL", filings)
         assert t1[0]["id"] == t2[0]["id"]
-        expected = hashlib.md5("AAPL:insider:abc:0".encode()).hexdigest()[:12]
+        expected = hashlib.md5(b"AAPL:insider:abc:0").hexdigest()[:12]
         assert t1[0]["id"] == expected
 
 

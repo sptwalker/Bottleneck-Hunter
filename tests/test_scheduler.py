@@ -4,8 +4,7 @@
 APScheduler 为可选依赖，未安装时自动跳过。
 """
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -13,7 +12,7 @@ from bottleneck_hunter.watchlist.store import WatchlistStore
 
 # APScheduler 可能未安装 — 标记跳过条件
 try:
-    import apscheduler
+    import apscheduler  # noqa: F401  仅探测可用性
     _HAS_APSCHEDULER = True
 except ImportError:
     _HAS_APSCHEDULER = False
@@ -62,9 +61,9 @@ class TestSchedulerInit:
     async def test_init_creates_all_jobs(self, store):
         """init_scheduler 后应注册 _JOB_SPECS 全部任务 + oplog_prune 维护任务。"""
         from bottleneck_hunter.watchlist.scheduler import (
+            _JOB_SPECS,
             get_job_statuses,
             init_scheduler,
-            _JOB_SPECS,
         )
 
         scheduler = init_scheduler(store)
@@ -87,10 +86,10 @@ class TestSchedulerInit:
     async def test_shutdown_cleans_up(self, store):
         """shutdown_scheduler 后 get_job_statuses 应返回空列表。"""
         from bottleneck_hunter.watchlist.scheduler import (
+            _JOB_SPECS,
             get_job_statuses,
             init_scheduler,
             shutdown_scheduler,
-            _JOB_SPECS,
         )
 
         scheduler = init_scheduler(store)
@@ -212,6 +211,7 @@ class TestManualRefreshMarketScope:
 
     async def test_a_stock_refresh_skips_sec(self, store):
         import json as _json
+
         from bottleneck_hunter.watchlist.scheduler import run_manual_refresh
         steps = []
         with patch("bottleneck_hunter.watchlist.price_pipeline.fetch_price_batch",
@@ -231,6 +231,7 @@ class TestManualRefreshMarketScope:
 
     async def test_us_stock_refresh_runs_sec(self, store):
         import json as _json
+
         from bottleneck_hunter.watchlist.scheduler import run_manual_refresh
         steps = []
         with patch("bottleneck_hunter.watchlist.price_pipeline.fetch_price_batch",

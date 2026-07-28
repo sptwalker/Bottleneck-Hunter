@@ -3,6 +3,7 @@
  */
 
 import { renderDAG, renderBottleneckBars, renderRadar, renderCompareRadar, renderMiniRadar, renderDetailRadar, renderAiScoreBar } from './charts.js';
+import { toast } from './utils/toast.js';
 import { collectCvModels, DEFAULT_MODELS, ensureProvidersLoaded } from './panel.js';
 
 /* ── Helpers ──────────────────────────────────────────── */
@@ -218,7 +219,7 @@ async function _retryFailedBottlenecks() {
 
   const provider = document.getElementById('bn-retry-provider')?.value;
   const model = document.getElementById('bn-retry-model')?.value;
-  if (!provider || !model) { alert('请选择备选引擎和模型'); return; }
+  if (!provider || !model) { toast('请选择备选引擎和模型'); return; }
 
   const retryBtn = document.getElementById('btn-bn-retry');
   const bar = document.getElementById('bn-retry-bar');
@@ -1052,7 +1053,7 @@ function _getCvModelsConfig() {
 export async function refreshCrossValidation() {
   const scorecards = window.appState.results?.supplier_eval;
   if (!scorecards || scorecards.length === 0) {
-    alert('没有可验证的供应商数据，请先运行分析');
+    toast('没有可验证的供应商数据，请先运行分析');
     return;
   }
 
@@ -1230,7 +1231,7 @@ async function saveCvResults() {
       if (btn) btn.querySelector('span').textContent = '保存结论';
     }, 2000);
   } catch (err) {
-    alert(`保存失败: ${err.message}`);
+    toast(`保存失败: ${err.message}`);
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1435,7 +1436,7 @@ function _closeReanalyzeModal() {
 export async function refreshSuppliers() {
   const bottlenecks = window.appState.results?.bottleneck;
   if (!bottlenecks || bottlenecks.length === 0) {
-    alert('没有瓶颈数据，请先运行分析');
+    toast('没有瓶颈数据，请先运行分析');
     return;
   }
 
@@ -1444,16 +1445,7 @@ export async function refreshSuppliers() {
 }
 
 function _showToast(msg, duration = 2500) {
-  let el = document.getElementById('bh-toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'bh-toast';
-    el.className = 'toast';
-    document.body.appendChild(el);
-  }
-  el.textContent = msg;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), duration);
+  toast(msg, 'success', duration);
 }
 
 function _setSkeleton(id) {

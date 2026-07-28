@@ -322,7 +322,8 @@ def _overwrite_guard(wl_store, account, acct_id, as_of_date, incoming_total, inc
 
 def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
                           cash_total_usd: float = 0.0,
-                          account_total_usd: float | None = None) -> dict:
+                          account_total_usd: float | None = None,
+                          loan_total_usd: float | None = None) -> dict:
     """把某快照日的规范 positions 投影到 sim_*，供决策引擎消费。
 
     先把旧 sim 快照冻结进 vip_reports(kind='import_snapshot')作溯源锚（M2），再清零重建。
@@ -333,6 +334,12 @@ def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
     """
     account = wl_store.get_sim_account(account_ref=account_ref)
     acct_id = account["id"]
+
+    # 贷款是账户级元数据（结单口径已用融资/负债），与持仓时效无关：只要本次结单带了贷款字段就落库，
+    # 不受下面「空快照 / 陈旧覆盖」两道持仓护栏拦截（否则花旗这类"贷款在月结单、最新持仓在另一份导出"
+    # 的账户，贷款会因月结单被陈旧护栏拦掉而永远写不进）。position_report 不含该字段 → 传 None → 不覆盖。
+    if loan_total_usd is not None:
+        wl_store.update_sim_account(account_ref=account_ref, loan_balance=round(loan_total_usd, 2))
 
     # 取规范层最新快照
     rows, selected = _latest_positions(wl_store, as_of_date, account_ref)
@@ -398,6 +405,13 @@ def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
     except Exception:  # noqa: BLE001
         import logging
         logging.getLogger(__name__).warning("结算单校准失败 (acct=%s)", account_ref, exc_info=True)
+    # C-4 轻量归因：确定性 diff 旧 sim 持仓 vs 本次导入，写「推断·非确认」备忘（独立 try，绝不带崩导入）
+    try:
+        from bottleneck_hunter.vip import attribution
+        attribution.run_attribution(wl_store, account_ref, old_positions, rows)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning("归因复盘失败 (acct=%s)", account_ref, exc_info=True)
     return {"account_id": acct_id, "n_positions": n,
             "total_equity": round(total_equity, 2),
             "cash_balance": round(cash_total_usd or 0.0, 2),
@@ -514,7 +528,7 @@ def _overview_totals(rows: list[dict]) -> dict:
 
 
 def build_account_overview(wl_store, *, account_ref: str = "") -> dict:
-    summary = build_portfolio_summary(wl_store, account_ref=account_ref)
+    summary = build_account_summary(wl_store, account_ref=account_ref)
     rows = list_transactions(wl_store, account_ref=account_ref, limit=10000)
     return {
         **summary,
@@ -529,7 +543,6 @@ def _canonical_cost_map(wl_store, account_ref: str) -> dict[str, dict]:
     返回 {symbol: {avg_cost, cost_basis, unrealized_pnl, as_of_date}}。无成本(结单未含)则值为 0/None。
     """
     rows, selected = _latest_positions(wl_store, "", account_ref)  # 复用"胜出快照"选择逻辑
-    as_of = selected.get("created_at", "") or ""
     conn = wl_store._connect()
     try:
         where = ["p.quantity != 0"]
@@ -590,7 +603,7 @@ def build_account_dossier(wl_store, *, account_ref: str = "") -> dict:
     返回结构见函数末 return。
     """
     account_ref = (account_ref or "").strip()
-    summary = build_portfolio_summary(wl_store, account_ref=account_ref)      # sim：真实权益/现金/持仓
+    summary = build_account_summary(wl_store, account_ref=account_ref)      # sim：真实权益/现金/持仓
     cost_map = _canonical_cost_map(wl_store, account_ref)                     # 规范层：成本/盈亏
 
     # 逐仓富化成本/盈亏（以 sim 持仓为准，成本从规范层按 symbol 贴合）
@@ -689,16 +702,19 @@ def build_total_overview(wl_store) -> dict:
     accounts: list[dict] = []
     holdings: list[dict] = []
     total_equity = cash_balance = top5 = 0.0
+    total_loan = 0.0
     n_holdings = 0
     for ref in refs:
-        summary = build_portfolio_summary(wl_store, account_ref=ref)
+        summary = build_account_summary(wl_store, account_ref=ref)
         meta = account_meta.get(ref, {})
         account_total = summary.get("total_equity", 0.0) or 0.0
         account_cash = summary.get("cash_balance", 0.0) or 0.0
         account_n_holdings = summary.get("n_holdings", 0) or 0
+        account_loan = summary.get("loan_balance", 0.0) or 0.0
         total_equity += account_total
         cash_balance += account_cash
         n_holdings += account_n_holdings
+        total_loan += account_loan
         for item in summary.get("holdings", []):
             holdings.append({**item, "account_ref": ref})
         accounts.append({
@@ -708,6 +724,7 @@ def build_total_overview(wl_store) -> dict:
             "account_kind": meta.get("account_kind", "broker"),
             "total_equity": round(account_total, 2),
             "cash_balance": round(account_cash, 2),
+            "loan_balance": round(account_loan, 2),
             "n_holdings": account_n_holdings,
         })
     holdings.sort(key=lambda x: x.get("market_value", 0), reverse=True)
@@ -721,7 +738,7 @@ def build_total_overview(wl_store) -> dict:
     return {
         "total_equity": round(total_equity, 2),
         "cash_balance": round(cash_balance, 2),
-        "total_loan_limit": None,
+        "total_loan": round(total_loan, 2),
         "n_accounts": len(accounts),
         "n_holdings": n_holdings,
         "accounts": accounts,
@@ -930,8 +947,13 @@ def missing_data_report(wl_store, *, account_ref: str = "") -> list[dict]:
 
 # ── P5: 报告 —— sim_* → 组合摘要 →（LLM 叙事，M1 可选）→ 落库 ──────────
 
-def build_portfolio_summary(wl_store, *, account_ref: str = "") -> dict:
+def build_account_summary(wl_store, *, account_ref: str = "") -> dict:
     """从 sim_* 汇总组合结构（不调 LLM）：总权益、现金、持仓明细、集中度 Top5。供报告与 number_guard facts。"""
+    # 硬守卫：VIP 端永不用空 ref。空 ref 会经 get_sim_account("") 越界读并【懒建】决策中心自有
+    # 模拟盘(account_ref='')、预置 10 万/100 万本金 → 把幻影组合当"真实持仓"喂给 dossier/总览/LLM。
+    # 见 memory dc_sim_account_decoupled。跨账户聚合走 build_total_overview/value_series(scope=all)，不经此函数。
+    if not (account_ref or "").strip():
+        raise ValueError("account_ref_required: VIP 账户视图须指定具体子账户，请先选择账户或上传月结单")
     account = wl_store.get_sim_account(account_ref=account_ref)
     positions = sorted(wl_store.get_sim_positions(account["id"]),
                        key=lambda p: p.get("market_value", 0), reverse=True)
@@ -943,6 +965,7 @@ def build_portfolio_summary(wl_store, *, account_ref: str = "") -> dict:
     top5 = sum(p["weight_pct"] for p in holdings[:5])
     return {"total_equity": round(total, 2), "cash_balance": round(cash, 2),
             "n_holdings": len(holdings),
+            "loan_balance": round(account.get("loan_balance", 0) or 0, 2),
             "holdings": holdings, "top5_concentration_pct": round(top5, 1),
             "account_ref": account.get("account_ref", account_ref or "")}
 
@@ -1056,7 +1079,7 @@ async def generate_vip_report_ai(wl_store, *, period: str = "",
                                  account_ref: str = "") -> dict:
     """异步：组合摘要 → vip_advisor 分层叙事 → number_guard → 落库。M1 报告的 AI 增强入口。"""
     from bottleneck_hunter.vip import mandate as _mandate
-    summary = build_portfolio_summary(wl_store, account_ref=account_ref)
+    summary = build_account_summary(wl_store, account_ref=account_ref)
     mandate_text = _mandate.format_mandate_for_prompt(wl_store, account_ref=account_ref)
     nar = await generate_advisor_narrative(summary, user_id=user_id, budget=budget, mandate_text=mandate_text)
     return generate_vip_report(
@@ -1078,7 +1101,7 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
     """
     import hashlib
 
-    summary = build_portfolio_summary(wl_store, account_ref=account_ref)
+    summary = build_account_summary(wl_store, account_ref=account_ref)
     facts = json.dumps(summary, ensure_ascii=False, default=str)
 
     unverified = []
@@ -1089,6 +1112,11 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
 
     report_md = render_report_md(summary, narrative, period,
                                  derivatives_md=render_derivative_summary(derivative_terms or []))
+    # F1：AI 报告挂"顾问可信度"角标——读回本模型 vip_advisor 历史校准(G5 复盘写入)，透明呈现。
+    # 放 number_guard 之后，'0.83x' 不进防伪扫描；纯数据报告(无模型)不挂。
+    if model_provider and model_name:
+        from bottleneck_hunter.vip.advisory import advisor_calibration
+        report_md += f"\n\n> 顾问可信度：{advisor_calibration(wl_store, model_provider, model_name)['note']}\n"
 
     rid = uuid.uuid4().hex[:12]
     with wl_store._write_conn() as conn:

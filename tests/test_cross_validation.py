@@ -1,13 +1,12 @@
 """Tests for CrossValidator — 多模型交叉验证。"""
 
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from bottleneck_hunter.chain.cross_validation import CrossValidator
 from bottleneck_hunter.chain.models import (
-    CrossValidationReport,
-    ModelValidation,
     SupplierInfo,
     SupplierScorecard,
 )

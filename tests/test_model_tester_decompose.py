@@ -8,7 +8,9 @@ import asyncio
 
 import bottleneck_hunter.web.model_tester as mt
 from bottleneck_hunter.web.model_tester import _score_chain_decompose
-from bottleneck_hunter.web.model_tester import test_chain_decompose as run_chain_decompose  # 别名：避免 pytest 误采集为用例
+from bottleneck_hunter.web.model_tester import (
+    test_chain_decompose as run_chain_decompose,  # 别名：避免 pytest 误采集为用例
+)
 
 
 def _node(name, code="002371"):

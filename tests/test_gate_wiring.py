@@ -3,8 +3,8 @@ import types
 
 import pytest
 
-from bottleneck_hunter.watchlist import institutional_pipeline as ip
 from bottleneck_hunter.data_provider import yf_gate
+from bottleneck_hunter.watchlist import institutional_pipeline as ip
 
 
 @pytest.fixture

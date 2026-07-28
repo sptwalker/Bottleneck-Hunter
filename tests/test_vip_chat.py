@@ -3,9 +3,9 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from bottleneck_hunter.watchlist.store import WatchlistStore
-from bottleneck_hunter.vip import portfolio, chat, derivatives
+from bottleneck_hunter.vip import chat, derivatives, portfolio
 from bottleneck_hunter.vip.ingest import BrokerStatement, EquityHolding, ReconResult
+from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
 def _stmt():

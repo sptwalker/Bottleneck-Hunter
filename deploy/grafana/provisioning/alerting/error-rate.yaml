@@ -1,0 +1,75 @@
+# Grafana 统一告警（自动装载）—— 无人值守的"应用 ERROR 激增"告警。
+# 规则：近 5 分钟 bottleneck-hunter 容器 ERROR 日志条数 > 阈值(默认 10) → 触发 → 推送到 webhook。
+#
+# 通知渠道（webhook）由 .env 的 ALERT_WEBHOOK_URL 决定；未设置时落到 example.invalid
+# 占位（告警仍会触发、在 Grafana 内可见，仅投递失败，无害），设了即生效。
+# webhook 通用：飞书/钉钉/企业微信机器人、Slack incoming webhook、自建接收端均可。
+# 想改用邮件：把下方 contactPoints 的 type 换成 email、settings 填 addresses，
+#   并在 grafana 服务补 SMTP 环境变量（GF_SMTP_ENABLED/HOST/USER/PASSWORD/FROM_ADDRESS）。
+# 想改阈值：改 rules[0].data[1].model.conditions[0].evaluator.params 的数字。
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: bh-alert
+    receivers:
+      - uid: bh-alert-webhook
+        type: webhook
+        settings:
+          url: ${ALERT_WEBHOOK_URL}
+          httpMethod: POST
+
+policies:
+  - orgId: 1
+    receiver: bh-alert
+    group_by: ["alertname"]
+    # 首次等待/重复间隔：ERROR 激增属突发，给 30s 聚合，4h 内不刷屏重复
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+
+groups:
+  - orgId: 1
+    name: bh-app-errors
+    folder: BottleneckHunter
+    interval: 1m
+    rules:
+      - uid: bh-error-rate
+        title: 应用 ERROR 日志激增（近5分钟）
+        # 每分钟评估：取近 5 分钟 ERROR 计数，>10 即告警
+        condition: C
+        for: 0m
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              refId: A
+              datasource:
+                type: loki
+                uid: loki
+              # 大小写不敏感匹配 "error"（Python logging 级别行 + 常见异常文本）
+              expr: 'sum(count_over_time({container="bottleneck-hunter"} |~ `(?i)error` [5m]))'
+              queryType: instant
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [10]
+        # 无匹配日志 = 没有 ERROR = 健康，不应报"无数据"告警
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "近5分钟 bottleneck-hunter 应用 ERROR 日志 {{ $values.A.Value }} 条，已超阈值 10"

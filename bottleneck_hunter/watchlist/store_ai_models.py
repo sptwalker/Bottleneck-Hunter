@@ -36,7 +36,7 @@ class _AIModelsMixin:
 
     def record_outcome(self, ticker: str, prediction_type: str,
                        outcome_value: str, outcome_date: str = "",
-                       score_delta: float = 0.0) -> int:
+                       score_delta: float = 0.0, prediction_date: str = "") -> int:
         now = _now_iso()
         odate = outcome_date or now[:10]
         with self._write_lock:
@@ -48,6 +48,9 @@ class _AIModelsMixin:
                        WHERE ticker = ? AND prediction_type = ? AND is_correct = -1"""
                 params = (outcome_value, odate, is_correct, score_delta, now,
                           ticker, prediction_type)
+                if prediction_date:  # C-3：按预测日逐条结算，避免把同标的多周期 pending 一次性结成同一 outcome
+                    q += " AND prediction_date = ?"
+                    params = params + (prediction_date,)
                 if self._user_id:
                     q += " AND user_id = ?"
                     params = params + (self._user_id,)
@@ -56,6 +59,33 @@ class _AIModelsMixin:
                 return cur.rowcount
             finally:
                 conn.close()
+
+
+    def list_pending_predictions(self, *, role_context: str = "",
+                                 prediction_types: list[str] | None = None,
+                                 market: str = "", limit: int = 500) -> list[dict]:
+        """读取未结算(is_correct=-1)的预测明细，供复盘逐条结算（C-3）。
+        按 user_id(_user_filter) 隔离；可按 role_context / prediction_type / market 收敛。"""
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM model_accuracy WHERE is_correct = -1"
+            p: tuple = ()
+            if role_context:
+                q += " AND role_context = ?"
+                p = p + (role_context,)
+            if prediction_types:
+                ph = ",".join("?" * len(prediction_types))
+                q += f" AND prediction_type IN ({ph})"
+                p = p + tuple(prediction_types)
+            if market:
+                q += " AND market = ?"
+                p = p + (market,)
+            q += " ORDER BY prediction_date ASC, created_at ASC LIMIT ?"
+            p = p + (int(limit),)
+            q, p = self._user_filter(q, p)
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
 
 
     def get_model_accuracy(self, provider: str, model: str,

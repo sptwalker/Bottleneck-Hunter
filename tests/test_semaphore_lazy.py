@@ -5,7 +5,6 @@ import importlib
 
 import pytest
 
-
 PIPELINE_MODULES = [
     "bottleneck_hunter.watchlist.price_pipeline",
     "bottleneck_hunter.watchlist.news_pipeline",
@@ -46,7 +45,6 @@ class TestSemaphoreLazy:
 
     async def test_concurrent_limit(self):
         """验证 Semaphore 限制并发数。"""
-        from bottleneck_hunter.watchlist.price_pipeline import _get_sem, _SEM
         import bottleneck_hunter.watchlist.price_pipeline as pp
 
         pp._SEM = None

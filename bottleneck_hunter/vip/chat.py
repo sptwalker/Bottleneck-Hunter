@@ -11,8 +11,8 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from bottleneck_hunter.vip import compliance, number_guard
-from bottleneck_hunter.vip import portfolio, derivatives, mandate as _mandate
+from bottleneck_hunter.vip import compliance, number_guard, portfolio
+from bottleneck_hunter.vip import mandate as _mandate
 from bottleneck_hunter.watchlist.macro_consultation import _iter_tokens
 
 
@@ -45,7 +45,7 @@ def append_chat_message(wl_store, session_id: str, role: str, content: str,
             + wl_store._user_insert_params() + wl_store._market_insert_params(),
         )
         conn.execute(
-            f"UPDATE chat_sessions SET updated_at=?, msg_count=msg_count+1 WHERE id=?",
+            "UPDATE chat_sessions SET updated_at=?, msg_count=msg_count+1 WHERE id=?",
             (_now_iso(), session_id),
         )
     return mid
@@ -84,16 +84,11 @@ def get_chat_messages(wl_store, session_id: str, limit: int = 100, account_ref: 
 
 def _build_facts(wl_store, account_ref: str = "") -> tuple[str, dict]:
     account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
-    summary = portfolio.build_portfolio_summary(wl_store, account_ref=account_ref)
-    terms = derivatives.list_derivative_terms(wl_store, account_ref=account_ref)
-    facts = {
-        "portfolio": summary,
-        "derivatives": [
-            {"family": t.product_family, "underlying": t.underlying_symbol, "ccy": t.currency, "terms": t.terms}
-            for t in terms
-        ],
-    }
-    return json.dumps(facts, ensure_ascii=False, default=str), summary
+    # G4：chat 用完整档案（build_account_dossier）而非单薄的 build_account_summary——
+    # 档案含逐仓成本/未实现盈亏、衍生品敞口、流水聚合、价源覆盖、数据新鲜度，与顾问/荐新同一事实源，
+    # 用户问"我这仓亏多少/敲出风险/现金够不够"才答得出。dossier 已内含衍生品敞口，不再单独抓一次。
+    dossier = portfolio.build_account_dossier(wl_store, account_ref=account_ref)
+    return json.dumps(dossier, ensure_ascii=False, default=str), dossier
 
 
 _PROMPT = """你是私人财务AI顾问。请只依据下面的真实 facts 回答，不得编造金额/占比/股数。
@@ -133,7 +128,7 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
     else:
         sid = create_chat_session(wl_store, title=question[:40], account_ref=account_ref)
     append_chat_message(wl_store, sid, "user", question, account_ref=account_ref)
-    facts_text, summary = _build_facts(wl_store, account_ref=account_ref)
+    facts_text, dossier = _build_facts(wl_store, account_ref=account_ref)
     mandate_text = _mandate.format_mandate_for_prompt(wl_store, account_ref=account_ref)
     prompt = _PROMPT.format(facts=facts_text, mandate=mandate_text, question=question)
     # number_guard 白名单语料并入纲领文本：纲领里的收益目标/回撤%是用户设定的合法数字，避免误标"未核到"
@@ -154,9 +149,10 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
         full = msg
         yield {"event": "chunk", "data": json.dumps({"text": msg}, ensure_ascii=False)}
 
-    # 数字白名单校验（与报告同一公共件）
-    unverified = [r["token"] for r in number_guard.verify_numbers(full, guard_corpus) if r["status"] == "unverified"]
-    final_text = number_guard.annotate_unverified(full, guard_corpus)
+    # 数字白名单校验（与报告同一公共件）；非美元衍生条款价不得核验叙述里的美元断言（跨币防误核）
+    fv = number_guard.foreign_derivative_values(dossier)
+    unverified = [r["token"] for r in number_guard.verify_numbers(full, guard_corpus, fv) if r["status"] == "unverified"]
+    final_text = number_guard.annotate_unverified(full, guard_corpus, foreign_values=fv)
     final_text = compliance.with_disclaimer(final_text)
     append_chat_message(wl_store, sid, "assistant", final_text, provider=provider, model=model, fail_reason=fail_reason, account_ref=account_ref)
     if budget is not None:
@@ -165,4 +161,4 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
         except Exception:
             pass
     yield {"event": "done", "data": json.dumps({"session_id": sid, "provider": provider, "model": model,
-                                                      "unverified": unverified, "summary": summary}, ensure_ascii=False)}
+                                                      "unverified": unverified, "dossier": dossier}, ensure_ascii=False)}

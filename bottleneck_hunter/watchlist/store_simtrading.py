@@ -137,7 +137,7 @@ class _SimTradingMixin:
 
 
     def set_default_vip_account(self, account_ref: str = "") -> dict:
-        account = self.ensure_vip_account(account_ref)
+        self.ensure_vip_account(account_ref)
         with self._write_conn() as conn:
             q, p = self._filtered("UPDATE vip_accounts SET is_default=0")
             conn.execute(q, p)
@@ -315,7 +315,8 @@ class _SimTradingMixin:
 
     def update_sim_account(self, account_ref: str = "", **fields) -> bool:
         allowed = {"current_capital", "cash_balance", "total_equity", "total_return_pct",
-                   "total_trades", "win_rate", "name", "initial_capital", "peak_equity"}
+                   "total_trades", "win_rate", "name", "initial_capital", "peak_equity",
+                   "loan_balance"}
         parts, vals = [], []
         for k, v in fields.items():
             if k in allowed:
@@ -538,7 +539,7 @@ class _SimTradingMixin:
     def create_vip_import(self, *, file_name: str, file_hash: str, file_type: str,
                           detected_kind: str, status: str, summary: str = "",
                           key_metrics: dict | None = None, reason: str = "", account_ref: str = "") -> str:
-        """写一条导入历史。同 (user, market, account_ref, file_hash) 已存在则返回原 id。"""
+        """写一条导入历史。同 (user, market, account_ref, file_hash) 已存在则更新为最新结果（upsert）。"""
         import json
         account_ref = self.resolve_vip_account_ref(account_ref)
         conn = self._connect()
@@ -548,10 +549,18 @@ class _SimTradingMixin:
                 (account_ref, file_hash),
             )
             row = conn.execute(q, p).fetchone()
-            if row:
-                return row["id"]
         finally:
             conn.close()
+        if row:
+            # 修好解析后重导：旧行可能停在 rejected/unparseable，须刷新为最新结果，否则历史长期误导
+            with self._write_conn() as conn:
+                conn.execute(
+                    "UPDATE vip_imports SET file_name=?, file_type=?, detected_kind=?, status=?, "
+                    "summary=?, key_metrics_json=?, reason=?, created_at=? WHERE id=?",
+                    (file_name, file_type, detected_kind, status, summary,
+                     json.dumps(key_metrics or {}, ensure_ascii=False), reason, _now_iso(), row["id"]),
+                )
+            return row["id"]
         iid = uuid.uuid4().hex[:12]
         with self._write_conn() as conn:
             conn.execute(

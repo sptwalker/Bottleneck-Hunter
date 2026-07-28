@@ -113,7 +113,7 @@ class AnalysisStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def for_user(self, user_id: str) -> "AnalysisStore":
+    def for_user(self, user_id: str) -> AnalysisStore:
         """返回绑定指定用户的 store 克隆。"""
         clone = object.__new__(AnalysisStore)
         clone.db_path = self.db_path

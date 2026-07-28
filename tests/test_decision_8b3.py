@@ -1,6 +1,7 @@
 """Tests for 8B.3 — 交易执行引擎、持仓 CRUD、API 交易闭环"""
 
 import pytest
+
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
@@ -219,10 +220,13 @@ class TestDecisionAPITrade:
     @pytest.fixture
     def client(self, store):
         s, *_ = store
-        from fastapi.testclient import TestClient
-        from bottleneck_hunter.web.decision_api import router as dc_router, set_store as dc_set_store
-        from bottleneck_hunter.web.trading_api import router as tr_router, set_store as tr_set_store
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from bottleneck_hunter.web.decision_api import router as dc_router
+        from bottleneck_hunter.web.decision_api import set_store as dc_set_store
+        from bottleneck_hunter.web.trading_api import router as tr_router
+        from bottleneck_hunter.web.trading_api import set_store as tr_set_store
 
         app = FastAPI()
         # confirm/reject 在 decision_api；account/equity-history 在 trading_api，两者都挂

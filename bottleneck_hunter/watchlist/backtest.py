@@ -1,6 +1,10 @@
 """回测引擎 — 回放历史模拟交易，生成净值曲线和绩效指标。
 
 使用 sim_trades + market_snapshots 数据回放指定时间段内的交易活动。
+
+注意（口径诚实）：这是「模拟盘复盘」——仅回放系统自身已发生的模拟交易，
+反映纸面持仓的历史表现，**不是**信号重放式的策略历史 alpha 验证
+（无 out-of-sample、无参数敏感性）。真回测框架另行排期，勿把此处指标当策略历史收益。
 """
 
 from __future__ import annotations
@@ -8,7 +12,6 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from bottleneck_hunter.watchlist.performance import (
     PerformanceMetrics,
