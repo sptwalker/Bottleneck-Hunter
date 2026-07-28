@@ -239,7 +239,6 @@ class WatchlistStore(
             self._migrate_vip_reports_account_ref(conn)
             self._migrate_chat_sessions_account_ref(conn)
             self._migrate_chat_messages_account_ref(conn)
-            self._migrate_purge_empty_account_ref(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -515,34 +514,9 @@ class WatchlistStore(
         return (row["sql"] or "") if row else ""
 
 
-    def _migrate_purge_empty_account_ref(self, conn) -> None:
-        """一次性清理历史 hidden default / 空 account_ref 残留数据（用户已授权删除旧数据）。
-
-        默认账户模型已废弃：account_ref='' 不再是合法业务账户。此迁移把所有空 ref
-        业务数据连同其 sim_account 挂的 sim_* 一并删除，避免删默认账户后留下孤儿脏数据。
-        """
-        # 先删空 ref sim_account 下挂的 sim_* 明细（按 account_id 关联）
-        try:
-            orphan_ids = [
-                r["id"] for r in conn.execute(
-                    "SELECT id FROM sim_account WHERE COALESCE(account_ref,'')=''"
-                ).fetchall()
-            ]
-            if orphan_ids:
-                ph = ",".join("?" for _ in orphan_ids)
-                for tbl in ("sim_positions", "sim_trades", "sim_fund_ops"):
-                    conn.execute(f"DELETE FROM {tbl} WHERE account_id IN ({ph})", orphan_ids)
-        except sqlite3.OperationalError as e:
-            logger.warning("清理空 ref sim_* 明细失败（可忽略）: %s", e)
-
-        # 再删所有按 account_ref 归属的业务表里的空 ref 行
-        for tbl in ("sim_account", "positions", "transactions", "vip_reports",
-                    "vip_derivative_terms", "vip_imports", "chat_sessions",
-                    "chat_messages", "vip_accounts"):
-            try:
-                conn.execute(f"DELETE FROM {tbl} WHERE COALESCE(account_ref,'')=''")
-            except sqlite3.OperationalError as e:
-                logger.warning("清理 %s 空 ref 失败（可忽略）: %s", tbl, e)
+    # ponytail: 已删除 _migrate_purge_empty_account_ref —— 它无条件删所有 account_ref='' 的
+    # sim_account+sim_*，而决策中心正用 account_ref='' 作合法业务键，每次重启都清空决策模拟账户
+    # （见 memory project_dc_sim_account_decoupled_from_vip）。移除迁移即根因修复。
 
 
     def _migrate_sim_account_per_account(self, conn) -> None:
