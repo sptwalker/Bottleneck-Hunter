@@ -17,10 +17,28 @@ DEFAULT_CONSTRAINTS = {
     "max_single_position_pct": 25.0,
     "max_sector_pct": 40.0,
     "min_cash_pct": 15.0,
-    "max_single_trade_usd": 50000.0,
+    "max_single_trade_usd": 50000.0,   # 绝对值地板（美股小账户）；大账户/他币种由 _pct 自适应接管
+    "max_single_trade_pct": 50.0,      # 单笔上限占总权益比；纯美元绝对值对 A股(人民币本金)会缩数十倍误拦
     "max_daily_turnover_pct": 30.0,
     "max_portfolio_beta": 1.1,
 }
+
+
+def _effective_single_trade_cap(c: dict, total_equity: float) -> float:
+    """单笔金额上限（账户本币口径）：绝对值(美股小账户地板)与权益百分比(大账户/他币种自适应)取较大者。
+
+    纯绝对美元值跨市场不缩放：对 A股(人民币本金 500 万)只剩 ~1%，远严于 25% 单股/30% 日额度，会把正常
+    委托整批误拦。引入百分比口径后，美股 50000/100000=50% 行为不变，A股 50%×¥500万=¥250万自动适配。
+    """
+    abs_cap = c.get("max_single_trade_usd", 50000.0) or 0.0
+    pct = c.get("max_single_trade_pct", 0.0) or 0.0
+    pct_cap = pct / 100 * total_equity if total_equity and total_equity > 0 else 0.0
+    return max(abs_cap, pct_cap)
+
+
+def _ccy_symbol(market: str) -> str:
+    """按市场返回金额显示币种符号（约束消息用，避免对 A股/港股仍标 $）。"""
+    return {"a_stock": "¥", "hk_stock": "HK$"}.get((market or "").strip(), "$")
 
 # 账户级熔断阈值（组合层保护，独立于单股止损）。
 # 触发后禁止新开/加仓（只允许减仓/清仓），防止在急跌中继续加码。
@@ -73,6 +91,7 @@ REGIME_CONSTRAINTS = {
         "max_sector_pct": 50.0,
         "min_cash_pct": 10.0,
         "max_single_trade_usd": 60000.0,
+        "max_single_trade_pct": 60.0,
         "max_daily_turnover_pct": 40.0,
         "max_portfolio_beta": 1.3,
     },
@@ -81,6 +100,7 @@ REGIME_CONSTRAINTS = {
         "max_sector_pct": 40.0,
         "min_cash_pct": 15.0,
         "max_single_trade_usd": 50000.0,
+        "max_single_trade_pct": 50.0,
         "max_daily_turnover_pct": 30.0,
         "max_portfolio_beta": 1.1,
     },
@@ -89,6 +109,7 @@ REGIME_CONSTRAINTS = {
         "max_sector_pct": 30.0,
         "min_cash_pct": 25.0,
         "max_single_trade_usd": 40000.0,
+        "max_single_trade_pct": 40.0,
         "max_daily_turnover_pct": 20.0,
         "max_portfolio_beta": 0.9,
     },
@@ -199,23 +220,24 @@ def validate_execution_plan(
 
     total_equity = account.get("total_equity") or account.get("current_capital", 100000)
     cash = _num(account.get("cash_balance", 0))
+    sym = _ccy_symbol(market)
 
-    # 1. 单笔交易金额上限（绝对值口径，不依赖权益）
-    max_trade = c["max_single_trade_usd"]
+    # 1. 单笔交易金额上限（账户本币口径：绝对值地板与权益百分比取较大者，自动适配币种/本金）
+    max_trade = _effective_single_trade_cap(c, total_equity)
     if trade_amount > max_trade:
         result.add_violation(
-            f"单笔金额 ${trade_amount:.0f} 超过上限 ${max_trade:.0f}"
+            f"单笔金额 {sym}{trade_amount:.0f} 超过上限 {sym}{max_trade:.0f}"
         )
     elif worst_amount > max_trade:
         result.add_warning(
-            f"最坏滑点下单笔金额 ${worst_amount:.0f} 可能触及上限 ${max_trade:.0f}"
+            f"最坏滑点下单笔金额 {sym}{worst_amount:.0f} 可能触及上限 {sym}{max_trade:.0f}"
         )
 
     if action in ("buy", "add"):
         # 0. 现金充足性硬校验（绝对值口径，equity<=0 时也拦得住「买入超余额」）(F1)
         if worst_amount > cash:
             result.add_violation(
-                f"现金不足：最坏滑点下需 ${worst_amount:.0f}，可用现金仅 ${cash:.0f}")
+                f"现金不足：最坏滑点下需 {sym}{worst_amount:.0f}，可用现金仅 {sym}{cash:.0f}")
 
         # 以下 %口径检查需正权益基准；权益<=0(未初始化)时跳过，避免除零并 fail-open(F1)
         if total_equity > 0:
@@ -269,7 +291,7 @@ def validate_execution_plan(
         max_turnover = c["max_daily_turnover_pct"] / 100 * total_equity
         if trade_amount > max_turnover:
             result.add_violation(
-                f"单笔 ${trade_amount:.0f} 超过日交易额度 ${max_turnover:.0f}"
+                f"单笔 {sym}{trade_amount:.0f} 超过日交易额度 {sym}{max_turnover:.0f}"
             )
 
     if not result.valid:
@@ -327,7 +349,7 @@ def max_compliant_shares(
 
     # 各约束允许的最大金额
     limits = [
-        c["max_single_trade_usd"],                                   # 单笔上限
+        _effective_single_trade_cap(c, total_equity),                # 单笔上限(绝对值/权益百分比取大)
         c["max_single_position_pct"] / 100 * total_equity - existing_value,  # 单股占比
         cash - c["min_cash_pct"] / 100 * total_equity,               # 现金下限
         c["max_daily_turnover_pct"] / 100 * total_equity,            # 日额度

@@ -287,11 +287,11 @@ class _SimTradingMixin:
                 # 绝不预置模拟本金——否则未导入就凭空显示 10 万/100 万权益。
                 name, capital = default_name or target_ref, 0.0
             else:
-                # 决策中心自有模拟组合：预置模拟本金（美股 10 万 / A股 100 万）。
+                # 决策中心自有模拟组合：预置模拟本金（美股 100 万美元 / A股 500 万人民币）。
                 if market == "a_stock":
-                    name, capital = "A股模拟账户", 1000000.0
+                    name, capital = "A股模拟账户", 5000000.0
                 else:
-                    name, capital = "美股模拟账户", 100000.0
+                    name, capital = "美股模拟账户", 1000000.0
                 name = (default_name or name).strip()
             aid = uuid.uuid4().hex[:12]
             now = _now_iso()

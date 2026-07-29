@@ -1131,19 +1131,23 @@ def _format_recent_trades(recent_map: dict[str, list[dict]]) -> str:
 
 def _format_constraints_for_prompt(constraints: dict, alloc_bounds: dict,
                                    account: dict, positions: list[dict],
-                                   cash_balance: float) -> str:
+                                   cash_balance: float, market: str = "us_stock") -> str:
     """把【当前真实生效】的动态约束 + 组合现状余量格式化成 prompt 文本。
 
     关键：LLM 必须看到 regime 收紧后的实际上限（如熊市单股 5%），否则会按
     prompt 写死的宽松值（20%）生成计划，随后被 L4 硬校验大批拦截，用户无操作可执行。
+    单笔上限与校验器同源(_effective_single_trade_cap)，币种符号按 market，避免对 A股仍标 $。
     """
+    from bottleneck_hunter.watchlist.constraint_validator import _ccy_symbol, _effective_single_trade_cap
     equity = account.get("total_equity") or account.get("current_capital", 100000) or 100000
+    sym = _ccy_symbol(market)
+    single_cap = _effective_single_trade_cap(constraints, equity)
     lines = [
-        f"- 可用现金：${cash_balance:,.0f}（占总资产 {cash_balance / equity * 100:.1f}%）",
+        f"- 可用现金：{sym}{cash_balance:,.0f}（占总资产 {cash_balance / equity * 100:.1f}%）",
         f"- 单股持仓上限：总资产 {constraints.get('max_single_position_pct', 25):.0f}%",
         f"- 单板块上限：总资产 {constraints.get('max_sector_pct', 40):.0f}%",
         f"- 最低现金保留：总资产 {constraints.get('min_cash_pct', 15):.0f}%",
-        f"- 单笔金额上限：${constraints.get('max_single_trade_usd', 50000):,.0f}",
+        f"- 单笔金额上限：{sym}{single_cap:,.0f}",
         f"- 单日交易规模上限：总资产 {constraints.get('max_daily_turnover_pct', 30):.0f}%",
     ]
     if constraints.get("max_portfolio_beta"):
@@ -1323,7 +1327,7 @@ async def run_execution_plans(
             constraints["max_portfolio_beta"] = min(
                 constraints.get("max_portfolio_beta", 10), alloc_bounds["beta_limit"])
         constraints_text = _format_constraints_for_prompt(
-            constraints, alloc_bounds, account, positions, cash_balance)
+            constraints, alloc_bounds, account, positions, cash_balance, market)
 
         prompt = (prompt_template
                   .replace("{market_context}", market_ctx)

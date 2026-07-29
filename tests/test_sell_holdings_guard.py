@@ -94,6 +94,27 @@ def test_sell_missing_price_still_checks_holdings():
     assert not r.valid and any("无持仓" in v for v in r.violations)
 
 
+# ── 单笔额度币种自适应（A股¥100万账户不被美元绝对值误拦）──────────────
+def test_single_trade_cap_scales_by_equity_for_astock():
+    """A股¥100万账户买入 ~20% 单股(¥20万)应通过：单笔上限=max($5万绝对, 50%×权益)=¥50万。
+
+    旧逻辑单笔恒 $50000，对¥100万账户只剩 5%，正常委托整批误拦（外网 A股 L4 全失败根因）。
+    """
+    from bottleneck_hunter.watchlist.constraint_validator import get_constraints_for_appetite
+    c = get_constraints_for_appetite("balanced")  # 默认档，含 max_single_trade_pct
+    acct = {"total_equity": 1_000_000, "cash_balance": 1_000_000}
+    plan = {"action": "buy", "ticker": "600519", "shares": 2000, "target_price": 100.0,
+            "sector": "白酒", "result_json": {"market": "a_stock"}}  # ¥20万，占比 20%<25%
+    r = validate_execution_plan(plan, acct, positions=[], constraints=c)
+    assert r.valid, r.violations
+    # 美股¥10万账户行为不变：单笔上限仍 $50000，买 $60000 超限
+    us = {"total_equity": 100_000, "cash_balance": 100_000}
+    plan_us = {"action": "buy", "ticker": "AAPL", "shares": 600, "target_price": 100.0,
+               "result_json": {"market": "us_stock"}}  # $60000 > $50000
+    r_us = validate_execution_plan(plan_us, us, positions=[], constraints=c)
+    assert not r_us.valid and any("单笔金额" in v for v in r_us.violations)
+
+
 if __name__ == "__main__":
     import sys
     mod = sys.modules[__name__]
