@@ -107,8 +107,12 @@
   gap: 12px;
 }
 
+/* 卡片数≠6 的网格（如风险仪表盘 4 项）单独指定列数，避免固定 6 列留大片空白 */
+.st-stat-grid-4 { grid-template-columns: repeat(4, 1fr); }
+
 @media (max-width: 900px) {
   .st-stat-grid { grid-template-columns: repeat(3, 1fr); }
+  .st-stat-grid-4 { grid-template-columns: repeat(2, 1fr); }  /* 4 卡两行两列，不留孤卡 */
 }
 
 @media (max-width: 520px) {

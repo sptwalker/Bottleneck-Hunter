@@ -178,6 +178,8 @@ async function loadEquityChart(days) {
         itemStyle: { color },
       }],
     });
+    // 视图刚从 display:none 切出时容器可能还是 0 宽，下一帧按真实尺寸重算，免得首次切入空白需手动刷新
+    requestAnimationFrame(() => stState.chartEquity?.resize());
   } catch (e) {
     console.error('权益曲线渲染失败:', e);
     container.innerHTML = '<p class="st-empty-hint">加载失败</p>';

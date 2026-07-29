@@ -101,6 +101,7 @@ class DerivativeTerm:
     terms: dict
     source_file: str = ""
     id: str = ""               # 落库记录 id（loader 回填；新抽取时为空）
+    lot_key: str = ""          # 同标的多笔头寸判别键（strike:maturity 等）；单条留空
 
 
 # ── 文本抽取 helper ───────────────────────────────────────────────────────
@@ -169,7 +170,9 @@ def extract_accumulator_terms(pdf_source, pdf_password: str = "") -> DerivativeT
         termination = _f(r"Termination Date\s*:?\s*The earlier of \(a\)\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
         tenor = _days_between(trade_date, termination) if trade_date and termination else 365
         ds = _ff(r"Daily Number of Shares \(DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or 0.0
-        stds = _ff(r"Step-up Daily Number of Shares \(St-DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or 0.0
+        # St-DS 缺抽时不可留 0：低于行权价时 payoff 用 days*St-DS 累股，St-DS=0 会把下行累购/亏损算成 0，
+        # 恰在最危险方向静默低估风险。日累购市场惯例 step-up=2×DS → 缺失回落 2*DS(偏保守)。ponytail: D3 校准旋钮。
+        stds = _ff(r"Step-up Daily Number of Shares \(St-DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or (2.0 * ds)
         max_nom = _ff(r"Maximum Number of Nominal Shares\s*:?\s*([\d,]+(?:\.\d+)?)", text) or 0.0
         afp = _ff(r":\s*USD\s*([\d,]+\.\d+)\s*\(\s*70\.75% of Initial Price\s*\)", text) or _ff(r"AFP\)?\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
         initial = _ff(r"Initial Price\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
@@ -239,7 +242,7 @@ def extract_mli_terms(pdf_source, pdf_password: str = "") -> DerivativeTerm:
         ki_price = _ff(r"Knock-in Price\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
         strike_price = _ff(r"Strike Price.*?USD\s*([\d,]+\.\d+)", text) or 0.0
 
-    ki_pct = _ff(r"Knock-in Price\s*\((\d+(?:\.\d+)?)% of Initial Price\)", text) or (ki_price / initial if initial else 0.0)
+    ki_pct = _ff(r"Knock-in Price\s*\((\d+(?:\.\d+)?)% of Initial Price\)", text) or ((ki_price / initial) * 100 if initial else 0.0)
     strike_pct = _ff(r"Strike Price,?\s*K\s*\((\d+(?:\.\d+)?)% of Initial Price\)", text) or ((strike_price / initial) * 100 if initial else 100.0)
     max_up = _ff(r"maximum return of\s*(\d+(?:\.\d+)?)%", text) or _ff(r"Maximum Appreciation.*?(\d+(?:\.\d+)?)%", text) or 50.0
     pf = _ff(r"Participation Factor \(PF\)\s*:?\s*(\d+(?:\.\d+)?)%", text) or 100.0
@@ -331,22 +334,26 @@ def classify_pdf(pdf_source, pdf_password: str = "") -> str:
         return "accumulator"
     if re.search(r"Daily(?: Securities)? Decumulator", text, re.I):
         return "decumulator"
-    if "Market Linked Instrument" in text or "Leverage Call Spread" in text or "Daily Callable Fixed Coupon" in text:
+    # FCN(固定息票票据/每日可赎回)不是 MLI Booster；单列 fcn，避免 reextract 误走 extract_mli_terms 贴错家族。
+    if "Daily Callable Fixed Coupon" in text or "Fixed Coupon Note" in text:
+        return "fcn"
+    if "Market Linked Instrument" in text or "Leverage Call Spread" in text:
         return "mli"
     return "other"
 
 
 def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: str, source_file_hash: str,
-                         broker: str, rationale_ref: str = "", account_ref: str = "") -> str:
+                         broker: str, rationale_ref: str = "", account_ref: str = "", lot_key: str = "") -> str:
     import json
     import uuid
     account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
+    lot_key = (lot_key or "").strip()  # 同标的多笔头寸判别键；条款单单条路径留空(行为不变)
     # 幂等：重复上传同一文件保留原 id/created_at（不做 OR REPLACE 重建）
     conn = wl_store._connect()
     try:
         q, p = wl_store._filtered(
-            "SELECT id FROM vip_derivative_terms WHERE account_ref=? AND source_file_hash=? AND product_family=? AND underlying_symbol=?",
-            (account_ref, source_file_hash, term.product_family, term.underlying_symbol))
+            "SELECT id FROM vip_derivative_terms WHERE account_ref=? AND source_file_hash=? AND product_family=? AND underlying_symbol=? AND lot_key=?",
+            (account_ref, source_file_hash, term.product_family, term.underlying_symbol, lot_key))
         row = conn.execute(q, p).fetchone()
         if row:
             return row["id"]
@@ -357,10 +364,10 @@ def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: st
         conn.execute(
             f"""INSERT INTO vip_derivative_terms
                (id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
-                currency, terms_json, rationale_ref, account_ref, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
-               VALUES (?,?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
+                currency, terms_json, rationale_ref, account_ref, lot_key, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
             (did, source_file_name, source_file_hash, broker, term.product_family, term.underlying_symbol,
-             term.currency, json.dumps(term.terms, ensure_ascii=False), rationale_ref, account_ref, datetime.now().isoformat())
+             term.currency, json.dumps(term.terms, ensure_ascii=False), rationale_ref, account_ref, lot_key, datetime.now().isoformat())
             + wl_store._user_insert_params() + wl_store._market_insert_params(),
         )
     return did
@@ -399,7 +406,8 @@ def list_derivative_terms(wl_store, limit: int = 50, account_ref: str = "") -> l
         t = json.loads(r["terms_json"] or "{}")
         out.append(DerivativeTerm(product_family=r["product_family"], underlying_symbol=r["underlying_symbol"],
                                   currency=r["currency"], tenor_days=int(t.get("tenor_days", 0) or 0),
-                                  terms=t, source_file=r["source_file_name"], id=r["id"]))
+                                  terms=t, source_file=r["source_file_name"], id=r["id"],
+                                  lot_key=r.get("lot_key", "") or ""))
     return out
 
 
@@ -448,7 +456,28 @@ def demo() -> None:
                           "max_upside_pct": 0.5, "strike_pct_initial": 1.0, "knock_in_pct_initial": 0.5379})
     assert payoff_mli_booster(mli, 130.0, knock_in_happened=False)["return_pct"] > 0
     assert payoff_mli_booster(mli, 80.0, knock_in_happened=True)["return_pct"] < 0
+    _lot_key_selfcheck()
     print("derivatives demo 通过")
+
+
+def _lot_key_selfcheck() -> None:
+    """lot_key 去重键自检(临时 DB)：同 (file,family,symbol) 不同 lot_key → 两条；同 lot_key → 幂等一条。
+    这正是野村双 ORCL accumulator 此前被静默折叠的根因。"""
+    import tempfile
+    from pathlib import Path
+
+    from bottleneck_hunter.watchlist.store import WatchlistStore
+    with tempfile.TemporaryDirectory() as d:
+        wl = WatchlistStore(db_path=Path(d) / "t.db").for_user("u1").for_market("us_stock")
+        t1 = DerivativeTerm("equity_accumulator", "ORCL", "USD", 100, {"market_value_usd": -3245.18})
+        t2 = DerivativeTerm("equity_accumulator", "ORCL", "USD", 110, {"market_value_usd": -1100.0})
+        common = dict(source_file_name="s.pdf", source_file_hash="h", broker="nomura", account_ref="acc")
+        id_a = save_derivative_term(wl, t1, lot_key="244.0263:161026", **common)
+        id_b = save_derivative_term(wl, t2, lot_key="230.5649:261026", **common)
+        id_a2 = save_derivative_term(wl, t1, lot_key="244.0263:161026", **common)  # 重放 → 幂等
+        assert id_a != id_b, "不同 lot_key 折叠成一条（去重键回归）"
+        assert id_a == id_a2, "同 lot_key 未幂等"
+        assert len(list_derivative_terms(wl, account_ref="acc")) == 2, "双 ORCL 应两条"
 
 
 if __name__ == "__main__":

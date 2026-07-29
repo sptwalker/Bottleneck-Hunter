@@ -598,3 +598,23 @@ class _SimTradingMixin:
         return rows
 
 
+    def count_vip_imports_by_account(self) -> dict[str, dict]:
+        """各账户累计导入文件数 + 按类型(detected_kind)细分。一次聚合避免 N+1。
+        返回 {account_ref: {"total": n, "by_type": {kind: n}}}。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT COALESCE(account_ref,'') ref, COALESCE(detected_kind, file_type, '未知') kind, COUNT(*) n "
+                "FROM vip_imports GROUP BY ref, kind"
+            )
+            rows = conn.execute(q, p).fetchall()
+        finally:
+            conn.close()
+        out: dict[str, dict] = {}
+        for r in rows:
+            slot = out.setdefault(r["ref"], {"total": 0, "by_type": {}})
+            slot["total"] += r["n"]
+            slot["by_type"][r["kind"]] = slot["by_type"].get(r["kind"], 0) + r["n"]
+        return out
+
+

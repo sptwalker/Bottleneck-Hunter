@@ -610,10 +610,11 @@ CREATE TABLE IF NOT EXISTS vip_derivative_terms (
     terms_json        TEXT DEFAULT '{}',
     rationale_ref     TEXT DEFAULT '',
     account_ref       TEXT DEFAULT '',
+    lot_key           TEXT DEFAULT '',   -- 同标的多笔头寸判别键(strike:maturity)，避免野村双 ORCL 折叠
     created_at        TEXT NOT NULL,
     user_id           TEXT DEFAULT '',
     market            TEXT DEFAULT 'us_stock',
-    UNIQUE(user_id, market, account_ref, source_file_hash, product_family, underlying_symbol)
+    UNIQUE(user_id, market, account_ref, source_file_hash, product_family, underlying_symbol, lot_key)
 );
 CREATE TABLE IF NOT EXISTS vip_imports (
     id              TEXT PRIMARY KEY,
@@ -1245,6 +1246,7 @@ MIGRATIONS: list[str] = [
         kind              TEXT NOT NULL DEFAULT 'stock_mtm'
                           CHECK(kind IN ('stock_mtm','deriv_accum','deriv_settle')),
         ticker            TEXT DEFAULT '',
+        lot_key           TEXT DEFAULT '',       -- 同标的多笔头寸判别键，避免野村双 ORCL 逐日推算折叠
         quantity          REAL DEFAULT 0,
         market_value_base REAL DEFAULT 0,
         unrealized_pnl    REAL DEFAULT 0,
@@ -1258,7 +1260,7 @@ MIGRATIONS: list[str] = [
         updated_at        TEXT DEFAULT '',
         user_id           TEXT DEFAULT '',
         market            TEXT DEFAULT 'us_stock',
-        UNIQUE(user_id, market, account_ref, as_of_date, kind, ticker)
+        UNIQUE(user_id, market, account_ref, as_of_date, kind, ticker, lot_key)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_vip_proj_acct ON vip_projections(user_id, market, account_ref, as_of_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_vip_proj_status ON vip_projections(user_id, market, status)",

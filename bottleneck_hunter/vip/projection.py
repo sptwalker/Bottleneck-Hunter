@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from bottleneck_hunter.watchlist.store_base import _now_iso
+from bottleneck_hunter.watchlist.store_base import _today
 
 # 美股 ticker 形态：字母打头、全字母/点/连字符、≤6 字符（GOOGL/BRK.B/ARM…）。
 # 港股数字码(700)、欧洲 ISIN(IE000CLB8RT6) 天然被排除——前者无字母、后者含数字超长。
@@ -89,7 +89,7 @@ def project_stock_mtm(wl_store, account_ref: str, as_of: str = "") -> dict:
     """
     account_ref = (account_ref or "").strip()
     rows, snap_date = _latest_snapshot_positions(wl_store, account_ref)
-    as_of = (as_of or "").strip() or _now_iso()[:10]
+    as_of = (as_of or "").strip() or _today()
 
     if not rows:
         return {"account_ref": account_ref, "n": 0, "n_priced": 0, "n_skipped": 0,
@@ -102,6 +102,20 @@ def project_stock_mtm(wl_store, account_ref: str, as_of: str = "") -> dict:
         symbol = r["symbol"]
         # 仅重估普通股票；衍生品在 P2 用条款逐日重放，这里跳过
         if (r.get("instrument_type") or "").lower() not in ("", "stock", "equity", "etf"):
+            continue
+        # positions.fx_rate 现未回填(恒 1.0)，故只对美元基准币持仓做逐日重估；非美元持仓沿用结算单
+        # 权威 USD 市值，避免用本币收盘价×1.0 写出约 FX 倍高估。FX 逐日重估待 P2/P3。ponytail: 币种守卫。
+        ccy = (r.get("currency") or "USD").strip().upper()
+        if ccy and ccy != "USD":
+            n_skipped += 1
+            skipped_syms.append(symbol)
+            wl_store.log_account_event(
+                account_ref=account_ref, event_type="projection",
+                title=f"{symbol} 非美元({ccy})持仓，跳过逐日重估",
+                detail="每日重估暂仅支持美元基准币持仓；本币持仓沿用结算单权威美元市值，待 FX 逐日重估(P2)。",
+                severity="info",
+                payload={"ticker": symbol, "reason": "non_usd", "currency": ccy},
+            )
             continue
         snap = wl_store.get_latest_snapshot(symbol)
         close = (snap or {}).get("close")
@@ -185,7 +199,7 @@ def project_derivative_accrual(wl_store, account_ref: str, as_of: str = "") -> d
     from bottleneck_hunter.vip.derivatives import list_derivative_terms, payoff_accumulator
 
     account_ref = (account_ref or "").strip()
-    as_of = (as_of or "").strip() or _now_iso()[:10]
+    as_of = (as_of or "").strip() or _today()
     terms = list_derivative_terms(wl_store, account_ref=account_ref, limit=200)
     n_priced = n_skipped = 0
     for term in terms:
@@ -230,18 +244,28 @@ def project_derivative_accrual(wl_store, account_ref: str, as_of: str = "") -> d
 
         expiry_iso = _to_iso(t.get("expiry_date", ""))
         end_iso = min(as_of, expiry_iso) if expiry_iso else as_of
-        try:
-            days_observed = max(0, int(np.busday_count(trade_iso, end_iso)))
-        except (ValueError, TypeError):
-            days_observed = 0
         settled = bool(expiry_iso) and as_of >= expiry_iso
+
+        # 起始日以来的收盘价序列，一次取用于「实际交易日计数 + KO 判定」（避免两次查库）
+        snaps = wl_store.get_snapshots(sym, days=400)
+        obs_dates = [d for d in ((row.get("date") or "") for row in snaps) if trade_iso <= d <= end_iso]
+        # days_observed：优先用真实交易日数（行情层节假日天然缺行、且不分美股/港股日历）；
+        # 仅当行情覆盖到窗口末端(最大日≥end)才可信，否则回落 busday_count（去周末、但含节假日略高估）。ponytail: PROJ6。
+        max_snap = max((row.get("date") or "") for row in snaps) if snaps else ""
+        if obs_dates and max_snap >= end_iso:
+            days_observed = len(obs_dates)
+        else:
+            try:
+                days_observed = max(0, int(np.busday_count(trade_iso, end_iso)))
+            except (ValueError, TypeError):
+                days_observed = 0
 
         # KO 判定：起始日以来收盘价是否触碰敲出线
         ko = t.get("knock_out_price") or 0.0
         ko_dir = t.get("knock_out_direction", "up_and_out")
         knock_out = False
         if ko:
-            for row in wl_store.get_snapshots(sym, days=400):
+            for row in snaps:
                 if (row.get("date") or "") < trade_iso:
                     continue
                 c = row.get("close")
@@ -266,7 +290,7 @@ def project_derivative_accrual(wl_store, account_ref: str, as_of: str = "") -> d
 
         kind = "deriv_settle" if settled else "deriv_accum"
         wl_store.upsert_projection(
-            account_ref=account_ref, as_of_date=as_of, kind=kind, ticker=sym,
+            account_ref=account_ref, as_of_date=as_of, kind=kind, ticker=sym, lot_key=term.lot_key,
             quantity=shares, market_value_base=mtm, unrealized_pnl=pnl,
             basis={"family": fam, "trade_date": trade_iso, "expiry_date": expiry_iso,
                    "days_observed": days_observed, "knock_out": knock_out, "final_price": final_price,

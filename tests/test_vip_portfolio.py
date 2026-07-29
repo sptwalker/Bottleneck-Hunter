@@ -101,6 +101,73 @@ def test_materialize_to_sim(wl):
 
 
 
+def test_reparse_same_doc_to_empty_purges_stale_positions(wl):
+    """重解析即权威：同一 doc 先出 3 仓，修好解析器后再解析为空 → 该 doc 旧持仓行必须被清。
+    复现 CMBI 早期把 FCN 当股票落库、holdings 变空后幽灵行永久粘住的 bug。"""
+    doc = _create_doc("monthly_statement", content_hash="reparse-1")
+    portfolio.normalize_statement(wl, _stmt(), source_doc_id=doc, account_ref="A1")
+
+    def _count():
+        conn = wl._connect()
+        try:
+            return conn.execute("SELECT COUNT(*) c FROM positions WHERE source_doc_id = ?", (doc,)).fetchone()["c"]
+        finally:
+            conn.close()
+
+    assert _count() == 3
+
+    # 修好的解析器把这些头寸移出 holdings（如 FCN 归衍生品栏）→ 同 doc 重解析成空持仓
+    empty = BrokerStatement(content_hash="reparse-1", period_end="2026-06-30",
+                            holdings=[], cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=0, holdings_total_usd=0.0,
+                                              statement_equities_total_usd=None, delta_usd=None,
+                                              status="no_statement_total"))
+    portfolio.normalize_statement(wl, empty, source_doc_id=doc, account_ref="A1")
+    assert _count() == 0  # 幽灵行随重解析清除
+
+
+def test_overview_folds_structured_product_into_holdings(wl):
+    """结构性产品(FCN)走衍生品栏、不进 sim_positions，但市值已计入总权益 → 概览 holdings/
+    n_holdings/集中度必须含它，否则出现'总权益百万、持仓 0 只、饼图空、集中度 0%'的错位(招银账户症状)。"""
+    from bottleneck_hunter.vip import derivatives as drv
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm
+
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, as_of_date="2026-06-30", account_ref="A1",
+                                    cash_total_usd=stmt.total_cash_usd)
+    base = portfolio.build_account_overview(wl, account_ref="A1")
+
+    drv.save_derivative_term(
+        wl, DerivativeTerm(product_family="equity_fcn", underlying_symbol="NVDA", currency="USD",
+                           tenor_days=0,
+                           terms={"market_value_usd": 250000.0, "notional": 260000.0, "maturity": "2026-09-04"}),
+        source_file_name="cmbi.pdf", source_file_hash="fcn-hash", broker="cmbi", account_ref="A1")
+
+    ov = portfolio.build_account_overview(wl, account_ref="A1")
+    assert ov["n_holdings"] == base["n_holdings"] + 1
+    fcn = [h for h in ov["holdings"] if h.get("kind") == "derivative"]
+    assert len(fcn) == 1 and abs(fcn[0]["market_value"] - 250000.0) < 1.0
+
+    # 无 MTM 的衍生品条款(仅有条款结构的 accumulator)不并入——其价值本就不在总权益里
+    drv.save_derivative_term(
+        wl, DerivativeTerm(product_family="equity_accumulator", underlying_symbol="TSLA", currency="USD",
+                           tenor_days=0, terms={"afp": 300.0}),
+        source_file_name="cmbi.pdf", source_file_hash="acc-hash", broker="cmbi", account_ref="A1")
+    ov2 = portfolio.build_account_overview(wl, account_ref="A1")
+    assert ov2["n_holdings"] == ov["n_holdings"]
+
+    # 多期结单：同一笔 FCN(同 lot_key)再落一期(不同文件 hash) → 仍算 1 只、MTM 不翻倍
+    drv.save_derivative_term(
+        wl, DerivativeTerm(product_family="equity_fcn", underlying_symbol="NVDA", currency="USD",
+                           tenor_days=0,
+                           terms={"market_value_usd": 260000.0, "notional": 260000.0, "maturity": "2026-09-04"}),
+        source_file_name="cmbi2.pdf", source_file_hash="fcn-hash-2", broker="cmbi", account_ref="A1")
+    ov3 = portfolio.build_account_overview(wl, account_ref="A1")
+    fcn3 = [h for h in ov3["holdings"] if h.get("kind") == "derivative"]
+    assert len(fcn3) == 1 and abs(fcn3[0]["market_value"] - 260000.0) < 1.0  # 取最新一期，不叠加
+
+
 def test_position_report_beats_monthly_statement_same_day(wl):
     monthly_doc = _create_doc("monthly_statement", content_hash="m1")
     pr_doc = _create_doc("position_report", content_hash="p1")

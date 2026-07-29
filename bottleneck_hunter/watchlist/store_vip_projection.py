@@ -23,6 +23,7 @@ class _VipProjectionMixin:
         as_of_date: str,
         kind: str = "stock_mtm",
         ticker: str = "",
+        lot_key: str = "",
         quantity: float = 0.0,
         market_value_base: float = 0.0,
         unrealized_pnl: float = 0.0,
@@ -30,15 +31,20 @@ class _VipProjectionMixin:
         status: str = "pending",
         confidence: float = 0.5,
     ) -> str:
-        """写入/覆盖单条推算记录（按 UNIQUE 键 upsert），返回记录 id。"""
+        """写入/覆盖单条推算记录（按 UNIQUE 键 upsert），返回记录 id。
+
+        lot_key：同标的多笔头寸判别键（衍生品多 lot）；股票留空。并入去重键，避免野村双 ORCL 折叠。
+        """
         account_ref = (account_ref or "").strip()
+        lot_key = (lot_key or "").strip()
         now = _now_iso()
         basis_json = json.dumps(basis or {}, ensure_ascii=False)
         with self._write_conn() as conn:
-            # 先查是否已存在同键记录（用户+市场+账户+日期+种类+标的）
+            # 先查是否已存在同键记录（用户+市场+账户+日期+种类+标的+lot）
             q, p = self._filtered(
-                "SELECT id FROM vip_projections WHERE account_ref=? AND as_of_date=? AND kind=? AND ticker=? LIMIT 1",
-                (account_ref, as_of_date, kind, ticker),
+                "SELECT id FROM vip_projections WHERE account_ref=? AND as_of_date=? AND kind=? "
+                "AND ticker=? AND lot_key=? LIMIT 1",
+                (account_ref, as_of_date, kind, ticker, lot_key),
             )
             row = conn.execute(q, p).fetchone()
             if row:
@@ -55,12 +61,12 @@ class _VipProjectionMixin:
             pid = uuid.uuid4().hex[:12]
             conn.execute(
                 f"""INSERT INTO vip_projections
-                   (id, account_ref, as_of_date, kind, ticker, quantity, market_value_base,
+                   (id, account_ref, as_of_date, kind, ticker, lot_key, quantity, market_value_base,
                     unrealized_pnl, basis_json, status, confidence, created_at, updated_at
                     {self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?
                     {self._user_insert_vals()}{self._market_insert_vals()})""",
-                (pid, account_ref, as_of_date, kind, ticker, quantity, market_value_base,
+                (pid, account_ref, as_of_date, kind, ticker, lot_key, quantity, market_value_base,
                  unrealized_pnl, basis_json, status, confidence, now, now)
                 + self._user_insert_params() + self._market_insert_params(),
             )
@@ -116,12 +122,25 @@ class _VipProjectionMixin:
             conn.close()
 
     def latest_projection_map(self, account_ref: str = "") -> dict[str, dict]:
-        """返回该账户最近一日、每个标的的推算记录（ticker→row），供读时叠加。"""
+        """返回该账户最近一日、每个标的的推算记录（ticker→row），供读时叠加。
+
+        同标的多 lot（衍生品多笔）市值/浮盈累加，避免只见最后一条 lot。ponytail: 同 ticker 汇总。
+        """
         d = self.latest_projection_date(account_ref)
         if not d:
             return {}
         rows = self.list_projections(account_ref=account_ref, as_of_date=d)
-        return {r["ticker"]: r for r in rows}
+        out: dict[str, dict] = {}
+        for r in rows:
+            t = r["ticker"]
+            if t in out:  # 多 lot 同标的：累加市值/浮盈/数量，其余字段保留首条
+                o = out[t]
+                o["market_value_base"] = (o.get("market_value_base") or 0.0) + (r.get("market_value_base") or 0.0)
+                o["unrealized_pnl"] = (o.get("unrealized_pnl") or 0.0) + (r.get("unrealized_pnl") or 0.0)
+                o["quantity"] = (o.get("quantity") or 0.0) + (r.get("quantity") or 0.0)
+            else:
+                out[t] = dict(r)
+        return out
 
     def mark_projection_calibrated(
         self, projection_id: str, *, doc_id: str = "", diff_pct: float | None = None, flagged: bool = False

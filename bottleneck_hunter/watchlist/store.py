@@ -236,6 +236,7 @@ class WatchlistStore(
             self._migrate_sim_account_per_account(conn)
             self._migrate_vip_imports_account_ref(conn)
             self._migrate_vip_derivative_terms_account_ref(conn)
+            self._migrate_vip_projections_lot_key(conn)
             self._migrate_vip_reports_account_ref(conn)
             self._migrate_chat_sessions_account_ref(conn)
             self._migrate_chat_messages_account_ref(conn)
@@ -624,9 +625,11 @@ class WatchlistStore(
             if not cols:
                 return
             ddl = self._table_sql(conn, "vip_derivative_terms")
-            if "account_ref" in cols and "UNIQUE(user_id, market, account_ref, source_file_hash, product_family, underlying_symbol)" in ddl:
+            # 目标态：既按账户隔离，又含 lot_key（同标的多笔头寸判别）。两者齐备才跳过。
+            if "account_ref" in cols and "lot_key" in cols and "underlying_symbol, lot_key)" in ddl:
                 return
             account_ref_expr = "COALESCE(account_ref, '')" if "account_ref" in cols else "''"
+            lot_key_expr = "COALESCE(lot_key, '')" if "lot_key" in cols else "''"
             conn.execute("""
                 CREATE TABLE vip_derivative_terms_new (
                     id TEXT PRIMARY KEY,
@@ -639,19 +642,20 @@ class WatchlistStore(
                     terms_json TEXT DEFAULT '{}',
                     rationale_ref TEXT DEFAULT '',
                     account_ref TEXT DEFAULT '',
+                    lot_key TEXT DEFAULT '',
                     created_at TEXT NOT NULL,
                     user_id TEXT DEFAULT '',
                     market TEXT DEFAULT 'us_stock',
-                    UNIQUE(user_id, market, account_ref, source_file_hash, product_family, underlying_symbol)
+                    UNIQUE(user_id, market, account_ref, source_file_hash, product_family, underlying_symbol, lot_key)
                 )
             """)
             conn.execute(
                 f"""
                 INSERT OR IGNORE INTO vip_derivative_terms_new
                 (id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
-                 currency, terms_json, rationale_ref, account_ref, created_at, user_id, market)
+                 currency, terms_json, rationale_ref, account_ref, lot_key, created_at, user_id, market)
                 SELECT id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
-                       currency, terms_json, rationale_ref, {account_ref_expr}, created_at,
+                       currency, terms_json, rationale_ref, {account_ref_expr}, {lot_key_expr}, created_at,
                        COALESCE(user_id,''), COALESCE(market,'us_stock')
                   FROM vip_derivative_terms
                 """
@@ -661,6 +665,64 @@ class WatchlistStore(
             logger.info("vip_derivative_terms 已重建为按账户隔离")
         except sqlite3.OperationalError as e:
             logger.warning("vip_derivative_terms 多账户迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_vip_projections_lot_key(self, conn) -> None:
+        """给 vip_projections 加 lot_key 列并把 UNIQUE 纳入 lot_key（同标的多笔逐日推算不折叠）。"""
+        try:
+            cols = self._table_cols(conn, "vip_projections")
+            if not cols:
+                return
+            ddl = self._table_sql(conn, "vip_projections")
+            if "lot_key" in cols and "kind, ticker, lot_key)" in ddl:
+                return
+            lot_key_expr = "COALESCE(lot_key, '')" if "lot_key" in cols else "''"
+            conn.execute("""
+                CREATE TABLE vip_projections_new (
+                    id                TEXT PRIMARY KEY,
+                    account_ref       TEXT DEFAULT '',
+                    as_of_date        TEXT NOT NULL,
+                    kind              TEXT NOT NULL DEFAULT 'stock_mtm'
+                                      CHECK(kind IN ('stock_mtm','deriv_accum','deriv_settle')),
+                    ticker            TEXT DEFAULT '',
+                    lot_key           TEXT DEFAULT '',
+                    quantity          REAL DEFAULT 0,
+                    market_value_base REAL DEFAULT 0,
+                    unrealized_pnl    REAL DEFAULT 0,
+                    basis_json        TEXT DEFAULT '{}',
+                    status            TEXT NOT NULL DEFAULT 'pending'
+                                      CHECK(status IN ('pending','calibrated','flagged')),
+                    confidence        REAL DEFAULT 0.5 CHECK(confidence BETWEEN 0 AND 1),
+                    calibrated_by_doc_id TEXT DEFAULT '',
+                    calib_diff_pct    REAL,
+                    created_at        TEXT NOT NULL,
+                    updated_at        TEXT DEFAULT '',
+                    user_id           TEXT DEFAULT '',
+                    market            TEXT DEFAULT 'us_stock',
+                    UNIQUE(user_id, market, account_ref, as_of_date, kind, ticker, lot_key)
+                )
+            """)
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO vip_projections_new
+                (id, account_ref, as_of_date, kind, ticker, lot_key, quantity, market_value_base,
+                 unrealized_pnl, basis_json, status, confidence, calibrated_by_doc_id, calib_diff_pct,
+                 created_at, updated_at, user_id, market)
+                SELECT id, account_ref, as_of_date, kind, ticker, {lot_key_expr}, quantity, market_value_base,
+                       unrealized_pnl, basis_json, status, confidence, calibrated_by_doc_id, calib_diff_pct,
+                       created_at, COALESCE(updated_at,''), COALESCE(user_id,''), COALESCE(market,'us_stock')
+                  FROM vip_projections
+                """
+            )
+            conn.execute("DROP TABLE vip_projections")
+            conn.execute("ALTER TABLE vip_projections_new RENAME TO vip_projections")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_vip_proj_acct "
+                         "ON vip_projections(user_id, market, account_ref, as_of_date DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_vip_proj_status "
+                         "ON vip_projections(user_id, market, status)")
+            logger.info("vip_projections 已重建为含 lot_key")
+        except sqlite3.OperationalError as e:
+            logger.warning("vip_projections lot_key 迁移失败（可忽略）: %s", e)
 
 
     def _migrate_vip_reports_account_ref(self, conn) -> None:

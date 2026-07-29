@@ -296,14 +296,51 @@ def _statement_from_doc(user_id: str, doc_id: str):
         return None
 
 
-def _guarded_result(filename, kind, stmt, as_of_date, reason) -> ImportResult:
-    """materialize 触发误覆盖护栏（陈旧单/骤降误判）：数据已入库，但 sim live 快照保持不动。
-    状态仍为 imported（文件已落库/规范层留痕），summary 明确提示为防误覆盖已保留原快照。"""
+def _persist_derivative_terms(wl_store, stmt, filename, account_ref) -> int:
+    """把结单抽出的结构性产品/衍生品薄记录落 vip_derivative_terms（幂等，lot_key 判别同标的多笔）。
+    与 sim_positions 股票分栏——这些头寸不进模拟持仓。返回落库/命中条数。"""
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm, save_derivative_term
+    rows = getattr(stmt, "derivative_terms", None) or []
+    if not rows:
+        return 0
+    broker = getattr(stmt, "broker", "") or ""
+    file_hash = getattr(stmt, "content_hash", "") or ""
+    n = 0
+    for r in rows:
+        try:
+            term = DerivativeTerm(
+                product_family=r.get("product_family", ""),
+                underlying_symbol=r.get("underlying_symbol", ""),
+                currency=r.get("currency", "USD"),
+                tenor_days=int(r.get("tenor_days", 0) or 0),
+                terms=r.get("terms", {}) or {},
+                source_file=filename,
+            )
+            save_derivative_term(wl_store, term, source_file_name=filename, source_file_hash=file_hash,
+                                 broker=broker, account_ref=account_ref, lot_key=r.get("lot_key", ""))
+            n += 1
+        except Exception:  # noqa: BLE001 — 单条薄记录抽取残缺不该拖垮整单导入
+            continue
+    return n
+
+
+def _guarded_result(filename, kind, stmt, as_of_date, reason, n_deriv: int = 0, n_back: int = 0) -> ImportResult:
+    """materialize 触发误覆盖护栏：数据已入库，但 sim live 快照保持不动（状态仍 imported）。
+    按护栏原因分流文案——陈旧单是正常时效行为(账户已有更新快照)，不该报"数据异常"吓用户；
+    只有骤降误判(suspected_misparse)才真需人工核对是否解析残缺。"""
+    if reason.startswith("stale_snapshot"):
+        summary = "已入库；账户已有更新日期的持仓快照，本结单作历史留档，未回填实时仓位（正常）"
+    else:
+        summary = "已入库，但检测到总值/持仓骤降（疑似解析残缺），为防误覆盖已保留原账户快照，请人工核对"
+    if n_back:
+        summary += f"；已按成本回填 {n_back} 只持仓（现价颜色/未实现盈亏已更新）"
+    if n_deriv:
+        summary += f"；另已记录 {n_deriv} 笔结构性产品/衍生品"
     return ImportResult("imported", filename, "pdf", kind,
-                        summary="已入库，但检测到数据异常（快照较旧或总值/持仓骤降），为防误覆盖已保留原账户快照，请人工核对",
-                        reason=reason,
+                        summary=summary, reason=reason,
                         key_metrics={"period_end": stmt.period_end, "broker": stmt.broker,
-                                     "as_of_date": as_of_date})
+                                     "as_of_date": as_of_date, "n_derivatives": n_deriv,
+                                     "n_cost_backfilled": n_back})
 
 
 def _import_statement(raw, filename, user_id, wl_store, market, account_ref, password) -> ImportResult:
@@ -348,7 +385,8 @@ def _import_statement(raw, filename, user_id, wl_store, market, account_ref, pas
                                               account_ref=account_ref,
                                               cash_total_usd=stmt.total_cash_usd)
         if mat.get("guard_skipped"):
-            return _guarded_result(filename, "position_report", stmt, norm["as_of_date"], mat["guard_skipped"])
+            return _guarded_result(filename, "position_report", stmt, norm["as_of_date"], mat["guard_skipped"],
+                                   n_back=mat.get("n_cost_backfilled", 0))
         return ImportResult("imported", filename, "pdf", "position_report",
                             summary=f"当前持仓导出：{mat['n_positions']} 只持仓，期末 {stmt.period_end or '—'}",
                             key_metrics={"n_positions": mat["n_positions"], "period_end": stmt.period_end,
@@ -358,12 +396,18 @@ def _import_statement(raw, filename, user_id, wl_store, market, account_ref, pas
         return ImportResult("imported", filename, "pdf", "monthly_statement",
                             summary="月结单已入库，待人工复核", reason=res["status"],
                             key_metrics={"broker": stmt.broker, "period_end": stmt.period_end})
+    # 衍生品/结构性产品是账户级头寸，与股票快照时效无关（仿 materialize 里贷款的处理）：只要本月结单
+    # parsed_ok 就落库，绝不被下面「同期更高优先级快照 / 陈旧覆盖」两道 sim_positions 护栏拦掉——
+    # 否则花旗这类"最新持仓在另一份导出、衍生品只在月结单"的账户，衍生品/结构性产品永远进不了库。
+    # ponytail: 多份不同期月结单会各自留一份期末快照行（按 file_hash 幂等去重）；期级替换待需要时再做。
+    n_deriv = _persist_derivative_terms(wl_store, stmt, filename, account_ref)
+    deriv_hint = f"，另 {n_deriv} 笔结构性产品/衍生品" if n_deriv else ""
     norm = portfolio.normalize_statement(wl_store, stmt, source_doc_id=doc_id, account_ref=account_ref)
     if not norm.get("snapshot_applied", True):
         return ImportResult("imported", filename, "pdf", "monthly_statement",
-                            summary="月结单已入库，当前持仓保持更高优先级快照",
+                            summary=f"月结单已入库{deriv_hint}，当前持仓保持更高优先级快照",
                             key_metrics={"period_end": stmt.period_end, "broker": stmt.broker,
-                                         "as_of_date": norm["as_of_date"]})
+                                         "n_derivatives": n_deriv, "as_of_date": norm["as_of_date"]})
     nav = None
     broker_id = getattr(stmt, "broker", "")
     summary = getattr(stmt, "account_summary", {}) or {}
@@ -380,15 +424,42 @@ def _import_statement(raw, filename, user_id, wl_store, market, account_ref, pas
         nav = summary.get("total_value_usd")
         if not nav or nav <= 0:
             nav = None
+    elif broker_id == "citi":
+        # 花旗 Total Assets 是「总资产(gross)」锚，含结构性产品/衍生品市值，比"股票+现金"更完整；
+        # 但它未扣融资负债。野村(NAV)/招银(TOTAL VALUE)都是净值口径，故此处须减去融资负债对齐为净权益，
+        # 否则有保证金贷款的账户总权益会被高估一整笔贷款(样本约 +46%)。ponytail: Total Assets 为 gross。
+        nav = summary.get("total_assets_usd")
+        if not nav or nav <= 0:
+            nav = None
+        else:
+            loan = summary.get("loan_outstanding_usd") or 0.0
+            if 0 < loan < nav:
+                nav = round(nav - loan, 2)
+    # 结单本应带权威总额锚(NAV/TOTAL VALUE/Total Assets)，若抽取缺失或非正被回落 None，
+    # materialize 将改用「持仓+现金」估算总权益——这会漏掉结构性产品/衍生品市值。发生即记 warn 账户日志，
+    # 让顾问知道该期总权益是估算而非结单权威值(不静默)。ponytail: PROJ8 可见化。
+    _ANCHOR_KEY = {"nomura": "net_asset_value_usd", "cmbi": "total_value_usd", "citi": "total_assets_usd"}
+    if broker_id in _ANCHOR_KEY and nav is None:
+        try:
+            wl_store.log_account_event(
+                account_ref=account_ref, event_type="anomaly",
+                title="结单权威总额缺失，总权益改用「持仓+现金」估算",
+                detail=f"{broker_id} 结单未抽到有效 {_ANCHOR_KEY[broker_id]}（缺失或非正），"
+                       "本期总权益为估算值、可能不含结构性产品/衍生品市值，请以结单原件为准。",
+                severity="warn", payload={"broker": broker_id, "anchor_key": _ANCHOR_KEY[broker_id]})
+        except Exception:  # noqa: BLE001 — 日志失败不该拖垮导入
+            pass
     mat = portfolio.materialize_portfolio(wl_store, as_of_date=norm["as_of_date"],
                                           account_ref=account_ref,
                                           cash_total_usd=stmt.total_cash_usd, account_total_usd=nav,
                                           loan_total_usd=summary.get("loan_outstanding_usd"))
     if mat.get("guard_skipped"):
-        return _guarded_result(filename, "monthly_statement", stmt, norm["as_of_date"], mat["guard_skipped"])
+        return _guarded_result(filename, "monthly_statement", stmt, norm["as_of_date"],
+                               mat["guard_skipped"], n_deriv, n_back=mat.get("n_cost_backfilled", 0))
     return ImportResult("imported", filename, "pdf", "monthly_statement",
-                        summary=f"月结单：{mat['n_positions']} 只持仓，期末 {stmt.period_end or '—'}",
-                        key_metrics={"n_positions": mat["n_positions"], "period_end": stmt.period_end,
+                        summary=f"月结单：{mat['n_positions']} 只持仓{deriv_hint}，期末 {stmt.period_end or '—'}",
+                        key_metrics={"n_positions": mat["n_positions"], "n_derivatives": n_deriv,
+                                     "period_end": stmt.period_end,
                                      "broker": stmt.broker, "as_of_date": norm["as_of_date"]})
 
 

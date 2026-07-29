@@ -101,6 +101,9 @@ class BrokerStatement(BaseModel):
     account_summary: dict = {}      # 可选：完整账户层摘要（如 Nomura 的 NAV/负债/衍生品合计）
     transactions: list[StatementTransaction] = []
     recon: ReconResult
+    # 结构性产品/衍生品薄记录：解析器填充 dict（family/underlying/currency/tenor_days/terms/lot_key），
+    # 导入时转 DerivativeTerm 落 vip_derivative_terms（与股票分栏）。dataclass 非 Pydantic，故用 dict 直存。
+    derivative_terms: list[dict] = []
 
 
 # ── PDF 文本抽取 ──────────────────────────────────────────────────────────
@@ -389,8 +392,8 @@ def _position_usd_value(report_value: tuple[str, float] | None,
                         report_per_usd: float | None) -> float:
     if local_value and local_value[0] == "USD":
         return local_value[1]
-    if local_value and local_value[0] == report_ccy:
-        return local_value[1]
+    # ponytail: 本地币种非 USD 时不得直接当美元返回（否则 report_ccy≠USD 时高估约 FX 倍），
+    # 一律落到下方 FX 折算分支；无汇率则返回 0.0（诚实的“无法折算”而非错误美元数）。
     if report_value and report_value[0] == report_ccy and report_per_usd and report_per_usd > 0:
         return round(report_value[1] / report_per_usd, 2)
     return 0.0
@@ -542,14 +545,15 @@ def _currency_amount(raw: str) -> tuple[str, float] | None:
         return None
     neg = s.startswith("(") and s.endswith(")")
     s = s.strip("() ")
-    m = re.match(r"([A-Z$€¥£HKDUSDJPYCNHEURAUDSGD]{1,4})\s*([\d,]+(?:\.\d+)?)$", s)
+    m = re.match(r"([A-Z$€¥￥£HKDUSDJPYCNHEURAUDSGD]{1,4})\s*([\d,]+(?:\.\d+)?)$", s)
     if not m:
         return None
     ccy = m.group(1)
     ccy = {
         "$": "USD",
         "€": "EUR",
-        "¥": "JPY",
+        "¥": "CNY",   # 本系统无日元市场，A股=CNY；人民币符号统一记 CNY
+        "￥": "CNY",
         "£": "GBP",
     }.get(ccy, ccy)
     amt = _num(m.group(2))
@@ -701,7 +705,7 @@ def _parse_cash(pages: list[str]) -> tuple[list[CashBalance], float]:
                 j = i + 1
                 while j + 3 < len(lines):
                     ccy = lines[j]
-                    if ccy == "EUR":          # 真实样本里 EUR 小节后为空，点到即止
+                    if not ccy:               # 空行 = 币种表结束
                         break
                     if re.fullmatch(r"[A-Z]{3}", ccy) and re.fullmatch(r"-?\d[\d,]*(?:\.\d+)?%", lines[j + 1]):
                         nom = _num(lines[j + 2])
@@ -725,19 +729,23 @@ def _parse_cash(pages: list[str]) -> tuple[list[CashBalance], float]:
 
 _RECON_TOL = 0.005   # 0.5% 容差（口径已统一为 Total Value USD，仅留四舍五入余量）
 
-def _reconcile(holdings: list[EquityHolding],
-               statement_total: float | None) -> ReconResult:
-    calc = sum(h.market_value_usd for h in holdings)
+def _reconcile_totals(calc: float, count: int, statement_total: float | None) -> ReconResult:
+    """按已算好的持仓合计对账（口径可含衍生品 MV，供 FCN 移出 holdings 的招银用）。"""
     if statement_total is None:
-        return ReconResult(holdings_count=len(holdings), holdings_total_usd=calc,
+        return ReconResult(holdings_count=count, holdings_total_usd=calc,
                            statement_equities_total_usd=None, delta_usd=None,
                            status="no_statement_total")
     delta = abs(calc - statement_total)
     ok = delta / max(statement_total, 1.0) <= _RECON_TOL
-    return ReconResult(holdings_count=len(holdings), holdings_total_usd=calc,
+    return ReconResult(holdings_count=count, holdings_total_usd=calc,
                        statement_equities_total_usd=statement_total,
                        delta_usd=round(calc - statement_total, 2),
                        status="ok" if ok else "mismatch")
+
+
+def _reconcile(holdings: list[EquityHolding],
+               statement_total: float | None) -> ReconResult:
+    return _reconcile_totals(sum(h.market_value_usd for h in holdings), len(holdings), statement_total)
 
 
 # 覆盖率守卫：状态 no_statement_total（未做总额对账）却仍带权益子账锚 statement_equities_total_usd
@@ -823,6 +831,149 @@ def _citi_loan_outstanding_usd(pages: list[str]) -> float:
     return 0.0
 
 
+_CITI_DDMMMYY_RE = re.compile(r"^(\d{1,2})([A-Z]{3})(\d{2})$")
+_CITI_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+
+
+def _citi_paren_num(s: str) -> float | None:
+    """花旗会计式负数 `(3,245.18)` → -3245.18；普通数走 _num。"""
+    t = (s or "").strip()
+    m = re.fullmatch(r"\(([\d,]+\.?\d*)\)", t)
+    if m:
+        v = _num(m.group(1))
+        return -v if v is not None else None
+    return _num(t)
+
+
+def _citi_ddmmmyy_to_iso(s: str) -> str:
+    """花旗紧凑日期 `05JAN27` / `19AUG26` → ISO；不可解析则空串。"""
+    m = _CITI_DDMMMYY_RE.match((s or "").strip().upper())
+    if not m or m.group(2) not in _CITI_MONTHS:
+        return ""
+    d, mon, y = int(m.group(1)), _CITI_MONTHS[m.group(2)], 2000 + int(m.group(3))
+    try:
+        return datetime(y, mon, d).strftime("%Y-%m-%d")
+    except ValueError:
+        return ""
+
+
+def _citi_tenor_days(as_of_iso: str, expiry_iso: str) -> int:
+    """as_of(ISO) → expiry(ISO) 自然日数；任一缺失/不可解析则 0。"""
+    if not as_of_iso or not expiry_iso:
+        return 0
+    try:
+        return max((datetime.strptime(expiry_iso, "%Y-%m-%d")
+                    - datetime.strptime(as_of_iso, "%Y-%m-%d")).days, 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _citi_total_assets_usd(pages: list[str]) -> float:
+    """花旗综合月结单权威总额：`Total Assets` 合计行下一数值（美元口径，仿 loan 合计法）。
+    p6 资产配置块首现即 100% 总额（36,128,828.16）。无则 0。"""
+    lines = [x.strip() for pg in pages for x in pg.splitlines()]
+    for i, line in enumerate(lines):
+        if line == "Total Assets":
+            for j in range(i + 1, min(i + 3, len(lines))):
+                v = _num(lines[j])
+                if v is not None and v > 0:
+                    return round(v, 2)
+    return 0.0
+
+
+def _parse_citi_derivatives(pages: list[str], as_of: str) -> list[dict]:
+    """Equity Derivatives − Equities Accumulator (p17)：逐笔累计期权 → 薄记录。
+    锚描述行 `<NAME> ACCUMULATOR`；上溯 3 行取 Mark to Market USD(★)；
+    下 1 行 `...-<EXPIRY>/AFP <strike>`、下 2 行 `KO <ko>/PREM`。
+    lot_key=strike:expiry 判别同标的多笔。ponytail: 结单只给当期 MTM，条款结构以此为准。"""
+    lines = [x.strip() for pg in pages for x in pg.splitlines()]
+    n = len(lines)
+    # 仅认 p17 权威持仓块：`Equities Accumulator` … `Total Equity Derivatives`（其后 detail 区同名描述会误命中）
+    try:
+        lo = next(i for i, ln in enumerate(lines) if ln == "Equities Accumulator")
+        hi = next(i for i in range(lo + 1, n) if lines[i] == "Total Equity Derivatives")
+    except StopIteration:
+        return []
+    out: list[dict] = []
+    for di in range(lo, hi):
+        line = lines[di]
+        m = re.match(r"^(.+?)\s+(ACCUMULATOR|DECUMULATOR)$", line)
+        if not m or di + 2 >= n or di - 3 < 0:
+            continue
+        family = "equity_decumulator" if m.group(2) == "DECUMULATOR" else "equity_accumulator"
+        name = m.group(1).strip()
+        symbol = name.split()[0].upper() if name.split() else "SP"
+        mtm = _citi_paren_num(lines[di - 3])            # MTM USD（di-1=%, di-2=资产标签, di-3=MTM，括号=负）
+        maf = re.search(r"AFP\s+([\d.]+)", lines[di + 1])
+        strike = _num(maf.group(1)) if maf else 0.0
+        mexp = re.search(r"-(\d{1,2}[A-Z]{3}\d{2})/", lines[di + 1])
+        expiry = _citi_ddmmmyy_to_iso(mexp.group(1)) if mexp else ""
+        mko = re.search(r"KO\s+([\d.]+)", lines[di + 2])
+        ko = _num(mko.group(1)) if mko else 0.0
+        if mtm is None:
+            continue
+        lot_key = f"{strike}:{mexp.group(1) if mexp else di}"
+        out.append({
+            "product_family": family, "underlying_symbol": symbol, "currency": "USD",
+            "tenor_days": _citi_tenor_days(as_of, expiry),
+            "lot_key": lot_key,
+            "terms": {"market_value_usd": mtm, "strike": strike or 0.0, "knock_out_price": ko or 0.0,
+                      "expiry_date": expiry, "maturity": expiry, "underlying_name": name,
+                      "nominal_ccy": "USD", "settlement_style": "physical_spot"},
+        })
+    return out
+
+
+def _parse_citi_structured(pages: list[str], as_of: str) -> list[dict]:
+    """Other Structured Investments − Market Linked Investment (p18-19)：MLI Booster → 薄记录。
+    锚每笔 `Market Linked Instrument`；上 1 行 Total Value USD(★，当期市值)；
+    上溯至 `USD` 币种行取名义；下 3 行描述 `N MTH USD <SYM..> MLI`(可折行)，
+    随后 `Value <d>` / `MAT <d>` / `Ref <id>`。lot_key=Ref（每笔唯一）。"""
+    lines = [x.strip() for pg in pages for x in pg.splitlines()]
+    out: list[dict] = []
+    n = len(lines)
+    for mk, line in enumerate(lines):
+        if line != "Market Linked Instrument":
+            continue
+        mv_usd = _num(lines[mk - 1]) if mk >= 1 else None   # Total Value USD（当期市值，权威）
+        nominal = None
+        for j in range(mk - 2, max(mk - 13, -1), -1):
+            if lines[j] == "USD" and j + 1 < n:
+                nominal = _num(lines[j + 1])
+                break
+        # 描述：mk+3 起收集，直到 `Value `；折行的 "…MLI" 拼回
+        desc_parts: list[str] = []
+        value_date = maturity = ref = ""
+        for j in range(mk + 3, min(mk + 9, n)):
+            t = lines[j]
+            if t.startswith("Value "):
+                value_date = _citi_ddmmmyy_to_iso(t[6:].strip())
+                continue
+            if t.startswith("MAT "):
+                maturity = _citi_ddmmmyy_to_iso(t[4:].strip())
+                continue
+            if t.startswith("Ref "):
+                ref = t[4:].strip()
+                break
+            desc_parts.append(t)
+        desc = " ".join(desc_parts).strip()
+        md = re.search(r"(\d+)\s*MTH\s+USD\s+(.+?)\s+MLI", desc)
+        symbol = (md.group(2).split()[0].split("+")[0] if md else desc.split()[0] if desc else "MLI").upper()
+        if mv_usd is None:
+            continue
+        lot_key = ref or f"{symbol}:{maturity}:{mk}"
+        out.append({
+            "product_family": "equity_mli_booster", "underlying_symbol": symbol, "currency": "USD",
+            "tenor_days": _citi_tenor_days(as_of, maturity),
+            "lot_key": lot_key,
+            "terms": {"market_value_usd": mv_usd, "notional": nominal or 0.0, "description": desc,
+                      "value_date": value_date, "maturity": maturity, "expiry_date": maturity,
+                      "reference": ref, "nominal_ccy": "USD", "product_type": "market_linked_investment"},
+        })
+    return out
+
+
 def _parse_citi_statement(pages: list[str], filename: str, content_hash: str,
                           doc_type_hint: str = "") -> BrokerStatement:
     doc_type = doc_type_hint or _detect_citi_doc_type(pages, filename)
@@ -861,6 +1012,7 @@ def _parse_citi_statement(pages: list[str], filename: str, content_hash: str,
     holdings, total_eq = _parse_equities(pages)
     cash_balances, total_cash_usd = _parse_cash(pages)
     recon = _reconcile(holdings, total_eq)
+    derivative_terms = _parse_citi_derivatives(pages, period) + _parse_citi_structured(pages, period)
     return BrokerStatement(
         broker="citi",
         content_hash=content_hash,
@@ -870,7 +1022,11 @@ def _parse_citi_statement(pages: list[str], filename: str, content_hash: str,
         total_cash_usd=total_cash_usd,
         transactions=transactions,
         recon=recon,
-        account_summary={"loan_outstanding_usd": _citi_loan_outstanding_usd(pages)},
+        derivative_terms=derivative_terms,
+        account_summary={
+            "loan_outstanding_usd": _citi_loan_outstanding_usd(pages),
+            "total_assets_usd": _citi_total_assets_usd(pages),
+        },
     )
 
 
@@ -885,9 +1041,9 @@ def _parse_nomura_cash(pages: list[str]) -> tuple[list[CashBalance], float]:
         while j + 2 < len(lines):
             if "Position Details" in lines[j] and "Equities" in lines[j]:
                 break
-            if re.fullmatch(r"[A-Z]{3}", lines[j]) and _num(lines[j + 1]) is not None and _num(lines[j + 2]) is not None:
-                balances.append(CashBalance(currency=lines[j], market_value_nominal=_num(lines[j + 1]),
-                                            market_value_usd=_num(lines[j + 2])))
+            n1, n2 = _num(lines[j + 1]), _num(lines[j + 2])
+            if re.fullmatch(r"[A-Z]{3}", lines[j]) and n1 is not None and n2 is not None:
+                balances.append(CashBalance(currency=lines[j], market_value_nominal=n1, market_value_usd=n2))
                 j += 3
                 continue
             if lines[j] == "Total" and _num(lines[j + 1]) is not None:
@@ -910,11 +1066,21 @@ def _parse_nomura_summary(pages: list[str]) -> dict:
         "total_liabilities_usd": 0.0,
         "net_asset_value_usd": 0.0,
     }
+    def _usd_before_pct(pct_idx: int, anchor_idx: int) -> float | None:
+        # Asset Allocation 行版式为 `<标签> … <Total(USD)> <占比%>`；+17 命中的是占比列（以 % 结尾），
+        # 其配对的美元总额是它前面第一个可解析数字。直接 _num(占比串) 恒为 None，故须回溯取美元列。
+        # ponytail: 固定偏移随版式漂移，回溯取“紧邻 % 的数字”比再猜一个死偏移稳；改版重导前用 dump_stmt 核对。
+        for k in range(pct_idx - 1, anchor_idx, -1):
+            v = _num(lines[k])
+            if v is not None:
+                return v
+        return None
+
     for i, line in enumerate(lines):
         if line == "Cash" and i + 17 < len(lines) and lines[i + 17].endswith('%'):
-            summary["cash_total_usd"] = _num(lines[i + 17]) or summary["cash_total_usd"]
+            summary["cash_total_usd"] = _usd_before_pct(i + 17, i) or summary["cash_total_usd"]
         elif line == "Equities" and i + 17 < len(lines) and lines[i + 17].endswith('%'):
-            summary["equities_total_usd"] = _num(lines[i + 17]) or summary["equities_total_usd"]
+            summary["equities_total_usd"] = _usd_before_pct(i + 17, i) or summary["equities_total_usd"]
         elif line == "Derivatives" and i + 17 < len(lines):
             # 在 Asset Allocation 里，Derivatives 的 Total(USD) 列落在 +17
             v = _num(lines[i + 17])
@@ -947,7 +1113,9 @@ def _parse_nomura_equities(pages: list[str]) -> list[EquityHolding]:
             in_eq = True
             i += 1
             continue
-        if in_eq and (("Position Details" in line and ("Derivatives" in line or "Deposit" in line)) or line.startswith("Completed Transactions")):
+        eq_end = ("Position Details" in line and ("Derivatives" in line or "Deposit" in line)) \
+            or line.startswith("Completed Transactions")
+        if in_eq and eq_end:
             in_eq = False
         if not in_eq:
             i += 1
@@ -979,11 +1147,126 @@ def _parse_nomura_equities(pages: list[str]) -> list[EquityHolding]:
     return out
 
 
+_NOMURA_MATURITY_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")   # 到期/估值日 16.10.2026
+
+
+def _nomura_tenor_days(as_of: str, maturity_ddmmyyyy: str) -> int:
+    """as_of(ISO) → maturity(DD.MM.YYYY) 的自然日数；任一缺失/不可解析则 0。"""
+    if not as_of or not _NOMURA_MATURITY_RE.match(maturity_ddmmyyyy or ""):
+        return 0
+    try:
+        d, m, y = maturity_ddmmyyyy.split(".")
+        mat = datetime(int(y), int(m), int(d))
+        ao = datetime.strptime(as_of, "%Y-%m-%d")
+        return max((mat - ao).days, 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _parse_nomura_derivatives(pages: list[str], as_of: str) -> list[dict]:
+    """Position Details − Derivatives (Derivatives − Equities)：逐笔 OTC 累计/减持期权 → 薄记录。
+    锚 `OTC EQUITY ACCUMULATOR/DECUMULATOR <SYM> <MKT>`；下一行 `(strike/ko) maturitycode`；
+    再下 `Underlying: NAME`。marker `s`/`n` 后固定列：+1 qty +2 到期 +3 purchase +4 mkt_price
+    +5 市值 +6 Value(USD)★。lot_key=strike:maturitycode 判别同标的多笔(野村双 ORCL)。"""
+    lines = _clean_nomura_lines(pages)
+    out: list[dict] = []
+    n = len(lines)
+    for i, line in enumerate(lines):
+        mfam = re.match(r"OTC EQUITY (ACCUMULATOR|DECUMULATOR)\s+([A-Z0-9]{1,6})\s+[A-Z]{2}\b", line)
+        if not mfam:
+            continue
+        fam = "equity_accumulator" if mfam.group(1) == "ACCUMULATOR" else "equity_decumulator"
+        symbol = mfam.group(2)
+        strike = ko = 0.0
+        mat_code = ""
+        underlying = ""
+        if i + 1 < n:
+            ms = re.match(r"\(([\d.]+)/([\d.]+)\)\s*(\d{6})?", lines[i + 1])
+            if ms:
+                strike = _num(ms.group(1)) or 0.0
+                ko = _num(ms.group(2)) or 0.0
+                mat_code = ms.group(3) or ""
+        if i + 2 < n and lines[i + 2].startswith("Underlying:"):
+            underlying = lines[i + 2].split(":", 1)[1].strip()
+        # 找 marker(s/n)，其后取 qty / 到期 / Value(USD)
+        mk = None
+        for j in range(i + 1, min(i + 8, n)):
+            if lines[j] in ("s", "n"):
+                mk = j
+                break
+        if mk is None or mk + 6 >= n:
+            continue
+        qty = _num(lines[mk + 1])
+        maturity = lines[mk + 2] if _NOMURA_MATURITY_RE.match(lines[mk + 2]) else ""
+        mv_usd = _num(lines[mk + 6])   # Value (USD) 列（负值=负债 MTM）
+        if qty is None or mv_usd is None:
+            continue
+        lot_key = f"{strike}:{mat_code}" if (strike or mat_code) else f"{qty}:{i}"
+        out.append({
+            "product_family": fam, "underlying_symbol": symbol, "currency": "USD",
+            "tenor_days": _nomura_tenor_days(as_of, maturity),
+            "lot_key": lot_key,
+            "terms": {"market_value_usd": mv_usd, "quantity": qty, "strike": strike,
+                      "knock_out_price": ko, "maturity": maturity, "expiry_date": maturity,
+                      "underlying_name": underlying, "nominal_ccy": "USD", "settlement_style": "physical_spot"},
+        })
+    return out
+
+
+def _parse_nomura_structured(pages: list[str], as_of: str) -> list[dict]:
+    """Position Details − Structured Products (Structured Product Equities)：FCN 等 → 薄记录。
+    锚含 `FIXED COUPON NOTE`/`FCN` 的描述行；ISIN 行(XS...)；marker `n`/`s` 后固定列：
+    +1 名义 +2 到期 +3 purchase +4 mkt_price +5 市值(原币) +6 unreal +7 Value(USD)★。"""
+    lines = _clean_nomura_lines(pages)
+    out: list[dict] = []
+    n = len(lines)
+    for i, line in enumerate(lines):
+        if "FIXED COUPON NOTE" not in line.upper() and not re.search(r"\bFCN\b", line.upper()):
+            continue
+        # 表头为 "FIXED COUPON NOTE"，本身无股票代码；标的须从 (SYM MK)/Underlying/ISIN 推出，绝不取表头词 "FIXED"。
+        isin = ""
+        symbol = ""
+        underlying = ""
+        for j in range(i + 1, min(i + 8, n)):
+            if not isin and re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9,10}", lines[j]):
+                isin = lines[j]
+            if lines[j].startswith("Underlying:"):
+                underlying = lines[j].split(":", 1)[1].strip()
+            if not symbol:
+                mt = re.search(r"\(([A-Z0-9]{1,6})\s+[A-Z]{2}\)", lines[j])
+                if mt:
+                    symbol = mt.group(1)
+        symbol = symbol or isin or (underlying.split()[0].upper() if underlying else "FCN")
+        mk = None
+        for j in range(i + 1, min(i + 8, n)):
+            if lines[j] in ("n", "s"):
+                mk = j
+                break
+        if mk is None or mk + 7 >= n:
+            continue
+        nominal = _num(lines[mk + 1])
+        maturity = lines[mk + 2] if _NOMURA_MATURITY_RE.match(lines[mk + 2]) else ""
+        mv_usd = _num(lines[mk + 7])   # Value (USD) 列
+        if nominal is None or mv_usd is None:
+            continue
+        lot_key = f"{isin}:{maturity}" if isin else f"{symbol}:{maturity}"
+        out.append({
+            "product_family": "equity_fcn", "underlying_symbol": symbol, "currency": "USD",
+            "tenor_days": _nomura_tenor_days(as_of, maturity),
+            "lot_key": lot_key,
+            "terms": {"market_value_usd": mv_usd, "notional": nominal, "isin": isin,
+                      "maturity": maturity, "expiry_date": maturity, "nominal_ccy": "USD",
+                      "product_type": "fixed_coupon_note"},
+        })
+    return out
+
+
 def _parse_nomura_statement(pages: list[str], filename: str, content_hash: str) -> BrokerStatement:
     holdings = _parse_nomura_equities(pages)
     cash_balances, total_cash_usd = _parse_nomura_cash(pages)
     summary = _parse_nomura_summary(pages)
     period = _parse_nomura_asof(pages)
+    derivative_terms = _parse_nomura_derivatives(pages, period) + _parse_nomura_structured(pages, period)
     # Nomura 完整账户以 NAV 为总权益锚；持仓对子账（Equities）先不做 statement_total 对账。
     recon = ReconResult(holdings_count=len(holdings), holdings_total_usd=sum(h.market_value_usd for h in holdings),
                        statement_equities_total_usd=summary.get("equities_total_usd") or None,
@@ -991,7 +1274,7 @@ def _parse_nomura_statement(pages: list[str], filename: str, content_hash: str) 
     return BrokerStatement(
         broker="nomura", content_hash=content_hash, period_end=period,
         holdings=holdings, cash_balances=cash_balances, total_cash_usd=total_cash_usd,
-        account_summary=summary, recon=recon,
+        account_summary=summary, recon=recon, derivative_terms=derivative_terms,
     )
 
 
@@ -1008,7 +1291,7 @@ _CMBI_DATE_ISO_RE = re.compile(r"(\d{1,2})-([A-Za-z]{3})-(\d{4})")   # 30-Jun-20
 _CMBI_FNAME_DATE_RE = re.compile(r"-(\d{4})(\d{2})(\d{2})-", re.I)   # M381691-20260630-Monthly
 _CMBI_MATURITY_RE = re.compile(r"^(\d{2}[A-Z]{3}\d{4}|\d{2}/\d{2}/\d{4})$")  # 04SEP2026 或 04/09/2026
 _CMBI_SP_HEADERS = ("CODE", "NAME", "MATURITY", "CLOSING", "MARKET VALUE", "MARGIN",
-                    "STOCK ON HOLD", "PENDING", "PRICE", "CCY", "B/F", "IN /", "NVDA")
+                    "STOCK ON HOLD", "PENDING", "PRICE", "CCY", "B/F", "IN /")
 
 
 def _cmbi_num(s: str) -> float | None:
@@ -1078,11 +1361,30 @@ def _cmbi_to_usd(amount: float | None, ccy: str, fx: dict, usd_hkd: float) -> fl
     return None
 
 
-def _cmbi_structured_products(pages: list[str], fx: dict, usd_hkd: float) -> list[EquityHolding]:
-    """结构性产品(FCN)持仓：以 '价格 CCY' 行为锚(CODE 可能是 ISIN 或内部码，形状不定)。
-    行内偏移：k-2=期终结余(数量)  k=价格+币种  k+1=市值(原币)；向前回溯跳数字/到期日得 CODE，再往前得 NAME。"""
+def _cmbi_maturity_iso(s: str) -> str:
+    """招银到期日 `04SEP2026` / `04/09/2026` → ISO；不可解析则空串。"""
+    t = (s or "").strip().upper()
+    m = re.fullmatch(r"(\d{2})([A-Z]{3})(\d{4})", t)
+    if m and m.group(2) in _CITI_MONTHS:
+        try:
+            return datetime(int(m.group(3)), _CITI_MONTHS[m.group(2)], int(m.group(1))).strftime("%Y-%m-%d")
+        except ValueError:
+            return ""
+    m = re.fullmatch(r"(\d{2})/(\d{2})/(\d{4})", t)
+    if m:
+        try:
+            return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1))).strftime("%Y-%m-%d")
+        except ValueError:
+            return ""
+    return ""
+
+
+def _parse_cmbi_derivatives(pages: list[str], fx: dict, usd_hkd: float, as_of: str) -> list[dict]:
+    """结构性产品(FCN) → equity_fcn 薄记录（§4：从 holdings 迁至衍生品通道，不再进 sim_positions）。
+    以 '价格 CCY' 行为锚：k-2=期终结余(名义)  k=价格+币种  k+1=市值(原币)；
+    向前回溯跳数字得 CODE(ISIN)，途中捕获到期日；再往前得 NAME(标的)。lot_key=CODE:MATURITY。"""
     lines = [x.strip() for pg in pages for x in pg.splitlines() if x.strip()]
-    out: list[EquityHolding] = []
+    out: list[dict] = []
     in_sp = False
     n = len(lines)
     for k in range(n):
@@ -1096,13 +1398,15 @@ def _cmbi_structured_products(pages: list[str], fx: dict, usd_hkd: float) -> lis
         pm = _CMBI_PRICE_CCY_RE.match(line)
         if not pm or k - 2 < 0 or k + 1 >= n:
             continue
-        ccy = pm.group(2); qty = _num(lines[k - 2]); mv_nom = _num(lines[k + 1])
-        if qty is None or mv_nom is None or mv_nom <= 0:
+        ccy = pm.group(2); notional = _num(lines[k - 2]); mv_nom = _num(lines[k + 1])
+        if notional is None or mv_nom is None or mv_nom <= 0:
             continue
         b = k - 1
         while b >= 0 and (_num(lines[b]) is not None or _CMBI_MATURITY_RE.match(lines[b])):
             b -= 1
         code = lines[b] if b >= 0 else ""
+        # 到期日在 CODE 行正上方（NAME/desc/MATURITY/CODE/数字.../价格）
+        maturity = _cmbi_maturity_iso(lines[b - 1]) if b - 1 >= 0 and _CMBI_MATURITY_RE.match(lines[b - 1]) else ""
         name_parts: list[str] = []; c = b - 1
         while c >= 0 and len(name_parts) < 6:
             t = lines[c]
@@ -1114,10 +1418,16 @@ def _cmbi_structured_products(pages: list[str], fx: dict, usd_hkd: float) -> lis
                 break
             name_parts.append(t); c -= 1
         name = " ".join(reversed(name_parts)).strip()
-        out.append(EquityHolding(
-            ticker=(code or "SP")[:24], company=name or code or "Structured Product",
-            quantity=qty, market_value_usd=_cmbi_to_usd(mv_nom, ccy, fx, usd_hkd) or 0.0,
-            nominal_ccy=ccy, market_value_nominal=mv_nom))
+        symbol = (name.split()[0].split("+")[0].upper() if name.split() else (code or "SP"))[:12]
+        out.append({
+            "product_family": "equity_fcn", "underlying_symbol": symbol, "currency": ccy,
+            "tenor_days": _citi_tenor_days(as_of, maturity),
+            "lot_key": f"{code}:{maturity}" if code else f"{symbol}:{maturity}:{k}",
+            "terms": {"market_value_usd": _cmbi_to_usd(mv_nom, ccy, fx, usd_hkd) or 0.0,
+                      "market_value_nominal": mv_nom, "notional": notional, "isin": code,
+                      "underlying_name": name, "maturity": maturity, "expiry_date": maturity,
+                      "nominal_ccy": ccy, "product_type": "fixed_coupon_note"},
+        })
     return out
 
 
@@ -1209,11 +1519,14 @@ def _cmbi_txn_date(dd_mm: str, iso_fallback: str) -> str:
 
 def _parse_cmbi_statement(pages: list[str], filename: str, content_hash: str) -> BrokerStatement:
     rows, fx, usd_hkd = _cmbi_account_summary(pages)
-    holdings = _cmbi_structured_products(pages, fx, usd_hkd)
+    # §4: FCN 改走衍生品通道(equity_fcn 薄记录)，不再进 holdings/sim_positions。
+    # ponytail: 历史已导入的 CMBI FCN 旧 sim_positions 行留存至重新导入，重导即纠正——不做迁移脚本。
+    derivative_terms = _parse_cmbi_derivatives(pages, fx, usd_hkd, _cmbi_period(pages, filename))
+    holdings: list[EquityHolding] = []
     transactions = _cmbi_transactions(pages, filename)
     # 缺锚检测：任一实际出现的非美元币种(账户小节行 + 结构性产品名义币)无 USD/HKD 汇率锚 →
     # 无法折美元，总权益口径不可信。绝不静默按原值横加(HKD 当 USD) → 整单转人工复核。
-    needed = set(rows.keys()) | {h.nominal_ccy for h in holdings}
+    needed = set(rows.keys()) | {t["currency"] for t in derivative_terms}
     fx_incomplete = any(c != "USD" and not (usd_hkd and fx.get(c)) for c in needed)
     cash_balances: list[CashBalance] = []
     for ccy, r in rows.items():
@@ -1236,7 +1549,11 @@ def _parse_cmbi_statement(pages: list[str], filename: str, content_hash: str) ->
                                           for ccy, r in rows.items()), 2),
         "fx_incomplete": fx_incomplete,
     }
-    recon = _reconcile(holdings, portfolio_usd if portfolio_usd > 0 else None)
+    # §4: FCN 市值已移出 holdings 进衍生品栏；对账口径须把衍生品 MV 计回，否则空 holdings 恒判 mismatch。
+    deriv_mv = round(sum(t["terms"].get("market_value_usd") or 0.0 for t in derivative_terms), 2)
+    recon = _reconcile_totals(round(sum(h.market_value_usd for h in holdings) + deriv_mv, 2),
+                              len(holdings) + len(derivative_terms),
+                              portfolio_usd if portfolio_usd > 0 else None)
     if fx_incomplete:
         # 缺锚：total_value_usd 是欠计(缺锚行按 0 计入)的假值。强制非白名单状态 → importer 不物化其 NAV
         # (importer 仅在 recon.status∈{ok,no_statement_total} 时用 total_value_usd 作 NAV)。
@@ -1247,7 +1564,8 @@ def _parse_cmbi_statement(pages: list[str], filename: str, content_hash: str) ->
     return BrokerStatement(
         broker="cmbi", content_hash=content_hash, period_end=_cmbi_period(pages, filename),
         holdings=holdings, cash_balances=cash_balances, total_cash_usd=total_cash_usd,
-        account_summary=account_summary, transactions=transactions, recon=recon)
+        account_summary=account_summary, transactions=transactions, recon=recon,
+        derivative_terms=derivative_terms)
 
 
 _PARSERS = {
@@ -1414,10 +1732,10 @@ def _cmbi_demo() -> None:
                   f"价{t.price:>10,.4f} 额 {t.currency} {t.gross_amount:>14,.2f} ref={t.external_id}")
         assert stmt.broker == "cmbi", f"券商识别错误: {stmt.broker}"
         assert stmt.period_end, "未抽到期末日期"
-        assert stmt.holdings, "未抽到结构性产品持仓"
+        assert stmt.derivative_terms, "未抽到结构性产品(FCN)"  # FCN 已改走衍生品栏，不再进 holdings
         assert tv > 0, "未抽到结单 TOTAL VALUE"
-        # 组合市值来自 Account Summary 的 portfolio 列，应与逐只结构性产品市值加总吻合
-        sp_sum = round(sum(h.market_value_usd for h in stmt.holdings), 2)
+        # 组合市值来自 Account Summary 的 portfolio 列，应与逐笔 FCN 当期 MTM 加总吻合
+        sp_sum = round(sum(t["terms"]["market_value_usd"] for t in stmt.derivative_terms), 2)
         assert abs(sp_sum - port) / max(port, 1.0) <= _RECON_TOL, f"结构性产品对账失败 Σ{sp_sum} vs 组合{port}"
         # 交易(若有)：类型合法、有交易日、金额为正(方向靠 txn_type，金额取绝对值)
         for t in stmt.transactions:
@@ -1441,7 +1759,36 @@ def _cmbi_fx_selfcheck() -> None:
     print("cmbi fx 缺锚守卫自检 通过")
 
 
+def _deriv_selfcheck() -> None:
+    """三家新分支纯逻辑自检(内联伪造版式，不碰真实 PII PDF)：
+    校验能抽出 DerivativeTerm、family/lot_key 正确、同标的双 lot 不折叠。"""
+    # 野村衍生品：两笔同标的 ORCL 不同 strike/到期 → 两条，lot_key 不撞
+    nomura_deriv = (
+        "OTC EQUITY ACCUMULATOR ORCL US\n(244.0263/461.4297) 161026\nUnderlying: ORACLE CORP\n"
+        "s\n876.00\n16.10.2026\nx\nx\nx\n-3,245.18\n"
+        "OTC EQUITY ACCUMULATOR ORCL US\n(230.5649/430.0000) 261026\nUnderlying: ORACLE CORP\n"
+        "s\n500.00\n26.10.2026\nx\nx\nx\n-1,100.00\n"
+    )
+    nd = _parse_nomura_derivatives([nomura_deriv], "2026-06-30")
+    assert len(nd) == 2, f"野村双 ORCL 应两条，得 {len(nd)}"
+    assert {t["lot_key"] for t in nd} == {"244.0263:161026", "230.5649:261026"}, "lot_key 折叠了"
+    assert all(t["product_family"] == "equity_accumulator" for t in nd)
+
+    # 野村结构性产品 FCN
+    nomura_sp = ("FIXED COUPON NOTE\nXS3164880992\nn\n1,000,000\n14.12.2026\nx\nx\nx\nx\n976,300.00\n"
+                 "Underlying: NVIDIA CORP\n")
+    ns = _parse_nomura_structured([nomura_sp], "2026-06-30")
+    assert len(ns) == 1 and ns[0]["product_family"] == "equity_fcn", "野村 FCN 未抽到"
+    assert ns[0]["terms"]["market_value_usd"] == 976300.0
+
+    # 花旗 Total Assets 锚（合计行下一数值）
+    assert _citi_total_assets_usd(["Total Assets\n36,128,828.16\nUSD"]) == 36128828.16
+    assert _citi_total_assets_usd(["no total here"]) == 0.0
+    print("衍生品/结构性产品 三家分支自检 通过")
+
+
 if __name__ == "__main__":
     _cmbi_fx_selfcheck()
+    _deriv_selfcheck()
     demo()
     _cmbi_demo()

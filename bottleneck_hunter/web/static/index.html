@@ -1631,7 +1631,7 @@
         <div class="st-card">
           <div class="st-card-header"><h3>风险仪表盘</h3></div>
           <div class="st-card-body">
-            <div class="st-stat-grid" id="vip-risk-grid">
+            <div class="st-stat-grid st-stat-grid-4" id="vip-risk-grid">
               <div class="st-stat-card"><span class="st-stat-value" id="vip-risk-top5">--</span><span class="st-stat-label">前五大集中度</span></div>
               <div class="st-stat-card"><span class="st-stat-value" id="vip-risk-cash">--</span><span class="st-stat-label">现金占比</span></div>
               <div class="st-stat-card"><span class="st-stat-value" id="vip-risk-drawdown">--</span><span class="st-stat-label">跨期最大回撤</span></div>
@@ -1681,6 +1681,7 @@
         <div class="st-card">
           <div class="st-card-header"><h3>导入历史</h3></div>
           <div class="st-card-body" style="max-height:360px;overflow-y:auto">
+            <div id="vip-imports-summary" style="margin-bottom:10px;font-size:13px;color:var(--muted)"></div>
             <table class="st-table">
               <thead><tr><th>文件名</th><th>账户</th><th>时间</th><th>类型</th><th>状态</th><th>摘要 / 主要数据</th></tr></thead>
               <tbody id="vip-imports-body"></tbody>
@@ -1714,6 +1715,28 @@
             <tbody id="vip-positions-body"></tbody>
           </table>
           <p class="st-empty-hint" id="vip-positions-empty">暂无持仓记录</p>
+        </div>
+      </div>
+      <div class="st-card" id="vip-positions-deriv-card" style="margin-top:16px;display:none">
+        <div class="st-card-header"><h3>衍生品持仓</h3></div>
+        <div class="st-card-body">
+          <table class="st-table">
+            <thead>
+              <tr><th>产品族</th><th>标的</th><th>币种</th><th>期限(天)</th><th>来源文件</th></tr>
+            </thead>
+            <tbody id="vip-positions-deriv-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="st-card" id="vip-positions-sp-card" style="margin-top:16px;display:none">
+        <div class="st-card-header"><h3>结构性产品</h3></div>
+        <div class="st-card-body">
+          <table class="st-table">
+            <thead>
+              <tr><th>标的</th><th>币种</th><th>名义</th><th>当期MTM(USD)</th><th>到期</th><th>来源文件</th></tr>
+            </thead>
+            <tbody id="vip-positions-sp-body"></tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -2316,7 +2339,7 @@
       <div class="account-section">
         <h4>账户列表</h4>
         <table class="st-table" style="width:100%">
-          <thead><tr><th>名称</th><th>标识</th><th>机构</th><th>类型</th><th>首选</th><th>操作</th></tr></thead>
+          <thead><tr><th>名称</th><th>标识</th><th>机构</th><th>类型</th><th>导入文件</th><th>首选</th><th>操作</th></tr></thead>
           <tbody id="vip-accounts-tbody"></tbody>
         </table>
       </div>

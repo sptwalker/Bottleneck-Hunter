@@ -123,10 +123,22 @@ def verify_numbers(text: str, facts, foreign_values: list[float] | None = None) 
         is_usd = tok[0] in "$＄"  # 美元令牌走剔除外币后的可信池
         nocomma = usd_fx_nocomma if is_usd else fx_nocomma
         pool = usd_fact_nums if is_usd else fact_nums
-        # 通道1：数字串（去单位/符号/逗号）原样出现在 facts
+        # 通道1：数字串（去单位/逗号）原样出现在 facts —— 但须符号一致，
+        # 否则编造的亏损 $-656,223 会被真实盈利 656,223 误核为 verified（strip 掉负号即张冠李戴）。
         v_str = "" if v is None else (repr(v) if v != int(v) else str(int(v)))
-        digits = v_str.lstrip("-")
-        if digits and digits in nocomma:
+        body = v_str.lstrip("-")
+        ch1 = False
+        if body:
+            if v is not None and v < 0:
+                ch1 = ("-" + body) in nocomma          # 负值：facts 里须确有该负数
+            else:
+                idx = nocomma.find(body)               # 正值：命中处不得紧跟在 "-" 之后（那是个负数）
+                while idx != -1:
+                    if idx == 0 or nocomma[idx - 1] != "-":
+                        ch1 = True
+                        break
+                    idx = nocomma.find(body, idx + 1)
+        if ch1:
             status = "verified"
         # 通道2：数值 1% 相对容差匹配任一 facts 数字
         elif v is not None:
@@ -191,6 +203,9 @@ def demo() -> None:
     assert verify_numbers("每股 $7.89", fdx, fv)[0]["status"] == "verified"
     # 非 $ 令牌（%/裸数）不受 foreign_values 影响：500 股仍按全池核（此处无 500 股事实→unverified 属正常）
     assert verify_numbers("占比 3.45%", fdx, fv)[0]["status"] == "verified"  # 3.45 在 facts 里，% 走全池
+    # 符号一致：真实盈利 $656,223 不得为编造的亏损 $-656,223 背书（strip 负号会张冠李戴）
+    assert verify_numbers("未实现盈亏 $656,223.00", facts)[0]["status"] == "verified"
+    assert verify_numbers("亏损 $-656,223.00", facts)[0]["status"] == "unverified"
     print("number_guard 自检通过")
 
 

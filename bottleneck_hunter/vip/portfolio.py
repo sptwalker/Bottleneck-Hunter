@@ -132,6 +132,14 @@ def normalize_statement(wl_store, stmt: BrokerStatement,
     """
     as_of = stmt.period_end or _now_iso()[:10]
     n_inst = n_pos = n_txn = 0
+    # 重解析即权威：本 doc 之前写过的持仓先清掉，再按当前解析重写。否则旧代码/旧版式解析出的
+    # 幽灵持仓（如 CMBI 早期把 FCN 当股票落的行）在 holdings 变空后永久粘住，重新导入也删不掉
+    # （_upsert_position 只按 (account_ref,instrument_id,as_of) upsert，从不删除已消失的标的）。
+    # 导入器对非 parsed_ok 的 position/monthly 会提前返回、根本不进本函数，故解析失败不会误删真仓。
+    if source_doc_id:
+        with wl_store._write_conn() as conn:
+            q, p = wl_store._filtered("DELETE FROM positions WHERE source_doc_id = ?", (source_doc_id,))
+            conn.execute(q, p)
     snapshot = {"apply": True, "selected_doc_id": source_doc_id, "selected_doc_type": ""}
     if stmt.holdings and source_doc_id:
         snapshot = _prepare_snapshot_write(wl_store, as_of, account_ref, source_doc_id)
@@ -320,6 +328,35 @@ def _overwrite_guard(wl_store, account, acct_id, as_of_date, incoming_total, inc
     return ""
 
 
+def _backfill_cost(wl_store, acct_id, rows) -> int:
+    """把带成本的快照(rows)的每股成本/未实现盈亏按 symbol 回填到 live sim 现有持仓。
+    只补成本相关字段，绝不动 shares/current_price/market_value（那是当前快照的权威值）；
+    仅当 live 行"无成本"(avg_cost 缺失或恰等于现价即 pnl≈0)且本次有真成本时才覆盖 → 不会拿旧成本
+    覆盖已有真成本。返回回填条数。ponytail: 按 ticker 匹配，同标的多持仓行少见，命中首个即可。"""
+    live = {p["ticker"]: p for p in wl_store.get_sim_positions(acct_id)}
+    n = 0
+    for r in rows:
+        cost = r["avg_cost"] or 0.0
+        qty = r["quantity"] or 0.0
+        if cost <= 0 and r["cost_basis"] and qty:
+            cost = r["cost_basis"] / qty
+        if cost <= 0:
+            continue
+        symbol, _ = _map_symbol(r["symbol"])
+        pos = live.get(symbol) or live.get(r["symbol"])
+        if not pos:
+            continue
+        cur = pos.get("current_price") or 0.0
+        had_cost = (pos.get("avg_cost") or 0.0) > 0 and abs((pos.get("avg_cost") or 0.0) - cur) > 1e-6
+        if had_cost:  # live 已有真成本(与现价不同)→ 不覆盖
+            continue
+        shares = pos.get("shares") or 0
+        upnl = round((cur - cost) * shares, 2) if cur else 0.0
+        wl_store.update_sim_position(pos["id"], avg_cost=round(cost, 6), unrealized_pnl=upnl)
+        n += 1
+    return n
+
+
 def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
                           cash_total_usd: float = 0.0,
                           account_total_usd: float | None = None,
@@ -360,7 +397,11 @@ def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
     incoming_total = account_total_usd if account_total_usd is not None else total_positions + (cash_total_usd or 0.0)
     guard = _overwrite_guard(wl_store, account, acct_id, as_of_date, incoming_total, len(rows), account_ref)
     if guard:
-        return {"account_id": acct_id, "n_positions": 0,
+        # 成本基是持仓自带属性，与快照时效无关（仿贷款/衍生品的处理）：本次快照虽被陈旧护栏挡下不作
+        # 实时仓位，但若它带成本、而现有 live 快照(如无成本的仓盘导出)缺成本，就按标的把成本/盈亏回填到
+        # live 现有持仓——否则花旗这类"最新持仓在无成本的仓盘导出、成本只在月结单"的账户，成本/颜色永进不来。
+        n_back = _backfill_cost(wl_store, acct_id, rows)
+        return {"account_id": acct_id, "n_positions": 0, "n_cost_backfilled": n_back,
                 "total_equity": round(account.get("total_equity", 0) or 0, 2),
                 "cash_balance": round(account.get("cash_balance", 0) or 0, 2),
                 "snapshot_report_id": "", "guard_skipped": guard,
@@ -386,10 +427,19 @@ def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
         symbol = r["symbol"]
         mv = r["market_value_base"] or 0.0
         qty = r["quantity"] or 0.0
-        avg = (mv / qty) if qty else 0.0
+        cur_price = (mv / qty) if qty else 0.0          # 当前每股价（市值/数量）
+        # 成本优先用结单抽出的每股成本；缺失(如仓盘导出不含成本)则回落当前价 → pnl=0，前端色显中性
+        cost = r["avg_cost"] or 0.0
+        if cost <= 0 and r["cost_basis"] and qty:
+            cost = r["cost_basis"] / qty
+        avg = cost if cost > 0 else cur_price
+        # 未实现盈亏优先用结单值；缺失则由 市值−成本 自算（成本回落当前价时自然为 0）
+        upnl = r["unrealized_pnl"]
+        if upnl is None:
+            upnl = round(mv - avg * qty, 2)
         pid = wl_store.create_sim_position(acct_id, symbol, int(qty), avg)
         wl_store.update_sim_position(
-            pid, current_price=avg, market_value=mv, unrealized_pnl=0.0,
+            pid, current_price=cur_price, market_value=mv, unrealized_pnl=round(upnl, 2),
             weight_pct=round(mv / total_equity * 100, 2) if total_equity else 0.0)
         n += 1
 
@@ -438,7 +488,8 @@ def _latest_positions(wl_store, as_of_date, account_ref) -> tuple[list[dict], di
             where.append("p.source_doc_id = ?")
             params.append(selected["doc_id"])
         q, p = wl_store._filtered(
-            f"""SELECT p.quantity, p.market_value_base, i.symbol, i.instrument_type, i.name
+            f"""SELECT p.quantity, p.market_value_base, p.avg_cost, p.cost_basis, p.unrealized_pnl,
+                      i.symbol, i.instrument_type, i.name
                FROM positions p JOIN instruments i ON i.id = p.instrument_id
                WHERE {' AND '.join(where)}""",
             tuple(params), table="p")
@@ -527,15 +578,90 @@ def _overview_totals(rows: list[dict]) -> dict:
 
 
 
+def _current_derivative_rows(wl_store, account_ref: str) -> list[dict]:
+    """账户"当前"结构性产品/衍生品条款：同一 (family, underlying, lot_key) 只取最新一期(MAX created_at)。
+
+    否则多期结单(如招银 05/06/07 三份月结单)会为同一笔 FCN 落三行，概览持仓与曲线 MTM 三倍虚增。
+    SQLite 保证：GROUP BY 配合 MAX(created_at) 时，其余裸列取自最大行(3.7.11+)。terms 由调用方解析。
+    """
+    import json
+    conn = wl_store._connect()
+    try:
+        q, p = wl_store._filtered(
+            "SELECT product_family, underlying_symbol, currency, terms_json, MAX(created_at) AS _mx "
+            "FROM vip_derivative_terms WHERE account_ref = ? "
+            "GROUP BY product_family, underlying_symbol, lot_key ORDER BY _mx DESC",
+            (account_ref,), table="vip_derivative_terms")
+        rows = [dict(r) for r in conn.execute(q, p).fetchall()]
+    finally:
+        conn.close()
+    for r in rows:
+        r["terms"] = json.loads(r.get("terms_json") or "{}")
+    return rows
+
+
+def _derivative_holdings(wl_store, account_ref: str) -> list[dict]:
+    """结构性产品/衍生品(vip_derivative_terms)中带当期 MTM 的条款，折成持仓构成条目。
+
+    这些头寸走衍生品栏、不进 sim_positions，但其市值已计入账户总权益(materialize 用结单权威合计
+    做锚)。若概览 holdings 只数股票，就会出现"总权益百万级、持仓 0 只、饼图空、集中度 0%"的错位
+    (招银账户几乎全是 FCN 即此症)。故把带 MTM 的条款并入概览 holdings。无 MTM 的条款(如仅有条款
+    结构的 accumulator)不并入——它们的价值本就不在总权益里，单列于衍生品敞口即可。
+    """
+    out = []
+    for r in _current_derivative_rows(wl_store, account_ref):
+        mv = (r.get("terms") or {}).get("market_value_usd")
+        if not mv:
+            continue
+        tag = "结构性" if r["product_family"] in ("equity_fcn", "equity_mli_booster") else "衍生品"
+        out.append({"ticker": f"{r['underlying_symbol']}·{tag}", "shares": 0,
+                    "market_value": round(mv, 2), "weight_pct": 0.0, "kind": "derivative"})
+    return out
+
+
+def _derivative_mtm_total(wl_store, account_ref: str) -> float:
+    """账户结构性产品/衍生品的当期 MTM 合计(仅计带 market_value_usd 的当前条款)。供价值曲线折入。"""
+    return round(sum((r.get("terms") or {}).get("market_value_usd") or 0.0
+                     for r in _current_derivative_rows(wl_store, account_ref)), 2)
+
+
+def _latest_import_period(wl_store, account_ref: str) -> str:
+    """该账户最新导入的结单期末日(vip_imports.key_metrics_json.period_end)，作全衍生品账户曲线锚点。"""
+    conn = wl_store._connect()
+    try:
+        q, p = wl_store._filtered(
+            "SELECT json_extract(key_metrics_json,'$.period_end') AS pe FROM vip_imports "
+            "WHERE account_ref = ? AND pe IS NOT NULL ORDER BY pe DESC LIMIT 1",
+            (account_ref,), table="vip_imports")
+        row = conn.execute(q, p).fetchone()
+        return (row["pe"] if row else "") or ""
+    finally:
+        conn.close()
+
+
 def build_account_overview(wl_store, *, account_ref: str = "") -> dict:
     summary = build_account_summary(wl_store, account_ref=account_ref)
     rows = list_transactions(wl_store, account_ref=account_ref, limit=10000)
-    return {
+    ov = {
         **summary,
         **_overview_totals(rows),
         "realized_pnl": None,
         "realized_pnl_available": False,
     }
+    extra = _derivative_holdings(wl_store, account_ref)
+    if extra:
+        holdings = list(ov.get("holdings", [])) + extra
+        # 权重分母取 max(权威总权益, 各持仓市值之和)：total_equity 已锚定结单口径时用它（差额=现金），
+        # 若解析退化未含衍生品致其偏小，则回落到持仓市值和，保证 Σ权重 ≤ 100%，绝不溢出。
+        hold_mv = sum((h.get("market_value", 0) or 0) for h in holdings)
+        denom = max(ov.get("total_equity", 0) or 0, hold_mv)
+        for h in holdings:
+            h["weight_pct"] = round((h.get("market_value", 0) or 0) / denom * 100, 1) if denom else 0.0
+        holdings.sort(key=lambda h: h.get("market_value", 0), reverse=True)
+        ov["holdings"] = holdings
+        ov["n_holdings"] = len(holdings)
+        ov["top5_concentration_pct"] = round(sum(h["weight_pct"] for h in holdings[:5]), 1)
+    return ov
 
 
 def _canonical_cost_map(wl_store, account_ref: str) -> dict[str, dict]:
@@ -711,11 +837,15 @@ def build_total_overview(wl_store) -> dict:
         account_cash = summary.get("cash_balance", 0.0) or 0.0
         account_n_holdings = summary.get("n_holdings", 0) or 0
         account_loan = summary.get("loan_balance", 0.0) or 0.0
+        extra_holdings = _derivative_holdings(wl_store, ref)  # 结构性产品/衍生品并入构成，见 _derivative_holdings
+        account_n_holdings += len(extra_holdings)
         total_equity += account_total
         cash_balance += account_cash
         n_holdings += account_n_holdings
         total_loan += account_loan
         for item in summary.get("holdings", []):
+            holdings.append({**item, "account_ref": ref})
+        for item in extra_holdings:
             holdings.append({**item, "account_ref": ref})
         accounts.append({
             "account_ref": ref,
@@ -887,6 +1017,16 @@ def value_series(wl_store, *, account_ref: str = "") -> dict:
                 series = _forward_filled_series(conn.execute(q, p).fetchall())
     finally:
         conn.close()
+    # 结构性产品/衍生品走 vip_derivative_terms、不进 positions，但其当期 MTM 是组合价值的一部分。
+    # 无逐日历史(衍生品逐日重估是 P2)。全衍生品账户(招银这类全 FCN)无股票快照 → 按最新导入期末补一个
+    # MTM 点，曲线不空白。混合账户则不把“当期 MTM”抹到历史各点——那会虚增历史并污染基准 rebase 基准值；
+    # ponytail: 逐期衍生品历史待 P2 逐日重估，此处只保证全衍生品账户曲线不空白，绝不伪造股票账户历史。
+    if account_ref:
+        mtm = _derivative_mtm_total(wl_store, account_ref)
+        if mtm and not series:
+            anchor = _latest_import_period(wl_store, account_ref)
+            if anchor:
+                series = [{"as_of_date": anchor, "total_equity": round(mtm, 2)}]
     # 叠加系统推算点：仅当推算日严格晚于最新真值快照日（否则真值优先，不覆盖）
     proj = _projection_point(wl_store, account_ref=account_ref)
     if proj and (not series or proj["as_of_date"] > series[-1]["as_of_date"]):

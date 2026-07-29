@@ -10,7 +10,7 @@ import { initReverse } from './reverse.js';
 import { initWatchlist, refreshWatchlistOnEnter } from './watchlist.js';
 import { initDecision } from './decision.js';
 import { initSimTrading, ensureSimTradingLoaded } from './simtrading.js';
-import { initVip, ensureVipLoaded, applyVipLock } from './vip.js';
+import { initVip, ensureVipLoaded, applyVipLock } from './vip.js?v=2';
 import { initAIConfig } from './ai-config.js';
 import { initAutoUpdate } from './auto-update.js';
 import { initDataReport } from './data-report.js';

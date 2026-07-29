@@ -245,6 +245,11 @@ async def upload_trade_export(file: UploadFile = File(...),
 async def list_accounts(market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
     wl = _wl(user, market)
     accounts = wl.list_vip_accounts(include_hidden_default=False)
+    import_counts = wl.count_vip_imports_by_account()
+    for a in accounts:
+        c = import_counts.get(a.get("account_ref") or "", {"total": 0, "by_type": {}})
+        a["import_count"] = c["total"]
+        a["import_by_type"] = c["by_type"]
     default_account = next((a for a in accounts if a.get("is_default")), None)
     preferred_account = default_account or (accounts[0] if accounts else None)
     return {
@@ -604,8 +609,15 @@ async def list_derivatives(market: str = "us_stock", account_ref: str = "", scop
             "account_ref": t["account_ref"],
         } for t in items]}
     terms = drv.list_derivative_terms(wl, account_ref=account_ref)
+    # 结构性产品分栏需展示当期 MTM/名义/到期 → 暴露 terms 里这几项（结单薄记录权威字段）
+    # 双击展开需完整 terms（主要指标 + 合约说明），一并透出 terms 原始 dict。
     return {"items": [{"id": t.id, "product_family": t.product_family, "underlying_symbol": t.underlying_symbol,
-                        "currency": t.currency, "source_file": t.source_file} for t in terms]}
+                        "currency": t.currency, "tenor_days": t.tenor_days, "source_file": t.source_file,
+                        "market_value_usd": (t.terms or {}).get("market_value_usd"),
+                        "notional": (t.terms or {}).get("notional"),
+                        "maturity": (t.terms or {}).get("maturity") or (t.terms or {}).get("expiry_date"),
+                        "terms": t.terms or {}}
+                       for t in terms]}
 
 
 @router.post("/derivatives/{did}/reextract")

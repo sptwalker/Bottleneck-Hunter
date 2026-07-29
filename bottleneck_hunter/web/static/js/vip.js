@@ -359,12 +359,12 @@ async function renderAccountsTable() {
   const tbody = document.getElementById('vip-accounts-tbody');
   if (!tbody) return;
   if (vipState.accountsError) {
-    tbody.innerHTML = `<tr><td colspan="6" style="color:#ef4444">账户列表加载失败：${esc(vipState.accountsError)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" style="color:#ef4444">账户列表加载失败：${esc(vipState.accountsError)}</td></tr>`;
     return;
   }
   const accounts = vipState.accounts || [];
   if (!accounts.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">当前没有可见账户</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted)">当前没有可见账户</td></tr>';
     return;
   }
   tbody.innerHTML = accounts.map((a, idx) => {
@@ -380,8 +380,13 @@ async function renderAccountsTable() {
     const downBtn = idx === accounts.length - 1
       ? '<span style="color:var(--muted)">↓</span>'
       : `<button class="btn btn-sm" data-move-down="${esc(ref)}">下移</button>`;
+    const byType = a.import_by_type || {};
+    const tip = Object.keys(byType).length
+      ? Object.entries(byType).map(([k, n]) => `${k}:${n}`).join(' / ')
+      : '暂无导入';
+    const impCell = `<span title="${esc(tip)}">${a.import_count || 0}</span>`;
     return `<tr><td>${esc(a.display_name || ref || '未命名账户')}</td><td>${esc(ref || '（兼容桶）')}</td>` +
-      `<td>${esc(a.institution_name || '—')}</td><td>${kind}</td><td>${isDefault}</td>` +
+      `<td>${esc(a.institution_name || '—')}</td><td>${kind}</td><td>${impCell}</td><td>${isDefault}</td>` +
       `<td style="white-space:nowrap"><button class="btn btn-sm" data-edit="${esc(ref)}">编辑</button> ${upBtn} ${downBtn} ${delBtn}</td></tr>`;
   }).join('');
   tbody.querySelectorAll('[data-edit]').forEach(b =>
@@ -864,6 +869,7 @@ async function loadImportCenter() {
   const empty = document.getElementById('vip-imports-empty');
   const chosenRef = selectedImportAccountRef();
   const accountMap = new Map((vipState.accounts || []).map(a => [a.account_ref || '', a]));
+  renderImportSummary(chosenRef, accountMap);
   if (body) {
     try {
       const scope = chosenRef ? 'account' : 'all';
@@ -878,7 +884,11 @@ async function loadImportCenter() {
         body.innerHTML = imports.slice(0, 100).map(x => {
           const km = x.key_metrics || {};
           const bits = Object.entries(km).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}=${esc(v)}`).join(' · ');
-          const detail = [esc(x.summary || ''), x.reason ? '⚠ ' + esc(x.reason) : '', bits].filter(Boolean).join('<br/>');
+          // 陈旧单是正常时效行为，非异常，不挂 ⚠；仅骤降误判等真异常才警示
+          const reasonBit = x.reason
+            ? (String(x.reason).startsWith('stale_snapshot') ? 'ℹ ' + esc(x.reason) : '⚠ ' + esc(x.reason))
+            : '';
+          const detail = [esc(x.summary || ''), reasonBit, bits].filter(Boolean).join('<br/>');
           const acc = accountMap.get(x.account_ref || '');
           const accountLabel = acc ? (acc.display_name || acc.account_ref || '未命名账户') : (x.account_ref || '自动归户');
           return `<tr><td style="font-weight:600">${esc(x.file_name)}</td><td>${esc(accountLabel)}</td><td>${esc((x.created_at || '').replace('T', ' ').slice(0, 16))}</td>` +
@@ -897,6 +907,24 @@ async function loadImportCenter() {
         `<div style="color:var(--muted);margin-top:2px">${esc(m.hint)}</div></div>`).join('');
     } catch (_) {}
   }
+}
+
+// 各子账户累计导入各类型文件的数量：数据来自 /accounts 的 import_by_type（一次聚合）
+function renderImportSummary(chosenRef, accountMap) {
+  const box = document.getElementById('vip-imports-summary');
+  if (!box) return;
+  const accounts = chosenRef
+    ? (accountMap.has(chosenRef) ? [accountMap.get(chosenRef)] : [])
+    : (vipState.accounts || []);
+  const parts = accounts
+    .filter(a => (a.import_count || 0) > 0)
+    .map(a => {
+      const name = esc(a.display_name || a.account_ref || '未命名账户');
+      const byType = Object.entries(a.import_by_type || {})
+        .map(([k, n]) => `${esc(k)} ${n}`).join('、');
+      return `<b>${name}</b>：累计 ${a.import_count} 份（${byType || '未分类'}）`;
+    });
+  box.innerHTML = parts.length ? parts.join('　｜　') : '暂无导入记录';
 }
 
 function importStatusBadge(s) {
@@ -1035,15 +1063,167 @@ async function loadPositions() {
     body.innerHTML = positions.map(p => {
       const pnl = p.unrealized_pnl || 0;
       const cls = pnl > 0 ? 'st-pnl-pos' : pnl < 0 ? 'st-pnl-neg' : 'st-pnl-zero';
+      // 现价相对成本着色：高于成本绿、低于红、无成本(成本≤0)中性
+      const cp = p.current_price || 0, ac = p.avg_cost || 0;
+      const pcls = ac > 0 ? (cp > ac ? 'st-pnl-pos' : cp < ac ? 'st-pnl-neg' : 'st-pnl-zero') : 'st-pnl-zero';
       // 双击整行 → 复用观察池统一企业详情抽屉（全局 data-company-ticker 委托，见 watchlist.js）
       const tk = esc(p.ticker);
       return `<tr data-company-ticker="${tk}" data-company-name="${tk}" data-company-market="${esc(market())}" style="cursor:pointer" title="双击查看企业详情">` +
         `<td style="font-weight:600">${tk}</td><td>${fmtNum(p.shares, 0)}</td>` +
-        `<td>$${fmtNum(p.avg_cost)}</td><td>$${fmtNum(p.current_price)}</td><td>$${fmtNum(p.market_value)}</td>` +
+        `<td>$${fmtNum(p.avg_cost)}</td><td class="${pcls}">$${fmtNum(p.current_price)}</td><td>$${fmtNum(p.market_value)}</td>` +
         `<td class="${cls}">${pnl >= 0 ? '+' : '-'}$${fmtNum(Math.abs(pnl))}</td><td>${fmtNum(p.weight_pct, 1)}%</td></tr>`;
     }).join('');
   } catch (_) { body.innerHTML = ''; if (empty) { empty.textContent = '加载失败，请重试'; empty.style.display = ''; } toast('持仓加载失败，请重试', 'error'); }
+  loadPositionsDeriv();
 }
+
+// 三类持仓分栏：股票在 sim_positions；衍生品(accumulator/decumulator)与结构性产品(mli/fcn)同源
+// vip_derivative_terms，一次 /derivatives 拉取后按 product_family 分流填两个卡体。
+const VIP_SP_FAMILIES = new Set(['equity_mli_booster', 'equity_fcn']);
+
+// terms 字段中文标签；未列出的键在展开时按原名兜底显示。
+const VIP_TERM_LABELS = {
+  initial_price: '初始价', afp: '平均远期价(AFP)', strike_price: '行权价', strike: '行权价',
+  knock_out_price: '敲出价', knock_in_price: '敲入价', knock_out_direction: '敲出方向',
+  knock_in_direction: '敲入方向', daily_shares: '每日累计股数', step_up_daily_shares: '加倍后每日股数',
+  gearing_ratio: '杠杆倍数', max_nominal_shares: '名义最大股数', participation_factor: '参与率',
+  max_upside_pct: '最大上行(%)', strike_pct_initial: '行权价/初始价(%)', knock_in_pct_initial: '敲入价/初始价(%)',
+  guaranteed_period_end: '保证期结束', settlement_style: '结算方式', net_premium: '净权利金',
+  principal_protected_if_no_ki: '未敲入本金保护', notional: '名义本金', market_value_usd: '当期MTM(USD)',
+  maturity: '到期日', expiry_date: '到期日', trade_date: '交易日', tenor_days: '期限(天)',
+};
+// 主要指标组（价格/规模/收益核心），其余键归入具体合约说明。
+const VIP_TERM_METRIC_KEYS = new Set([
+  'initial_price', 'afp', 'strike_price', 'strike', 'knock_out_price', 'knock_in_price',
+  'participation_factor', 'max_upside_pct', 'gearing_ratio', 'daily_shares', 'max_nominal_shares',
+  'notional', 'market_value_usd', 'net_premium',
+]);
+
+function vipFmtTermVal(key, v) {
+  if (v == null || v === '') return '—';
+  if (typeof v === 'boolean') return v ? '是' : '否';
+  if (typeof v === 'number') {
+    if (key.endsWith('_pct')) return fmtNum(v, 2) + '%';
+    if (key.endsWith('_shares') || key === 'tenor_days' || key === 'max_nominal_shares') return fmtNum(v, 0);
+    if (key === 'market_value_usd' || key === 'notional' || key === 'net_premium') return '$' + fmtNum(v);
+    return fmtNum(v, 4);
+  }
+  return esc(String(v));
+}
+
+// 按 terms 现有字段拼一句通俗产品描述；字段缺失就泛化，绝不杜撰。返回 HTML 安全串（动态值已 esc/fmtNum）。
+function vipProductNarrative(family, t, symbol) {
+  t = t || {};
+  const s = esc(symbol || '该标的');
+  const n = (v, d = 4) => (v == null || v === '' ? '—' : fmtNum(v, d));
+  const money = v => (v == null ? '—' : '$' + fmtNum(v));
+  const mat = t.maturity || t.expiry_date;
+  if (family === 'equity_accumulator') {
+    let x = `累计股票期权(Accumulator)：约定以行权价 $${n(t.afp || t.strike_price || t.strike)} 每日买入 ${n(t.daily_shares, 0)} 股 ${s}`;
+    if (t.initial_price) x += `（初始价 $${n(t.initial_price)}，行权价低于市价，相当于打折接货）`;
+    x += '。';
+    if (t.knock_out_price) x += `一旦 ${s} 涨破敲出价 $${n(t.knock_out_price)}，合约提前了结。`;
+    if (t.gearing_ratio > 1) x += `若跌破行权价，则按 ${n(t.gearing_ratio, 0)} 倍加倍买入（每日 ${n(t.step_up_daily_shares || t.daily_shares, 0)} 股）`;
+    if (t.max_nominal_shares) x += `，累计上限 ${n(t.max_nominal_shares, 0)} 股`;
+    return x + '。通俗说：打折接货，跌了加倍接盘。';
+  }
+  if (family === 'equity_decumulator') {
+    let x = `累沽股票期权(Decumulator)：约定以行权价 $${n(t.afp || t.strike_price || t.strike)} 每日卖出 ${n(t.daily_shares, 0)} 股 ${s}`;
+    if (t.initial_price) x += `（初始价 $${n(t.initial_price)}，行权价高于市价，相当于溢价出货）`;
+    x += '。';
+    if (t.knock_out_price) x += `一旦 ${s} 跌破敲出价 $${n(t.knock_out_price)}，合约提前了结。`;
+    if (t.gearing_ratio > 1) x += `若涨破行权价，则按 ${n(t.gearing_ratio, 0)} 倍加倍卖出（每日 ${n(t.step_up_daily_shares || t.daily_shares, 0)} 股）`;
+    if (t.max_nominal_shares) x += `，累计上限 ${n(t.max_nominal_shares, 0)} 股`;
+    return x + '。通俗说：溢价出货，涨了加倍出货。';
+  }
+  if (family === 'equity_mli_booster') {
+    let x = `市场挂钩票据(MLI Booster)：挂钩 ${s}`;
+    if (t.notional) x += `，名义本金 ${money(t.notional)}`;
+    if (mat) x += `，${esc(mat)} 到期`;
+    x += '。到期按 ' + s + ' 表现结算——上涨时';
+    x += t.participation_factor ? `按参与率 ${n(t.participation_factor, 2)} 放大收益` : '放大参与其涨幅';
+    if (t.max_upside_pct) x += `（收益封顶 ${n(t.max_upside_pct, 2)}%）`;
+    x += t.knock_in_price ? `；若跌破敲入价 $${n(t.knock_in_price)}，本金随标的下跌承损` : '；下跌时可能承担本金损失';
+    return x + '。';
+  }
+  if (family === 'equity_fcn') {
+    let x = `固定派息票据(FCN)：定期收取固定票息，挂钩 ${s}`;
+    if (t.notional) x += `，名义本金 ${money(t.notional)}`;
+    if (mat) x += `，${esc(mat)} 到期`;
+    x += '。到期若标的高于行权价，以现金收回本金；否则按约定行权价折算为股票交割';
+    if (t.strike_price || t.strike) x += `（行权价 $${n(t.strike_price || t.strike)}）`;
+    return x + '（多标的时按表现最差者结算）。';
+  }
+  return '';
+}
+
+// 家族无关的两段式明细：通俗描述 + 主要指标 + 具体合约说明。d 为 /derivatives 单条（含 terms/product_family/underlying_symbol）。
+function vipTermsDetail(d, colspan) {
+  const t = d.terms || {};
+  const narr = vipProductNarrative(d.product_family, t, d.underlying_symbol);
+  const narrHtml = narr
+    ? `<div style="margin-bottom:10px;padding:8px 10px;border-left:3px solid var(--accent,#4a90d9);background:var(--bg,#fff);border-radius:4px;line-height:1.7">${narr}</div>`
+    : '';
+  const keys = Object.keys(t).filter(k => t[k] != null && t[k] !== '');
+  if (!keys.length) {
+    const inner = narrHtml || '<span style="color:var(--muted)">无更多合约信息</span>';
+    return `<tr class="vip-drv-detail" style="display:none"><td colspan="${colspan}" style="background:var(--bg-soft,#f7f7f9)"><div style="padding:6px 4px">${inner}</div></td></tr>`;
+  }
+  const metric = keys.filter(k => VIP_TERM_METRIC_KEYS.has(k));
+  const contract = keys.filter(k => !VIP_TERM_METRIC_KEYS.has(k));
+  const kv = ks => ks.map(k =>
+    `<div style="display:flex;justify-content:space-between;gap:12px;padding:2px 0">` +
+    `<span style="color:var(--muted)">${esc(VIP_TERM_LABELS[k] || k)}</span>` +
+    `<span style="font-weight:600">${vipFmtTermVal(k, t[k])}</span></div>`).join('');
+  const sec = (title, ks) => ks.length
+    ? `<div style="flex:1;min-width:220px"><div style="font-weight:600;margin-bottom:4px">${title}</div>` +
+      `<div style="display:grid;grid-template-columns:1fr;font-size:12px">${kv(ks)}</div></div>` : '';
+  return `<tr class="vip-drv-detail" style="display:none"><td colspan="${colspan}" style="background:var(--bg-soft,#f7f7f9)">` +
+    `<div style="padding:6px 4px">${narrHtml}<div style="display:flex;gap:32px;flex-wrap:wrap">${sec('主要指标', metric)}${sec('具体合约说明', contract)}</div></div>` +
+    `</td></tr>`;
+}
+
+// 双击主行 → 切换其后紧邻的明细行。
+function vipToggleDrvDetail(tr) {
+  const d = tr.nextElementSibling;
+  if (d && d.classList.contains('vip-drv-detail')) d.style.display = d.style.display === 'none' ? '' : 'none';
+}
+
+async function loadPositionsDeriv() {
+  const dCard = document.getElementById('vip-positions-deriv-card');
+  const dBody = document.getElementById('vip-positions-deriv-body');
+  const sCard = document.getElementById('vip-positions-sp-card');
+  const sBody = document.getElementById('vip-positions-sp-body');
+  if (!dCard || !dBody) return;
+  try {
+    const { items } = await vipGet(`/derivatives?account_ref=${encodeURIComponent(selectedAccountRef())}`);
+    const list = items || [];
+    const sp = list.filter(d => VIP_SP_FAMILIES.has(d.product_family));
+    const deriv = list.filter(d => !VIP_SP_FAMILIES.has(d.product_family));
+    if (!deriv.length) { dCard.style.display = 'none'; } else {
+      dBody.innerHTML = deriv.map(d =>
+        `<tr style="cursor:pointer" title="双击展开合约详情" ondblclick="vipToggleDrvDetail(this)">` +
+        `<td>${esc(d.product_family || '—')}</td><td style="font-weight:600">${esc(d.underlying_symbol || '—')}</td>` +
+        `<td>${esc(d.currency || '—')}</td><td>${d.tenor_days ? fmtNum(d.tenor_days, 0) : '—'}</td><td>${esc(d.source_file || '—')}</td></tr>` +
+        vipTermsDetail(d, 5)).join('');
+      dCard.style.display = '';
+    }
+    if (sCard && sBody) {
+      if (!sp.length) { sCard.style.display = 'none'; } else {
+        sBody.innerHTML = sp.map(d =>
+          `<tr style="cursor:pointer" title="双击展开合约详情" ondblclick="vipToggleDrvDetail(this)">` +
+          `<td style="font-weight:600">${esc(d.underlying_symbol || '—')}</td><td>${esc(d.currency || '—')}</td>` +
+          `<td>${d.notional != null ? fmtNum(d.notional, 0) : '—'}</td>` +
+          `<td>$${d.market_value_usd != null ? fmtNum(d.market_value_usd) : '—'}</td>` +
+          `<td>${esc(d.maturity || '—')}</td><td>${esc(d.source_file || '—')}</td></tr>` +
+          vipTermsDetail(d, 6)).join('');
+        sCard.style.display = '';
+      }
+    }
+  } catch (_) { dCard.style.display = 'none'; if (sCard) sCard.style.display = 'none'; }
+}
+
+if (typeof window !== 'undefined') window.vipToggleDrvDetail = vipToggleDrvDetail;
 
 async function loadTransactions() {
   if (requireConcreteAccount('history')) return;
