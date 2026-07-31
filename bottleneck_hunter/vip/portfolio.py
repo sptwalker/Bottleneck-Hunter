@@ -625,6 +625,27 @@ def _derivative_mtm_total(wl_store, account_ref: str) -> float:
                      for r in _current_derivative_rows(wl_store, account_ref)), 2)
 
 
+def _import_total_series(wl_store, account_ref: str) -> list[dict]:
+    """该账户各期结单权威净值序列(vip_imports.key_metrics_json 的 period_end + total_equity)。
+
+    供纯结构性产品/衍生品账户(positions 表为空)建价值曲线：每个 period_end 取最新一次导入的 total_equity。
+    仅历史导入已带 total_equity 的期才有点(旧导入无此键 → 需重导回填)。返回按期升序 [{as_of_date,total_equity}]。
+    """
+    conn = wl_store._connect()
+    try:
+        q, p = wl_store._filtered(
+            "SELECT json_extract(key_metrics_json,'$.period_end') AS pe, "
+            "       json_extract(key_metrics_json,'$.total_equity') AS te, MAX(created_at) AS mx "
+            "FROM vip_imports WHERE account_ref = ? "
+            "AND pe IS NOT NULL AND pe != '' AND te IS NOT NULL "
+            "GROUP BY pe ORDER BY pe",
+            (account_ref,), table="vip_imports")
+        return [{"as_of_date": r["pe"], "total_equity": round(r["te"], 2)}
+                for r in conn.execute(q, p).fetchall()]
+    finally:
+        conn.close()
+
+
 def _latest_import_period(wl_store, account_ref: str) -> str:
     """该账户最新导入的结单期末日(vip_imports.key_metrics_json.period_end)，作全衍生品账户曲线锚点。"""
     conn = wl_store._connect()
@@ -1018,15 +1039,17 @@ def value_series(wl_store, *, account_ref: str = "") -> dict:
     finally:
         conn.close()
     # 结构性产品/衍生品走 vip_derivative_terms、不进 positions，但其当期 MTM 是组合价值的一部分。
-    # 无逐日历史(衍生品逐日重估是 P2)。全衍生品账户(招银这类全 FCN)无股票快照 → 按最新导入期末补一个
-    # MTM 点，曲线不空白。混合账户则不把“当期 MTM”抹到历史各点——那会虚增历史并污染基准 rebase 基准值；
-    # ponytail: 逐期衍生品历史待 P2 逐日重估，此处只保证全衍生品账户曲线不空白，绝不伪造股票账户历史。
-    if account_ref:
-        mtm = _derivative_mtm_total(wl_store, account_ref)
-        if mtm and not series:
-            anchor = _latest_import_period(wl_store, account_ref)
-            if anchor:
-                series = [{"as_of_date": anchor, "total_equity": round(mtm, 2)}]
+    # 纯衍生品账户(招银这类全 FCN)无股票快照 → 优先用各期结单权威净值(total_equity)建**多点**曲线，
+    # 逐期收益率随之可算；缺该键的历史期(旧导入未落 total_equity)退回单点当期 MTM 锚点，曲线不空白。
+    # 混合账户则不把“当期 MTM”抹到历史各点——那会虚增历史并污染基准 rebase 基准值；ponytail: 逐日重估待 P2。
+    if account_ref and not series:
+        series = _import_total_series(wl_store, account_ref)
+        if not series:
+            mtm = _derivative_mtm_total(wl_store, account_ref)
+            if mtm:
+                anchor = _latest_import_period(wl_store, account_ref)
+                if anchor:
+                    series = [{"as_of_date": anchor, "total_equity": round(mtm, 2)}]
     # 叠加系统推算点：仅当推算日严格晚于最新真值快照日（否则真值优先，不覆盖）
     proj = _projection_point(wl_store, account_ref=account_ref)
     if proj and (not series or proj["as_of_date"] > series[-1]["as_of_date"]):

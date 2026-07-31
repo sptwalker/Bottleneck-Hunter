@@ -153,6 +153,8 @@ def _days_between(a: str, b: str) -> int:
 
 def extract_accumulator_terms(pdf_source, pdf_password: str = "") -> DerivativeTerm:
     text = _read_pdf_text(pdf_source, pages=8, pdf_password=pdf_password)
+    if "RATIONALE RECORD" in text:  # 野村 irf 精简记录（非完整条款单）走专用抽取
+        return _parse_irf_record(text, pdf_source)
     # 识别 product family：正文常同时出现“Equity Accumulator / Equity Decumulator”说明语，
     # 故优先看产品标题里的 Daily ... Accumulator/Decumulator。
     fam = "equity_accumulator"
@@ -268,6 +270,187 @@ def extract_mli_terms(pdf_source, pdf_password: str = "") -> DerivativeTerm:
     )
 
 
+# ── 条款抽取：野村 irf「投资产品−理由记录」精简交易记录 ──────────────────
+# irf-*.pdf 是野村每日下发的一页式成交记录（非完整条款单）：只给合约关键位
+# (strike/KO)、名义/数量、成交/到期日、Gearing，无当期 MTM、无 DS/参考现价。
+# → 薄记录：market_value_usd 留空(结构性产品栏不伪造 0)，payoff_* 全量重估待
+#   完整 termsheet 导入再启用；总权益仍由月结单权威锚定，不依赖此记录逐日精算。
+
+_IRF_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+               "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+
+
+def _irf_trade_date(text: str) -> str:
+    """`07−JUL−2026`（分隔符可能是 U+2212 减号或连字符）→ ISO `2026-07-07`。"""
+    m = re.search(r"Trade Date:\s*(\d{1,2})[−\-]([A-Za-z]{3})[−\-](\d{4})", text)
+    if not m:
+        return ""
+    mon = _IRF_MONTHS.get(m.group(2).upper(), 0)
+    return f"{int(m.group(3)):04d}-{mon:02d}-{int(m.group(1)):02d}" if mon else ""
+
+
+def _irf_maturity(ddmmyy: str) -> str:
+    """产品串尾 `060727`（DDMMYY，20xx）→ ISO `2027-07-06`。"""
+    return f"20{ddmmyy[4:6]}-{ddmmyy[2:4]}-{ddmmyy[0:2]}"
+
+
+def _iso_days(a_iso: str, b_iso: str) -> int:
+    from datetime import date
+    try:
+        a = date(*map(int, a_iso.split("-")))
+        b = date(*map(int, b_iso.split("-")))
+        return (b - a).days
+    except (ValueError, TypeError):
+        return 365
+
+
+def _parse_irf_record(text: str, pdf_source) -> DerivativeTerm:
+    """野村 irf 精简记录抽取。版式：
+    `Investment Product: <类型 标的 交易所 | 标的 交易所 币种 类型> (strike/KO) DDMMYY`
+    支持 累购/累沽/FCN 三族；lot_key=strike:DDMMYY 判别同标的多笔头寸。"""
+    m = re.search(r"Investment Product:\s*(.+?)\(([\d.]+)\s*/\s*([\d.]+)\)\s*(\d{6})", text, re.S)
+    if not m:
+        raise ValueError("irf_product_not_found")
+    desc = " ".join(m.group(1).split())
+    up = desc.upper()
+    strike, knock_out, ddmmyy = float(m.group(2)), float(m.group(3)), m.group(4)
+
+    ccy = "USD"  # 野村日累购/减持均为 USD 计价；FCN 从产品串显式币种覆盖
+    if "DECUMULATOR" in up:
+        fam, ko_dir = "equity_decumulator", "down_and_out"
+    elif "ACCUMULATOR" in up:
+        fam, ko_dir = "equity_accumulator", "up_and_out"
+    elif "FIXED COUPON NOTE" in up:
+        fam, ko_dir = "equity_fcn", ""
+    else:
+        raise ValueError(f"irf_unknown_family:{desc[:40]}")
+
+    if fam == "equity_fcn":
+        fm = re.match(r"([A-Z0-9]{1,6})\s+[A-Z]{2}\s+([A-Z]{3})\s+FIXED COUPON NOTE", up)
+        symbol = fm.group(1) if fm else up.split()[0]
+        if fm:
+            ccy = fm.group(2)
+    else:
+        am = re.search(r"(?:ACCUMULATOR|DECUMULATOR)\s+([A-Z0-9]{1,6})\s+[A-Z]{2}", up)
+        symbol = am.group(1) if am else ""
+
+    trade_date = _irf_trade_date(text)
+    maturity = _irf_maturity(ddmmyy)
+    tenor = _iso_days(trade_date, maturity)
+    gearing = _ff(r"Gearing Ratio / Gearing Ratio Ideal Threshold:\s*([\d.]+)", text) or 0.0
+    qm = re.search(r"Quantity / Notional:\s*(?:([A-Z]{3})\s+)?([\d,]+)", text)
+    qty = float(qm.group(2).replace(",", "")) if qm else 0.0
+    if qm and qm.group(1):
+        ccy = qm.group(1)
+
+    terms = {
+        "strike": strike, "knock_out_price": knock_out, "knock_out_direction": ko_dir,
+        "gearing_ratio": gearing, "trade_date": trade_date, "expiry_date": maturity,
+        "maturity": maturity, "tenor_days": tenor, "market_value_usd": None,
+        "settlement_style": "physical_spot", "source_kind": "nomura_irf",
+    }
+    if fam == "equity_fcn":
+        terms["notional"] = qty
+        terms["notional_ccy"] = ccy
+    else:
+        terms["afp"] = strike            # 累购/减持 AFP=行权价
+        terms["max_nominal_shares"] = qty
+    term = DerivativeTerm(product_family=fam, underlying_symbol=symbol, currency=ccy,
+                          tenor_days=tenor, terms=terms, source_file=str(pdf_source))
+    term.lot_key = f"{strike}:{ddmmyy}"
+    return term
+
+
+def extract_fcn_terms(pdf_source, pdf_password: str = "") -> DerivativeTerm:
+    """FCN(固定息票票据) 抽取，三种版式同族 equity_fcn：
+    野村 irf 精简记录 / 花旗完整条款单(Fixed Coupon Autocall Notes) / 巴克莱完整条款单(Daily Callable)。
+    薄记录以条款价位为准，市值待重估。"""
+    text = _read_pdf_text(pdf_source, pages=8, pdf_password=pdf_password)
+    if "RATIONALE RECORD" in text:
+        return _parse_irf_record(text, pdf_source)
+    if "Fixed Coupon Autocall Notes" in text or "Autocall Barrier Level" in text:
+        return _parse_citi_fcn(text, pdf_source)
+    if "Daily Callable Fixed Coupon" in text or "Aggregate Nominal Amount" in text:
+        return _parse_barclays_fcn(text, pdf_source)
+    raise ValueError("fcn_full_termsheet_not_modeled")
+
+
+def _fcn_thin_term(pdf_source, *, symbol, ccy, initial, strike, autocall, denom, notional,
+                   trade_txt, mat_txt, source_kind, extra=None) -> DerivativeTerm:
+    """完整 FCN 条款单 → equity_fcn 薄记录的公共装配（花旗/巴克莱共用）。
+    lot_key=strike:DDMMYY 与野村 irf 一致 → 同产品重导入在持仓视图折叠为最新一期。"""
+    def _iso(s):
+        try:
+            return datetime.strptime(s, "%d %B %Y").strftime("%Y-%m-%d")
+        except ValueError:
+            return ""
+    trade_iso, mat_iso = _iso(trade_txt), _iso(mat_txt)
+    tenor = _days_between(trade_txt, mat_txt) if trade_txt and mat_txt else 365
+    ddmmyy = datetime.strptime(mat_txt, "%d %B %Y").strftime("%d%m%y") if mat_iso else "000000"
+    terms = {
+        "initial_price": initial, "strike": strike, "afp": strike,
+        "knock_out_price": autocall, "autocall_barrier": autocall, "knock_out_direction": "up_and_out",
+        "denomination": denom, "notional": notional, "notional_ccy": ccy,
+        "trade_date": trade_iso, "expiry_date": mat_iso, "maturity": mat_iso,
+        "tenor_days": tenor, "market_value_usd": None,
+        "settlement_style": "cash_or_physical", "source_kind": source_kind,
+    }
+    if extra:
+        terms.update(extra)
+    term = DerivativeTerm(product_family="equity_fcn", underlying_symbol=symbol, currency=ccy,
+                          tenor_days=tenor, terms=terms, source_file=str(pdf_source))
+    term.lot_key = f"{strike}:{ddmmyy}"
+    return term
+
+
+def _parse_citi_fcn(text: str, pdf_source) -> DerivativeTerm:
+    """花旗完整 FCN 条款单(Fixed Coupon Autocall Notes) → equity_fcn 薄记录。
+    表格里三个价位(Initial/Strike/Autocall Barrier)标签与标的描述分块排列，故按
+    "Barrier Level 标签之后首现的三个 4 位小数 USD 值" 顺序取值(Initial/Strike/Autocall)。"""
+    symbol = (_f(r"([A-Z]{1,6})\s+[A-Z]{2}\s+Equity\b", text, flags=0) or "").strip()
+    ccy = _f(r"Denomination\s+([A-Z]{3})\s+[\d,]", text) or "USD"
+    denom = _ff(r"Denomination\s+[A-Z]{3}\s+([\d,]+(?:\.\d+)?)", text) or 0.0
+    issue_size = _ff(r"Issue Size\s+[A-Z]{3}\s+([\d,]+(?:\.\d+)?)", text) or 0.0
+    # 4 位小数 USD 值仅出现在标的价位区(息票 USD 333.35/面额 USD 50,000 均 ≤2 位)
+    tail = text.split("Barrier Level", 1)[-1]
+    lv = re.findall(r"USD\s*([\d,]+\.\d{3,})", tail)
+    def _num(i):
+        return float(lv[i].replace(",", "")) if i < len(lv) else 0.0
+    initial, strike, autocall = _num(0), _num(1), _num(2)
+    coupon_pa = _ff(r"approximately\s*([\d.]+)%\s*per annum", text) or 0.0
+    return _fcn_thin_term(
+        pdf_source, symbol=symbol, ccy=ccy, initial=initial, strike=strike, autocall=autocall,
+        denom=denom, notional=issue_size,
+        trade_txt=_f(r"Strike Date / Trade Date\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text) or "",
+        mat_txt=_f(r"Maturity Date\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text) or "",
+        source_kind="citi_fcn_termsheet", extra={"coupon_pa_pct": coupon_pa})
+
+
+def _parse_barclays_fcn(text: str, pdf_source) -> DerivativeTerm:
+    """巴克莱完整 FCN 条款单(Daily Callable Fixed Coupon, 经野村分销) → equity_fcn 薄记录。
+    价位以具名定义给出：`"Initial Price" means USD X` / `Strike Price...being USD Y` / `Trigger Price...being USD Z`。
+    coupon_pct 存每期票息原值(文档未给年化，不臆造 p.a.)。"""
+    def _named_usd(label):
+        m = re.search(rf'{label}[^"]*?\bUSD\s+([\d,]+\.\d+)', text, re.I | re.S)
+        return float(m.group(1).replace(",", "")) if m else 0.0
+    symbol = (_f(r"([A-Z]{1,6})\s+[A-Z]{2}\s+Equity\b", text, flags=0) or "").strip()
+    ccy = _f(r"Specified Denomination\s+([A-Z]{3})\s+[\d,]", text) or "USD"
+    denom = _ff(r"Specified Denomination\s+[A-Z]{3}\s+([\d,]+(?:\.\d+)?)", text) or 0.0
+    notional = _ff(r"Aggregate Nominal Amount\s+[A-Z]{3}\s+([\d,]+(?:\.\d+)?)", text) or 0.0
+    initial = _named_usd(r'"Initial Price"\s+means')
+    strike = _named_usd(r'Strike Price"\s+means')
+    autocall = _named_usd(r'Trigger Price"\s+means')
+    coupon = _ff(r"Interest Rate\s+([\d.]+)%", text) or 0.0
+    # 到期锚用 Redemption Date（scheduled to be …）；缺则退回 Final Valuation Date
+    mat_txt = (_f(r"scheduled to be (\d{1,2}\s+[A-Za-z]+\s+\d{4})", text)
+               or _f(r"Final Valuation Date\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text) or "")
+    return _fcn_thin_term(
+        pdf_source, symbol=symbol, ccy=ccy, initial=initial, strike=strike, autocall=autocall,
+        denom=denom, notional=notional,
+        trade_txt=_f(r"Trade Date\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4})", text) or "",
+        mat_txt=mat_txt, source_kind="barclays_fcn_termsheet", extra={"coupon_pct": coupon})
+
+
 # ── 场景收益引擎 ─────────────────────────────────────────────────────────
 
 def payoff_accumulator(term: DerivativeTerm, final_price: float, *,
@@ -330,12 +513,16 @@ def classify_pdf(pdf_source, pdf_password: str = "") -> str:
     text = _read_pdf_text(pdf_source, pages=2, pdf_password=pdf_password)
     if "Master Fund Highlights" in text or "Financial Statements" in text:
         return "fund_report"
-    if re.search(r"Daily(?: Securities)? Accumulator", text, re.I):
-        return "accumulator"
-    if re.search(r"Daily(?: Securities)? Decumulator", text, re.I):
+    # 完整条款单标题含 "Daily ... Accumulator/Decumulator"；野村 irf 精简记录只在产品串里点名
+    # "EQUITY ACCUMULATOR/COVERED DECUMULATOR"（大写）→ 二者同判家族，抽取端自适应两种版式。
+    low = text.lower()
+    if re.search(r"daily(?: securities)? decumulator|covered decumulator|equity decumulator", low):
         return "decumulator"
+    if re.search(r"daily(?: securities)? accumulator|equity accumulator", low):
+        return "accumulator"
     # FCN(固定息票票据/每日可赎回)不是 MLI Booster；单列 fcn，避免 reextract 误走 extract_mli_terms 贴错家族。
-    if "Daily Callable Fixed Coupon" in text or "Fixed Coupon Note" in text:
+    if "fixed coupon note" in low or "daily callable fixed coupon" in low \
+            or "fixed coupon autocall" in low:  # 花旗完整条款单标题
         return "fcn"
     if "Market Linked Instrument" in text or "Leverage Call Spread" in text:
         return "mli"
@@ -412,26 +599,44 @@ def list_derivative_terms(wl_store, limit: int = 50, account_ref: str = "") -> l
 
 
 def list_derivative_terms_all_accounts(wl_store, limit: int = 200) -> list[dict]:
+    """全部账户"当前"结构性产品/衍生品明细（供总览聚合明细区）。
+
+    同一 (account_ref, family, underlying, lot_key) 只取最新一期(MAX created_at)——否则招银 05/06/07
+    三份月结单会为同一笔 FCN 落三行，明细区重复虚增。SQLite 3.7.11+ 保证 GROUP BY + MAX 时其余裸列取自最大行。
+    再剔除已过到期日(北京日期口径)的头寸——到期的旧票(如招银 CMBIGP step-up notes)不该再挂在当前持仓里。
+    """
     import json
+
+    from bottleneck_hunter.watchlist.store_base import _today
 
     conn = wl_store._connect()
     try:
         q, p = wl_store._filtered(
-            "SELECT * FROM vip_derivative_terms ORDER BY created_at DESC LIMIT ?",
+            "SELECT account_ref, product_family, underlying_symbol, currency, terms_json, "
+            "source_file_name, MAX(created_at) AS _mx FROM vip_derivative_terms "
+            "GROUP BY account_ref, product_family, underlying_symbol, lot_key "
+            "ORDER BY _mx DESC LIMIT ?",
             (limit,),
             table="vip_derivative_terms",
         )
         rows = [dict(r) for r in conn.execute(q, p).fetchall()]
     finally:
         conn.close()
+    today = _today()
     items = []
     for r in rows:
         t = json.loads(r["terms_json"] or "{}")
+        maturity = t.get("maturity") or t.get("expiry_date") or ""
+        if maturity and maturity < today:  # 已过到期日 → 不再是当前持仓（ISO 日期串直接比较）
+            continue
         items.append({
             "product_family": r["product_family"],
             "underlying_symbol": r["underlying_symbol"],
             "currency": r["currency"],
             "tenor_days": int(t.get("tenor_days", 0) or 0),
+            "market_value_usd": t.get("market_value_usd"),
+            "notional": t.get("notional"),
+            "maturity": maturity,
             "terms": t,
             "source_file": r["source_file_name"],
             "account_ref": r.get("account_ref") or "",
@@ -457,7 +662,73 @@ def demo() -> None:
     assert payoff_mli_booster(mli, 130.0, knock_in_happened=False)["return_pct"] > 0
     assert payoff_mli_booster(mli, 80.0, knock_in_happened=True)["return_pct"] < 0
     _lot_key_selfcheck()
+    _all_accounts_selfcheck()
+    _irf_selfcheck()
+    _citi_fcn_selfcheck()
+    _barclays_fcn_selfcheck()
     print("derivatives demo 通过")
+
+
+def _irf_selfcheck() -> None:
+    """野村 irf 精简记录抽取自检（内联伪造文本，不碰真实 PII PDF）：
+    三族家族/标的/strike/KO/币种/到期/lot_key 正确；同标的不同 strike → lot_key 不折叠。"""
+    acc = ("INVESTMENT PRODUCT − RATIONALE RECORD\nTrade Date: \n07−JUL−2026\n"
+           "Account Number: \n22704339\nInvestment Product: \nOTC EQUITY ACCUMULATOR BE UN \n"
+           "(169.803/278.765) 060727\nQuantity / Notional: \n1500 Shares\n"
+           "Gearing Ratio / Gearing Ratio Ideal Threshold: \n6.01 / 3\n")
+    t = _parse_irf_record(acc, "irf-a.pdf")
+    assert t.product_family == "equity_accumulator" and t.underlying_symbol == "BE", t
+    assert t.terms["strike"] == 169.803 and t.terms["knock_out_price"] == 278.765
+    assert t.terms["knock_out_direction"] == "up_and_out" and t.currency == "USD"
+    assert t.terms["trade_date"] == "2026-07-07" and t.terms["maturity"] == "2027-07-06"
+    assert t.terms["max_nominal_shares"] == 1500 and t.terms["gearing_ratio"] == 6.01
+    assert t.terms["market_value_usd"] is None and t.lot_key == "169.803:060727"
+
+    dec = acc.replace("OTC EQUITY ACCUMULATOR BE UN", "OTC EQUITY COVERED DECUMULATOR PLTR UW") \
+             .replace("(169.803/278.765)", "(178.1962/128.5101)")
+    d = _parse_irf_record(dec, "irf-d.pdf")
+    assert d.product_family == "equity_decumulator" and d.underlying_symbol == "PLTR", d
+    assert d.terms["knock_out_direction"] == "down_and_out"
+
+    fcn = ("INVESTMENT PRODUCT − RATIONALE RECORD\nTrade Date: \n13−JUL−2026\n"
+           "Investment Product: \nNVDA US USD FIXED COUPON NOTE \n(182.9692/200.7864) 141226\n"
+           "Quantity / Notional: \nUSD 1000000\n"
+           "Gearing Ratio / Gearing Ratio Ideal Threshold: \n6.02 / 3\n")
+    f = _parse_irf_record(fcn, "irf-f.pdf")
+    assert f.product_family == "equity_fcn" and f.underlying_symbol == "NVDA", f
+    assert f.currency == "USD" and f.terms["notional"] == 1000000
+    assert f.terms["maturity"] == "2026-12-14"
+
+    # 同标的不同 strike → lot_key 不折叠（野村双 BE accumulator 场景）
+    acc2 = acc.replace("(169.803/278.765) 060727", "(155.500/260.000) 260727")
+    t2 = _parse_irf_record(acc2, "irf-a2.pdf")
+    assert t2.lot_key != t.lot_key, "同标的不同 strike 的 lot_key 折叠了"
+
+
+def _all_accounts_selfcheck() -> None:
+    """全账户当前明细(list_derivative_terms_all_accounts)：同一笔多份结单折一条 + 已过到期剔除 + MTM/名义透出。
+    这正是招银 05/06/07 三份月结单致 FCN 三倍虚增、及到期 CMBIGP 仍挂列表的两处根因。"""
+    import tempfile
+    from pathlib import Path
+
+    from bottleneck_hunter.watchlist.store import WatchlistStore
+    with tempfile.TemporaryDirectory() as d:
+        wl = WatchlistStore(db_path=Path(d) / "t.db").for_user("u1").for_market("us_stock")
+        fut = DerivativeTerm("equity_fcn", "NVDA", "USD", 120,
+                             {"market_value_usd": 12345.6, "notional": 1000000, "maturity": "2099-12-31"})
+        past = DerivativeTerm("equity_fcn", "CMBIGP", "USD", 60, {"market_value_usd": 999.0, "maturity": "2000-01-01"})
+        common = dict(broker="cmbi", account_ref="acc")
+        # 同一笔 NVDA FCN 两份月结单(不同 file_hash，同 lot_key) → 应折成一条
+        save_derivative_term(wl, fut, source_file_name="m05.pdf", source_file_hash="h05", lot_key="L1", **common)
+        save_derivative_term(wl, fut, source_file_name="m06.pdf", source_file_hash="h06", lot_key="L1", **common)
+        save_derivative_term(wl, past, source_file_name="m05.pdf", source_file_hash="h05b", lot_key="L2", **common)
+        items = list_derivative_terms_all_accounts(wl)
+        syms = [i["underlying_symbol"] for i in items]
+        assert syms.count("NVDA") == 1, f"同笔 FCN 未折叠：{syms}"
+        assert "CMBIGP" not in syms, f"已到期未剔除：{syms}"
+        nv = next(i for i in items if i["underlying_symbol"] == "NVDA")
+        assert nv["market_value_usd"] == 12345.6 and nv["notional"] == 1000000, nv
+        assert nv["maturity"] == "2099-12-31" and nv["account_ref"], nv
 
 
 def _lot_key_selfcheck() -> None:
@@ -478,6 +749,49 @@ def _lot_key_selfcheck() -> None:
         assert id_a != id_b, "不同 lot_key 折叠成一条（去重键回归）"
         assert id_a == id_a2, "同 lot_key 未幂等"
         assert len(list_derivative_terms(wl, account_ref="acc")) == 2, "双 ORCL 应两条"
+
+
+def _citi_fcn_selfcheck() -> None:
+    """花旗完整 FCN 条款单抽取自检（内联伪造版式，不碰真实 PII PDF）：
+    标的/币种/三价位/到期/名义/lot_key 正确；lot_key 与野村 irf 同格式(strike:DDMMYY)可折叠。"""
+    text = (
+        "Fixed Coupon Autocall Notes Based Upon the Shares of NVIDIA Corporation\n"
+        "Issue Size \nUSD 1,000,000 \nDenomination \nUSD 50,000 \n"
+        "Strike Date / Trade Date \n27 May 2026 \nMaturity Date \n14 December 2026 \n"
+        "Initial Level \nStrike Level \nAutocall \nBarrier Level \n"
+        "NVDA UW \nEquity \nShare \nNASDAQ \n"
+        "USD 211.3541 \nUSD 182.9692 \nUSD 200.7864 \n"
+        "Strike Level \n86.57% of the Initial Level \n"
+        "0.6667% per month (corresponding to approximately 8.00% per annum)\n"
+    )
+    t = _parse_citi_fcn(text, "termsheet.pdf")
+    assert t.product_family == "equity_fcn" and t.underlying_symbol == "NVDA", t
+    assert t.currency == "USD" and t.terms["notional"] == 1000000 and t.terms["denomination"] == 50000
+    assert t.terms["initial_price"] == 211.3541 and t.terms["strike"] == 182.9692
+    assert t.terms["autocall_barrier"] == 200.7864 and t.terms["coupon_pa_pct"] == 8.0
+    assert t.terms["trade_date"] == "2026-05-27" and t.terms["maturity"] == "2026-12-14"
+    assert t.terms["market_value_usd"] is None and t.lot_key == "182.9692:141226"
+
+
+def _barclays_fcn_selfcheck() -> None:
+    """巴克莱完整 FCN 条款单(Daily Callable, 具名价位) 抽取自检（内联伪造版式，不碰真实 PII PDF）。"""
+    text = (
+        "Daily Callable Fixed Coupon linked to NVIDIA CORP\n"
+        "Trade Date \n13 July 2026 \nAggregate Nominal Amount \nUSD 1,000,000 \n"
+        "Specified Denomination \nUSD 50,000 \nBloomberg Code (for identification purposes only) \n"
+        "NVDA UW Equity \nInterest Rate \n0.6667% \n"
+        '"Initial Price" means USD 206.1495, being the price on the Initial Valuation Date. \n'
+        '"Trigger Price" means 95.00% of the Initial Price; being USD 195.8420 as at the Trade Date. \n'
+        '"Strike Price" means 84.45% of the Initial Price; being USD 174.0933 as at the Trade Date. \n'
+        "Two (2) Business Days immediately following the Final Valuation Date (scheduled to be 30 December 2026). \n"
+    )
+    t = _parse_barclays_fcn(text, "barclays.pdf")
+    assert t.product_family == "equity_fcn" and t.underlying_symbol == "NVDA", t
+    assert t.currency == "USD" and t.terms["notional"] == 1000000 and t.terms["denomination"] == 50000
+    assert t.terms["initial_price"] == 206.1495 and t.terms["strike"] == 174.0933
+    assert t.terms["autocall_barrier"] == 195.842 and t.terms["coupon_pct"] == 0.6667
+    assert t.terms["trade_date"] == "2026-07-13" and t.terms["maturity"] == "2026-12-30"
+    assert t.terms["market_value_usd"] is None and t.lot_key == "174.0933:301226"
 
 
 if __name__ == "__main__":

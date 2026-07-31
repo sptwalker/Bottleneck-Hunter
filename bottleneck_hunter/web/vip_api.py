@@ -576,18 +576,20 @@ async def upload_derivative_file(file: UploadFile = File(...),
     uid = user["sub"]
     wl = _wl(user, market)
     kind = drv.classify_pdf(raw, pdf_password=pdf_password)
-    if kind not in ("accumulator", "decumulator", "mli"):
+    if kind not in ("accumulator", "decumulator", "mli", "fcn"):
         raise HTTPException(status_code=400, detail=f"该文件类型当前不建模：{kind}")
     try:
-        if kind in ("accumulator", "decumulator"):
-            term = drv.extract_accumulator_terms(raw, pdf_password=pdf_password)
-        else:
+        if kind == "mli":
             term = drv.extract_mli_terms(raw, pdf_password=pdf_password)
+        elif kind == "fcn":
+            term = drv.extract_fcn_terms(raw, pdf_password=pdf_password)
+        else:
+            term = drv.extract_accumulator_terms(raw, pdf_password=pdf_password)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"条款抽取失败: {e}") from e
     did = drv.save_derivative_term(wl, term, source_file_name=file.filename or "term.pdf",
                                    source_file_hash=sha256(raw).hexdigest(), broker=broker,
-                                   account_ref=account_ref)
+                                   account_ref=account_ref, lot_key=getattr(term, "lot_key", ""))
     record_operation(uid, "上传衍生品文件", category="vip_financial",
                      detail=f"deriv={did[:8]} kind={kind} src={file.filename or ''}")
     return {"id": did, "kind": kind, "term": {"family": term.product_family, "underlying": term.underlying_symbol}}
@@ -605,10 +607,32 @@ async def list_derivatives(market: str = "us_stock", account_ref: str = "", scop
             "product_family": t["product_family"],
             "underlying_symbol": t["underlying_symbol"],
             "currency": t["currency"],
+            "tenor_days": t.get("tenor_days"),
+            "market_value_usd": t.get("market_value_usd"),
+            "notional": t.get("notional"),
+            "maturity": t.get("maturity"),
+            "terms": t.get("terms") or {},
             "source_file": t["source_file"],
             "account_ref": t["account_ref"],
         } for t in items]}
-    terms = drv.list_derivative_terms(wl, account_ref=account_ref)
+    terms = drv.list_derivative_terms(wl, account_ref=account_ref, limit=500)
+    # 与总览「全账户」明细口径一致：同 (family,标的,lot_key) 只留最新一期(list 已按 created_at DESC)，
+    # 并剔除已过到期日(北京日期)的旧票——否则持仓 Tab 会把多份月结单的同笔 FCN 重复列出、到期票不下架。
+    # ponytail: 折叠/剔到期逻辑与 derivatives.list_derivative_terms_all_accounts 各写一份(类型不同)，
+    #   两处口径须同步；若第三处再需要，再抽公共谓词。
+    from bottleneck_hunter.watchlist.store_base import _today
+    today = _today()
+    seen: set = set()
+    current = []
+    for t in terms:
+        key = (t.product_family, t.underlying_symbol, t.lot_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        mat = (t.terms or {}).get("maturity") or (t.terms or {}).get("expiry_date") or ""
+        if mat and mat < today:
+            continue
+        current.append(t)
     # 结构性产品分栏需展示当期 MTM/名义/到期 → 暴露 terms 里这几项（结单薄记录权威字段）
     # 双击展开需完整 terms（主要指标 + 合约说明），一并透出 terms 原始 dict。
     return {"items": [{"id": t.id, "product_family": t.product_family, "underlying_symbol": t.underlying_symbol,
@@ -617,7 +641,7 @@ async def list_derivatives(market: str = "us_stock", account_ref: str = "", scop
                         "notional": (t.terms or {}).get("notional"),
                         "maturity": (t.terms or {}).get("maturity") or (t.terms or {}).get("expiry_date"),
                         "terms": t.terms or {}}
-                       for t in terms]}
+                       for t in current]}
 
 
 @router.post("/derivatives/{did}/reextract")
@@ -639,13 +663,15 @@ async def reextract_derivative(did: str, file: UploadFile = File(...),
     from bottleneck_hunter.web.oplog import record_operation
     wl = _wl(user, market)
     kind = drv.classify_pdf(raw, pdf_password=pdf_password)
-    if kind not in ("accumulator", "decumulator", "mli"):
+    if kind not in ("accumulator", "decumulator", "mli", "fcn"):
         raise HTTPException(status_code=400, detail=f"该文件类型当前不建模：{kind}")
     try:
-        if kind in ("accumulator", "decumulator"):
-            term = drv.extract_accumulator_terms(raw, pdf_password=pdf_password)
-        else:
+        if kind == "mli":
             term = drv.extract_mli_terms(raw, pdf_password=pdf_password)
+        elif kind == "fcn":
+            term = drv.extract_fcn_terms(raw, pdf_password=pdf_password)
+        else:
+            term = drv.extract_accumulator_terms(raw, pdf_password=pdf_password)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"条款抽取失败: {e}") from e
     if not drv.update_derivative_term(wl, did, term):

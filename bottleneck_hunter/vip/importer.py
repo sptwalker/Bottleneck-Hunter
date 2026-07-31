@@ -84,11 +84,12 @@ def dispatch_import(raw: bytes, filename: str, *, user_id: str, wl_store,
         result.summary = f"{result.summary}（已自动归户）" if result.summary else "已自动归户"
     result.resolved_account_ref = resolved_account_ref
     result.account_candidates = account_candidates
-    if is_redo:
-        # 复用重导：回填已完成，提示用户这是重跑而非首次导入；不新增历史行（UNIQUE 已保证唯一）
-        if result.status == "imported":
-            result.summary = f"{result.summary}（重复导入，已回填最新字段）" if result.summary else "已回填最新字段"
-        return result
+    if is_redo and result.status == "imported":
+        # 复用重导：提示用户这是重跑而非首次导入
+        result.summary = f"{result.summary}（重复导入，已回填最新字段）" if result.summary else "已回填最新字段"
+    # 无论首导还是重导都写 create_vip_import——它按 (account_ref, file_hash) upsert（见 store_simtrading.py），
+    # 重导只刷新既有行而不新增。之前 is_redo 直接 return 会跳过这次 upsert，导致代码升级后新增的 key_metrics
+    # 字段（如 total_equity 逐期净值锚点）永远写不进旧行——价值曲线因此建不出多点。
     wl_store.create_vip_import(
         file_name=filename, file_hash=file_hash, file_type=result.file_type,
         detected_kind=result.detected_kind, status=result.status,
@@ -251,7 +252,7 @@ def _import_pdf(raw, filename, user_id, wl_store, market, account_ref, password)
         kind = "other"
     except Exception:  # noqa: BLE001 — 损坏/非法 PDF：交由 statement 路径统一报错
         kind = "other"
-    if kind in ("accumulator", "decumulator", "mli"):
+    if kind in ("accumulator", "decumulator", "mli", "fcn"):
         return _import_derivative(raw, filename, kind, wl_store, password, account_ref=account_ref)
     return _import_statement(raw, filename, user_id, wl_store, market, account_ref, password)
 
@@ -268,8 +269,9 @@ def _import_derivative(raw, filename, kind, wl_store, password, account_ref: str
     if broker == "unknown":
         broker = ""
     try:
-        term = (drv.extract_mli_terms if kind == "mli" else drv.extract_accumulator_terms)(
-            raw, pdf_password=password)
+        _extractor = {"mli": drv.extract_mli_terms, "fcn": drv.extract_fcn_terms}.get(
+            kind, drv.extract_accumulator_terms)
+        term = _extractor(raw, pdf_password=password)
     except ValueError as e:
         if "password" in str(e):
             return _pwd_result(filename)
@@ -277,7 +279,7 @@ def _import_derivative(raw, filename, kind, wl_store, password, account_ref: str
                             summary="衍生品条款抽取失败", reason=str(e))
     drv.save_derivative_term(wl_store, term, source_file_name=filename,
                              source_file_hash=hashlib.sha256(raw).hexdigest(), broker=broker,
-                             account_ref=account_ref)
+                             account_ref=account_ref, lot_key=getattr(term, "lot_key", ""))
     return ImportResult("imported", filename, "pdf", term.product_family,
                         summary=f"衍生品条款：{term.underlying_symbol} · {term.product_family}",
                         key_metrics={"underlying": term.underlying_symbol,
@@ -456,10 +458,13 @@ def _import_statement(raw, filename, user_id, wl_store, market, account_ref, pas
     if mat.get("guard_skipped"):
         return _guarded_result(filename, "monthly_statement", stmt, norm["as_of_date"],
                                mat["guard_skipped"], n_deriv, n_back=mat.get("n_cost_backfilled", 0))
+    # 落逐期权威总额：纯结构性产品/衍生品账户(如招银全 FCN)的 positions 表为空，价值曲线无从按持仓建线；
+    # 把本期结单权威净值(mat.total_equity=NAV/TOTAL VALUE/Total Assets)按 period_end 留在 key_metrics，
+    # value_series 便能对无持仓账户拼出逐期净值曲线。ponytail: 借 vip_imports 已有的 period_end 存点，不新增表。
     return ImportResult("imported", filename, "pdf", "monthly_statement",
                         summary=f"月结单：{mat['n_positions']} 只持仓{deriv_hint}，期末 {stmt.period_end or '—'}",
                         key_metrics={"n_positions": mat["n_positions"], "n_derivatives": n_deriv,
-                                     "period_end": stmt.period_end,
+                                     "period_end": stmt.period_end, "total_equity": mat.get("total_equity"),
                                      "broker": stmt.broker, "as_of_date": norm["as_of_date"]})
 
 

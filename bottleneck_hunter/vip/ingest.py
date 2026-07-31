@@ -1405,9 +1405,20 @@ def _parse_cmbi_derivatives(pages: list[str], fx: dict, usd_hkd: float, as_of: s
         while b >= 0 and (_num(lines[b]) is not None or _CMBI_MATURITY_RE.match(lines[b])):
             b -= 1
         code = lines[b] if b >= 0 else ""
-        # 到期日在 CODE 行正上方（NAME/desc/MATURITY/CODE/数字.../价格）
-        maturity = _cmbi_maturity_iso(lines[b - 1]) if b - 1 >= 0 and _CMBI_MATURITY_RE.match(lines[b - 1]) else ""
-        name_parts: list[str] = []; c = b - 1
+        # CODE 与 NAME 之间可能夹一行参考号(如 202505AP005)：到期日不一定紧贴 CODE 上方。
+        # 在 CODE 上方小窗口(≤3 行)内找到期日版式行，NAME 取到期日行再上方的词行——
+        # 否则参考号行会顶替到期日(→到期空、已到期票剔不掉)并污染标的名(→symbol 取成参考号)。
+        maturity = ""
+        mat_idx = b
+        for u in range(b - 1, max(b - 4, -1), -1):
+            if _CMBI_MATURITY_RE.match(lines[u]):
+                maturity = _cmbi_maturity_iso(lines[u])
+                mat_idx = u
+                break
+            if any(h in lines[u] for h in _CMBI_SP_HEADERS):
+                break
+        c = (mat_idx - 1) if maturity else (b - 1)
+        name_parts: list[str] = []
         while c >= 0 and len(name_parts) < 6:
             t = lines[c]
             if _num(t) is not None or _CMBI_PRICE_CCY_RE.match(t):
@@ -1784,6 +1795,17 @@ def _deriv_selfcheck() -> None:
     # 花旗 Total Assets 锚（合计行下一数值）
     assert _citi_total_assets_usd(["Total Assets\n36,128,828.16\nUSD"]) == 36128828.16
     assert _citi_total_assets_usd(["no total here"]) == 0.0
+
+    # 招银 FCN 04-30 版式：到期日与 CODE 之间夹参考号行 → 到期须仍抓对、标的名不被参考号污染
+    cmbi_sp = ("Structured Product Asset Summary\n"
+               "CMBIGP issuance HKD\n12 months step-up T+ 5B\n15MAY2026\n202505AP005\nS20250515S917HKD\n"
+               "2,090,000\n0\n0\n2,090,000\n0\n103.175342 HKD\n2,156,364.65\n0.00\n0.00\n"
+               "Account Summary\n")
+    cs = _parse_cmbi_derivatives([cmbi_sp], {"HKD": 1.0, "USD": 7.8065}, 7.8065, "2026-04-30")
+    assert len(cs) == 1, f"招银 FCN 应一条，得 {len(cs)}"
+    assert cs[0]["terms"]["maturity"] == "2026-05-15", f"到期抓错：{cs[0]['terms']['maturity']}"
+    assert "202505AP005" not in cs[0]["terms"]["underlying_name"], "参考号污染了标的名"
+    assert cs[0]["lot_key"] == "S20250515S917HKD:2026-05-15", cs[0]["lot_key"]
     print("衍生品/结构性产品 三家分支自检 通过")
 
 

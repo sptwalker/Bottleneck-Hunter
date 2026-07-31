@@ -322,6 +322,32 @@ def test_value_series_forward_fill_unit():
     assert out == {"2026-04-20": 1000.0, "2026-06-30": 1200.0, "2026-07-24": 23200.0}
 
 
+def test_value_series_derivative_only_account_uses_import_totals(wl):
+    """纯结构性产品账户(无 positions)：价值曲线用各期结单权威净值(vip_imports.total_equity)建多点，
+    逐期收益率随之可算；同一期多次导入取最新一次(created_at 最大)的 total_equity，旧导入无该键的期不成点。"""
+    import json
+
+    def _imp(iid, pe, te, created):
+        with wl._write_conn() as conn:
+            conn.execute(
+                "INSERT INTO vip_imports(id,file_name,file_hash,file_type,detected_kind,status,"
+                "key_metrics_json,account_ref,created_at,user_id,market) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (iid, f"{iid}.pdf", iid, "pdf", "monthly_statement", "imported",
+                 json.dumps({"period_end": pe, "total_equity": te}), "DERIV", created, "u1", "us_stock"))
+
+    _imp("i1", "2026-04-30", 1000000.0, "2026-07-01T00:00:00+00:00")
+    _imp("i2", "2026-05-31", 1010000.0, "2026-07-02T00:00:00+00:00")
+    _imp("i3", "2026-05-31", 1020000.0, "2026-07-03T00:00:00+00:00")  # 同期重导 → 覆盖为最新净值
+    _imp("i4", "", None, "2026-07-04T00:00:00+00:00")                 # 缺期/缺净值 → 不成点
+
+    vs = portfolio.value_series(wl, account_ref="DERIV")
+    by = {s["as_of_date"]: s["total_equity"] for s in vs["series"]}
+    assert list(by) == ["2026-04-30", "2026-05-31"]
+    assert by["2026-05-31"] == 1020000.0          # 取同期最新一次导入
+    assert len(vs["returns"]) == 1                # 两点 → 一段逐期收益率
+    assert abs(vs["returns"][0]["pct"] - 2.0) < 0.01  # (1020000-1000000)/1000000
+
+
 def test_report_number_guard(wl):
     stmt = _stmt()
     portfolio.normalize_statement(wl, stmt, account_ref="A1")

@@ -678,8 +678,9 @@ async function loadDashboard() {
     const { items } = await vipGet(`/derivatives?${params.toString()}`);
     const el = document.getElementById('vip-risk-deriv');
     if (el) el.textContent = String(items?.length || 0);
-    if (scope === 'account') renderDerivList(items || []);
-  } catch (_) {}
+    if (scope === 'account') { renderDerivList(items || []); renderOverviewDeriv([]); }
+    else renderOverviewDeriv(items || []);  // 全账户：结构性产品/衍生品独立明细区
+  } catch (_) { renderOverviewDeriv([]); }
 
   renderStaleness(ref);
 }
@@ -834,6 +835,45 @@ function renderDerivList(items, accounts = null) {
     '</tbody></table>';
   box.querySelectorAll('button[data-reextract]').forEach(btn =>
     btn.addEventListener('click', () => reextractDeriv(btn.getAttribute('data-reextract'))));
+}
+
+// 总览「全账户」结构性产品/衍生品明细：/derivatives?scope=all 拉取后按 family 分流填两卡体，各带所属账户列。
+// 复用持仓 Tab 同款渲染（双击展开完整条款），差别仅多一列「所属账户」——全账户视角需标注归属。
+function renderOverviewDeriv(items) {
+  const spCard = document.getElementById('vip-overview-sp-card');
+  const spBody = document.getElementById('vip-overview-sp-body');
+  const dCard = document.getElementById('vip-overview-deriv-card');
+  const dBody = document.getElementById('vip-overview-deriv-body');
+  const nameOf = ref => {
+    const a = (vipState.accounts || []).find(x => (x.account_ref || '') === ref);
+    return a ? (a.display_name || a.account_ref || ref) : (ref || '—');
+  };
+  const list = items || [];
+  const sp = list.filter(d => VIP_SP_FAMILIES.has(d.product_family));
+  const deriv = list.filter(d => !VIP_SP_FAMILIES.has(d.product_family));
+  if (spCard && spBody) {
+    if (!sp.length) { spCard.style.display = 'none'; } else {
+      spBody.innerHTML = sp.map(d =>
+        `<tr style="cursor:pointer" title="双击展开合约详情" ondblclick="vipToggleDrvDetail(this)">` +
+        `<td style="font-weight:600">${esc(d.underlying_symbol || '—')}</td><td>${esc(d.currency || '—')}</td>` +
+        `<td>${d.notional != null ? fmtNum(d.notional, 0) : '—'}</td>` +
+        `<td>$${d.market_value_usd != null ? fmtNum(d.market_value_usd) : '—'}</td>` +
+        `<td>${esc(d.maturity || '—')}</td><td>${esc(nameOf(d.account_ref))}</td><td>${esc(d.source_file || '—')}</td></tr>` +
+        vipTermsDetail(d, 7)).join('');
+      spCard.style.display = '';
+    }
+  }
+  if (dCard && dBody) {
+    if (!deriv.length) { dCard.style.display = 'none'; } else {
+      dBody.innerHTML = deriv.map(d =>
+        `<tr style="cursor:pointer" title="双击展开合约详情" ondblclick="vipToggleDrvDetail(this)">` +
+        `<td>${esc(d.product_family || '—')}</td><td style="font-weight:600">${esc(d.underlying_symbol || '—')}</td>` +
+        `<td>${esc(d.currency || '—')}</td><td>${d.tenor_days ? fmtNum(d.tenor_days, 0) : '—'}</td>` +
+        `<td>${esc(nameOf(d.account_ref))}</td><td>${esc(d.source_file || '—')}</td></tr>` +
+        vipTermsDetail(d, 6)).join('');
+      dCard.style.display = '';
+    }
+  }
 }
 
 // 重传原始结算单回填/刷新条款（旧数据缺 trade_date 时用）
