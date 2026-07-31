@@ -117,6 +117,16 @@ async def get_latest_macro(market: str = "us_stock", user: dict = Depends(get_cu
     return {"strategy": strategy}
 
 
+@router.get("/market-indices")
+async def get_market_indices(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """观察池顶栏：当前市场主要指数（美股 标普/纳指/VIX；A股 上证/深成/中证500/沪深300）。
+
+    指数为市场全局数据，用全局 store（非按用户隔离）；随前端市场切换。
+    """
+    from bottleneck_hunter.watchlist.macro_data import fetch_market_indices
+    return await fetch_market_indices(_get_store(), market)
+
+
 @router.get("/macro/history")
 async def get_macro_history(limit: int = 10, market: str = "us_stock", user: dict = Depends(get_current_user)):
     store = _user_store(user).for_market(market)

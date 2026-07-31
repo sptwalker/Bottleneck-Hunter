@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 import yfinance as yf
@@ -115,6 +116,72 @@ _INDEX_CODE_MAP: dict[str, tuple[str, str]] = {
 _BENCHMARK_KEY: dict[str, str] = {"us_stock": "sp500", "a_stock": "csi300", "hk_stock": "hsi"}
 
 
+# 观察池顶栏「市场主要指数」——随所选市场切换展示的指数 (key, yfinance 代码, 中文名)。
+# 独立于 L1 宏观口径：这里只为顶栏展示，深成/中证500 不进 L1 宏观策略，避免污染。
+_WATCH_INDEX_BAR: dict[str, list[tuple[str, str, str]]] = {
+    "us_stock": [
+        ("sp500", "^GSPC", "标普500"),
+        ("nasdaq", "^IXIC", "纳斯达克"),
+        ("vix", "^VIX", "恐慌指数VIX"),
+    ],
+    "a_stock": [
+        ("sse_index", "000001.SS", "上证指数"),
+        ("szse_component", "399001.SZ", "深证成指"),
+        ("csi500", "000905.SS", "中证500"),
+        ("csi300", "000300.SS", "沪深300"),
+    ],
+}
+
+_index_bar_cache: dict[str, tuple[float, dict]] = {}  # market -> (取数时刻, payload)
+_INDEX_BAR_TTL = 600  # 秒；指数按日更新，10 分钟缓存足够，避免每次进池都打 yfinance
+
+
+async def fetch_market_indices(store: WatchlistStore, market: str = "us_stock") -> dict:
+    """观察池顶栏所需的市场主要指数（随市场切换）。TTL 缓存 + 单指标快照兜底。
+
+    返回 {"market", "updated_at", "indices": [{key,label,value,change_pct,stale,fetched_at}]}。
+    yfinance 取不到（国内被墙/限流）时回落到 macro_snapshots 最近一条并标 stale。
+    """
+    market = market or "us_stock"
+    specs = _WATCH_INDEX_BAR.get(market)
+    if not specs:
+        return {"market": market, "updated_at": None, "indices": []}
+
+    now = time.time()
+    hit = _index_bar_cache.get(market)
+    if hit and now - hit[0] < _INDEX_BAR_TTL:
+        return hit[1]
+
+    cached = {r["indicator"]: r for r in store.get_latest_macro_snapshots()}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    async def _one(key: str, symbol: str, label: str) -> dict:
+        data = None
+        try:
+            data = await asyncio.to_thread(_fetch_yf_quote, symbol)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("指数 %s 获取失败: %s", key, e)
+        if data:
+            store.save_macro_snapshot(key, today, data["value"], now_iso,
+                                      change_pct=data.get("change_pct", 0.0))
+            return {"key": key, "label": label, "value": data["value"],
+                    "change_pct": data.get("change_pct", 0.0), "stale": False, "fetched_at": now_iso}
+        row = cached.get(key)  # 实时取不到 → 最近快照兜底
+        if row:
+            return {"key": key, "label": label, "value": row["value"],
+                    "change_pct": row.get("change_pct", 0.0) or 0.0, "stale": True,
+                    "fetched_at": row.get("fetched_at") or row.get("date")}
+        return {"key": key, "label": label, "value": None, "change_pct": None,
+                "stale": True, "fetched_at": None}
+
+    indices = list(await asyncio.gather(*[_one(k, s, l) for k, s, l in specs]))
+    stamps = [i["fetched_at"] for i in indices if i["fetched_at"]]
+    payload = {"market": market, "updated_at": max(stamps) if stamps else None, "indices": indices}
+    _index_bar_cache[market] = (now, payload)
+    return payload
+
+
 def default_benchmark_ticker(market: str) -> tuple[str, str]:
     """返回该市场净值对照用的默认基准 (yfinance 代码, 显示名)。未知市场退美股标普。"""
     key = _BENCHMARK_KEY.get(market or "us_stock", "sp500")
@@ -159,14 +226,15 @@ _FRED_INDICATORS = [
     ("vix", "VIXCLS", "VIX 恐慌指数", "level"),
     ("hy_oas", "BAMLH0A0HYM2", "高收益债信用利差 HY OAS(%)", "level"),
     ("wti_oil", "DCOILWTICO", "WTI 原油($/桶)", "level"),
+    ("dxy", "DTWEXBGS", "美元指数", "pct"),  # 广义贸易加权美元；yfinance DX-Y.NYB 被墙时借道 FRED 兜底
     # 黄金：FRED 的 GOLDAMGBD228NLBM 已停更(返回400)，改用 akshare 上海金(见 _fetch_sge_gold)。
 ]
 
 # 美股大盘指数的 FRED 兜底：yfinance(^GSPC/^IXIC)被 Yahoo 限流(429)时用 FRED 补。
 # 仅当 markets 含 us_stock 时才取(sp500/nasdaq 是美股专属，绝不进 A股/港股宏观口径)。
 _FRED_US_EQUITY = [
-    ("sp500", "SP500", "标普500", "level"),
-    ("nasdaq", "NASDAQCOM", "纳斯达克综指", "level"),
+    ("sp500", "SP500", "标普500", "pct"),
+    ("nasdaq", "NASDAQCOM", "纳斯达克综指", "pct"),
 ]
 
 
@@ -213,7 +281,15 @@ async def _fetch_fred_indicators(extra: list | None = None) -> dict:
                     trillions = round(val_m / 1_000_000, 3)
                     wow = round((val_m / prev_m - 1) * 100, 2) if prev_m else 0.0
                     out[k] = {"value": trillions, "change_pct": wow, "label": label, "date": obs[0].get("date", "")}
-            else:  # kind == "level"：最新值 + 环比绝对变动
+            elif kind == "pct":  # 价格/指数型：环比百分比变动（股指等大数值，绝对点差当%会得出 -433%）
+                obs = await _fred_series(key, series_id, limit=2)
+                if obs:
+                    val = float(obs[0]["value"])
+                    prev = float(obs[1]["value"]) if len(obs) >= 2 else val
+                    out[k] = {"value": round(val, 2),
+                              "change_pct": round((val / prev - 1) * 100, 2) if prev else 0.0,
+                              "label": label, "date": obs[0].get("date", "")}
+            else:  # kind == "level"：最新值 + 环比绝对变动（利率/利差等，点差即百分点）
                 obs = await _fred_series(key, series_id, limit=2)
                 if obs:
                     val = float(obs[0]["value"])

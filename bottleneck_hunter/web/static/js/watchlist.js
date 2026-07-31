@@ -1992,6 +1992,7 @@ function initToolbar() {
     marketSelect.addEventListener('change', () => {
       wlState.filterMarket = marketSelect.value;
       render();
+      loadMarketIndices();
     });
   }
 
@@ -2524,7 +2525,42 @@ async function loadStrategyTab(entry) {
   }
 }
 
-/* ── Init ─────────────────────────────────────────────── */
+/* ── 市场主要指数顶栏（随市场切换）──────────────────────── */
+
+async function loadMarketIndices() {
+  const bar = document.getElementById('wl-index-bar');
+  if (!bar) return;
+  try {
+    const mkt = wlState.filterMarket || 'us_stock';
+    const res = await fetch(`/api/decision/market-indices?market=${encodeURIComponent(mkt)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderMarketIndices(await res.json());
+  } catch (e) {
+    bar.style.display = 'none';
+  }
+}
+
+function renderMarketIndices(data) {
+  const bar = document.getElementById('wl-index-bar');
+  if (!bar) return;
+  const list = (data && data.indices) || [];
+  if (!list.length) { bar.style.display = 'none'; return; }
+  const chips = list.map(ix => {
+    const v = ix.value != null ? Number(ix.value).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '--';
+    const cp = ix.change_pct;
+    const cls = cp == null ? '' : cp >= 0 ? 'wl-change-up' : 'wl-change-down';
+    const cpStr = cp == null ? '' : `${cp >= 0 ? '+' : ''}${cp.toFixed(2)}%`;
+    const stale = ix.stale ? ' wl-index-chip--stale' : '';
+    return `<span class="wl-index-chip${stale}"${ix.stale ? ' title="实时获取失败，显示最近快照"' : ''}>
+      <span class="wl-index-name">${escHtml(ix.label)}</span>
+      <span class="wl-index-val">${v}</span>
+      <span class="wl-index-chg ${cls}">${cpStr}</span>
+    </span>`;
+  }).join('');
+  const upd = data.updated_at ? fmtBJ(data.updated_at) : '—';
+  bar.innerHTML = `<div class="wl-index-chips">${chips}</div><span class="wl-index-updated">更新 ${upd}</span>`;
+  bar.style.display = 'flex';
+}
 
 /* ── Init ─────────────────────────────────────────────── */
 
@@ -2543,10 +2579,12 @@ export function initWatchlist() {
   loadBudget();
   loadPipelineStatus();
   loadStrategySummaries();
+  loadMarketIndices();
 }
 
 // 每次切换到观察池视图时调用：重新拉取列表，确保刚加入/删除的股票实时可见，无需手动刷新。
 export async function refreshWatchlistOnEnter() {
   await loadWatchlist();
   loadPipelineStatus();
+  loadMarketIndices();
 }

@@ -119,6 +119,42 @@
   border: 1px solid oklch(0.55 0.15 250 / 0.15);
 }
 
+/* ── 市场主要指数顶栏 ─────────────────────────────────── */
+.wl-index-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  background: oklch(0.55 0.15 250 / 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.wl-index-chips {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.wl-index-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.wl-index-name { font-size: var(--fs-xs); color: var(--muted); }
+.wl-index-val  { font-size: var(--fs-sm); font-weight: 600; }
+.wl-index-chg  { font-size: var(--fs-xs); }
+.wl-index-chip--stale { opacity: 0.6; }
+.wl-index-updated {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .wl-refresh-header {
   display: flex;
   justify-content: space-between;

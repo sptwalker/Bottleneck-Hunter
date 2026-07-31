@@ -588,6 +588,9 @@
           </div>
         </div>
 
+        <!-- 市场主要指数（随所选市场切换：美股 标普/纳指/VIX；A股 上证/深成/中证500/沪深300） -->
+        <div class="wl-index-bar" id="wl-index-bar" style="display:none"></div>
+
         <!-- 刷新进度条 -->
         <div class="wl-refresh-bar" id="wl-refresh-bar" style="display:none">
           <div class="wl-refresh-header">
@@ -1638,6 +1641,29 @@
               <div class="st-stat-card"><span class="st-stat-value" id="vip-risk-deriv">--</span><span class="st-stat-label">衍生品敞口数</span></div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div class="st-card" id="vip-overview-sp-card" style="margin-top:16px;display:none">
+        <div class="st-card-header"><h3>结构性产品（全账户）</h3></div>
+        <div class="st-card-body">
+          <table class="st-table">
+            <thead>
+              <tr><th>标的</th><th>币种</th><th>名义</th><th>当期MTM(USD)</th><th>到期</th><th>所属账户</th><th>来源文件</th></tr>
+            </thead>
+            <tbody id="vip-overview-sp-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="st-card" id="vip-overview-deriv-card" style="margin-top:16px;display:none">
+        <div class="st-card-header"><h3>衍生品持仓（全账户）</h3></div>
+        <div class="st-card-body">
+          <table class="st-table">
+            <thead>
+              <tr><th>产品族</th><th>标的</th><th>币种</th><th>期限(天)</th><th>所属账户</th><th>来源文件</th></tr>
+            </thead>
+            <tbody id="vip-overview-deriv-body"></tbody>
+          </table>
         </div>
       </div>
 
