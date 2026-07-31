@@ -19,6 +19,7 @@ from bottleneck_hunter.watchlist.budget import BudgetTracker
 # 复用 decision_engine 的工具：_sse 会把 event 名同时写进 data（前端 dcSSE 依赖此约定）
 from bottleneck_hunter.watchlist.decision_engine import (
     _collect_market_context,
+    _get_market_context_text,
     _inject_market_news,
     _load_prompt,
     _sse,
@@ -39,6 +40,15 @@ ANALYSTS = [
     {"slot": 0, "role": "macro_market",   "label": "🌐 宏观市场分析师", "prompt": "macro_consult_market"},
     {"slot": 1, "role": "industry_trend", "label": "🏭 产业动向分析师", "prompt": "macro_consult_industry"},
 ]
+
+# snapshot 顶部的「本次咨询主市场」标注：点明宏观段哪些是本土锚、哪些是全球外溢参考，
+# 防止切到 A股/港股 后分析师仍把美联储/美国CPI 当本土基本面主线解读。
+_SNAPSHOT_MARKET_NOTE = {
+    "a_stock": "本次咨询主市场：A股。宏观段以中国本土指标(中国CPI/M2/1年LPR/社融/中债10Y)为主锚；"
+               "美联储利率/美债/VIX/美元指数等为『全球外溢参考』，勿当作 A股 本土基本面主线。",
+    "us_stock": "本次咨询主市场：美股。宏观段以美国本土指标(联储利率/美国CPI/失业率/美债曲线/VIX)为主线。",
+    "hk_stock": "本次咨询主市场：港股。宏观段兼看美联储(联系汇率下利率同步)与中国内地政策外溢，两头均为外部驱动。",
+}
 
 
 # ── 小工具 ────────────────────────────────────────────
@@ -94,6 +104,7 @@ def _snapshot_entry(market_ctx: dict, strategy: dict | None) -> dict:
         }
     return {
         "type": "snapshot", "ts": _now_iso(),
+        "market": market_ctx.get("markets", []),   # 供 _snapshot_text 标注主市场/外溢参考
         "indices": market_ctx.get("indices", {}),
         "sentiment": market_ctx.get("sentiment", {}),
         "macro": market_ctx.get("macro", {}),
@@ -106,7 +117,12 @@ def _snapshot_entry(market_ctx: dict, strategy: dict | None) -> dict:
 def _snapshot_text(snap: dict) -> str:
     """把 snapshot 渲染成喂给 LLM 的紧凑文本。"""
     import json
-    parts = [
+    parts = []
+    note = next((_SNAPSHOT_MARKET_NOTE[m] for m in (snap.get("market") or [])
+                 if m in _SNAPSHOT_MARKET_NOTE), "")
+    if note:
+        parts.append(f"【{note}】")
+    parts += [
         f"大盘指数: {json.dumps(snap.get('indices', {}), ensure_ascii=False)}",
         f"市场情绪(含VIX): {json.dumps(snap.get('sentiment', {}), ensure_ascii=False)}",
         f"宏观(利率/汇率等): {json.dumps(snap.get('macro', {}), ensure_ascii=False)}",
@@ -150,13 +166,15 @@ def _context_for_prompt(transcript: list, max_recent: int = MAX_RECENT) -> str:
 
 
 def _analyst_prompt(analyst: dict, snapshot_text: str, ctx_text: str,
-                    question: str, peer_answer: str = "", round: int = 0) -> str:
+                    question: str, peer_answer: str = "", round: int = 0,
+                    market_ctx: str = "") -> str:
     tmpl = _load_prompt(analyst["prompt"])
     q = question or "（开场解读：请基于以上市场数据主动给出你的宏观判断）"
     return (tmpl.replace("{snapshot}", snapshot_text)
                 .replace("{context}", ctx_text)
                 .replace("{question}", q)
                 .replace("{peer_answer}", peer_answer or "（本轮无对方观点）")
+                .replace("{market_context}", market_ctx or "（未指定市场特性）")
                 .replace("{round}", str(round)))
 
 
@@ -175,10 +193,11 @@ async def _iter_tokens(llm, prompt: str):
 
 
 async def _run_analyst(a: dict, models: list, snapshot_text: str, ctx_text: str,
-                       question: str, peer_answer: str, round: int, budget):
+                       question: str, peer_answer: str, round: int, budget,
+                       market_ctx: str = ""):
     """跑一位分析师的一轮：流式 yield ('chunk', text)，最后 yield ('done', entry)。"""
     llm, provider, model = _analyst_llm(models, a["slot"])
-    prompt = _analyst_prompt(a, snapshot_text, ctx_text, question, peer_answer, round)
+    prompt = _analyst_prompt(a, snapshot_text, ctx_text, question, peer_answer, round, market_ctx)
     full = ""
     fail_reason = ""
     try:
@@ -275,6 +294,8 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
         yield _sse("error", message="无可用 LLM（请在 AI 配置中为 L1_macro 配置模型）")
         return
 
+    market = normalize_market(market)
+    market_ctx = _get_market_context_text([market])   # 市场特性(涨跌停/T+1/宏观驱动)注入提示词
     session = _load_session(store, market)
     transcript = list(session.get("transcript_json") or []) if session else []
     today = _now_iso()[:10]
@@ -319,7 +340,8 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
 
     yield _sse("start", phase="round0")
     for a in active:
-        async for kind, payload in _run_analyst(a, models, snapshot_text, ctx_text, "", "", 0, budget):
+        async for kind, payload in _run_analyst(a, models, snapshot_text, ctx_text, "", "", 0, budget,
+                                                 market_ctx=market_ctx):
             if kind == "chunk":
                 yield _sse("chunk", role=a["role"], round=0, text=payload)
             else:
@@ -345,6 +367,8 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
         yield _sse("error", message="无可用 LLM（请在 AI 配置中为 L1_macro 配置模型）")
         return
 
+    market = normalize_market(market)
+    market_ctx = _get_market_context_text([market])
     session = _load_session(store, market)
     if not session:
         record_id = store.create_meeting_record(
@@ -378,7 +402,8 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
     yield _sse("start", phase="round1", question=question)
     round1: dict[str, str] = {}
     for a in active:
-        async for kind, payload in _run_analyst(a, models, snapshot_text, ctx_text, question, "", 1, budget):
+        async for kind, payload in _run_analyst(a, models, snapshot_text, ctx_text, question, "", 1, budget,
+                                                 market_ctx=market_ctx):
             if kind == "chunk":
                 yield _sse("chunk", role=a["role"], round=1, text=payload)
             else:
@@ -395,7 +420,7 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
             peer = next((x for x in active if x["role"] != a["role"]), None)
             peer_ans = round1.get(peer["role"], "") if peer else ""
             async for kind, payload in _run_analyst(a, models, snapshot_text, ctx_text,
-                                                     question, peer_ans, 2, budget):
+                                                     question, peer_ans, 2, budget, market_ctx=market_ctx):
                 if kind == "chunk":
                     yield _sse("chunk", role=a["role"], round=2, text=payload)
                 else:
@@ -422,6 +447,7 @@ async def stream_retry(store: WatchlistStore, budget: BudgetTracker | None,
     可选 provider/model：留空用该角色该槽的模型（网络类原地重试）；指定则换模型重试（容量/额度类）。
     """
     market = normalize_market(market)
+    market_ctx = _get_market_context_text([market])
     session = _load_session(store, market)
     if not session:
         yield _sse("error", message="无历史会话可重试")
@@ -472,7 +498,8 @@ async def stream_retry(store: WatchlistStore, budget: BudgetTracker | None,
 
     yield _sse("retry_start", role=role, round=rnd)
     new_entry = None
-    async for kind, payload in _run_analyst(a, [model_tuple], snapshot_text, ctx_text, question, peer_ans, rnd, budget):
+    async for kind, payload in _run_analyst(a, [model_tuple], snapshot_text, ctx_text, question, peer_ans, rnd, budget,
+                                             market_ctx=market_ctx):
         if kind == "chunk":
             yield _sse("chunk", role=role, round=rnd, text=payload)
         else:

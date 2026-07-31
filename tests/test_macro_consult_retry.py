@@ -45,7 +45,7 @@ class _FakeStore:
 
 
 async def test_stream_retry_replaces_failed_message(monkeypatch):
-    async def _fake_run(a, models, snap, ctx, q, peer, rnd, budget):
+    async def _fake_run(a, models, snap, ctx, q, peer, rnd, budget, market_ctx=""):
         yield "chunk", "新答复"
         yield "done", ({"type": "analyst", "role": a["role"], "round": rnd, "content": "新答复",
                         "provider": "deepseek", "model": "deepseek-chat", "reply_to": None},

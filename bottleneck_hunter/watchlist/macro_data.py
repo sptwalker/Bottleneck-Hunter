@@ -76,6 +76,70 @@ def _fetch_sge_gold() -> dict | None:
         return None
 
 
+@with_retry(max_retries=2, base_delay=1.0)
+def _fetch_cn_macro() -> dict:
+    """中国本土宏观：CPI同比 / M2同比 / 1年期LPR / 中债10Y / 社融增量（akshare，国内可达）。
+
+    A股 L1 宏观口径的『本土锚』——此前 A股 的 macro 段只有美联储/美国指标(偏美股口径)，
+    切到 A股 仍满屏美国数据。补上本土宏观后，A股 以本土为主、美国 FRED 退为全球外溢参考。
+    逐项容错：单个接口失败不影响其余；akshare 不可用则整体返回空。
+    """
+    if ak is None:
+        return {}
+    out: dict[str, dict] = {}
+
+    def _report_yoy(fn, key: str, label: str) -> None:
+        # akshare「商品/日期/今值/预测值/前值」型月度报告：今值=最新同比%，change=今-前(百分点)
+        try:
+            df = fn().dropna(subset=["今值", "前值"])
+            if df.empty:
+                return
+            last = df.iloc[-1]
+            val, prev = float(last["今值"]), float(last["前值"])
+            out[key] = {"value": round(val, 2), "change_pct": round(val - prev, 2),
+                        "label": label, "date": str(last["日期"])}
+        except Exception as e:  # noqa: BLE001
+            logger.debug("%s 采集失败: %s", key, e)
+
+    _report_yoy(ak.macro_china_cpi_yearly, "cn_cpi_yoy", "中国CPI同比(%)")
+    _report_yoy(ak.macro_china_m2_yearly, "cn_m2_yoy", "中国M2同比(%)")
+
+    try:  # LPR：TRADE_DATE / LPR1Y / LPR5Y；change 用相邻两次报价差(百分点)
+        df = ak.macro_china_lpr().dropna(subset=["LPR1Y"])
+        if not df.empty:
+            val = float(df.iloc[-1]["LPR1Y"])
+            prev = float(df.iloc[-2]["LPR1Y"]) if len(df) >= 2 else val
+            out["cn_lpr_1y"] = {"value": round(val, 2), "change_pct": round(val - prev, 2),
+                                "label": "中国1年期LPR(%)", "date": str(df.iloc[-1]["TRADE_DATE"])}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("LPR 采集失败: %s", e)
+
+    try:  # 中债10Y：bond_zh_us_rate，列「中国国债收益率10年」；change 用相邻交易日差(百分点)
+        col = "中国国债收益率10年"
+        df = ak.bond_zh_us_rate().dropna(subset=[col])
+        if not df.empty:
+            val = float(df.iloc[-1][col])
+            prev = float(df.iloc[-2][col]) if len(df) >= 2 else val
+            out["cn_10y_yield"] = {"value": round(val, 3), "change_pct": round(val - prev, 3),
+                                   "label": "中国10Y国债收益率(%)", "date": str(df.iloc[-1]["日期"])}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("中债10Y 采集失败: %s", e)
+
+    try:  # 社融增量：macro_china_shrzgm，列「社会融资规模增量」(亿元)，change 用环比%
+        col = "社会融资规模增量"
+        df = ak.macro_china_shrzgm().dropna(subset=[col])
+        if not df.empty:
+            val = float(df.iloc[-1][col])
+            prev = float(df.iloc[-2][col]) if len(df) >= 2 else val
+            out["cn_social_financing"] = {"value": round(val, 1),
+                                          "change_pct": round((val / prev - 1) * 100, 2) if prev else 0.0,
+                                          "label": "中国社融增量(亿元)", "date": str(df.iloc[-1]["月份"])}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("社融 采集失败: %s", e)
+
+    return out
+
+
 # 宏观指标定义：(显示名, yfinance 代码, 市场标签)
 # 全球风险因子：VIX/美债/美元指数——各市场都合理参考（人民币/资本流动/联储外溢）
 _GLOBAL_INDICATORS = [
@@ -187,11 +251,12 @@ def default_benchmark_ticker(market: str) -> tuple[str, str]:
     key = _BENCHMARK_KEY.get(market or "us_stock", "sp500")
     return _INDEX_CODE_MAP.get(key, ("^GSPC", "标普500"))
 
-# 各市场「专属」宏观指标 key（_GLOBAL_INDICATORS 与 FRED 为全球共享、任何市场都可用，不在此列）。
-# 用于缓存兜底时剔除「他市专属」指标，避免 sp500/北向资金 等串味进另一市场的 L1 宏观口径。
+# 各市场「专属」宏观指标 key（_FRED_GLOBAL 为全球共享、任何市场都可用，不在此列）。
+# 用于缓存兜底时剔除「他市专属」指标，避免 sp500/北向资金/美国CPI/中国LPR 等串味进另一市场的 L1 宏观口径。
 _MARKET_EXCLUSIVE_KEYS: dict[str, set[str]] = {
-    "us_stock": {"sp500", "nasdaq"},
-    "a_stock": {"cny_usd", "sse_index", "csi300", "northbound_flow"},
+    "us_stock": {"sp500", "nasdaq", "unemployment_rate", "cpi_yoy"},  # cpi_yoy=美国CPI(FRED)
+    "a_stock": {"cny_usd", "sse_index", "csi300", "northbound_flow",
+                "cn_cpi_yoy", "cn_m2_yoy", "cn_lpr_1y", "cn_10y_yield", "cn_social_financing"},
     "hk_stock": {"hsi", "hstech"},
 }
 
@@ -214,20 +279,25 @@ def foreign_indicator_keys(markets: list[str]) -> set[str]:
 #   kind="level"  : 取最新值 + 环比绝对变动（利率/利差/VIX/油金等价格型）
 #   kind="cpi"    : 按 13 个月算同比通胀
 #   kind="walcl"  : 美联储总资产（百万美元）→ 换算万亿 + 周环比%（看缩表节奏）
-_FRED_INDICATORS = [
-    ("fed_funds_rate", "FEDFUNDS", "联邦基金利率(%)", "level"),
-    ("unemployment_rate", "UNRATE", "美国失业率(%)", "level"),
-    ("cpi_yoy", "CPIAUCSL", "美国CPI同比(%)", "cpi"),
-    # ── 利率与流动性「量价全景」──
+#
+# _FRED_GLOBAL：全球风险/流动性因子（利率/曲线/缩表/美元/VIX/信用利差/油）——对各市场都有外溢，
+#   全市场纳入；但语义是「全球外溢参考」而非主市场本土宏观（咨询/L1 提示词已据此标注，A股 另有本土锚）。
+_FRED_GLOBAL = [
+    ("fed_funds_rate", "FEDFUNDS", "美国联邦基金利率(%)", "level"),
     ("us_10y_yield", "DGS10", "10Y 美债收益率(%)", "level"),
-    ("yield_curve_2s10s", "T10Y2Y", "2s10s 利差(%,负=倒挂)", "level"),
+    ("yield_curve_2s10s", "T10Y2Y", "美债2s10s利差(%,负=倒挂)", "level"),
     ("fed_balance_sheet", "WALCL", "美联储总资产(万亿$,降=缩表QT)", "walcl"),
-    # ── 风险情绪「跨资产印证」──
     ("vix", "VIXCLS", "VIX 恐慌指数", "level"),
-    ("hy_oas", "BAMLH0A0HYM2", "高收益债信用利差 HY OAS(%)", "level"),
+    ("hy_oas", "BAMLH0A0HYM2", "美国高收益债信用利差 HY OAS(%)", "level"),
     ("wti_oil", "DCOILWTICO", "WTI 原油($/桶)", "level"),
     ("dxy", "DTWEXBGS", "美元指数", "pct"),  # 广义贸易加权美元；yfinance DX-Y.NYB 被墙时借道 FRED 兜底
     # 黄金：FRED 的 GOLDAMGBD228NLBM 已停更(返回400)，改用 akshare 上海金(见 _fetch_sge_gold)。
+]
+
+# _FRED_US_DOMESTIC：美国本土数据（失业率/CPI）——仅美股纳入，不灌进 A股/港股主宏观口径。
+_FRED_US_DOMESTIC = [
+    ("unemployment_rate", "UNRATE", "美国失业率(%)", "level"),
+    ("cpi_yoy", "CPIAUCSL", "美国CPI同比(%)", "cpi"),
 ]
 
 # 美股大盘指数的 FRED 兜底：yfinance(^GSPC/^IXIC)被 Yahoo 限流(429)时用 FRED 补。
@@ -260,7 +330,7 @@ async def _fetch_fred_indicators(extra: list | None = None) -> dict:
     if not key:
         return {}
     out: dict[str, dict] = {}
-    for k, series_id, label, kind in (_FRED_INDICATORS + (extra or [])):
+    for k, series_id, label, kind in (_FRED_GLOBAL + (extra or [])):
         try:
             if kind == "cpi":
                 obs = await _fred_series(key, series_id, limit=13)  # 需 13 个月算同比
@@ -350,14 +420,27 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
                 logger.warning("北向资金采集失败: %s", e)
         tasks.append(_fetch_north())
 
+        # A股 本土宏观锚（CPI/M2/LPR/中债10Y/社融）——让 A股 macro 段以本土为主，非满屏美国数据。
+        # ponytail: 仅 a_stock 取；港股同受中国内地政策影响，需要时再把 cn_* 扩到 hk_stock。
+        async def _fetch_cn():
+            try:
+                data = await asyncio.to_thread(_fetch_cn_macro)
+                for k, v in data.items():
+                    results[k] = v
+                    store.save_macro_snapshot(k, today, v["value"], now_iso,
+                                              change_pct=v.get("change_pct", 0.0))
+            except Exception as e:
+                logger.warning("中国本土宏观采集失败: %s", e)
+        tasks.append(_fetch_cn())
+
     # FRED 真宏观指标 —— Fed 政策对各市场都有外溢，全局纳入；无 Key 自动跳过。
     # vix/us_10y_yield 与 yfinance 同 key：FRED 作兜底(yfinance 取到就不覆盖，取不到则 FRED 补)，
     # 其余(曲线/信用利差/缩表/金油等)为 FRED 独有。故等 yfinance 任务先跑完，FRED 再 setdefault。
     async def _fetch_fred():
         try:
-            # 美股市场额外把 sp500/nasdaq 纳入 FRED 兜底(yfinance 被 429 限流时补大盘指数)；
-            # 非美股市场不加，避免美股指数串味进 A股/港股宏观口径。
-            extra = _FRED_US_EQUITY if "us_stock" in markets else None
+            # 美股市场额外把 美国本土(失业率/CPI) + sp500/nasdaq 纳入 FRED 兜底(yfinance 被 429 限流时补)；
+            # 非美股市场不加，避免美国本土数据/美股指数串味进 A股/港股主宏观口径。
+            extra = (_FRED_US_DOMESTIC + _FRED_US_EQUITY) if "us_stock" in markets else None
             fred = await _fetch_fred_indicators(extra=extra)  # 已改异步(走共享 httpx，可借道)，不再 to_thread
             for k, v in fred.items():
                 if k in results:
