@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -532,13 +533,6 @@ def _parse_trade_date(raw: str) -> str:
         return ""
 
 
-def _strip_cny_prefix(raw: str) -> str:
-    s = (raw or "").strip()
-    if s.startswith("CNY"):
-        s = s[3:].strip()
-    return s
-
-
 def _currency_amount(raw: str) -> tuple[str, float] | None:
     s = (raw or "").strip()
     if not s:
@@ -598,68 +592,88 @@ def _build_citi_external_id(trade_date: str, account_ref: str, kind: str, desc: 
     return "citi-" + "-".join(p for p in parts if p)
 
 
+def _citi_amount(raw: str) -> float | None:
+    """花旗金额行 → 带符号数值。会计式括号=负数，括号可落在币种符号后
+    （`€(167,546.74)`、`CNY (1,294,974.49)`）；前缀币种码/符号一律剥除。"""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    neg = "(" in s
+    body = re.sub(r"^(CNY|USD|EUR|HKD|GBP|JPY|SGD|AUD|CNH)\s*", "", s)
+    body = re.sub(r"^[$€¥￥£]", "", body).strip("() ").replace(",", "").strip()
+    v = _num(body)
+    if v is None:
+        return None
+    return -abs(v) if neg else v
+
+
 def _parse_citi_transactions(pages: list[str]) -> list[StatementTransaction]:
-    """解析花旗交易导出 PDF（当前样本格式：日期 + 8~10 行列值）。"""
-    lines = [re.sub(r"\s+", " ", x).strip() for pg in pages for x in pg.splitlines() if x.strip()]
+    """解析花旗「交易活动报告」PDF（竖排逐字段）。
+
+    真实版式每条记录以账户号行(`7/XXX468/028`)为锚，其后固定 8 列：
+      账户号 / 代号 / 账户描述 / 种类 / 交易货币 / 金额(CNY) / 金额(交易币) / CUSIP / ISIN
+    锚之前、日期行之后的所有行拼成交易描述（证券描述常跨行：`NAME` + `ISIN xxx`）。
+    花旗把大量 CJK 字用康熙部首/兼容区码位编码（如 `已购⼊证券` 的 `⼊`=U+2F0A），
+    故先 NFKC 规整，否则种类映射与锚点全部落空。旧「日期+固定 9 行」逻辑漏了「交易货币」
+    这一列、且无法处理跨行描述——整份 18 页单会被抽成 0 或错位脏数据。
+    """
+    acct_re = re.compile(r"^\d+/X{2,}\d+/\d+$")
+    lines = [unicodedata.normalize("NFKC", re.sub(r"\s+", " ", x).strip())
+             for pg in pages for x in pg.splitlines() if x.strip()]
     out: list[StatementTransaction] = []
+    n = len(lines)
     i = 0
-    while i < len(lines):
+    while i < n:
         trade_date = _parse_trade_date(lines[i])
         if not trade_date:
             i += 1
             continue
-        if i + 8 >= len(lines):
-            break
-        desc1 = lines[i + 1]
-        account_ref = lines[i + 2]
-        account_code = lines[i + 3]
-        account_desc = lines[i + 4]
-        kind = lines[i + 5]
-
-        # 真实记录总是日期后紧跟账户号；多行描述记录第一版先跳过，避免错位脏解析。
-        if not re.match(r"\d+/X{3}\d+/\d+", account_ref):
+        # 描述可跨 1~7 行，末尾锚定账户号行
+        j = next((k for k in range(i + 1, min(i + 9, n)) if acct_re.match(lines[k])), None)
+        if j is None or j + 8 >= n:
             i += 1
             continue
-        if account_code != "-":
-            i += 1
+        account_ref = lines[j]
+        account_desc = lines[j + 2]
+        kind = lines[j + 3]
+        txn_currency = lines[j + 4]
+        amount_cny = _citi_amount(lines[j + 5])
+        amount_txn = _citi_amount(lines[j + 6])
+        cusip = lines[j + 7]
+        isin = lines[j + 8]
+        # 交易货币须为 3 位币种码、交易币金额须可解析，否则非交易行 → 跳过而非污染
+        if not re.fullmatch(r"[A-Z]{3}", txn_currency) or amount_txn is None:
+            i = j + 9
             continue
 
-        amount_cny_raw = lines[i + 6]
-        amount_txn_raw = lines[i + 7]
-        cusip = lines[i + 8] if i + 8 < len(lines) else ""
-        isin = lines[i + 9] if i + 9 < len(lines) else ""
-
-        amount_cny = _currency_amount(_strip_cny_prefix(amount_cny_raw))
-        amount_txn = _currency_amount(amount_txn_raw)
-        if not amount_txn:
-            i += 1
-            continue
-        txn_currency, txn_amount = amount_txn
-        cny_amount = amount_cny[1] if amount_cny else 0.0
-        fx_rate = abs(cny_amount / txn_amount) if txn_amount else 1.0
-
-        isin_clean = isin if isin != "-" else ""
-        cusip_clean = cusip if cusip != "-" else ""
-        txn_type = _map_citi_txn_type(kind, desc1, txn_currency, txn_amount)
-        net_amount = txn_amount
-        if txn_type == "buy" and net_amount > 0 or txn_type in ("sell", "dividend", "deposit", "interest", "transfer_in") and net_amount < 0 or txn_type in ("fee", "withdrawal") and net_amount > 0:
+        desc = re.sub(r"\s+ISIN\s+[A-Z0-9]+\s*$", "", " ".join(lines[i + 1:j]).strip()).strip()
+        isin_clean = "" if isin == "-" else isin
+        cusip_clean = "" if cusip == "-" else cusip
+        cny_amount = amount_cny if amount_cny is not None else 0.0
+        fx_rate = abs(cny_amount / amount_txn) if amount_txn else 1.0
+        txn_type = _map_citi_txn_type(kind, desc, txn_currency, amount_txn)
+        net_amount = amount_txn
+        if (txn_type == "buy" and net_amount > 0
+                or txn_type in ("sell", "dividend", "deposit", "interest", "transfer_in") and net_amount < 0
+                or txn_type in ("fee", "withdrawal") and net_amount > 0):
             net_amount = -net_amount
 
         out.append(StatementTransaction(
-            company=desc1,
+            company=desc,
             txn_type=txn_type,
             trade_date=trade_date,
             currency=txn_currency,
-            gross_amount=txn_amount,
+            gross_amount=amount_txn,
             net_amount=net_amount,
             fx_rate=round(fx_rate, 6) if fx_rate else 1.0,
-            external_id=_build_citi_external_id(trade_date, account_ref, kind, desc1, txn_currency, txn_amount, isin_clean, cusip_clean),
-            description=f"{desc1} | {kind} | {account_desc}",
+            external_id=_build_citi_external_id(trade_date, account_ref, kind, desc,
+                                                txn_currency, amount_txn, isin_clean, cusip_clean),
+            description=f"{desc} | {kind} | {account_desc}",
             cusip=cusip_clean,
             isin=isin_clean,
             account_ref=account_ref,
         ))
-        i += 10 if isin else 9
+        i = j + 9
     return out
 
 

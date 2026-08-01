@@ -434,3 +434,49 @@ def test_ingest_and_store_rejects_empty_monthly_statement(tmp_path, monkeypatch)
     monkeypatch.setattr(ingest, "ingest_pdf", lambda *a, **k: _mk_stmt())      # 抽成 0 持仓
     with pytest.raises(ValueError, match="unsupported_non_statement"):
         ingest.ingest_and_store(b"%PDF-fake", "disclosure.pdf", user_id="u1")
+
+
+# ── 花旗「交易活动报告」竖排解析回归（不依赖 PDF 字体，直接喂抽取后的行）──────
+
+def test_parse_citi_transactions_real_layout():
+    """真实版式：账户号锚点 + 8 列尾（含独立「交易货币」列）、证券描述跨行、
+    康熙部首码位（入=U+2F0A）需 NFKC 规整、会计式括号可落在币种符号后（€(...)）。
+    这些正是把整份 18 页交易单抽成脏数据的四个坑，任一回退此测即红。"""
+    page = "\n".join([
+        # ① 证券买入：种类用康熙部首「已购⼊证券」、描述跨两行、CNY/USD 均括号负数
+        "21 Jul 2026",
+        "MICRON TECHNOLOG",
+        "ISIN US5951121038",
+        "7/XXX468/028", "-", "Investment Advisory Portfolio",
+        "已购⼊证券", "USD", "CNY (292,090.70)", "USD (43,165.90)", "-", "US5951121038",
+        # ② 保证金贷款支取：EUR 括号落在币种符号后 €(...)
+        "23 Jul 2026",
+        "MARGIN DEMAND LOAN",
+        "7/XXX468/028", "-", "Investment Advisory Portfolio",
+        "贷款付款", "EUR", "CNY (1,294,974.49)", "€(167,546.74)", "-", "-",
+        # ③ 港币股息：非美元、正数、ISIN 有值
+        "01 Jun 2026",
+        "TENCENT HOLDINGS",
+        "ISIN KYG875721634",
+        "7/XXX468/028", "-", "Investment Advisory Portfolio",
+        "股息", "HKD", "CNY 5,821.94", "HKD 6,328.20", "-", "KYG875721634",
+        "⻚⾯打印在 24 Jul 2026 8:59 AM (UTC+08:00)",
+    ])
+    txns = ingest._parse_citi_transactions([page])
+    assert len(txns) == 3, [t.company for t in txns]
+    by = {t.company: t for t in txns}
+
+    mic = by["MICRON TECHNOLOG"]                       # 跨行描述已剥掉尾部 ISIN
+    assert mic.txn_type == "buy" and mic.currency == "USD"
+    assert abs(mic.gross_amount - (-43165.90)) < 0.01
+    assert mic.isin == "US5951121038"
+
+    loan = by["MARGIN DEMAND LOAN"]                    # €(...) → 负数
+    assert loan.txn_type == "withdrawal" and loan.currency == "EUR"
+    assert abs(loan.gross_amount - (-167546.74)) < 0.01
+    assert loan.isin == ""
+
+    ten = by["TENCENT HOLDINGS"]
+    assert ten.txn_type == "dividend" and ten.currency == "HKD"
+    assert abs(ten.gross_amount - 6328.20) < 0.01
+    assert ten.isin == "KYG875721634"

@@ -53,9 +53,9 @@ def _citi_trade_export_pdf() -> bytes:
     import fitz
     lines = [
         "Transaction Description", "Account Number", "Account Number 2", "Account Description", "Transaction Type", "Currency", "Base Amount", "Transaction Amount", "CUSIP", "ISIN",
-        "24 Jul 2026", "Alphabet Inc Dividend", "123/XXX456/7", "-", "Global account", "DIVIDEND", "CNY 717.50", "USD 100.00", "-", "US02079K3059",
-        "23 Jul 2026", "Tencent Fee", "123/XXX456/7", "-", "Global account", "FEE", "CNY 91.75", "HKD 100.00", "-", "HK0700000000",
-        "22 Jul 2026", "Cash Transfer", "123/XXX456/7", "-", "Global account", "DEPOSIT", "CNY 3587.50", "USD 500.00", "-", "-",
+        "24 Jul 2026", "Alphabet Inc Dividend", "123/XXX456/7", "-", "Global account", "DIVIDEND", "USD", "CNY 717.50", "USD 100.00", "-", "US02079K3059",
+        "23 Jul 2026", "Tencent Fee", "123/XXX456/7", "-", "Global account", "FEE", "HKD", "CNY 91.75", "HKD 100.00", "-", "HK0700000000",
+        "22 Jul 2026", "Cash Transfer", "123/XXX456/7", "-", "Global account", "DEPOSIT", "USD", "CNY 3587.50", "USD 500.00", "-", "-",
     ]
     doc = fitz.open(); pg = doc.new_page()
     pg.insert_text((36, 40), "\n".join(lines), fontsize=8)
