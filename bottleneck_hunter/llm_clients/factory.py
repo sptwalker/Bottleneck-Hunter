@@ -403,10 +403,13 @@ def get_models_for_role(
 
     # 优先级1: 数据库矩阵（手动覆盖）。prefer_primary 时仅在主模型不可用后作兜底。
     if configs:
+        from bottleneck_hunter.llm_clients import provider_gate
         results = []
         for cfg in configs:
             if not is_provider_active(cfg["provider"]):
                 continue  # 跳过已被管理员禁用的 provider（其它优先级会兜底到主要/可用模型）
+            if provider_gate.is_disabled(uid, cfg["provider"]):
+                continue  # 跳过因认证失效/限流严重被持久禁用的节点（须用户重配/过测试恢复）
             try:
                 llm = create_llm(cfg["provider"], cfg["model"], temperature=temperature, with_fallback=with_fallback, user_id=uid)
                 results.append((llm, cfg["provider"], cfg["model"]))

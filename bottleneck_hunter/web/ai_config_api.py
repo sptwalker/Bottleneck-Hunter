@@ -121,6 +121,13 @@ def _build_providers_list(user_id: str = "", include_unconfigured: bool = False)
             continue
         pid = cp["provider_id"]
         has_key = pid in user_hints
+        health = None
+        if user_id:
+            try:
+                from bottleneck_hunter.llm_clients import provider_gate
+                health = provider_gate.disabled_info(user_id, pid)  # 认证失效/限流严重禁用态，未禁则 None
+            except Exception:  # noqa: BLE001
+                pass
         providers.append({
             "id": pid,
             "name": cp.get("display_name") or pid,
@@ -129,6 +136,7 @@ def _build_providers_list(user_id: str = "", include_unconfigured: bool = False)
             "default_model": cp.get("default_model", "") or "",
             "base_url": cp.get("base_url", "") or "",
             "key_hint": user_hints.get(pid, ""),  # 当前用户自己的 hint
+            "health": health,                     # {status,reason,detail,disabled_at} 或 None
         })
     return providers
 
@@ -226,6 +234,56 @@ async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
     except Exception as e:
         msg = str(e).strip() or e.__class__.__name__
         return {"ok": False, "error": msg[:300]}
+
+
+# ── POST /provider/{provider}/recover ──
+
+
+_RECOVER_CALLS = 3  # 流量测试：顺序发 N 次真实调用，全过才算恢复（区别于 /test/one 单发探活）
+
+
+@router.post("/provider/{provider}/recover")
+async def recover_provider(provider: str, user: dict = Depends(get_current_user)):
+    """流量测试恢复被持久禁用（密钥失效/限流严重）的节点：用当前用户 key 顺序发
+    _RECOVER_CALLS 次真实调用，全过 → 解除禁用；任一失败 → 保留禁用并回失败原因。"""
+    from langchain_core.messages import HumanMessage
+
+    from bottleneck_hunter.llm_clients import provider_gate
+
+    uid = user.get("sub", "")
+    provider = provider.strip()
+    if not provider_gate.is_disabled(uid, provider):
+        return {"ok": True, "recovered": True, "note": "该节点未被禁用"}
+
+    # 解析当前用户自己的 key + 模型（严格隔离，缺 key 即失败）
+    try:
+        from bottleneck_hunter.web.user_api import resolve_user_api_key
+        api_key = resolve_user_api_key(uid, provider) or ""
+    except Exception:
+        api_key = ""
+    model = resolve_provider_model(provider, uid)
+    if not model:
+        return {"ok": False, "recovered": False, "error": "未配置模型（请先在配置中心填写模型名）"}
+
+    for i in range(_RECOVER_CALLS):
+        try:
+            llm = create_llm(provider, model, api_key=(api_key or None),
+                             user_id=uid, with_fallback=False)
+            await asyncio.wait_for(
+                asyncio.to_thread(lambda m=llm: m.invoke([HumanMessage(content="ping")])),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            return {"ok": False, "recovered": False, "error": f"第 {i + 1}/{_RECOVER_CALLS} 次请求超时(60s)"}
+        except Exception as e:
+            from bottleneck_hunter.llm_clients.fallback import classify_reason
+            msg = str(e).strip() or e.__class__.__name__
+            return {"ok": False, "recovered": False,
+                    "error": f"第 {i + 1}/{_RECOVER_CALLS} 次失败：{msg[:200]}",
+                    "reason": classify_reason(e)}
+
+    provider_gate.clear(uid, provider)  # 全过才解除禁用
+    return {"ok": True, "recovered": True, "calls": _RECOVER_CALLS}
 
 
 # ── POST /test/connectivity ──

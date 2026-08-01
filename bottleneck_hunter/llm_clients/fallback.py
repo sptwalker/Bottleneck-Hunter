@@ -117,6 +117,13 @@ def _record_call(provider: str, model: str, ok: bool, t0: float, reason: str = "
     # 遥测落库：测试运行中跳过，避免假模型数据污染 Phase 1 排序
     if "pytest" in sys.modules:
         return
+    # 持久熔断升级：认证失败→立即禁用；限流严重→累计阈值禁用。落真库，故 pytest 下跳过
+    # （provider_gate 有独立单测用 tmp 库直驱 record_result）。
+    try:
+        from bottleneck_hunter.llm_clients import provider_gate
+        provider_gate.record_result(uid, provider, ok, reason)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         latency_ms = (time.monotonic() - t0) * 1000
         _get_metric_store().record_model_call(
@@ -298,6 +305,7 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
     用户配的其它 provider 无法被自动替换。"""
     # 延迟导入避免与 factory 循环依赖
     from bottleneck_hunter.auth.current_user import get_current_user_id
+    from bottleneck_hunter.llm_clients import provider_gate
     from bottleneck_hunter.llm_clients.factory import (
         _FALLBACK_CHAIN,
         _user_has_llm_key,
@@ -324,6 +332,8 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
             continue
         seen.add(provider)
         if not is_provider_active(provider):  # 跳过已被管理员禁用的 provider
+            continue
+        if provider_gate.is_disabled(uid, provider):  # 跳过认证失效/限流严重被持久禁用的节点
             continue
         if not _user_has_llm_key(provider, uid):  # 严格：只用当前用户自己配了 KEY 的备选
             continue

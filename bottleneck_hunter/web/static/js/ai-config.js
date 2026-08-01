@@ -93,6 +93,7 @@ export function initAIConfig() {
     else if (btn.dataset.aicAct === 'delete') deleteProvider(id, btn.dataset.name || id, isCustom);
     else if (btn.dataset.aicAct === 'primary') setProviderPrimary(id, btn.dataset.name || id);
     else if (btn.dataset.aicAct === 'disable') toggleProviderActive(id, btn.dataset.name || id, btn.dataset.active === '1');
+    else if (btn.dataset.aicAct === 'recover') recoverProvider(id, btn.dataset.name || id, btn);
   });
 
   // Auto-generate ID from name
@@ -163,6 +164,7 @@ async function loadRoles() {
     renderProviders();
     renderConfiguredModelSummary();
     renderMatrixForModule(_activeModule);
+    refreshAiConfigRedDot();   // provider 列表含 health → 更新首页导航红点
   } catch (e) {
     console.error('Failed to load roles:', e);
     renderSidebarError('网络错误');
@@ -247,10 +249,15 @@ function renderProviders() {
       const configured = !!cfg.configured;
       const keyHint = cfg.key_hint || '';
       const health = _providerHealth[id];
+      const gate = cfg.health;   // 持久熔断态 {status,reason,...} 或 null（认证失效/限流严重）
 
-      // 健康点：未配→灰；禁用→灰；熔断→红；成功率<70%→黄；否则绿
+      // 健康点：未配→灰；禁用→灰；持久熔断→红；熔断→红；成功率<70%→黄；否则绿
       let dotClass = 'aic-status-unknown', stateText = '未配置';
       if (isDisabled) { dotClass = 'aic-status-unknown'; stateText = '已禁用'; }
+      else if (gate) {
+        dotClass = 'aic-status-fail';
+        stateText = gate.status === 'disabled_auth' ? '密钥失效 · 已禁用' : '限流严重 · 已禁用';
+      }
       else if (configured) {
         stateText = keyHint ? `已连接 · ${escHtml(keyHint)}` : '已连接';
         if (health && health.cooldown_s > 0) { dotClass = 'aic-status-fail'; stateText += ' · 暂时不可用'; }
@@ -260,6 +267,13 @@ function renderProviders() {
 
       const freeBadge = FREE_PROVIDERS.has(id) ? '<span class="aic-tier-badge free">免费</span>' : '';
       const primaryBadge = isPrimary ? '<span class="aic-provider-primary-badge" title="全局主要模型（默认+兜底优先）">主要</span>' : '';
+      // 持久熔断徽章：密钥失效 / 限流严重（须重配或过流量测试恢复）
+      const gateBadge = gate
+        ? `<span class="aic-gate-badge" title="${escHtml(gate.reason || '')}${gate.detail ? ' · ' + escHtml(gate.detail) : ''}">⛔ ${gate.status === 'disabled_auth' ? '密钥失效' : '限流严重'}</span>`
+        : '';
+      const recoverBtn = gate
+        ? `<button class="btn btn-xs btn-primary" data-aic-act="recover" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" title="用当前 Key 顺序发 3 次真实调用，全过即恢复">测试并恢复</button>`
+        : '';
       const editLabel = isAdmin ? '编辑' : (configured ? '换密钥' : '填入密钥');
       const editCls = (!configured && !isAdmin) ? 'btn-primary' : '';
       const delBtn = isAdmin
@@ -276,13 +290,13 @@ function renderProviders() {
         <div class="aic-provider-row-top">
           <span class="aic-provider-status ${dotClass}"></span>
           <div class="aic-provider-info">
-            <span class="aic-provider-name">${escHtml(displayName)}${freeBadge}${primaryBadge}</span>
+            <span class="aic-provider-name">${escHtml(displayName)}${freeBadge}${primaryBadge}${gateBadge}</span>
             <span class="aic-provider-state">${stateText}${model ? ` · ${escHtml(model)}` : ''}</span>
           </div>
         </div>
         <div class="aic-provider-actions-inline">
           <button class="btn btn-xs ${editCls}" data-aic-act="edit" data-pid="${escHtml(id)}" data-custom="1">${editLabel}</button>
-          ${primaryBtn}${disableBtn}${delBtn}
+          ${recoverBtn}${primaryBtn}${disableBtn}${delBtn}
         </div>
       </div>`;
     }).join('');
@@ -659,6 +673,33 @@ async function toggleProviderActive(id, name, currentlyActive) {
   } catch (e) {
     toast('网络错误: ' + e.message);
   }
+}
+
+async function recoverProvider(id, name, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '流量测试中…'; }
+  try {
+    const resp = await fetch(`${API}/provider/${encodeURIComponent(id)}/recover`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.recovered) {
+      toast(`「${name}」已恢复（${data.calls || 3} 次流量测试全过）`);
+      await loadRoles();  // 重拉带 health 的 provider 列表，徽章消失
+      refreshAiConfigRedDot();
+    } else {
+      toast(`恢复失败：${data.error || '流量测试未通过'}`);
+      if (btn) { btn.disabled = false; btn.textContent = '测试并恢复'; }
+    }
+  } catch (e) {
+    toast('网络错误: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '测试并恢复'; }
+  }
+}
+
+// 首页导航红点：任一 provider 被持久禁用 → 给「系统配置中心」nav 按钮挂 .has-unread（复用现成机制）
+function refreshAiConfigRedDot() {
+  const nav = document.querySelector('.nav-btn[data-view="aiconfig"]');
+  if (!nav) return;
+  const anyDisabled = _providers.some(p => p.health);
+  nav.classList.toggle('has-unread', anyDisabled);
 }
 
 async function testConnectivity() {

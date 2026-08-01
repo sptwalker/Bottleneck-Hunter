@@ -52,8 +52,19 @@ class ProviderHealth:
             self._until.pop((user_id or "", (provider or "").lower().strip()), None)
 
     def is_open(self, user_id: str, provider: str) -> bool:
-        """True = 该 provider 处于冷却期，应沉底/避免选作主模型。"""
-        key = (user_id or "", (provider or "").lower().strip())
+        """True = 该 provider 处于冷却期或已被持久禁用，应沉底/避免选作主模型。
+
+        持久禁用（provider_gate：认证失效/限流严重）优先——它需人工重配/过测试才恢复，
+        比进程内冷却更硬。惰性 import 断开 health→provider_gate→fallback→factory→health 环。
+        """
+        p = (provider or "").lower().strip()
+        try:
+            from bottleneck_hunter.llm_clients import provider_gate
+            if provider_gate.is_disabled(user_id or "", p):
+                return True
+        except Exception:  # noqa: BLE001  熔断表故障不应阻断选型
+            pass
+        key = (user_id or "", p)
         with self._lock:
             t = self._until.get(key)
             if t is None:

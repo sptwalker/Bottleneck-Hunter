@@ -83,6 +83,18 @@
   border-radius: 2px 2px 0 0;
 }
 
+/* 未读红点（如：LLM 节点被持久禁用，需去配置中心处理）。用 ::before 避开 active 的 ::after 下划线 */
+.nav-btn.has-unread::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger, #dc2626);
+}
+
 /* ── 用户信息 ── */
 .user-info {
   display: flex;

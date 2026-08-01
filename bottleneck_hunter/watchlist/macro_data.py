@@ -397,6 +397,8 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     async def _fetch_one(key: str, symbol: str, label: str):
+        if key in results:
+            return  # FRED 已取到该 key(可靠源) → yfinance 不再重复打(省 Yahoo 限流预算)
         try:
             data = await asyncio.to_thread(_fetch_yf_quote, symbol)
             if data:
@@ -434,25 +436,26 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
         tasks.append(_fetch_cn())
 
     # FRED 真宏观指标 —— Fed 政策对各市场都有外溢，全局纳入；无 Key 自动跳过。
-    # vix/us_10y_yield 与 yfinance 同 key：FRED 作兜底(yfinance 取到就不覆盖，取不到则 FRED 补)，
-    # 其余(曲线/信用利差/缩表/金油等)为 FRED 独有。故等 yfinance 任务先跑完，FRED 再 setdefault。
+    # vix/us_10y_yield/dxy/sp500/nasdaq 与 yfinance 同 key：**FRED 优先**（借道白名单可靠，
+    # 国内直连 yfinance 必失败）。故先跑 FRED 填满其覆盖的 key，yfinance 只补 FRED 没覆盖的
+    # (港股恒指/A股相关等 FRED 无的)。其余(曲线/信用利差/缩表/金油等)本就 FRED 独有。
     async def _fetch_fred():
         try:
-            # 美股市场额外把 美国本土(失业率/CPI) + sp500/nasdaq 纳入 FRED 兜底(yfinance 被 429 限流时补)；
+            # 美股市场额外把 美国本土(失业率/CPI) + sp500/nasdaq 纳入 FRED；
             # 非美股市场不加，避免美国本土数据/美股指数串味进 A股/港股主宏观口径。
             extra = (_FRED_US_DOMESTIC + _FRED_US_EQUITY) if "us_stock" in markets else None
             fred = await _fetch_fred_indicators(extra=extra)  # 已改异步(走共享 httpx，可借道)，不再 to_thread
             for k, v in fred.items():
                 if k in results:
-                    continue  # yfinance 已取到该 key(更实时) → 不覆盖
+                    continue  # 已取到(cn_macro 等) → 不覆盖
                 results[k] = v
                 store.save_macro_snapshot(k, today, v["value"], now_iso,
                                           change_pct=v.get("change_pct", 0.0))
         except Exception as e:
             logger.warning("FRED 宏观指标采集失败: %s", e)
-    # 先并发跑 yfinance 指标(+北向)，全部完成后再跑 FRED 兜底，保证 setdefault 语义确定
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # 先跑 FRED(可靠)填满其覆盖的 key，再并发跑 yfinance 只补 FRED 缺的，确定去重语义
     await _fetch_fred()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
     # 黄金（上海金，akshare 国内可达）——全局风险资产，各市场都参考
     async def _fetch_gold():

@@ -56,6 +56,10 @@ export function showView(viewName) {
   if (viewName === 'screen') {
     refreshPhase4Watchlist();
   }
+  // 进入系统配置中心即清掉「节点被禁用」红点（用户已看见，视为已读）
+  if (viewName === 'aiconfig') {
+    navBtn?.classList.remove('has-unread');
+  }
 }
 
 /* ── Auth ───────────────────────────────────────────── */

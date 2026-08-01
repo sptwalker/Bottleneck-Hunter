@@ -162,6 +162,17 @@ class AuthStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_audit_user_ref
                     ON advice_audit_trail(user_id, advice_ref);
+                -- LLM 节点持久熔断：认证失败/限流严重时禁用该用户的该 provider（见 provider_gate.py）。
+                -- 进程内冷却(health.py)只临时避让；此表持久标注，需用户重配/过流量测试才恢复。
+                CREATE TABLE IF NOT EXISTS llm_provider_health (
+                    user_id     TEXT NOT NULL,
+                    provider    TEXT NOT NULL,
+                    status      TEXT NOT NULL,          -- 'disabled_auth' | 'disabled_ratelimit'
+                    reason      TEXT DEFAULT '',        -- classify_reason 原文（面向用户中文）
+                    detail      TEXT DEFAULT '',        -- 末次错误摘要（截断 200）
+                    disabled_at TEXT NOT NULL,          -- UTC ISO
+                    PRIMARY KEY (user_id, provider)
+                );
             """)
         self._migrate()
 
@@ -613,7 +624,11 @@ class AuthStore:
 
     def save_user_api_key(self, user_id: str, provider: str,
                           encrypted_key: str, key_hint: str) -> str:
-        """保存或更新用户的 API KEY（已加密）。返回 record id。"""
+        """保存或更新用户的 API KEY（已加密）。返回 record id。
+
+        重存 key = 用户"重新配置"该 provider → 自动清除该节点的**认证**持久禁用
+        （限流禁用须过流量测试恢复，此处不动）。见 provider_gate.clear_auth_disable。
+        """
         now = _utcnow().isoformat()
         record_id = uuid.uuid4().hex[:16]
         with self._conn() as conn:
@@ -628,14 +643,64 @@ class AuthStore:
                     "WHERE user_id = ? AND provider = ?",
                     (encrypted_key, key_hint, now, user_id, provider),
                 )
-                return existing["id"]
+                rid = existing["id"]
             else:
                 conn.execute(
                     "INSERT INTO user_api_keys (id, user_id, provider, encrypted_key, key_hint, "
                     "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (record_id, user_id, provider, encrypted_key, key_hint, now, now),
                 )
-                return record_id
+                rid = record_id
+        try:  # 惰性 import 断开 provider_gate → store → provider_gate 环
+            from bottleneck_hunter.llm_clients import provider_gate
+            provider_gate.clear_auth_disable(user_id, provider)
+        except Exception:  # noqa: BLE001  清除失败不应阻断存 key
+            pass
+        return rid
+
+    # ── LLM 节点持久熔断 ───────────────────────────────────
+
+    def disable_llm_provider(self, user_id: str, provider: str, status: str,
+                             reason: str = "", detail: str = "") -> None:
+        """标注并禁用某用户的某 LLM provider（UPSERT，已禁用则更新原因/时间）。"""
+        now = _utcnow().isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO llm_provider_health (user_id, provider, status, reason, detail, disabled_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, provider) DO UPDATE SET "
+                "status=excluded.status, reason=excluded.reason, "
+                "detail=excluded.detail, disabled_at=excluded.disabled_at",
+                (user_id, provider, status, reason, detail[:200], now),
+            )
+
+    def get_llm_provider_health(self, user_id: str, provider: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT provider, status, reason, detail, disabled_at "
+                "FROM llm_provider_health WHERE user_id = ? AND provider = ?",
+                (user_id, provider),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_llm_provider_health(self, user_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT provider, status, reason, detail, disabled_at "
+                "FROM llm_provider_health WHERE user_id = ? ORDER BY provider",
+                (user_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def clear_llm_provider_health(self, user_id: str, provider: str) -> bool:
+        """解除禁用（恢复）。返回是否有记录被清。"""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM llm_provider_health WHERE user_id = ? AND provider = ?",
+                (user_id, provider),
+            )
+            return cur.rowcount > 0
+
 
     def get_user_api_keys(self, user_id: str) -> list[dict]:
         """返回用户所有 API KEY（不含明文，只有 hint）。"""
