@@ -78,7 +78,13 @@ def client(tmp_path, monkeypatch):
 
     app.include_router(vip_api.router, prefix="/api/vip")
     c = TestClient(app)
-    c._set_user = lambda u: _user.__setitem__("holder", u)
+
+    def _set_user(u):
+        _user["holder"] = u
+        if u and u.get("sub"):
+            vip_api._unlocked_subs.add(u["sub"])   # 注入用户 = 已登录且已解锁的 VIP（真实用户凭密码解锁一次/会话）
+
+    c._set_user = _set_user
     return c
 
 
@@ -86,6 +92,17 @@ def test_non_vip_forbidden(client):
     client._set_user({"sub": "u1", "role": "user"})   # 非 VIP
     r = client.get("/api/vip/statements")
     assert r.status_code == 403
+
+
+def test_vip_lock_gate(client):
+    """密码锁屏后端门禁：已登录 VIP 未解锁 → 423；解锁后 → 200。
+    此门禁 commit 5068d6b 上线时零覆盖，静默打挂 18 项测试，补此守卫防复发。"""
+    from bottleneck_hunter.web import vip_api
+    client._set_user({"sub": "locktest", "role": "admin"})   # fixture 顺带解锁
+    vip_api._unlocked_subs.discard("locktest")               # 回到锁定态
+    assert client.get("/api/vip/statements?market=us_stock").status_code == 423
+    vip_api._unlocked_subs.add("locktest")                   # 解锁
+    assert client.get("/api/vip/statements?market=us_stock").status_code == 200
 
 
 def test_account_management_endpoints(client):
@@ -273,7 +290,7 @@ def test_total_overview_scope_all(client):
     assert abs(overview["total_equity"] - 560000.0) < 1.0
     assert overview["n_accounts"] == 2
     assert overview["n_holdings"] == 4
-    assert overview["total_loan_limit"] is None
+    assert overview["total_loan"] == 0.0
     assert {row["account_ref"] for row in overview["holdings"]} == {"ACC-1", "ACC-2"}
     assert {row["account_ref"] for row in overview["accounts"]} == {"ACC-1", "ACC-2"}
 

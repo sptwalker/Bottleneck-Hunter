@@ -235,7 +235,7 @@ async def resolve_model_debug(role: str = "pipeline_decompose", user: dict = Dep
     from bottleneck_hunter.llm_clients import factory as F
     from bottleneck_hunter.llm_clients import health as H
     uid = user.get("sub", "")
-    primary = F.get_primary_provider()
+    primary = F.resolve_primary_for_user(uid)  # 用户级主模型（退役全局 get_primary_provider）
     # 候选池 = 主模型 + 全部已注册 provider + 应急链（与调度一致）
     try:
         universe = F.list_custom_provider_ids()

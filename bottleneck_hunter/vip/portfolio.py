@@ -498,6 +498,48 @@ def _latest_positions(wl_store, as_of_date, account_ref) -> tuple[list[dict], di
         conn.close()
 
 
+def _snapshot_dates(wl_store, account_ref: str, limit: int = 2) -> list[str]:
+    """账户最近 N 个不同持仓快照日(as_of_date DESC)——供相邻两期贡献归因取「相邻两期」。"""
+    conn = wl_store._connect()
+    try:
+        where = ["quantity != 0"]
+        params: list = []
+        if account_ref:
+            where.append("account_ref = ?")
+            params.append(account_ref)
+        q, p = wl_store._filtered(
+            f"SELECT DISTINCT as_of_date FROM positions WHERE {' AND '.join(where)} "
+            "ORDER BY as_of_date DESC LIMIT ?", tuple(params) + (limit,), table="positions")
+        return [r["as_of_date"] for r in conn.execute(q, p).fetchall() if r["as_of_date"]]
+    finally:
+        conn.close()
+
+
+def _contribution(wl_store, account_ref: str) -> dict:
+    """P3-3 · 标的贡献归因：最近相邻两期胜出快照，期初权重 × 单价收益(mv/qty 还原单价，剔买卖污染)。
+
+    权重分母 = 期初股票腿市值和(自洽的股票腿归因，不含现金)。不足两期/无重叠可定价标的 → 空结果 + note。
+    数据源与概览/成本层同一「胜出快照」(_latest_positions)，口径一致。
+    """
+    from bottleneck_hunter.vip import metrics as _m
+    dates = _snapshot_dates(wl_store, account_ref, limit=2)
+    if len(dates) < 2:
+        return {"rows": [], "prev_date": "", "cur_date": "", "coverage": "0/0",
+                "note": "不足两期持仓快照，无法做相邻期归因"}
+    cur_date, prev_date = dates[0], dates[1]   # DESC：[0] 最新期、[1] 上一期
+    prev_rows, _ = _latest_positions(wl_store, prev_date, account_ref)
+    cur_rows, _ = _latest_positions(wl_store, cur_date, account_ref)
+    prev_h = [{"symbol": r["symbol"], "quantity": r.get("quantity"),
+               "market_value_base": r.get("market_value_base")} for r in prev_rows]
+    cur_h = [{"symbol": r["symbol"], "quantity": r.get("quantity"),
+              "market_value_base": r.get("market_value_base")} for r in cur_rows]
+    prev_total = sum(float(h["market_value_base"] or 0.0) for h in prev_h)
+    rows = _m.contribution_attribution(prev_h, cur_h, prev_total)
+    return {"rows": rows, "prev_date": prev_date, "cur_date": cur_date,
+            "coverage": f"{len(rows)}/{len(prev_h)}",
+            "note": "" if rows else "相邻两期无重叠可定价标的，归因留空(不臆造)"}
+
+
 def _freeze_snapshot(wl_store, account, positions, account_ref: str = "") -> str:
     rid = uuid.uuid4().hex[:12]
     payload = {"account": {k: account.get(k) for k in ("total_equity", "cash_balance")},
@@ -546,6 +588,12 @@ def list_transactions(wl_store, *, account_ref: str = "", ticker: str = "", txn_
         conn.close()
 
 
+# 外部现金流分类（注资/提取），TWR/MWR 分母只应剔这些——买卖交割不算。net_amount 已带符号(注入+/提取-)，
+# 故 _external_flows 直接取 net_amount 即得 Modified Dietz 所需带符号外部流。
+_EXT_IN = {"deposit", "transfer_in"}
+_EXT_OUT = {"withdrawal", "transfer_out"}
+
+
 def _overview_totals(rows: list[dict]) -> dict:
     totals = {
         "transaction_count": len(rows),
@@ -556,7 +604,17 @@ def _overview_totals(rows: list[dict]) -> dict:
         "fee_total": 0.0,
         "net_inflow": 0.0,
         "net_outflow": 0.0,
+        # P2-2：外部现金流(注资/提取/转入转出)与买卖交割严格分离——TWR/MWR 分母只应剔外部现金流，不应把
+        # 买卖交割额当注资(红线 §3.2)。net_inflow/net_outflow 保留旧「按符号的全额」语义不动(向后兼容/测试锁定)。
+        # 券商是否逐笔列出转账决定覆盖度：花旗逐笔列(deposit/withdrawal/transfer_in)，招银月结单只出 buy/sell →
+        # external_txn_count=0 不等于"无外部现金流"，仅表示该券商未逐笔披露(Phase 3 据此决定能否算精确 TWR/MWR)。
+        "external_inflow": 0.0,
+        "external_outflow": 0.0,
+        "net_external_cashflow": 0.0,
+        "external_txn_count": 0,
     }
+    _ext_in = _EXT_IN
+    _ext_out = _EXT_OUT
     for row in rows:
         amt = float(row.get("net_amount") or 0.0)
         kind = row.get("txn_type") or ""
@@ -570,11 +628,33 @@ def _overview_totals(rows: list[dict]) -> dict:
             totals["interest_income"] += amt
         elif kind == "fee":
             totals["fee_total"] += abs(amt)
+        elif kind in _ext_in:
+            totals["external_inflow"] += abs(amt)
+            totals["external_txn_count"] += 1
+        elif kind in _ext_out:
+            totals["external_outflow"] += abs(amt)
+            totals["external_txn_count"] += 1
         if amt >= 0:
             totals["net_inflow"] += amt
         else:
             totals["net_outflow"] += abs(amt)
+    totals["net_external_cashflow"] = totals["external_inflow"] - totals["external_outflow"]
     return {k: round(v, 2) if isinstance(v, float) else v for k, v in totals.items()}
+
+
+def _external_flows(txns: list[dict]) -> list[dict]:
+    """P3-1 · 从流水抽外部现金流为 Modified Dietz 输入 [{date, amount(带符号)}]。
+
+    注资(deposit/transfer_in) net_amount>0、提取(withdrawal/transfer_out) net_amount<0——net_amount 本就
+    带符号，直接透传即为 Modified Dietz 所需带符号外部流；缺 trade_date 的行跳过(无法归子期)。
+    """
+    out = []
+    for t in txns:
+        if (t.get("txn_type") or "") in _EXT_IN or (t.get("txn_type") or "") in _EXT_OUT:
+            d = t.get("trade_date")
+            if d:
+                out.append({"date": str(d)[:10], "amount": float(t.get("net_amount") or 0.0)})
+    return out
 
 
 
@@ -625,6 +705,42 @@ def _derivative_mtm_total(wl_store, account_ref: str) -> float:
                      for r in _current_derivative_rows(wl_store, account_ref)), 2)
 
 
+# ── P4-1/P4-2：组合级压力测试 + 净 Greeks（接线 vip/stress 纯引擎，注入真实现价）──
+# 默认情景：市场 ±10%/±20%（对称，覆盖股灾与反弹）。衍生品重放 payoff、股票线性 delta。
+_STRESS_SCENARIOS = [
+    {"name": "市场 +20%", "market_shock": 0.20},
+    {"name": "市场 +10%", "market_shock": 0.10},
+    {"name": "市场 -10%", "market_shock": -0.10},
+    {"name": "市场 -20%", "market_shock": -0.20},
+]
+
+
+def _stress_and_greeks(wl_store, account_ref: str, stock_mv_total: float) -> dict:
+    """组装压力测试 + 净 Greeks 输入（真实现价从 get_latest_snapshot 注入），调 vip.stress 纯引擎。
+
+    衍生品由 _current_derivative_rows 重建 DerivativeTerm（同去重口径，一笔 FCN 不重复计）；缺现价/缺条款
+    参数的标的由纯引擎诚实剔出并披露覆盖率。股票总市值走线性 delta。返回 {stress, greeks} 或空 dict（无衍生品且无股票）。
+    """
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm
+    from bottleneck_hunter.vip.stress import net_greeks, stress_test
+
+    derivs: list[dict] = []
+    for r in _current_derivative_rows(wl_store, account_ref):
+        t = r.get("terms") or {}
+        sym = (r.get("underlying_symbol") or "").strip()
+        term = DerivativeTerm(product_family=r.get("product_family", ""), underlying_symbol=sym,
+                              currency=r.get("currency", ""), tenor_days=int(t.get("tenor_days", 0) or 0),
+                              terms=t)
+        snap = wl_store.get_latest_snapshot(sym) if sym and hasattr(wl_store, "get_latest_snapshot") else None
+        spot = (snap or {}).get("close") or 0.0
+        derivs.append({"term": term, "spot": float(spot or 0.0)})
+
+    if not derivs and stock_mv_total <= 0:
+        return {}
+    return {"stress": stress_test(stock_mv_total, derivs, _STRESS_SCENARIOS),
+            "greeks": net_greeks(derivs)}
+
+
 def _import_total_series(wl_store, account_ref: str) -> list[dict]:
     """该账户各期结单权威净值序列(vip_imports.key_metrics_json 的 period_end + total_equity)。
 
@@ -658,6 +774,28 @@ def _latest_import_period(wl_store, account_ref: str) -> str:
         return (row["pe"] if row else "") or ""
     finally:
         conn.close()
+
+
+def _holdings_as_of(wl_store, account_ref: str) -> str:
+    """0-1：持仓「数据截至」日 = 最新非零持仓快照的 as_of_date（即结算单期末），
+    ★区别于市值重估日(latest_projection_date)——前者是持仓事实的锚点(可能 40 天前)，后者只是按最新收盘重估的时刻。
+    三面板(顾问/荐新/报告)据此标「数据截至 X 日」，让用户区分"今天生成的意见"与"底层持仓可能是上月的"。
+    纯衍生品账户(positions 空)→ 退回结单期末 _latest_import_period；全无→空串（诚实留白，不编造今天）。"""
+    conn = wl_store._connect()
+    try:
+        where = ["quantity != 0"]
+        params: list = []
+        if account_ref:
+            where.append("account_ref = ?")
+            params.append(account_ref)
+        q, p = wl_store._filtered(
+            f"SELECT MAX(as_of_date) AS d FROM positions WHERE {' AND '.join(where)}",
+            tuple(params), table="positions")
+        row = conn.execute(q, p).fetchone()
+        d = (row["d"] if row and row["d"] else "") or ""
+    finally:
+        conn.close()
+    return d or _latest_import_period(wl_store, account_ref)
 
 
 def build_account_overview(wl_store, *, account_ref: str = "") -> dict:
@@ -740,13 +878,261 @@ def _price_coverage(wl_store, holdings: list, derivative_exposure: list) -> dict
             "n_total": len(covered) + len(uncovered), "as_of": covered}
 
 
+def _date_span_days(d0: str, d1: str) -> int:
+    from datetime import date
+    try:
+        return (date.fromisoformat(str(d1)[:10]) - date.fromisoformat(str(d0)[:10])).days
+    except (ValueError, TypeError):
+        return 0
+
+
+def _perf_summary(vseries: dict, totals: dict, pos_mv: float, flows: list[dict] | None = None) -> dict:
+    """Phase 0-3 · 绩效摘要 KPI（私行季报首排数字），全部来自 value_series 期末点 + 交易流水聚合。
+
+    诚实边界（红线 §8.1/8.2）：这些是「基于 N 期结单期末点」的**指示性/近似**口径——非逐日。
+    - since_inception/annualized：简单价格收益率（**未剔注资**），分母口径由 value_series 决定，保留为原始参照。
+    - dietz_*/mwr（P3-1）：Modified Dietz·链接≈TWR，**已剔外部现金流**，是真实业绩收益率；需 flows 且权威口径。
+    - sharpe/sortino/calmar（P3-2）：稀疏期收益上的风险调整，按实际期均跨度年化，<3 期收益诚实降级 None。
+    调用方必须带 `basis` 标注展示，绝不伪装精确。推算点(is_projected)不计入真实绩效。
+    """
+    series = [s for s in (vseries.get("series") or []) if not s.get("is_projected")]
+    # basis 随曲线口径如实变化(P2-1)：权威净值含现金·净融资 vs 持仓市值不含现金——两者绩效分母不同，不可混淆。
+    _caliber = {"authoritative_total_equity": "结单权威净值(含现金·净融资)",
+                "derivative_mtm_anchor": "衍生品当期MTM锚点"}.get(vseries.get("basis"), "持仓市值(不含现金)")
+    out = {
+        "since_inception_pct": None, "annualized_pct": None,
+        "income_yield_pct": None, "excess_vs_benchmark_pct": None,
+        "max_drawdown_pct": None, "n_points": len(series),
+        "basis": f"基于 N 期{_caliber}期末点·非逐日·未剔注资，指示性口径",
+        # P3-1/P3-2：现金流调整收益 + 风险调整（默认 None；下方按数据可得性填充，各带诚实口径标注）
+        "dietz_return_pct": None, "dietz_annualized_pct": None, "mwr_pct": None, "dietz_basis": "",
+        "sharpe": None, "sortino": None, "calmar": None, "risk_note": "",
+    }
+    if len(series) < 2:
+        return out
+    first, last = series[0]["total_equity"], series[-1]["total_equity"]
+    if first > 0:
+        out["since_inception_pct"] = round((last / first - 1) * 100, 2)
+        days = _date_span_days(series[0]["as_of_date"], series[-1]["as_of_date"])
+        if days >= 30 and last > 0:   # 跨度不足 1 月不年化：短样本年化会爆表失真
+            out["annualized_pct"] = round(((last / first) ** (365.0 / days) - 1) * 100, 2)
+    # 累计 income yield（股息+利息 / 当前持仓市值）——累计口径，非年化
+    income = (totals.get("dividend_income") or 0.0) + (totals.get("interest_income") or 0.0)
+    if pos_mv > 0 and income:
+        out["income_yield_pct"] = round(income / pos_mv * 100, 2)
+    # vs 基准超额：同一 value_series 的 benchmark_value 首末差（_rebase_benchmark 已对齐同轴，单一权威源）
+    bf, bl = series[0].get("benchmark_value"), series[-1].get("benchmark_value")
+    if bf and bl and bf > 0 and out["since_inception_pct"] is not None:
+        out["excess_vs_benchmark_pct"] = round(out["since_inception_pct"] - (bl / bf - 1) * 100, 2)
+    # 近似最大回撤（稀疏期末点 peak-to-trough，非逐日）。
+    # 权威净值口径下 equity 含外部现金流(注资抬高/提取压低)——须先剔累计外部净流再做峰谷，否则注资掩盖真实回撤、
+    # 提取伪造回撤台阶，令 Calmar(=年化/|MDD|) 方向性失真(与 dietz 剔流口径不一致)。其余口径不含现金，直接峰谷。
+    _flows = flows or []
+    if vseries.get("basis") == "authoritative_total_equity" and _flows:
+        def _adj_eq(s):  # 该点权益 − 截至该点(含)的累计外部净流 = 剔注资/提取后的市场口径权益
+            cum = sum(f["amount"] for f in _flows if str(f.get("date"))[:10] <= s["as_of_date"])
+            return s["total_equity"] - cum
+        eqs = [_adj_eq(s) for s in series]
+    else:
+        eqs = [s["total_equity"] for s in series]
+    peak, mdd = eqs[0], 0.0
+    for eq in eqs:
+        if eq > peak:
+            peak = eq
+        elif peak > 0:
+            mdd = min(mdd, (eq - peak) / peak)
+    out["max_drawdown_pct"] = round(mdd * 100, 2)
+
+    # ── P3-1/P3-2：Modified Dietz(已剔外部现金流·链接≈TWR) + 稀疏期收益风险调整 ──
+    # 只在权威净值口径下呈现精确业绩收益率——持仓市值/MTM锚点口径分母不含现金、剔流无意义，仅保留 dietz_basis 说明。
+    from bottleneck_hunter.vip import metrics as _m
+    if vseries.get("basis") == "authoritative_total_equity":
+        dietz = _m.linked_modified_dietz(series, flows or [])
+        out["dietz_return_pct"] = dietz["cumulative_pct"]
+        out["dietz_annualized_pct"] = dietz["annualized_pct"]
+        out["mwr_pct"] = dietz["mwr_pct"]
+        out["dietz_basis"] = (f"Modified Dietz·链接≈TWR·基于 {dietz['n_periods']} 期结单"
+                              f"·已剔外部现金流·非逐日 (有效期覆盖 {dietz['coverage']})")
+        rets = [p["pct"] / 100.0 for p in dietz["period_returns"]]
+        spans = [p["span_days"] for p in dietz["period_returns"]]
+        ra = _m.risk_adjusted(rets, spans, out["max_drawdown_pct"])
+        out["sharpe"], out["sortino"], out["calmar"] = ra["sharpe"], ra["sortino"], ra["calmar"]
+        out["risk_note"] = (ra["note"] or
+                            f"基于 {ra['n_returns']} 期收益·按实际期均跨度年化·样本极少属指示性趋势")
+    else:
+        out["dietz_basis"] = "非权威净值口径(缺含现金 NAV)，不呈现现金流调整收益率——先补齐结单权威净值"
+    return out
+
+
+def _derivative_notional(t: dict) -> float | None:
+    """Phase 0-7 · 单笔衍生品名义敞口（USD 口径，缺参数诚实 None，绝不臆造）。
+
+    FCN：条款直接带 `notional`（花旗 issue_size / 巴克莱 aggregate nominal）→ 直接用。
+    累购/累沽：`max_nominal_shares × afp`（成交远期价）= 客户最大购入义务金额（真实隐含杠杆的分子）。
+    MLI booster：无本金参数（project_derivative_accrual 亦跳过）→ None。
+    """
+    if t.get("notional"):
+        return round(float(t["notional"]), 2)
+    mn = t.get("max_nominal_shares") or 0.0
+    px = t.get("afp") or t.get("strike") or 0.0
+    if mn and px:
+        return round(float(mn) * float(px), 2)
+    return None
+
+
+def _derivative_notional_usd(t: dict, currency: str) -> tuple[float | None, float | None]:
+    """Phase 0-7 修正 · 单笔名义敞口 (usd, native)：先算原币种名义 native，仅当条款币种为美元(或未知)
+    时才同时作 USD 口径回传；非美元(HKD/JPY FCN、港币累购)名义 usd=None——绝不冒充美元汇总/除美元权益
+    (否则 HKD FCN 杠杆虚高 ~7.8×、JPY ~150×)。native 仍保留供呈现「原币种名义」。"""
+    from bottleneck_hunter.vip.number_guard import _USD_CCY
+    native = _derivative_notional(t)
+    if native is None:
+        return None, None
+    is_usd = (currency or "").strip().lower() in _USD_CCY
+    return (native if is_usd else None), native
+
+
+def _exposure_breakdown(wl_store, account_ref: str) -> dict:
+    """Phase 0-4 · 币种 + 资产类别敞口分桶（Σ market_value_base，USD 口径）。
+
+    数据源同 _canonical_cost_map 的胜出快照 positions；多币种真账户（港币/日元/美元混持）的汇率
+    敞口首次可见。currency=结单名义币（p.currency），asset_class=instruments.instrument_type。
+    衍生品不在此层（单列 derivative_exposure），此处仅股票/规范层持仓。
+    """
+    _, selected = _latest_positions(wl_store, "", account_ref)   # 复用"胜出快照"选择逻辑
+    conn = wl_store._connect()
+    try:
+        where = ["p.quantity != 0"]
+        params: list = []
+        if account_ref:
+            where.append("p.account_ref = ?")
+            params.append(account_ref)
+        if selected.get("doc_id"):
+            where.append("p.source_doc_id = ?")
+            params.append(selected["doc_id"])
+        q, p = wl_store._filtered(
+            f"""SELECT p.currency, i.instrument_type, p.market_value_base
+               FROM positions p JOIN instruments i ON i.id = p.instrument_id
+               WHERE {' AND '.join(where)}""",
+            tuple(params), table="p")
+        by_ccy: dict[str, float] = {}
+        by_asset: dict[str, float] = {}
+        for r in conn.execute(q, p).fetchall():
+            mv = r["market_value_base"] or 0.0
+            ccy = ((r["currency"] or "USD").strip().upper()) or "USD"
+            asset = ((r["instrument_type"] or "stock").strip().lower()) or "stock"
+            by_ccy[ccy] = round(by_ccy.get(ccy, 0.0) + mv, 2)
+            by_asset[asset] = round(by_asset.get(asset, 0.0) + mv, 2)
+        return {"by_currency": by_ccy, "by_asset_class": by_asset,
+                "total_base": round(sum(by_ccy.values()), 2)}
+    finally:
+        conn.close()
+
+
+def compute_realized_pnl_fifo(txns: list[dict]) -> dict:
+    """P1-5 · FIFO 已实现盈亏（完整性闸门 + 币种闸门：残缺/非美元标的绝不冒充美元合计）。
+
+    结算单常只覆盖近几期，期初建仓的买入未必在库；且流水金额是**原币种**净额（港币/日元…，
+    fx_rate 未回填）。故双闸门：
+      ① 完整性：某笔卖出在库买入存量不足（队列下溢）→ 该标的历史残缺，realized 记 None、剔出合计。
+      ② 币种：realized 按原币种撮合；仅「全腿美元(或未知)」的标的计入美元 total；非美元标的原币种
+         分列 by_currency + foreign_values（喂 number_guard，$ 令牌不得据此核实），绝不 ÷1 冒充
+         美元（HKD ~7.8×/JPY ~150× 虚高），与衍生品 _derivative_notional_usd「非美元不汇总」同规矩。
+    每股口径用 |net_amount|/qty（含费税的净额；缺则退 price）。仅纳入「有卖出」的标的（纯买入跳过）。返回见函数末。
+    """
+    from bottleneck_hunter.vip.number_guard import _USD_CCY  # 币种口径判定复用防伪器同一集合（含 ""=未知→按美元）
+
+    def _unit(r: dict) -> float | None:      # 每股净额（含费税）：优先 net_amount，退回 price；无从定价→None
+        qty = abs(float(r.get("quantity") or 0.0))
+        if qty <= 0:
+            return None
+        net = abs(float(r.get("net_amount") or 0.0))
+        if net > 0:
+            return net / qty
+        price = abs(float(r.get("price") or 0.0))
+        return price if price > 0 else None
+
+    def _ccy(rows: list[dict]) -> str:       # 标的币种：任一腿为非美元原币种→取该原币种；否则全腿美元/未知→USD
+        for r in rows:
+            c = str(r.get("currency") or "").strip()
+            if c.lower() not in _USD_CCY:
+                return c.upper()
+        return "USD"
+
+    by: dict[str, list[dict]] = {}
+    for t in txns:
+        sym = t.get("symbol") or t.get("ticker") or ""
+        if sym and (t.get("txn_type") in ("buy", "sell")):
+            by.setdefault(sym, []).append(t)
+
+    by_symbol: list[dict] = []
+    incomplete: list[str] = []
+    by_currency: dict[str, float] = {}                       # 非美元原币种合计（不并入美元 total）
+    foreign_values: list[float] = []                        # 非美元 realized：喂 number_guard 排除
+    usd_total = 0.0
+    any_usd = False
+    for sym, rows in by.items():
+        rows.sort(key=lambda r: (r.get("trade_date") or "", r.get("created_at") or ""))
+        if not any(r.get("txn_type") == "sell" for r in rows):
+            continue                                        # 纯买入 → 无已实现，不入明细
+        queue: list[list[float]] = []                       # FIFO 批次 [剩余股数, 每股成本]
+        realized, matched_qty, sell_count, broken = 0.0, 0.0, 0, False
+        for r in rows:
+            qty, u = abs(float(r.get("quantity") or 0.0)), _unit(r)
+            if qty <= 0 or u is None:
+                broken = True
+                break                                       # 无法定价 → 判该标的残缺
+            if r["txn_type"] == "buy":
+                queue.append([qty, u])
+                continue
+            sell_count += 1
+            remaining = qty
+            while remaining > 1e-9 and queue:
+                lot = queue[0]
+                take = min(remaining, lot[0])
+                realized += (u - lot[1]) * take
+                matched_qty += take
+                lot[0] -= take
+                remaining -= take
+                if lot[0] <= 1e-9:
+                    queue.pop(0)
+            if remaining > 1e-9:                            # 卖出多于在库买入 → 期初建仓缺失
+                broken = True
+                break
+        if broken:
+            by_symbol.append({"symbol": sym, "realized_pnl": None, "sell_count": sell_count,
+                              "complete": False, "note": "买入历史不足以覆盖卖出（期初建仓未在库）"})
+            incomplete.append(sym)
+            continue
+        ccy = _ccy(rows)
+        realized = round(realized, 2)
+        entry = {"symbol": sym, "realized_pnl": realized, "currency": ccy,
+                 "matched_qty": round(matched_qty, 4), "sell_count": sell_count, "complete": True}
+        if ccy == "USD":
+            any_usd = True
+            usd_total += realized
+        else:                                               # 非美元：原币种分列，绝不并入美元合计
+            by_currency[ccy] = round(by_currency.get(ccy, 0.0) + realized, 2)
+            foreign_values.append(realized)
+            entry["note"] = "原币种口径，未计入美元合计（汇率未回填，不冒充美元）"
+        by_symbol.append(entry)
+    by_symbol.sort(key=lambda s: (s["complete"], abs(s.get("realized_pnl") or 0.0)), reverse=True)
+    return {"available": any_usd,                           # 有可计入美元合计的标的（纯非美元账户→False，total None）
+            "total": round(usd_total, 2) if any_usd else None,   # 仅全腿美元标的的美元合计
+            "by_symbol": by_symbol,
+            "by_currency": by_currency,                     # {原币种: 合计}（诚实分列，不混美元）
+            "foreign_values": foreign_values,               # 非美元 realized，供 number_guard 排除 $ 误核
+            "incomplete_symbols": incomplete,
+            "basis": "FIFO 净额口径（含费税）；仅全腿美元计入 total，非美元原币种分列 by_currency，残缺留空不猜"}
+
+
 def build_account_dossier(wl_store, *, account_ref: str = "") -> dict:
     """Phase A · 账户完整档案层——LLM 单一事实源。聚合此前碎在 7+ 调用里的账户全貌。
 
     口径原则（用户拍板）：
     - 头条"真实价值" = 结算单事实（股票 sim 权益 + 现金），**不含衍生品模型估值**。
     - 衍生品单列 `derivative_exposure`（敞口 + 条款），路径依赖/敲出风险由决策层单独消费。
-    - 成本/已实现盈亏来自结算单直接解析（无则诚实留 None，不猜、不 FIFO 反推）。
+    - 成本/已实现盈亏来自结算单直接解析（成本无则留 None）；已实现盈亏走完整性闸门的 FIFO（残缺→None，不硬凑）。
     返回结构见函数末 return。
     """
     account_ref = (account_ref or "").strip()
@@ -757,38 +1143,84 @@ def build_account_dossier(wl_store, *, account_ref: str = "") -> dict:
     holdings = []
     unrealized_total = 0.0
     cost_covered = 0
+    join_covered = 0
     for h in summary.get("holdings", []):
         c = cost_map.get(h["ticker"], {})
         upnl = c.get("unrealized_pnl")
         if upnl is not None:
             unrealized_total += upnl
             cost_covered += 1
+        # 0-5: 逐仓反查观察池补 entry_id/sector/bottleneck_node —— 产业前瞻(Phase 4)的地基，
+        # 且顺手修「持仓催化剂恒空」bug：advisory 把 h["entry_id"] 喂给 build_ticker_background，
+        # 此前 dossier 从不做此 join → entry_id 恒 None → 催化剂段恒"暂无"。非观察池标的诚实降级。
+        # ponytail: 逐仓一次 get_by_ticker（单用户周期性，N 小）；量大再批量 IN 查。
+        wl = wl_store.get_by_ticker(h["ticker"]) or {}
+        if wl.get("id"):
+            join_covered += 1
         holdings.append({**h,
                          "avg_cost": c.get("avg_cost"),
                          "cost_basis": c.get("cost_basis"),
                          "unrealized_pnl": upnl,
-                         "unrealized_pnl_pct": c.get("unrealized_pnl_pct")})
+                         "unrealized_pnl_pct": c.get("unrealized_pnl_pct"),
+                         "is_derivative": False,  # 0-8：股票track（计入总权益）；与 derivative_exposure 的 True 对轨
+                         "entry_id": wl.get("id"),
+                         "sector": wl.get("sector") or h.get("sector") or "",
+                         "bottleneck_node": wl.get("bottleneck_node") or ""})
 
     # 交易流水聚合（净流入/买卖/分红/费用）
     txns = list_transactions(wl_store, account_ref=account_ref, limit=10000)
     totals = _overview_totals(txns)
+    realized = compute_realized_pnl_fifo(txns)     # P1-5：复用已取的 txns，完整性闸门 FIFO（残缺标的留 None）
 
-    # 衍生品敞口（单列，不并入权益）
+    # 衍生品敞口（单列，不并入权益）——★与 mtm_total_usd 同源用去重后的"当前条款"(_current_derivative_rows)：
+    # 否则多期结单(招银 05/06/07)同一笔 FCN 落三行 → 名义/杠杆三倍虚增，且与已去重的 MTM 同字典自相矛盾。
     try:
-        from bottleneck_hunter.vip import derivatives as drv
-        deriv = drv.list_derivative_terms(wl_store, account_ref=account_ref)
-        derivative_exposure = [{
-            "underlying": t.underlying_symbol, "family": t.product_family,
-            "currency": t.currency, "tenor_days": t.tenor_days,
-            "trade_date": t.terms.get("trade_date", ""), "expiry_date": t.terms.get("expiry_date", ""),
-            "afp": t.terms.get("afp"), "knock_out_price": t.terms.get("knock_out_price"),
-            "strike_pct_initial": t.terms.get("strike_pct_initial"),
-        } for t in deriv]
+        rows = _current_derivative_rows(wl_store, account_ref)
+        derivative_exposure = []
+        for r in rows:
+            tm = r.get("terms") or {}
+            n_usd, n_native = _derivative_notional_usd(tm, r.get("currency", ""))
+            derivative_exposure.append({
+                "underlying": r.get("underlying_symbol"), "family": r.get("product_family"),
+                "currency": r.get("currency"), "tenor_days": int(tm.get("tenor_days", 0) or 0),
+                "is_derivative": True,  # 0-8：衍生品track（名义敞口，**不计入总权益**）——供合并配置视图分色/隔离
+                "trade_date": tm.get("trade_date", ""), "expiry_date": tm.get("expiry_date", ""),
+                "afp": tm.get("afp"), "knock_out_price": tm.get("knock_out_price"),
+                "strike_pct_initial": tm.get("strike_pct_initial"),
+                # 0-7：名义敞口——仅美元(或未知)币种给 notional_usd；非美元只留 notional_native+币种(诚实不硬凑美元)
+                "notional_usd": n_usd, "notional_native": n_native,
+                "mtm_usd": tm.get("market_value_usd"),
+            })
     except Exception:  # noqa: BLE001 - 衍生品缺失绝不带崩档案
         derivative_exposure = []
 
+    # 0-7：组合级衍生品名义敞口 + 杠杆比率（名义 / 真实权益，暴露"总权益不含衍生品"下的尾部杠杆）。
+    # ★只对"美元口径"腿求和/算杠杆——非美元名义在原币种、与美元权益不可直接相除；非美元腿数单列 coverage。
+    head_equity = summary.get("total_equity", 0.0) or 0.0
+    notional_vals = [d["notional_usd"] for d in derivative_exposure if d.get("notional_usd")]
+    notional_total = round(sum(notional_vals), 2)
+    non_usd = sum(1 for d in derivative_exposure
+                  if d.get("notional_usd") is None and d.get("notional_native"))
+    derivative_summary = {
+        "notional_total_usd": notional_total,
+        "mtm_total_usd": _derivative_mtm_total(wl_store, account_ref),
+        "leverage_ratio": round(notional_total / head_equity, 2) if head_equity > 0 and notional_total else None,
+        "notional_coverage": {"computable": len(notional_vals), "non_usd": non_usd,
+                              "total": len(derivative_exposure)},
+    }
+
     # 数据新鲜度（复用推算层）
     last_proj_date = wl_store.latest_projection_date(account_ref) if hasattr(wl_store, "latest_projection_date") else ""
+
+    vseries = value_series(wl_store, account_ref=account_ref)
+    pos_mv = sum(h.get("market_value") or 0.0 for h in holdings)
+    perf_summary = _perf_summary(vseries, totals, pos_mv, flows=_external_flows(txns))
+
+    # P4-1/P4-2：组合级压力测试 + 净 Greeks（衍生品 payoff 重放 + 股票线性 delta）。缺价/未建模诚实剔出并披露。
+    try:
+        stress_greeks = _stress_and_greeks(wl_store, account_ref, pos_mv)
+    except Exception:  # noqa: BLE001 - 压测/Greeks 失败绝不带崩档案
+        stress_greeks = {}
 
     return {
         "account_ref": account_ref,
@@ -801,17 +1233,31 @@ def build_account_dossier(wl_store, *, account_ref: str = "") -> dict:
         "holdings": holdings,
         "unrealized_pnl_total": round(unrealized_total, 2) if cost_covered else None,
         "cost_coverage": {"covered": cost_covered, "total": len(holdings)},
-        # ── 流水聚合 + 已实现盈亏（暂不可得，诚实标注）──
+        "join_coverage": {"covered": join_covered, "total": len(holdings)},
+        # ── 币种 + 资产类别敞口（0-4，多币种账户汇率敞口首次可见）──
+        "exposure_breakdown": _exposure_breakdown(wl_store, account_ref),
+        # ── 流水聚合 + 已实现盈亏（P1-5：完整性闸门 FIFO，残缺标的留 None，不猜）──
         "flows": totals,
-        "realized_pnl": None,
-        "realized_pnl_available": False,
+        "realized_pnl": realized["total"],
+        "realized_pnl_available": realized["available"],
+        "realized_pnl_detail": realized,
+        # ── 绩效摘要 KPI（0-3，指示性口径，须带 basis 标注展示）──
+        "perf_summary": perf_summary,
+        # ── 标的贡献归因（P3-3，相邻两期×期初权重，剔买卖污染，须带 coverage/note）──
+        "contribution": _contribution(wl_store, account_ref),
         # ── 衍生品敞口（单列，路径依赖风险由决策层消费）──
         "derivative_exposure": derivative_exposure,
+        # ── 衍生品组合级名义敞口 + 杠杆比率（0-7，名义/真实权益）──
+        "derivative_summary": derivative_summary,
+        # ── 组合级压力测试 + 净 Greeks（P4-1/P4-2，衍生品 payoff 重放 + 股票线性 delta；缺价/未建模剔出披露）──
+        "stress_test": stress_greeks.get("stress"),
+        "net_greeks": stress_greeks.get("greeks"),
         # ── 价源覆盖（代码判定：无快照=无活跃价源，市值走结算单结转，判断须谨慎）──
         "price_coverage": _price_coverage(wl_store, holdings, derivative_exposure),
         # ── 价值曲线 + 新鲜度 ──
-        "value_series": value_series(wl_store, account_ref=account_ref),
-        "as_of_hint": {"latest_projection_date": last_proj_date},
+        "value_series": vseries,
+        "as_of_hint": {"latest_projection_date": last_proj_date,
+                       "data_as_of": _holdings_as_of(wl_store, account_ref)},
     }
 
 
@@ -1010,26 +1456,28 @@ def _rebase_benchmark(series: list[dict], snaps: list[dict]) -> bool:
 
 
 def value_series(wl_store, *, account_ref: str = "") -> dict:
-    """按 positions.as_of_date 聚合 Σmarket_value_base → 价值曲线；派生逐期收益率。
+    """结单权威净值(含现金·净融资)按 period_end 逐期成点 → 价值曲线；派生逐期收益率。
 
-    无按日真实净值，用月结单期末快照拼点（导入越多期越密）。曲线为持仓市值口径（不含现金，
-    因现金未按日留存）。多账户聚合按账户前向填充，避免快照日期不齐造成虚假跳变。
+    单账户优先用各期结单权威净值(total_equity)建点——与头条 total_equity 同口径(含现金、净融资)，
+    消除"曲线不含现金 vs 头条含现金"的同屏分裂(P2-1)；缺权威净值(仅持仓导出/旧导入未落)才回落
+    持仓市值口径(不含现金)，并以 basis 如实标注。多账户聚合仍按持仓市值口径前向填充(basis 标明)。
     末尾若存在比最新真值快照更新的系统推算，则叠加一个 is_projected 点（虚线展示，待校准）。
-    返回 {series:[{as_of_date,total_equity,is_projected?}], returns:[{period,pct}]}。
+    返回 {series:[{as_of_date,total_equity,is_projected?}], returns:[{period,pct}], basis}。
     """
+    basis = "positions_market_value"  # 口径标签：持仓市值(不含现金)；单账户命中权威净值时改写
+    series: list[dict] = []
     conn = wl_store._connect()
     try:
         if account_ref:
             sql = ("SELECT as_of_date AS d, SUM(market_value_base) AS eq FROM positions "
                    "WHERE quantity != 0 AND account_ref = ? GROUP BY as_of_date ORDER BY as_of_date")
             q, p = wl_store._filtered(sql, (account_ref,), table="positions")
-            series = [{"as_of_date": r["d"], "total_equity": round(r["eq"] or 0.0, 2)}
-                      for r in conn.execute(q, p).fetchall() if r["d"]]
+            pos_series = [{"as_of_date": r["d"], "total_equity": round(r["eq"] or 0.0, 2)}
+                          for r in conn.execute(q, p).fetchall() if r["d"]]
         else:
+            pos_series = []
             refs = _visible_account_refs(wl_store)
-            if not refs:
-                series = []
-            else:
+            if refs:
                 placeholders = ",".join("?" for _ in refs)
                 sql = ("SELECT account_ref AS a, as_of_date AS d, SUM(market_value_base) AS eq "
                        f"FROM positions WHERE quantity != 0 AND account_ref IN ({placeholders}) "
@@ -1038,21 +1486,38 @@ def value_series(wl_store, *, account_ref: str = "") -> dict:
                 series = _forward_filled_series(conn.execute(q, p).fetchall())
     finally:
         conn.close()
-    # 结构性产品/衍生品走 vip_derivative_terms、不进 positions，但其当期 MTM 是组合价值的一部分。
-    # 纯衍生品账户(招银这类全 FCN)无股票快照 → 优先用各期结单权威净值(total_equity)建**多点**曲线，
-    # 逐期收益率随之可算；缺该键的历史期(旧导入未落 total_equity)退回单点当期 MTM 锚点，曲线不空白。
-    # 混合账户则不把“当期 MTM”抹到历史各点——那会虚增历史并污染基准 rebase 基准值；ponytail: 逐日重估待 P2。
-    if account_ref and not series:
-        series = _import_total_series(wl_store, account_ref)
-        if not series:
-            mtm = _derivative_mtm_total(wl_store, account_ref)
-            if mtm:
-                anchor = _latest_import_period(wl_store, account_ref)
-                if anchor:
-                    series = [{"as_of_date": anchor, "total_equity": round(mtm, 2)}]
+    # P2-1：单账户曲线口径统一为「结单权威净值(含现金·净融资)」——与头条 total_equity 同口径，消同屏分裂。
+    # 权威净值(vip_imports.total_equity = NAV / TOTAL VALUE / Total Assets−loan)按 period_end 逐期成点，
+    # 有则为准(cash-inclusive)；无(仅持仓导出/旧导入未落 total_equity)才回落持仓市值口径(不含现金)，如实标 basis。
+    # 结构性产品/衍生品走 vip_derivative_terms、不进 positions，其当期 MTM 已含在权威净值里；纯衍生品账户既无
+    # 股票快照又无权威净值时，退回单点当期 MTM 锚点，曲线不空白。ponytail: 持仓多于结单期的日期点被权威净值取代属预期。
+    # ponytail: 反向的半迁移态(最新一期是旧导入未落 total_equity、比已回填的旧期更新)下，末点保持权威净值口径、
+    #           不追加更新的持仓点——补持仓点(不含现金)会重新引入 P2-1 消除的同屏口径分裂，得不偿失；重新导入
+    #           使该期落 total_equity 即自愈。真正需要时的正解是读该期物化头条(sim_account)补回含现金口径,非补持仓和。
+    if account_ref:
+        auth = _import_total_series(wl_store, account_ref)
+        if auth:
+            series, basis = auth, "authoritative_total_equity"
+        else:
+            series = pos_series
+            if not series:
+                mtm = _derivative_mtm_total(wl_store, account_ref)
+                if mtm:
+                    anchor = _latest_import_period(wl_store, account_ref)
+                    if anchor:
+                        series = [{"as_of_date": anchor, "total_equity": round(mtm, 2)}]
+                        basis = "derivative_mtm_anchor"
     # 叠加系统推算点：仅当推算日严格晚于最新真值快照日（否则真值优先，不覆盖）
     proj = _projection_point(wl_store, account_ref=account_ref)
     if proj and (not series or proj["as_of_date"] > series[-1]["as_of_date"]):
+        # P2-1 口径对齐：推算点只重估了股票腿(不含现金)。权威净值口径(含现金·净融资)下直接叠加会把末点
+        # 打回持仓市值口径、破坏红线不变量「曲线末点==头条 total_equity」、并派生虚假末期收益/回撤。
+        # 故只取推算的股票重估「增量」(proj − 真值底座)，叠加到最近权威净值上——现金/衍生品/融资按最新
+        # 结单恒定 carry-forward，末点仍是含现金口径且与头条同源。ponytail: 现金等非股票腿假定期间不变;
+        # 待逐日现金/衍生品重估(P2 后续)再细化，推算点本就是虚线待校准态。
+        if basis == "authoritative_total_equity" and account_ref and series:
+            base_stock = sum(_latest_truth_mv_map(wl_store, account_ref).values())
+            proj = {**proj, "total_equity": round(series[-1]["total_equity"] + (proj["total_equity"] - base_stock), 2)}
         series = series + [proj]
     returns = []
     for prev, cur in zip(series, series[1:]):
@@ -1071,7 +1536,7 @@ def value_series(wl_store, *, account_ref: str = "") -> dict:
             snaps = []
         if _rebase_benchmark(series, snaps):
             benchmark_meta = {"ticker": bench_code, "label": bench_label}
-    return {"series": series, "returns": returns, "benchmark": benchmark_meta}
+    return {"series": series, "returns": returns, "benchmark": benchmark_meta, "basis": basis}
 
 
 def missing_data_report(wl_store, *, account_ref: str = "") -> list[dict]:
@@ -1152,11 +1617,72 @@ def render_derivative_summary(terms: list) -> str:
     return "\n".join(L)
 
 
-def render_report_md(summary: dict, narrative: str = "", period: str = "", derivatives_md: str = "") -> str:
+def render_period_narrative(wl_store, account_ref: str) -> str:
+    """P3-4 · 确定性本期叙事块（无 LLM）：现金流调整真实收益率 + 标的贡献 Top/Bottom + 确定性仓位事件。
+
+    全部来自结构化事实——收益率过 Modified Dietz(已剔外部现金流)，贡献相邻两期×期初权重(剔买卖污染)，
+    仓位事件走 attribution 确定性 diff。红线：仓位事件是「推断·非确认」备忘录、非因果结论。
+    自包含(内部取 txns/vseries/contribution)，供 generate_vip_report 作为 AI 主观分析之前的事实锚。
+    """
+    from bottleneck_hunter.vip.attribution import _LABEL, detect_position_events
+    txns = list_transactions(wl_store, account_ref=account_ref, limit=10000)
+    vseries = value_series(wl_store, account_ref=account_ref)
+    perf = _perf_summary(vseries, _overview_totals(txns), 0.0, flows=_external_flows(txns))
+    contribution = _contribution(wl_store, account_ref)
+    L: list[str] = []
+
+    dr = perf.get("dietz_return_pct")
+    if dr is not None:
+        ann = perf.get("dietz_annualized_pct")
+        L += ["## 本期业绩（现金流调整）", "",
+              f"- 累计收益率：**{dr:+.2f}%**" + (f"（年化 {ann:+.2f}%）" if ann is not None else ""),
+              f"  - 口径：{perf.get('dietz_basis', '')}"]
+        if perf.get("sharpe") is not None:
+            L.append(f"- 风险调整：Sharpe {perf['sharpe']}｜Sortino {perf.get('sortino')}｜Calmar {perf.get('calmar')}"
+                     f"（{perf.get('risk_note', '')}）")
+        L.append("")
+
+    rows = contribution.get("rows") or []
+    if rows:
+        def _fmt(r):
+            return (f"{r['symbol']} {r['contribution_pct']:+.2f}pct"
+                    f"(单价{r['price_return_pct']:+.1f}%·权重{r['weight_pct']:.1f}%)")
+        gainers = [r for r in rows if r["contribution_pct"] > 0][:3]
+        losers = [r for r in rows if r["contribution_pct"] < 0][:3]
+        L += [f"## 标的贡献归因（{contribution.get('prev_date', '')}→{contribution.get('cur_date', '')}）", ""]
+        if gainers:
+            L.append("- 贡献最大：" + "；".join(_fmt(r) for r in gainers))
+        if losers:
+            L.append("- 拖累最大：" + "；".join(_fmt(r) for r in losers))
+        L.append(f"  - 覆盖 {contribution.get('coverage', '')}（相邻两期×期初权重，已剔买卖交割污染，非逐日）")
+        L.append("")
+
+    dates = _snapshot_dates(wl_store, account_ref, limit=2)
+    if len(dates) >= 2:
+        prev_rows, _ = _latest_positions(wl_store, dates[1], account_ref)
+        cur_rows, _ = _latest_positions(wl_store, dates[0], account_ref)
+        old = [{"ticker": r["symbol"], "shares": r.get("quantity"), "market_value": r.get("market_value_base")}
+               for r in prev_rows]
+        events = detect_position_events(old, cur_rows)
+        if events:
+            L += ["## 本期仓位变动（确定性·推断非确认）", ""]
+            for e in events:
+                L.append(f"- {_LABEL.get(e['event'], e['event'])} **{e['ticker']}**："
+                         f"数量 {e['old_qty']:g}→{e['new_qty']:g}（{e['chg_pct']:+.1f}%）")
+            L.append("")
+
+    return "\n".join(L).strip()
+
+
+def render_report_md(summary: dict, narrative: str = "", period: str = "", derivatives_md: str = "",
+                     data_as_of: str = "", perf_narrative_md: str = "") -> str:
     """渲染报告 Markdown（append-lines 风格，仿 chain/report.py）。narrative 已过 number_guard。"""
     L: list[str] = []
     L.append(f"# 持仓分析报告{f'（{period}）' if period else ''}")
     L.append("")
+    if data_as_of:  # 0-1：持仓数据截至日（结算单期末），与"生成于今天"区分开
+        L.append(f"> 📅 数据截至 **{data_as_of}**（持仓来自该日结算单；市值或按更晚收盘重估，判断请以此为锚）")
+        L.append("")
     L.append(f"- 组合总权益：**${summary['total_equity']:,.2f}**（统一美元口径）")
     L.append(f"- 其中可投资现金：**${summary['cash_balance']:,.2f}**")
     L.append(f"- 持仓数：{summary['n_holdings']} 只")
@@ -1169,6 +1695,9 @@ def render_report_md(summary: dict, narrative: str = "", period: str = "", deriv
     for h in summary["holdings"]:
         L.append(f"| {h['ticker']} | {h['shares']:,} | ${h['market_value']:,.2f} | {h['weight_pct']}% |")
     L.append("")
+    if perf_narrative_md:   # P3-4：确定性本期叙事（真实收益率+贡献+仓位事件），置于 AI 主观分析之前作事实锚
+        L.append(perf_narrative_md)
+        L.append("")
     if narrative:
         L.append("## AI 分析")
         L.append("")
@@ -1274,7 +1803,9 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
         narrative = number_guard.annotate_unverified(narrative, facts)
 
     report_md = render_report_md(summary, narrative, period,
-                                 derivatives_md=render_derivative_summary(derivative_terms or []))
+                                 derivatives_md=render_derivative_summary(derivative_terms or []),
+                                 data_as_of=_holdings_as_of(wl_store, account_ref),
+                                 perf_narrative_md=render_period_narrative(wl_store, account_ref))
     # F1：AI 报告挂"顾问可信度"角标——读回本模型 vip_advisor 历史校准(G5 复盘写入)，透明呈现。
     # 放 number_guard 之后，'0.83x' 不进防伪扫描；纯数据报告(无模型)不挂。
     if model_provider and model_name:

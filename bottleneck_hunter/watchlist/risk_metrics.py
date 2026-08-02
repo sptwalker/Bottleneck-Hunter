@@ -24,6 +24,11 @@ class PortfolioRiskMetrics:
     max_single_weight: float = 0.0
     correlation_pairs: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # 0-6：σ 此前算了 portfolio_returns 却弃用；覆盖率此前静默丢无价标的（HHI 含但 VaR 不含 → 误导）
+    portfolio_volatility: float | None = None   # 年化波动率 %（稀疏日收益，指示性）；<2 点无法算→None(不冒充 0%)
+    priced_count: int = 0               # 有 market_snapshots 可入 VaR/CVaR/σ 的持仓数
+    total_count: int = 0                # 组合总持仓数
+    priced_weight_pct: float = 0.0      # 可定价持仓的权重占比 %（VaR/CVaR/σ 的真实覆盖面）
 
 
 def compute_portfolio_risk(
@@ -77,18 +82,38 @@ def compute_portfolio_risk(
             ]
             stock_returns[ticker] = returns
 
-    # 组合日收益率（加权）
+    # 0-6：VaR/CVaR/σ 真实覆盖面（HHI 含全部权重、VaR 仅含有价标的 → 不标注即误导）
+    m.total_count = len(positions)
+    m.priced_count = len(stock_returns)
+    m.priced_weight_pct = round(
+        sum(w for p, w in zip(positions, weights) if p.get("ticker", "") in stock_returns) * 100, 2
+    )
+    if 0 < m.priced_weight_pct < 90:
+        m.warnings.append(
+            f"VaR/CVaR/σ 仅覆盖 {m.priced_weight_pct:.0f}% 权重（{m.priced_count}/{m.total_count} 只有价），"
+            "其余标的无 market_snapshots 被排除，风险或被低估")
+
+    # 组合日收益率（加权）——★按"最近对齐"取各序列尾部 min_len 段：各持仓/基准的日收益都截至最新交易日，
+    # 尾部窗口才共享同一日历日；此前用 [:min_len] 头部会把新加标的的近端与老标的的远端错配 → beta 偏/反号。
     if stock_returns:
         min_len = min(len(r) for r in stock_returns.values())
         if min_len > 0:
+            tails = {tk: r[-min_len:] for tk, r in stock_returns.items()}   # 各序列最近 min_len 段（按日历对齐）
             portfolio_returns = []
             for i in range(min_len):
                 day_return = 0.0
-                for p, w in zip(positions, weights):
+                for p, w in zip(positions, weights, strict=True):
                     ticker = p.get("ticker", "")
-                    if ticker in stock_returns and i < len(stock_returns[ticker]):
-                        day_return += w * stock_returns[ticker][i]
+                    if ticker in tails:
+                        day_return += w * tails[ticker][i]
                 portfolio_returns.append(day_return)
+
+            # 0-6：组合年化波动率 σ（此前算完 portfolio_returns 只喂 VaR 就丢弃）。
+            # 不足 2 点无法定义样本方差 → 保持 None（不拿 0.0 冒充"零波动"，与 perf_summary 的 None 风格一致）。
+            if len(portfolio_returns) >= 2:
+                mean_r = sum(portfolio_returns) / len(portfolio_returns)
+                var_r = sum((r - mean_r) ** 2 for r in portfolio_returns) / (len(portfolio_returns) - 1)
+                m.portfolio_volatility = round(math.sqrt(var_r) * math.sqrt(TRADING_DAYS_PER_YEAR) * 100, 2)
 
             # VaR（历史模拟法，95% 分位数）
             if portfolio_returns:
@@ -97,16 +122,18 @@ def compute_portfolio_risk(
                 m.var_95 = round(abs(sorted_returns[idx_95]) * total_equity, 2)
 
                 # CVaR（条件 VaR）
-                tail = sorted_returns[:idx_95 + 1]
-                if tail:
+                var_tail = sorted_returns[:idx_95 + 1]
+                if var_tail:
                     m.cvar_95 = round(
-                        abs(sum(tail) / len(tail)) * total_equity, 2
+                        abs(sum(var_tail) / len(var_tail)) * total_equity, 2
                     )
 
-            # Beta
+            # Beta——组合尾部窗口 vs 基准尾部窗口（同截至最新交易日 → 按日历对齐）。
+            # ponytail: 尾部对齐假设各序列都含最新交易日且日频连续；个别停更标的的尾端会比基准旧，
+            #           真要处理停更需按 as_of_date 交集对齐(改签名传日期)，当前 onboarding 稀疏史已由此修正。
             if benchmark_returns and len(benchmark_returns) >= min_len:
-                bm = benchmark_returns[:min_len]
-                pr = portfolio_returns[:min_len]
+                bm = benchmark_returns[-min_len:]
+                pr = portfolio_returns          # 已是最近 min_len 段
                 mean_bm = sum(bm) / len(bm)
                 mean_pr = sum(pr) / len(pr)
                 cov = sum((pr[i] - mean_pr) * (bm[i] - mean_bm) for i in range(len(pr))) / len(pr)

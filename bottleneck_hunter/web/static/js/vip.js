@@ -638,7 +638,8 @@ async function loadDashboard() {
       const cashPct = total ? (overview.cash_balance || 0) / total * 100 : 0;
       el('vip-risk-top5', fmtNum(overview.top5_concentration_pct || 0, 1) + '%');
       el('vip-risk-cash', fmtNum(cashPct, 1) + '%');
-      renderHoldingsPie((overview.accounts || []).map(a => ({ ticker: a.display_name || a.account_ref || '兼容账户', market_value: a.total_equity || 0 })));
+      renderHoldingsPie((overview.accounts || []).map(a => ({ ticker: a.display_name || a.account_ref || '兼容账户', market_value: a.total_equity || 0 })),
+        '饼图为各子账户总价值分布；衍生品名义敞口不计入，见各账户「衍生品」页');
       renderDerivList([], overview.accounts || []);
       renderOverviewAccounts();
     } else {
@@ -647,13 +648,16 @@ async function loadDashboard() {
       el('vip-holdings-count', String(overview.n_holdings ?? 0));
       el('vip-loan-total', overview.loan_balance == null ? '--' : '$' + fmtNum(overview.loan_balance));
       el('vip-transaction-count', String(overview.transaction_count ?? 0));
-      el('vip-net-inflow', '$' + fmtNum((overview.net_inflow || 0) - (overview.net_outflow || 0)));
+      // P2-2：外部净注资 = 注资/转入 − 提取/转出（剔除买卖交割）；券商未逐笔披露转账(external_txn_count=0)时
+      // 显 '--' 而非 $0，避免把"未披露"误读为"未注资"。旧"净流入"含买卖交割额，口径不实，已废弃。
+      el('vip-net-inflow', (overview.external_txn_count || 0)
+        ? '$' + fmtNum(overview.net_external_cashflow || 0) : '--');
       setLabel('vip-total-equity', '总权益');
       setLabel('vip-cash-balance', '可投资现金');
       setLabel('vip-holdings-count', '持仓数');
       setLabel('vip-loan-total', '贷款');
       setLabel('vip-transaction-count', '交易笔数');
-      setLabel('vip-net-inflow', '累计净流入');
+      setLabel('vip-net-inflow', '外部净注资');
       const total = overview.total_equity || 0;
       const cashPct = total ? (overview.cash_balance || 0) / total * 100 : 0;
       el('vip-risk-top5', fmtNum(overview.top5_concentration_pct || 0, 1) + '%');
@@ -803,10 +807,15 @@ function renderReturnsChart(returns) {
   });
 }
 
-function renderHoldingsPie(holdings) {
+function renderHoldingsPie(holdings, capText = '饼图为股票持仓市值分布（计入总权益）；现金与衍生品名义敞口不作切片，衍生品见「衍生品」页单列') {
   const el = document.getElementById('vip-holdings-pie');
   if (!el) return;
-  if (!holdings.length) { el.innerHTML = '<p class="st-empty-hint">暂无持仓，导入月结单后生成</p>'; return; }
+  if (!holdings.length) {
+    el.innerHTML = '<p class="st-empty-hint">暂无持仓，导入月结单后生成</p>';
+    const c0 = document.getElementById('vip-holdings-pie-cap');  // 清残留注脚：饼图是 el 的兄弟节点，innerHTML 不动它
+    if (c0) c0.textContent = '';
+    return;
+  }
   const c = vipChart('vip-holdings-pie');
   if (!c) { el.innerHTML = '<p class="st-empty-hint">图表库未加载，请刷新</p>'; return; }
   const data = holdings.map(h => ({ name: h.ticker, value: Math.round((h.market_value || 0) * 100) / 100 }));
@@ -816,6 +825,16 @@ function renderHoldingsPie(holdings) {
     series: [{ type: 'pie', radius: ['40%', '68%'], center: ['50%', '44%'], avoidLabelOverlap: true,
       itemStyle: { borderColor: '#fff', borderWidth: 2 }, label: { show: false }, data }],
   });
+  // 0-8：双轨口径打标——饼图/头条为股票权益track，衍生品名义敞口单列(不计入总权益)，消除同屏误读
+  let cap = document.getElementById('vip-holdings-pie-cap');
+  if (!cap) {
+    cap = document.createElement('div');
+    cap.id = 'vip-holdings-pie-cap';
+    cap.className = 'st-empty-hint';
+    cap.style.cssText = 'font-size:11px;text-align:center;margin-top:4px';
+    el.insertAdjacentElement('afterend', cap);
+  }
+  cap.textContent = capText;
 }
 
 function renderDerivList(items, accounts = null) {
@@ -1391,6 +1410,7 @@ async function loadAdvisory() {
   if (btn) btn.onclick = () => runAdvisory(ref);
   setStatus('vip-advisory-status', '', true);
   refreshBudgetBar(ref);  // 独立异步，与两 pass 建议并存
+  refreshActionPlan(ref);  // 合并 advisory+recommend 的本轮行动清单（切回本 tab 即刷新，含他 tab 新生成的荐新）
   if (body) body.innerHTML = '<p class="st-empty-hint">加载中…</p>';
   try {
     const { history } = await vipGet(`/account/advisory/history?account_ref=${encodeURIComponent(ref)}`);
@@ -1433,6 +1453,7 @@ async function runAdvisory(ref) {
     renderAdvisory(result);
     setStatus('vip-advisory-status', '✓ 已生成', true);
     refreshBudgetBar(ref);  // 新建议可能改变加仓集 → 刷新预算对照
+    refreshActionPlan(ref);  // 新建议改变减/持/加 → 刷新行动清单
     try {  // 刷新历史列表（失败不影响已渲染的新建议）
       const { history } = await vipGet(`/account/advisory/history?account_ref=${encodeURIComponent(ref)}`);
       renderAdvisoryHistory(history || []);
@@ -1440,6 +1461,121 @@ async function runAdvisory(ref) {
   } catch (e) {
     setStatus('vip-advisory-status', `✗ 生成失败：${e.message}`, false);
   }
+}
+
+// 0-10：good-path 绿色核验回执——数字全核+可溯源+新鲜三项皆过时给正向信号；否则展开未过项（不掩盖）
+function renderReceipt(r) {
+  if (!r || !(r.checks || []).length) return '';
+  const items = r.checks.map(c =>
+    `<span class="vip-receipt-item ${c.ok ? 'ok' : 'bad'}">${c.ok ? '✓' : '✗'} ${esc(c.label)}` +
+    `<small>${esc(c.detail || '')}</small></span>`).join('');
+  return `<div class="vip-receipt ${r.green ? 'ok' : 'warn'}">` +
+    `<div class="vip-receipt-head">${r.green ? '✅' : '☑'} ${esc(r.note || '')}</div>` +
+    `<div class="vip-receipt-items">${items}</div></div>`;
+}
+
+// P1-1：纲领合规对账面板——集中度/排除/回撤硬约束 + 聚焦板块软偏好，确定性核算（非 LLM 叙述）逐项回呈
+// 复用 .vip-receipt 样式：ok=✓绿 / warn=△琥珀（逼近未破）/ bad=✗红（破坏）/ null=–灰（数据不足，不硬凑通过）
+function renderMandateCompliance(mc) {
+  if (!mc || !(mc.checks || []).length) return '';
+  const cls = c => c.ok === false ? 'bad' : (c.warn ? 'warn' : (c.ok === true ? 'ok' : 'muted'));
+  const icon = c => c.ok === false ? '✗' : (c.warn ? '△' : (c.ok === true ? '✓' : '–'));
+  const items = mc.checks.map(c =>
+    `<span class="vip-receipt-item ${cls(c)}">${icon(c)} ${esc(c.label)}${c.severity === 'soft' ? '（软）' : ''}` +
+    `<small>${esc(c.detail || '')}</small></span>`).join('');
+  const head = mc.compliant
+    ? '✅ 持仓符合纲领硬约束（集中度/排除/回撤）'
+    : `⛔ 触及纲领硬约束：${(mc.violations || []).map(v => esc(v.label)).join('、')}`;
+  return `<div class="vip-receipt ${mc.compliant ? 'ok' : 'warn'}">` +
+    `<div class="vip-receipt-head">${head}</div>` +
+    `<div class="vip-receipt-items">${items}` +
+    (mc.basis_note ? `<span class="vip-receipt-item muted"><small>${esc(mc.basis_note)}</small></span>` : '') +
+    `</div></div>`;
+}
+
+// P1-3：持仓板块 vs L1 轮动对照——重仓走弱板块 / 顺势走强 / 判强零持仓，宏观提示（不硬拦）
+function renderSectorRotation(rot) {
+  if (!rot || !rot.available) return '';
+  const lines = [];
+  if ((rot.in_weakening || []).length)
+    lines.push(`⚠ 重仓于 L1 判弱板块（共 ${rot.weakening_weight_pct}% 权益）：` +
+      rot.in_weakening.map(r => `${esc(r.sector)} ${r.weight_pct}%（${(r.tickers || []).map(esc).join('、')}）`).join('；'));
+  if ((rot.in_strengthening || []).length)
+    lines.push(`顺势持有 L1 判强板块：` +
+      rot.in_strengthening.map(r => `${esc(r.sector)} ${r.weight_pct}%`).join('、'));
+  if ((rot.strengthening_unheld || []).length)
+    lines.push(`L1 判强但零持仓（潜在方向，仅提示）：${rot.strengthening_unheld.map(esc).join('、')}`);
+  if (!lines.length) return '';
+  const cls = (rot.in_weakening || []).length ? ' coverage' : '';   // 有走弱重仓→琥珀，否则中性
+  return `<div class="vip-adv-callout${cls}"><h4>板块轮动对照（L1）</h4><p>${lines.join('<br>')}</p></div>`;
+}
+
+// P1-4：衍生品 KO/KI 状态面板——距敲出/敲入缓冲%、是否已触发、剩余名义（只读，缺价诚实标注）
+function renderDerivativeBarriers(barriers) {
+  const list = barriers || [];
+  if (!list.length) return '';
+  const fam = { equity_accumulator: '累购', equity_decumulator: '累沽', equity_fcn: 'FCN', equity_mli_booster: 'MLI' };
+  const num = v => typeof v === 'number';
+  const rows = list.map(b => {
+    const name = `${esc(b.symbol || '—')} <small>${esc(fam[b.family] || b.family || '')}</small>`;
+    if (!b.available)   // 缺价/缺障碍/缺交易日 → 诚实降级为灰条 + note，不硬凑距离
+      return `<span class="vip-receipt-item muted">– ${name}<small>${esc(b.note || '数据不足')}</small></span>`;
+    const parts = [];
+    if (b.knock_out) parts.push('已敲出（利润封顶）');
+    else if (num(b.ko_buffer_pct)) parts.push(b.ko_buffer_pct <= 0 ? '已越敲出线' : `距敲出 ${b.ko_buffer_pct}%`);
+    if (b.knock_in) parts.push('已敲入（本金风险激活）');
+    else if (num(b.ki_buffer_pct)) parts.push(b.ki_buffer_pct <= 0 ? '已越敲入线' : `距敲入 ${b.ki_buffer_pct}%`);
+    if (num(b.remaining_nominal_shares)) parts.push(`剩余名义 ${b.remaining_nominal_shares} 股`);
+    if (num(b.days_to_maturity)) parts.push(`到期 ${b.days_to_maturity} 天`);
+    const near = p => num(p) && p >= 0 && p <= 5;   // 缓冲≤5%（含已越线的≤0）→ 逼近警示
+    const danger = b.knock_out || near(b.ko_buffer_pct) || near(b.ki_buffer_pct);
+    const cls = b.knock_in ? 'bad' : (danger ? 'warn' : 'ok');   // 已敲入=本金风险，最重
+    const icon = b.knock_in ? '✗' : (danger ? '△' : '✓');
+    const tail = b.note ? ` · ${esc(b.note)}` : '';   // 有交易日缺失等提示时并列展示
+    return `<span class="vip-receipt-item ${cls}">${icon} ${name}<small>${esc(parts.join(' · '))}${tail}</small></span>`;
+  }).join('');
+  return `<div class="vip-receipt"><div class="vip-receipt-head">衍生品 KO/KI 状态（只读扫描）</div>` +
+    `<div class="vip-receipt-items">${rows}</div></div>`;
+}
+
+// P1-2：本轮账户统一行动清单——advisory(减/持/加) 与 recommend(建仓/关注/规避) 合并、按可执行性排序（后端已排）
+// 复用 .vip-receipt 样式：减仓=warn / 建仓·加仓=ok（正向动作）/ 关注·持有·规避=muted（不动/观察/回避）。现金配平见上方预算条，此处只列动作。
+function renderActionPlan(plan) {
+  if (!plan || !plan.available || !(plan.actions || []).length) return '';
+  const num = v => typeof v === 'number';
+  const meta = {
+    '减仓': { cls: 'warn', icon: '▼' }, '建仓': { cls: 'ok', icon: '＋' }, '加仓': { cls: 'ok', icon: '▲' },
+    '关注': { cls: 'muted', icon: '◦' }, '持有': { cls: 'muted', icon: '＝' }, '规避': { cls: 'muted', icon: '⊘' },
+  };
+  const rows = plan.actions.map(a => {
+    const m = meta[a.action] || { cls: 'muted', icon: '·' };
+    const bits = [];
+    if (a.sizing && num(a.sizing.suggested_shares))   // 加仓附波动率缩放的指示性档位
+      bits.push(`≈${fmtNum(a.sizing.suggested_shares, 0)} 股 / $${fmtNum(a.sizing.suggested_amount)}`);
+    if (a.suggested_weight) bits.push(`目标 ${esc(a.suggested_weight)}`);   // 建仓附建议权重
+    if (a.reason) bits.push(esc(a.reason));
+    const detail = bits.join(' · ');
+    return `<span class="vip-receipt-item ${m.cls}">${m.icon} ${esc(a.ticker || '—')} <b>${esc(a.action)}</b>` +
+      ` <small>[${esc(a.source)}]${detail ? ' ' + detail : ''}</small></span>`;
+  }).join('');
+  const head = plan.n_actionable
+    ? `📋 本轮需下手 ${plan.n_actionable} 项（减/建/加）· 共 ${plan.actions.length} 项`
+    : `📋 本轮无需下手 · ${plan.actions.length} 项均为持有/关注/规避`;
+  return `<div class="vip-receipt ${plan.n_actionable ? 'warn' : 'ok'}">` +
+    `<div class="vip-receipt-head">${head}</div>` +
+    `<div class="vip-receipt-items">${rows}` +
+    `<span class="vip-receipt-item muted"><small>合并 顾问建议(减/持/加) + 荐新(建仓/关注/规避)；现金配平见上方预算条。仅指示、不下单。</small></span>` +
+    `</div></div>`;
+}
+
+// 行动清单旁路刷新——取最新 advisory + recommend 合并；失败不影响建议主体（与预算条同构）
+async function refreshActionPlan(ref) {
+  const box = document.getElementById('vip-advisory-actionplan');
+  if (!box || !ref) return;
+  try {
+    const { action_plan: p } = await vipGet(`/account/action-plan?account_ref=${encodeURIComponent(ref)}`);
+    box.innerHTML = renderActionPlan(p);
+  } catch (_) { box.innerHTML = ''; /* 行动清单失败不影响建议主体 */ }
 }
 
 function renderAdvisory(result) {
@@ -1468,18 +1604,26 @@ function renderAdvisory(result) {
       (m.assessment ? `<div class="vip-member-assess">${esc(m.assessment)}</div>` : '') + `</div>`;
   }).join('');
   body.innerHTML =
-    `<div class="vip-adv-meta">生成于 ${esc(fmtBJ(result.generated_at))} · ${esc(result.provider || '')}/${esc(result.model || '')}</div>` +
+    `<div class="vip-adv-meta">生成于 ${esc(fmtBJ(result.generated_at))} · ${esc(result.provider || '')}/${esc(result.model || '')}` +
+      (result.data_as_of ? ` · 📅 数据截至 ${esc(result.data_as_of)}` : '') + `</div>` +
     `<div class="vip-adv-verdict ${vKey}">` +
       `<span class="vip-adv-verdict-badge ${vKey}">投委会：${esc(verdictTxt)}</span>` +
       `<span class="vip-adv-verdict-count">赞成 ${c.approve || 0} · 否决 ${c.reject || 0}</span>` +
       (c.caution ? `<span class="vip-adv-verdict-caution">⚠ 建议审慎</span>` : '') +
     `</div>` +
+    (result.chair_summary ? `<div class="vip-adv-chair">🪑 <b>主席综述</b>：${esc(result.chair_summary)}</div>` : '') +
+    renderReceipt(result.verification_receipt) +
+    renderMandateCompliance(result.mandate_compliance) +
+    (c.mandate_veto ? `<div class="vip-adv-foot warn">⛔ 触及纲领硬约束（${(c.mandate_violations || []).map(esc).join('、') || '硬约束'}）：已抑制升级为「通过」</div>` : '') +
+    ((result.mandate_blocked || []).length ? `<div class="vip-adv-foot warn">🚫 硬拦：${result.mandate_blocked.map(esc).join('、')} 的「加仓」已确定性下调为「持有」（详见逐仓理由括注）</div>` : '') +
     (c.risk_veto ? `<div class="vip-adv-foot warn">⛔ 风控委员否决：已抑制升级为「通过」，请审慎核对</div>` : '') +
     (c.diversity_warning ? `<div class="vip-adv-foot warn">⚠ ${esc(c.diversity_warning)}</div>` : '') +
     (c.weighted_note ? `<div class="vip-adv-foot muted">${esc(c.weighted_note)}</div>` : '') +
     (result.reconciled ? `<div class="vip-adv-foot warn">↔ 已按投委会结论对账草案动作（详见逐条建议中的括注）</div>` : '') +
     (result.portfolio_diagnosis ? `<div class="vip-adv-callout"><h4>组合诊断</h4><p>${esc(result.portfolio_diagnosis)}</p></div>` : '') +
     (result.cross_market_coverage ? `<div class="vip-adv-callout coverage"><h4>跨市场覆盖</h4><p>${esc(result.cross_market_coverage)}</p></div>` : '') +
+    renderSectorRotation(result.sector_rotation_reconcile) +
+    renderDerivativeBarriers(result.derivative_barriers) +
     `<div class="vip-adv-section-title">逐仓建议</div>` +
     `<div class="st-table-wrap"><table class="st-table vip-adv-table"><thead><tr><th>标的</th><th>建议</th><th>理由</th><th>风险</th><th>衍生品提示</th></tr></thead><tbody>${rows}</tbody></table></div>` +
     `<div class="vip-adv-section-title">投委会 4 席评审</div>` +
@@ -1578,13 +1722,16 @@ function renderRecommend(result) {
     ? `候选池 ${st.n_total} 只 · 取综合分前 ${st.n_shown}${st.capped ? '（已截断）' : ''} · 已持剔除 ${(st.dropped_held || []).length} · 纲领排除 ${(st.dropped_excluded || []).length}`
     : '';
   body.innerHTML =
-    `<div class="vip-adv-meta">生成于 ${esc(fmtBJ(result.generated_at))} · ${esc(result.provider || '')}/${esc(result.model || '')}</div>` +
+    `<div class="vip-adv-meta">生成于 ${esc(fmtBJ(result.generated_at))} · ${esc(result.provider || '')}/${esc(result.model || '')}` +
+      (result.data_as_of ? ` · 📅 数据截至 ${esc(result.data_as_of)}` : '') + `</div>` +
     (poolLine ? `<div class="vip-adv-meta">${esc(poolLine)}</div>` : '') +
     `<div class="vip-adv-verdict ${vKey}">` +
       `<span class="vip-adv-verdict-badge ${vKey}">投委会：${esc(verdictTxt)}</span>` +
       `<span class="vip-adv-verdict-count">赞成 ${c.approve || 0} · 否决 ${c.reject || 0}</span>` +
       (c.caution ? `<span class="vip-adv-verdict-caution">⚠ 建议审慎</span>` : '') +
     `</div>` +
+    (result.chair_summary ? `<div class="vip-adv-chair">🪑 <b>主席综述</b>：${esc(result.chair_summary)}</div>` : '') +
+    renderReceipt(result.verification_receipt) +
     (c.risk_veto ? `<div class="vip-adv-foot warn">⛔ 风控委员否决：已抑制升级为「通过」，请审慎核对</div>` : '') +
     (c.diversity_warning ? `<div class="vip-adv-foot warn">⚠ ${esc(c.diversity_warning)}</div>` : '') +
     (c.weighted_note ? `<div class="vip-adv-foot muted">${esc(c.weighted_note)}</div>` : '') +

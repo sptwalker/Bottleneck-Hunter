@@ -12,9 +12,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.vip import compliance, derivatives, number_guard, portfolio
@@ -139,10 +140,166 @@ def format_macro_for_prompt(wl_store) -> str:
     return "\n".join(parts).strip() or _MACRO_FALLBACK
 
 
+# ── P1-3：持仓板块权重 vs L1 板块轮动三桶的确定性对照 —— 把「宏观板块信号 vs 我的持仓」从叙述自由推理变结构化对账 ──
+# rotation 兼容 L1 两种输出：英文 {strengthening/weakening/neutral}（_merge_sector_rotation 产出）或中文 {看多/看空}。
+_ROTATION_SYNONYMS = {
+    "weakening": ("weakening", "看空", "走弱", "减配", "回避", "弱"),
+    "strengthening": ("strengthening", "看多", "走强", "增配", "超配", "强"),
+}
+
+
+def _rotation_bucket(rotation: dict, kind: str) -> list[str]:
+    """从 L1 sector_rotation 提取某一档（强/弱）的板块名列表；按键名同义词归类，兼容中英键。"""
+    out: list[str] = []
+    for k, v in (rotation or {}).items():
+        ks = str(k).strip()
+        if any(s in ks.lower() or s in ks for s in _ROTATION_SYNONYMS[kind]):
+            vals = v if isinstance(v, (list, tuple)) else [v]
+            out.extend(str(x).strip() for x in vals if str(x).strip())
+    return list(dict.fromkeys(out))
+
+
+def reconcile_sector_rotation(holdings: list[dict], rotation: dict) -> dict:
+    """确定性核算持仓板块权重 vs L1 板块轮动，标「重仓于走弱板块」「持有于走强板块」「L1 判强但零持仓」。
+
+    喂 risk_officer（折进 portfolio_risk）+ 前端对照面板。纯函数、零 LLM。板块名双向子串近似匹配
+    （持仓 sector 来自观察池 join，rotation 来自 L1；粒度可能不同 → 子串近似而非精确映射）。
+    rotation 无强/弱信号 → available False（不硬凑对照）。
+    """
+    weakening = _rotation_bucket(rotation, "weakening")
+    strengthening = _rotation_bucket(rotation, "strengthening")
+    if not weakening and not strengthening:
+        return {"available": False, "in_weakening": [], "in_strengthening": [],
+                "strengthening_unheld": [], "weakening_weight_pct": 0.0,
+                "note": "L1 未产出板块轮动强/弱信号，未做对照"}
+
+    by_sector: dict[str, dict] = {}
+    for h in holdings or []:
+        sec = str(h.get("sector") or "").strip()
+        if not sec or sec == "未知":
+            continue
+        b = by_sector.setdefault(sec, {"weight_pct": 0.0, "tickers": []})
+        b["weight_pct"] += float(h.get("weight_pct") or 0)
+        if h.get("ticker"):
+            b["tickers"].append(str(h["ticker"]))
+
+    def _bucket_of(sec: str) -> str | None:
+        """把一个持仓板块归入**唯一**方向：跨两桶取「最贴合」的轮动词（精确匹配 > 子串重叠更长），
+        杜绝双向子串双命中（如 '能源'⊂'新能源' 令 新能源 同时进弱/强桶自相矛盾+虚增走弱敞口）。
+        平局（含 L1 自身把同板块列强又列弱）→ 先遍历的 weakening 胜出（风险优先，宁可提示走弱）。"""
+        best = None  # (exact:0/1, overlap_len, bucket)
+        for bucket, kws in (("weak", weakening), ("strong", strengthening)):
+            for kw in kws:
+                k = str(kw).strip()
+                if not k:
+                    continue
+                if sec == k:
+                    cand = (1, len(k), bucket)
+                elif k in sec or sec in k:
+                    cand = (0, min(len(sec), len(k)), bucket)   # 重叠长度=较短串长，越长越贴合
+                else:
+                    continue
+                if best is None or cand[:2] > best[:2]:
+                    best = cand
+        return best[2] if best else None
+
+    in_weak, in_strong = [], []
+    for sec, b in by_sector.items():
+        rec = {"sector": sec, "weight_pct": round(b["weight_pct"], 1), "tickers": b["tickers"]}
+        bucket = _bucket_of(sec)
+        if bucket == "weak":
+            in_weak.append(rec)
+        elif bucket == "strong":
+            in_strong.append(rec)
+    held = list(by_sector)
+    unheld = [s for s in strengthening if not any(s in hs or hs in s for hs in held)]
+    return {
+        "available": True,
+        "in_weakening": sorted(in_weak, key=lambda r: -r["weight_pct"]),
+        "in_strengthening": sorted(in_strong, key=lambda r: -r["weight_pct"]),
+        "strengthening_unheld": unheld,
+        "weakening_weight_pct": round(sum(r["weight_pct"] for r in in_weak), 1),
+        "note": "板块名子串近似匹配（非精确映射）；对照 L1 轮动作宏观提示，不硬拦。",
+    }
+
+
+# ── P4-3：账户级瓶颈主题暴露 + 机会集缺口图 —— 把差异化的瓶颈引擎首次接到用户自己的账户 ──
+# 聚合持仓 bottleneck_node × 权重 vs 观察池候选机会集，diff：over-owned（重仓拥挤主题）/ under-owned
+# （观察池有高分候选、账户零/低持仓的高价值瓶颈主题）。止于建议层——只出方向性「腾挪」提示，不下单。
+# 天花板（诚实标注）：bottleneck_node 是自由文本非规范化 taxonomy → 只做粗粒度字符串归一(strip/lower)的**定性**图，
+# 不量化瓶颈强度暴露（须等 Phase 5 持久化五维评分）。
+
+def bottleneck_theme_exposure(holdings: list[dict], candidates: list[dict]) -> dict:
+    """确定性核算账户瓶颈主题暴露 vs 观察池机会集，标 over-owned（拥挤）/ under-owned（缺口）。
+
+    holdings: dossier holdings（带 bottleneck_node/weight_pct，来自 0-5 观察池 join）。
+    candidates: 观察池 list_all()（带 bottleneck_node/composite_score/tier/ticker）。
+    纯函数、零 LLM。主题名按 strip().lower() 归一后精确聚合（自由文本，不做子串近似——避免误并不同主题）。
+    无任一持仓带 bottleneck_node → available False（join 未覆盖，不硬凑）。
+    """
+    def _norm(x) -> str:
+        return str(x or "").strip()
+
+    # 持仓侧：主题 → 累计权重 + 标的
+    held: dict[str, dict] = {}
+    for h in holdings or []:
+        node = _norm(h.get("bottleneck_node"))
+        if not node:
+            continue
+        b = held.setdefault(node.lower(), {"theme": node, "weight_pct": 0.0, "tickers": []})
+        b["weight_pct"] += float(h.get("weight_pct") or 0)
+        if h.get("ticker"):
+            b["tickers"].append(str(h["ticker"]))
+
+    if not held:
+        return {"available": False, "over_owned": [], "under_owned": [],
+                "note": "持仓未 join 到任何瓶颈主题（观察池覆盖不足），未做主题缺口对照"}
+
+    # 候选侧：主题 → 观察池里该主题的最高分候选（机会集代表）+ 是否已持有
+    held_keys = set(held)
+    cand_by_theme: dict[str, dict] = {}
+    for c in candidates or []:
+        node = _norm(c.get("bottleneck_node"))
+        if not node:
+            continue
+        key = node.lower()
+        score = float(c.get("composite_score") or 0)
+        rep = cand_by_theme.setdefault(key, {"theme": node, "_raw": float("-inf"), "top_score": 0.0,
+                                              "top_ticker": "", "tier": "", "n_candidates": 0})
+        rep["n_candidates"] += 1
+        if score > rep["_raw"]:   # 比未四舍原值，避免已四舍 top_score 令同分带内低分候选顶替真最高分
+            rep["_raw"] = score
+            rep["top_score"] = round(score, 1)
+            rep["top_ticker"] = str(c.get("ticker") or "")
+            rep["tier"] = str(c.get("tier") or "")
+
+    # over-owned：已持有主题按权重降序（重仓即拥挤，供「腾挪」参考）
+    over = sorted(({"theme": b["theme"], "weight_pct": round(b["weight_pct"], 1),
+                    "tickers": b["tickers"],
+                    "in_watchlist": (k in cand_by_theme)} for k, b in held.items()),
+                  key=lambda r: -r["weight_pct"])
+    # under-owned：观察池有候选、账户未持有的主题，按候选最高分降序（高价值被忽视的瓶颈环节）
+    under = sorted(({"theme": v["theme"], "top_ticker": v["top_ticker"], "top_score": v["top_score"],
+                     "tier": v["tier"], "n_candidates": v["n_candidates"]}
+                    for k, v in cand_by_theme.items() if k not in held_keys),
+                   key=lambda r: -r["top_score"])
+    return {
+        "available": True,
+        "over_owned": over,
+        "under_owned": under,
+        "held_theme_count": len(held),
+        "note": "瓶颈主题为自由文本、精确归一聚合（定性图，非量化强度暴露）；under-owned=观察池高分候选但账户未持有，"
+                "over-owned=账户重仓主题——仅作方向性腾挪提示，止于建议层。",
+    }
+
+
 _BG_CAP = 15  # 逐名背景上限（本地 DB 读，够 committee 判断；超限只标注不静默截断）
 
 
-def build_committee_context(wl_store, dossier: dict, macro_text: str, bg_items: list[dict], *, market: str = "") -> dict:
+def build_committee_context(wl_store, dossier: dict, macro_text: str, bg_items: list[dict], *,
+                            market: str = "", mandate_compliance: dict | None = None,
+                            sector_rotation: dict | None = None,
+                            derivative_barriers: list | None = None) -> dict:
     """组装投委会 4 席评审的真实上下文，全部复用决策中心本地-DB 取数（零新增网络面）。
 
     - portfolio_risk：decision_engine._portfolio_risk_summary（真实 HHI/VaR/CVaR/beta/相关性），
@@ -150,6 +307,7 @@ def build_committee_context(wl_store, dossier: dict, macro_text: str, bg_items: 
     - valuation/sentiment/crowding/peer/catalyst：committee.build_ticker_background 逐名聚合 {ticker: 段}。
     bg_items: [{"ticker","entry_id"}]——advisory 传持仓（holdings 无 entry_id→催化剂段自然"暂无"），
               recommend 传候选（观察池 entry 有 id→估值/催化剂全亮）。
+    mandate_compliance: P1-1 纲领硬约束结构化对账；None 时按 dossier.account_ref 自动核算（recommend 免改也得注入）。
     ponytail: 逐名背景上限 _BG_CAP=15，超限 coverage_note 标"仅前 N 只"不静默截断；
               非观察池标的→估值/情绪段回退"暂无"（诚实降级不编造）；
               全 sector 未知→去掉 max_sector_weight（单桶算 100% 会误报>40%告警）。
@@ -193,6 +351,58 @@ def build_committee_context(wl_store, dossier: dict, macro_text: str, bg_items: 
         portfolio_risk = {"top5_concentration_pct": dossier.get("top5_concentration_pct"),
                           "n_holdings": dossier.get("n_holdings")}
     portfolio_risk.setdefault("derivative_exposure", dossier.get("derivative_exposure", []))
+
+    # P1-1：纲领硬约束结构化对账折进 portfolio_risk（risk_officer 的 prompt 已渲染此字段 → 零 prompt 文件改动即收到结构化违规信号）。
+    # None 时按账户自动核算（recommend 路径免改也得注入）；折入 corpus 键 → 委员引用其数字不被误标 ⚠。
+    if mandate_compliance is None:
+        try:
+            mandate_compliance = _mandate.check_mandate_compliance(
+                _mandate.load_mandate(wl_store, dossier.get("account_ref", "")), dossier)
+        except Exception:  # noqa: BLE001 - 对账失败绝不带崩委员会评审
+            mandate_compliance = None
+    if mandate_compliance:
+        portfolio_risk["mandate_compliance"] = mandate_compliance
+
+    # P1-3：持仓板块权重 vs L1 板块轮动结构化对照，同折进 portfolio_risk（同 corpus 键，同零 prompt 改动路径）。
+    # None 时按 wl_store 最新 L1 自动核算（recommend 免改也得注入）；无信号→available False，不注入。
+    if sector_rotation is None:
+        try:
+            _macro = wl_store.get_latest_macro_strategy() if hasattr(wl_store, "get_latest_macro_strategy") else None
+            sector_rotation = (_macro or {}).get("sector_rotation") or {}
+        except Exception:  # noqa: BLE001 - L1 取数失败绝不带崩委员会评审
+            sector_rotation = {}
+    rot = reconcile_sector_rotation(holdings, sector_rotation or {})
+    if rot.get("available"):
+        portfolio_risk["sector_rotation_reconcile"] = rot
+
+    # P1-4：衍生品 KO/KI 状态折进 portfolio_risk（同 corpus 键、同零 prompt 改动路径）——risk_officer 收到
+    # 「累购距敲出仅 3%（利润封顶）/FCN 已敲入（本金风险激活）」结构化信号。
+    # None 时按账户自动只读扫描（recommend 免改也注入）。
+    if derivative_barriers is None:
+        try:
+            from bottleneck_hunter.vip.projection import derivative_barrier_status
+            derivative_barriers = derivative_barrier_status(wl_store, dossier.get("account_ref", ""))
+        except Exception:  # noqa: BLE001 - 障碍扫描失败绝不带崩委员会评审
+            derivative_barriers = []
+    live = [b for b in (derivative_barriers or []) if b.get("available")]
+    if live:
+        portfolio_risk["derivative_barriers"] = live
+
+    # P4-3：账户级瓶颈主题暴露 + 机会集缺口图折进 portfolio_risk（同 corpus 键、同零 prompt 改动路径）——
+    # 委员收到「重仓拥挤主题 X / 观察池高分候选 Y 主题账户零持仓」结构化前瞻信号。持仓已带 bottleneck_node(0-5 join)。
+    try:
+        _cands = wl_store.list_all() if hasattr(wl_store, "list_all") else []
+    except Exception:  # noqa: BLE001 - 观察池取数失败绝不带崩委员会评审
+        _cands = []
+    theme = bottleneck_theme_exposure(holdings, _cands)
+    if theme.get("available"):
+        portfolio_risk["bottleneck_theme_exposure"] = theme
+
+    # P4-1/P4-2：组合级压力测试 + 净 Greeks 直接沿用 dossier 已算好的结果（衍生品 payoff 重放 + 股票线性 delta）。
+    if dossier.get("stress_test"):
+        portfolio_risk["stress_test"] = dossier["stress_test"]
+    if dossier.get("net_greeks"):
+        portfolio_risk["net_greeks"] = dossier["net_greeks"]
 
     context = {
         "macro_summary": macro_text,
@@ -252,19 +462,20 @@ def _validate_draft(raw: str) -> dict:
     }
 
 
-def _consensus(reviews: list[dict], *, store=None, market: str = "") -> dict:
-    """确定性合议：置信×校准加权表决 + H-18 独立性护栏 + 风控软否决。不再多花 1 次 LLM。
+def _consensus(reviews: list[dict], *, store=None, market: str = "",
+               mandate_compliance: dict | None = None) -> dict:
+    """确定性合议：置信×校准加权表决 + H-18 独立性护栏 + 风控软否决 + P1-1 纲领硬约束否决。不再多花 1 次 LLM。
 
-    向后兼容：签名新增 *,store,market（缺省 store=None → 校准权重全 1.0，退化为纯置信加权；
-    无 confidence → 退化为等权）；返回在旧键(verdict/caution/approve/reject/members)基础上**只增**
-    diversity_warning / weighted_note / risk_veto，vip.js 仅做加性渲染。
+    向后兼容：签名新增 *,store,market,mandate_compliance（全缺省 → 退化旧行为）；返回在旧键基础上**只增**
+    diversity_warning / weighted_note / risk_veto / mandate_veto / mandate_violations，vip.js 仅做加性渲染。
 
     ponytail:
     - 加权 w=max(confidence,1)*calib（calib 复用 committee._member_weights，缺校准/无 store→1.0）；
       confidence 若为 0-1 制则 floor 到 1 → 退化为纯校准加权（安全，不会误放大）。
       同时保留 headcount approve/reject 供展示，加权与人头结论不一致时注 weighted_note。
-    - 风控软否决：risk_officer 投 reject 即 risk_veto+caution，verdict 不得为 approve（approve→split）——
-      用"风控否决=软否决"作硬约束破坏的确定性代理（关键词扫叙述判"回撤/排除破坏"太脆），升级路径＝结构化违规信号。
+    - 风控软否决：risk_officer 投 reject 即 risk_veto+caution，verdict 不得为 approve（approve→split）。
+    - 纲领硬约束否决（P1-1）：check_mandate_compliance 报 hard 破坏（集中度/排除/回撤突破）时 mandate_veto+caution、
+      不得升级为 approve。这是「结构化违规信号」正解——不再依赖 risk_officer 从叙述里自由推理是否破坏硬约束。
     """
     from bottleneck_hunter.watchlist.committee import MEMBERS, _member_weights
     label_of = {m["role"]: m["label"] for m in MEMBERS}
@@ -312,6 +523,15 @@ def _consensus(reviews: list[dict], *, store=None, market: str = "") -> dict:
         if verdict == "approve":
             verdict = "split"
 
+    # P1-1 纲领硬约束否决：结构化 hard 破坏直接抑制 approve（不靠 LLM 自由推理），surfaced 供主席综述/面板
+    mc = mandate_compliance or {}
+    mandate_violations = [v.get("label", "") for v in (mc.get("violations") or [])]
+    mandate_veto = bool(mandate_violations)
+    if mandate_veto:
+        caution = True
+        if verdict == "approve":
+            verdict = "split"
+
     providers_used = [r.get("provider", "") for r in valid]
     distinct = {p for p in providers_used if p}
     diversity_warning = ""
@@ -321,7 +541,8 @@ def _consensus(reviews: list[dict], *, store=None, market: str = "") -> dict:
 
     return {"verdict": verdict, "caution": caution, "approve": approve, "reject": reject,
             "members": members, "diversity_warning": diversity_warning,
-            "weighted_note": weighted_note, "risk_veto": risk_veto}
+            "weighted_note": weighted_note, "risk_veto": risk_veto,
+            "mandate_veto": mandate_veto, "mandate_violations": mandate_violations}
 
 
 _COMMITTEE_CORPUS_KEYS = ("portfolio_risk", "valuation_data", "sentiment_data",
@@ -382,6 +603,41 @@ def reconcile_draft(items: list[dict], action_key: str, downgrade_map: dict, com
             it["reason"] = (str(it.get("reason", "")) + "（投委会提示警示，请谨慎核对）").strip()
         return True
     return False
+
+
+def enforce_mandate_hard(holdings: list[dict], compliance: dict,
+                         sector_by_ticker: dict | None = None) -> list[str]:
+    """P1-1 硬拦：对命中纲领硬约束（排除/单仓集中度=按 ticker；板块集中度=按 sector）的持仓，把「加仓」
+    确定性下调「持有」并注明原因，返回被拦 ticker。
+
+    这是「硬拦」的落地——结构化违规不止提示，还确定性收敛激进动作。回撤是组合级（无 per-ticker items）→
+    由 mandate_veto 抑制整体升级、不逐仓改。排除命中即便原动作是持有也追加退出提示（advice-only，不臆造减仓 sizing）。
+    ★ 板块集中度 violation 的 items 是**板块名**（非 ticker，见 mandate.check_mandate_compliance），故按板块匹配：
+      板块超限时该板块内所有加仓下调持有。草案持仓 sector 缺失时从 sector_by_ticker（dossier 权威口径）反查。
+    ponytail: 只降「加仓→持有」一档；强制减仓需仓位级判断，留给委员会/用户。
+    """
+    by_ticker: dict[str, list[str]] = {}
+    by_sector: dict[str, list[str]] = {}
+    for v in (compliance or {}).get("violations", []):
+        target = by_sector if v.get("key") == "sector_concentration" else by_ticker
+        for it in (v.get("items") or []):
+            target.setdefault(str(it), []).append(v.get("label", "硬约束"))
+    smap = sector_by_ticker or {}
+    blocked: list[str] = []
+    for h in holdings:
+        tk = str(h.get("ticker", ""))
+        sec = str(h.get("sector") or smap.get(tk) or "").strip()      # 草案缺 sector → dossier 权威反查
+        labels = by_ticker.get(tk, []) + (by_sector.get(sec, []) if sec else [])
+        if not labels:
+            continue
+        lab = "、".join(dict.fromkeys(labels))
+        if str(h.get("action", "")) == "加仓":
+            h["action"] = "持有"
+            h["reason"] = (str(h.get("reason", "")) + f"（触及纲领硬约束[{lab}]，加仓已下调为持有）").strip()
+            blocked.append(tk)
+        else:
+            h["reason"] = (str(h.get("reason", "")) + f"（触及纲领硬约束[{lab}]，请审慎核对）").strip()
+    return blocked
 
 
 def _parse_weight(s: str) -> float | None:
@@ -478,6 +734,129 @@ def summarize_cash_budget(dossier: dict, advisory_result: dict | None,
             "note": "现金口径为结算单静态余额、不含融资(buying_power)，容量判断为指示性。" + tail}
 
 
+_VERDICT_ZH = {"approve": "通过", "reject": "否决", "split": "分歧"}
+
+
+def chair_summary(committee: dict, cash_budget: dict | None = None) -> str:
+    """0-9：投委会主席综述行——确定性拼装 verdict+票数+关键护栏信号+现金容量，**不再花第 2 次 LLM**。
+
+    一句话把「4 席怎么投、有没有被风控/独立性护栏拦、拟新增买入现金够不够」讲清，作为逐条建议之上的总纲。
+    纯拼装：只读 _consensus 已算好的结构化结论 + summarize_cash_budget 的容量口径，零模型调用。"""
+    verdict = committee.get("verdict", "")
+    vtxt = _VERDICT_ZH.get(verdict, verdict or "—")
+    parts = [f"投委会加权表决：{vtxt}（赞成 {committee.get('approve', 0)} / 否决 {committee.get('reject', 0)}）"]
+    if committee.get("mandate_veto"):
+        vio = "、".join(committee.get("mandate_violations") or []) or "硬约束"
+        parts.append(f"触及纲领硬约束（{vio}），已抑制升级为通过")
+    if committee.get("risk_veto"):
+        parts.append("风控委员否决，已抑制升级为通过")
+    elif committee.get("caution"):
+        parts.append("多数持保留，建议审慎核对")
+    if committee.get("diversity_warning"):
+        parts.append("委员独立性降级，结论仅供参考")
+    if cash_budget:
+        req = cash_budget.get("requested_new_buy", 0) or 0
+        avail = cash_budget.get("available_cash", 0) or 0
+        if not cash_budget.get("fits", True):
+            if avail > 0:
+                parts.append(f"拟新增买入约 ${req:,.0f} 超可投资现金 ${avail:,.0f}"
+                             f"（超 {cash_budget.get('overcommit_pct', 0) or 0:.0f}%）")
+            else:  # 现金恰为 0/负 → overcommit_pct 恒 0，不印自相矛盾的"超 0%"
+                parts.append(f"拟新增买入约 ${req:,.0f}，但无可投资现金")
+        elif req > 0:
+            parts.append(f"拟新增买入约 ${req:,.0f}，现金可覆盖")
+        if cash_budget.get("unquantified_adds"):
+            parts.append(f"另有 {cash_budget['unquantified_adds']} 项未量化，容量判断偏乐观")
+    return "；".join(parts) + "。"
+
+
+# P1-2：本轮账户统一行动清单——把 advisory(减/持/加) 与 recommend(建仓/关注/规避) 并成一张按可执行性排序的清单。
+_ACTION_RANK = {"减仓": 0, "建仓": 1, "加仓": 2, "关注": 3, "持有": 4, "规避": 5}
+_ACTIONABLE = {"减仓", "加仓", "建仓"}  # 本轮需下手的动作（持有/关注/规避＝不动/观察/回避，非行动）
+
+
+def _merge_actions(adv: dict | None, rec: dict | None, add_sized: dict) -> list[dict]:
+    """纯合并（决策路径）：advisory holdings + recommend candidates → 按可执行性排序的统一行动行。
+    加仓项就地附 cash_budget 已算好的指示性 sizing（同一算法，口径不漂移）；同档稳定排序保 持仓→荐新 顺序。"""
+    actions: list[dict] = []
+    for h in ((adv or {}).get("holdings") or []):
+        act = str(h.get("action", ""))
+        item = {"ticker": h.get("ticker", ""), "action": act, "source": "持仓",
+                "reason": h.get("reason", ""), "risk": h.get("risk", ""),
+                "derivative_note": h.get("derivative_note", ""), "actionable": act in _ACTIONABLE}
+        if act == "加仓" and item["ticker"] in add_sized:
+            item["sizing"] = add_sized[item["ticker"]]
+        actions.append(item)
+    for c in ((rec or {}).get("candidates") or []):
+        act = str(c.get("action", ""))
+        actions.append({"ticker": c.get("ticker", ""), "action": act, "source": "荐新",
+                        "reason": c.get("reason", ""), "risk": c.get("risk", ""),
+                        "fit": c.get("fit", ""), "suggested_weight": c.get("suggested_weight", ""),
+                        "actionable": act in _ACTIONABLE})
+    actions.sort(key=lambda a: _ACTION_RANK.get(a["action"], 9))
+    return actions
+
+
+def build_action_plan(wl_store, account_ref: str = "") -> dict:
+    """P1-2：读最新 advisory + 最新 recommend，合并成「本轮账户行动清单」并对两 pass 一起做现金配平。
+
+    纯确定性拼装：只读两份已落库结果 + 复用 summarize_cash_budget 同一现金原语，零 LLM、不下单。
+    任一 pass 缺失只并另一侧（sources 诚实标注偏乐观）；两侧皆无 → available False。
+    """
+    account_ref = (account_ref or "").strip()
+    adv = get_latest_advisory(wl_store, account_ref)
+    from bottleneck_hunter.vip import recommend as _recommend  # 惰性：recommend 顶层已 import advisory，避免循环
+    rec = _recommend.get_latest_recommendations(wl_store, account_ref)
+    if not adv and not rec:
+        return {"available": False, "actions": [], "note": "尚无顾问建议或荐新，请先在对应标签页生成。"}
+    dossier = portfolio.build_account_dossier(wl_store, account_ref=account_ref)
+    cash_budget = summarize_cash_budget(dossier, adv, rec, wl_store=wl_store)  # 跨 pass 配平（加仓+建仓一起对照现金）
+    add_sized = {s["ticker"]: s for s in cash_budget.get("add_suggestions", [])}
+    actions = _merge_actions(adv, rec, add_sized)
+    return {"available": True, "account_ref": account_ref,
+            "data_as_of": (dossier.get("as_of_hint") or {}).get("data_as_of", ""),
+            "actions": actions, "n_actionable": sum(1 for a in actions if a["actionable"]),
+            "cash_budget": cash_budget,
+            "sources": {"advisory_available": bool(adv), "advisory_at": (adv or {}).get("generated_at", ""),
+                        "recommend_available": bool(rec), "recommend_at": (rec or {}).get("generated_at", "")}}
+
+
+# 结算单月频，>此天数视为过期（需重新上传结算单）；env 可调
+_STALE_DAYS = int(os.getenv("BH_VIP_STALE_DAYS", "45"))
+
+
+def _days_between(iso_a: str, iso_b: str) -> int | None:
+    """|a - b| 的自然日数（各取前 10 位日期段）；任一不可解析→None（诚实未知，不硬凑 0）。"""
+    try:
+        return abs((date.fromisoformat((iso_a or "")[:10]) - date.fromisoformat((iso_b or "")[:10])).days)
+    except (ValueError, TypeError):
+        return None
+
+
+def verification_receipt(result: dict, *, stale_days: int = _STALE_DAYS) -> dict:
+    """0-10：good-path 绿色核验回执——数字全核(number_guard 零未核)＋持仓可溯源＋数据新鲜 三项皆过时的正向信号。
+
+    是 ⚠未核到 警示的正面对偶：把"无警示=沉默"翻成显式回执，让用户看见"本次数字全部溯源、快照日已知、在时效内"。
+    任一不满足→green=False 并逐项列出未过原因（不掩盖）。纯确定性拼装，零 LLM。"""
+    unverified = result.get("unverified") or []
+    data_as_of = result.get("data_as_of") or ""
+    gap = _days_between(result.get("generated_at", ""), data_as_of) if data_as_of else None
+    fresh_ok = gap is not None and gap <= stale_days
+    checks = [
+        {"key": "numbers", "label": "数字全部溯源", "ok": not unverified,
+         "detail": "建议中的数字均可在账户数据中核到" if not unverified else f"{len(unverified)} 个数字未核到"},
+        {"key": "sourced", "label": "持仓可溯源", "ok": bool(data_as_of),
+         "detail": f"快照截至 {data_as_of}" if data_as_of else "缺持仓快照日期"},
+        {"key": "fresh", "label": "数据新鲜", "ok": fresh_ok,
+         "detail": (f"快照距生成 {gap} 天，在 {stale_days} 天时效内" if fresh_ok else
+                    (f"快照距生成 {gap} 天，已超 {stale_days} 天时效，建议重新上传结算单"
+                     if gap is not None else "无法判定时效"))},
+    ]
+    green = all(c["ok"] for c in checks)
+    return {"green": green, "checks": checks,
+            "note": "本次建议数字全核、持仓可溯源且在时效内。" if green else "部分核验未通过，请留意下列提示。"}
+
+
 def _annotate(draft: dict, corpus: str, foreign_values: list[float] | None = None) -> list[str]:
     """就地给草案文本里未在档案/纲领语料中出现的数字加⚠标注，返回未核到 token 列表。"""
     unverified: list[str] = []
@@ -516,6 +895,18 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
     dossier = inputs["dossier"]
     if not dossier.get("holdings"):
         return {"error": "该账户暂无持仓，请先上传月结单"}
+    # P1-1：纲领硬约束结构化对账（一次算好，复用于委员会注入 / 合议否决 / 硬拦 / 结果面板）。绝不带崩。
+    try:
+        mandate_comp = _mandate.check_mandate_compliance(
+            _mandate.load_mandate(wl_store, account_ref), dossier)
+    except Exception:  # noqa: BLE001
+        mandate_comp = {}
+    # P1-4：衍生品 KO/KI 状态只读扫描（全量，含 available False 项供面板诚实标注；委员会仅收 available 项）。
+    try:
+        from bottleneck_hunter.vip.projection import derivative_barrier_status
+        deriv_barriers = derivative_barrier_status(wl_store, account_ref)
+    except Exception:  # noqa: BLE001
+        deriv_barriers = []
     if budget is not None and not budget.can_spend():
         return {"error": "预算不足，暂不生成顾问建议"}
     models = get_models_for_role("vip_advisor", user_id=user_id, with_fallback=True)
@@ -536,38 +927,54 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
     # ── 2) 投委会 4 persona 并行评审（复用 committee._review_single；喂真实组合风险+逐名背景，不碰 sim 表）──
     context = build_committee_context(
         wl_store, dossier, inputs["macro_text"],
-        [{"ticker": h.get("ticker"), "entry_id": h.get("entry_id")} for h in dossier.get("holdings", [])])
+        [{"ticker": h.get("ticker"), "entry_id": h.get("entry_id")} for h in dossier.get("holdings", [])],
+        mandate_compliance=mandate_comp, derivative_barriers=deriv_barriers)
     exec_plan = {"account_ref": account_ref, "mandate": inputs["mandate_text"], "draft": draft}
     reviews = await asyncio.gather(*[_review_single(m, exec_plan, context) for m in MEMBERS],
                                    return_exceptions=True)
     reviews = [r for r in reviews if isinstance(r, dict)]
 
     # ── 3) 确定性合议 + number_guard（草案 + 委员叙述都过防伪；corpus 含喂进委员会的真实数）──
-    committee = _consensus(reviews, store=wl_store, market=getattr(wl_store, "_market", "") or "")
+    committee = _consensus(reviews, store=wl_store, market=getattr(wl_store, "_market", "") or "",
+                           mandate_compliance=mandate_comp)
     corpus = (json.dumps(dossier, ensure_ascii=False, default=str)
               + "\n" + inputs["mandate_text"] + "\n" + inputs["macro_text"]
               + "\n" + committee_corpus(context))
-    fv = number_guard.foreign_derivative_values(dossier)  # 非美元衍生条款价：$令牌不得据此核实（跨币防误核）
+    fv = number_guard.foreign_account_values(dossier)  # 非美元衍生价/已实现盈亏：$令牌不据此核实（跨币防误核）
     unverified = _annotate(draft, corpus, fv)
     unverified = list(dict.fromkeys(unverified + annotate_committee(committee, corpus, fv)))
 
     # ── 3b) 草案↔投委会对账：reject→加仓降持有、caution/split→加警示注（memory:vip_advisory_pass 用户已确认强度）──
     reconciled = reconcile_draft(draft["holdings"], "action", {"加仓": "持有"}, committee)
+    # ── 3b') P1-1 纲领硬拦：命中排除/集中度的持仓「加仓」确定性下调「持有」（先于容量对照，被拦项不计入拟新增买入）──
+    #    板块集中度按 sector 匹配——草案持仓未必回带 sector，故传 dossier 权威 ticker→sector 映射兜底。
+    sector_by_ticker = {h.get("ticker"): (h.get("sector") or "")
+                        for h in dossier.get("holdings", []) if h.get("ticker")}
+    mandate_blocked = enforce_mandate_hard(draft["holdings"], mandate_comp, sector_by_ticker=sector_by_ticker)
+
+    # ── 3c) 0-9 主席综述行：本 pass 只含加仓量化（recommend 侧建仓未知→None），容量口径与 budget 端点一致 ──
+    cash_budget = summarize_cash_budget(dossier, {"holdings": draft["holdings"]}, None, wl_store=wl_store)
 
     result = {
         "account_ref": account_ref,
         "generated_at": _now_iso(),
+        "data_as_of": (dossier.get("as_of_hint") or {}).get("data_as_of", ""),  # 0-1：持仓数据截至日
+        "chair_summary": chair_summary(committee, cash_budget),  # 0-9：确定性主席综述行（无第 2 次 LLM）
         "portfolio_diagnosis": draft["portfolio_diagnosis"],
         "cross_market_coverage": draft["cross_market_coverage"],
         "holdings": draft["holdings"],
         "committee": committee,
+        "mandate_compliance": mandate_comp,        # P1-1：合规对账面板（集中度/排除/回撤/聚焦，确定性）
+        "mandate_blocked": mandate_blocked,        # 被硬拦下调为持有的标的
+        "sector_rotation_reconcile": context["portfolio_risk"].get("sector_rotation_reconcile"),  # P1-3：板块轮动对照
+        "derivative_barriers": deriv_barriers,     # P1-4：衍生品 KO/KI 状态面板（距障碍%/触发/剩余名义）
         "unverified": unverified,
         "reconciled": reconciled,
         "provider": provider, "model": model,
         "advisor_calibration": advisor_calibration(wl_store, provider, model),  # F1：surfaced 可信度
         "disclaimer": compliance.DISCLAIMER_ZH,
     }
-
+    result["verification_receipt"] = verification_receipt(result)  # 0-10：读 unverified/data_as_of/generated_at
     # ── C-1 复盘打点（record_prediction，只写不评）：为 5b 复盘启动数据时钟，并给 VIP 自己的准确率信号。
     #    role_context=vip_advisor 独占桶，与 sim 的 committee_*/vote 物理隔离；旁路容错——打点失败只 debug、
     #    绝不影响建议主链路（仿 record_model_call 哲学）。记录的是 reconcile 后的最终动作。
@@ -859,5 +1266,89 @@ if __name__ == "__main__":
     assert advisor_calibration(_CalStub(1.3), "x", "y")["calibration_weight"] == 1.3
     assert advisor_calibration(_CalStub(None), "x", "y")["calibration_weight"] == 1.0  # 异常兜底中性
     assert advisor_calibration(_CalStub(0.0), "x", "y")["calibration_weight"] == 1.0   # 非正权重视作中性
+
+    # 15) 0-9 chair_summary：确定性拼装 verdict+票数+护栏+现金容量，零 LLM
+    s_ok = chair_summary({"verdict": "approve", "approve": 3, "reject": 1})
+    assert s_ok.startswith("投委会加权表决：通过（赞成 3 / 否决 1）") and s_ok.endswith("。"), s_ok
+    s_veto = chair_summary({"verdict": "split", "approve": 3, "reject": 1, "risk_veto": True,
+                            "diversity_warning": "全 glm"},
+                           {"requested_new_buy": 60000.0, "available_cash": 50000.0, "fits": False,
+                            "overcommit_pct": 20.0, "unquantified_adds": 2})
+    assert "风控委员否决" in s_veto and "独立性降级" in s_veto, s_veto
+    assert "超可投资现金 $50,000" in s_veto and "另有 2 项未量化" in s_veto, s_veto
+    s_fit = chair_summary({"verdict": "approve", "approve": 4, "reject": 0, "caution": False},
+                          {"requested_new_buy": 10000.0, "available_cash": 50000.0, "fits": True})
+    assert "现金可覆盖" in s_fit and "风控" not in s_fit, s_fit    # fits 且无护栏→只报可覆盖
+
+    # 16) 0-10 verification_receipt：三项皆过→green；缺一→green=False 且列出未过项
+    green = verification_receipt({"unverified": [], "data_as_of": "2026-07-20",
+                                  "generated_at": "2026-08-02T00:00:00+00:00"}, stale_days=45)
+    assert green["green"] is True and all(c["ok"] for c in green["checks"]), green   # 13 天 < 45
+    bad_num = verification_receipt({"unverified": ["$999"], "data_as_of": "2026-07-20",
+                                    "generated_at": "2026-08-02T00:00:00+00:00"}, stale_days=45)
+    assert bad_num["green"] is False and bad_num["checks"][0]["ok"] is False, bad_num  # 有未核数→不绿
+    stale = verification_receipt({"unverified": [], "data_as_of": "2026-01-01",
+                                  "generated_at": "2026-08-02T00:00:00+00:00"}, stale_days=45)
+    assert stale["green"] is False and stale["checks"][2]["ok"] is False, stale        # 超时效→不绿
+    blank = verification_receipt({"unverified": [], "data_as_of": "",
+                                  "generated_at": "2026-08-02T00:00:00+00:00"})
+    assert blank["green"] is False and blank["checks"][1]["ok"] is False, blank         # 无快照日→不可溯源+时效未知
+    assert _days_between("2026-08-02T00:00:00+00:00", "2026-07-20") == 13
+    assert _days_between("bad", "2026-07-20") is None                                   # 不可解析→None，不硬凑
+
+    # 17) P1-1 纲领硬约束接线：_consensus 收结构化违规→mandate_veto 抑制升级 / enforce 硬拦 / chair 综述
+    mc_bad = {"compliant": False, "violations": [{"key": "single_concentration", "label": "单仓集中度",
+                                                  "detail": "NVDA 40% > 15%", "items": ["NVDA"]}]}
+    # 全票 approve 但触硬约束 → verdict 由 approve 压到 split、mandate_veto、caution
+    cmv = _consensus([{"role": r, "vote": "approve", "confidence": 5, "provider": p} for r, p in
+                      (("risk_officer", "openai"), ("growth_investor", "glm"),
+                       ("value_investor", "qwen"), ("contrarian", "deepseek"))],
+                     mandate_compliance=mc_bad)
+    assert cmv["mandate_veto"] is True and cmv["verdict"] == "split" and cmv["caution"] is True, cmv
+    assert cmv["mandate_violations"] == ["单仓集中度"], cmv
+    # 无违规（compliant）→ 不触发 mandate_veto，不干扰原表决
+    cmv_ok = _consensus([{"role": "growth_investor", "vote": "approve", "confidence": 5, "provider": "glm"}],
+                        mandate_compliance={"compliant": True, "violations": []})
+    assert cmv_ok["mandate_veto"] is False and cmv_ok["verdict"] == "approve", cmv_ok
+    # 缺省不传 → 向后兼容，无 mandate_veto
+    assert _consensus([{"role": "growth_investor", "vote": "approve"}])["mandate_veto"] is False
+
+    # enforce_mandate_hard：命中标的「加仓」降「持有」+注；命中但非加仓→仅注；未命中→不动
+    hs2 = [{"ticker": "NVDA", "action": "加仓", "reason": "看好"},
+           {"ticker": "MU", "action": "持有", "reason": "观望"},
+           {"ticker": "AAPL", "action": "加仓", "reason": "稳"}]
+    mc2 = {"violations": [{"key": "exclusions", "label": "排除清单", "items": ["NVDA", "MU"]}]}
+    blocked = enforce_mandate_hard(hs2, mc2)
+    assert blocked == ["NVDA"], blocked                                    # 只 NVDA 是加仓被下调
+    assert hs2[0]["action"] == "持有" and "硬约束" in hs2[0]["reason"], hs2  # 加仓→持有
+    assert hs2[1]["action"] == "持有" and "审慎" in hs2[1]["reason"], hs2    # 命中但持有→仅注
+    assert hs2[2]["action"] == "加仓" and "硬约束" not in hs2[2]["reason"], hs2  # 未命中→不动
+
+    # chair_summary 含纲领硬约束行
+    s_mv = chair_summary({"verdict": "split", "approve": 4, "reject": 0,
+                          "mandate_veto": True, "mandate_violations": ["单仓集中度", "排除清单"]})
+    assert "触及纲领硬约束" in s_mv and "单仓集中度" in s_mv, s_mv
+
+    # 18) P1-3 板块轮动对照：重仓走弱板块入 in_weakening、持有走强入 in_strengthening、判强零持仓入 unheld
+    rot = reconcile_sector_rotation(
+        [{"ticker": "NVDA", "weight_pct": 40.0, "sector": "半导体"},
+         {"ticker": "XOM", "weight_pct": 30.0, "sector": "能源"},
+         {"ticker": "KO", "weight_pct": 10.0, "sector": "未知"}],   # 未知板块跳过
+        {"strengthening": ["半导体板块"], "weakening": ["能源"], "neutral": ["医药"]})
+    assert rot["available"] is True, rot
+    assert [r["sector"] for r in rot["in_weakening"]] == ["能源"], rot            # 能源∈弱
+    assert rot["weakening_weight_pct"] == 30.0, rot
+    assert [r["sector"] for r in rot["in_strengthening"]] == ["半导体"], rot       # '半导体'⊂'半导体板块'
+    assert "半导体板块" not in rot["strengthening_unheld"], rot                    # 已持有→不列 unheld
+    # 中文键 兼容（看多/看空）+ 判强零持仓
+    rot2 = reconcile_sector_rotation(
+        [{"ticker": "AAPL", "weight_pct": 20.0, "sector": "科技"}],
+        {"看多": ["医药", "科技"], "看空": ["地产"]})
+    assert "医药" in rot2["strengthening_unheld"] and "科技" not in rot2["strengthening_unheld"], rot2
+    assert [r["sector"] for r in rot2["in_strengthening"]] == ["科技"], rot2
+    # 无强/弱信号 → available False，不硬凑
+    rot3 = reconcile_sector_rotation([{"ticker": "AAPL", "weight_pct": 20.0, "sector": "科技"}],
+                                     {"neutral": ["医药"]})
+    assert rot3["available"] is False and rot3["in_weakening"] == [], rot3
 
     print("advisory self-check OK")

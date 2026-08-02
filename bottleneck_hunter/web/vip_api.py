@@ -825,6 +825,18 @@ async def get_budget_reconciliation(market: str = "us_stock", account_ref: str =
     return {"budget": result}
 
 
+@router.get("/account/action-plan")
+async def get_action_plan(market: str = "us_stock", account_ref: str = "",
+                          user: dict = Depends(require_vip_unlocked)):
+    """P1-2 · 本轮账户统一行动清单（只读、指示性）：advisory(减/持/加) + recommend(建仓/关注/规避) 合并成一张
+    按可执行性排序的清单，并对两 pass 一起做现金配平。两侧皆未生成 → available False。只提示、不下单。"""
+    from bottleneck_hunter.vip import advisory
+    ref = (account_ref or "").strip()
+    if not ref:  # 空 ref 会经 build_account_dossier→get_sim_account('') 越界读决策中心模拟盘（见 memory:dc_sim_account_decoupled）
+        raise HTTPException(status_code=400, detail="请先选择具体子账户")
+    return {"action_plan": advisory.build_action_plan(_wl(user, market), account_ref=ref)}
+
+
 class ChatReq(BaseModel):
     session_id: str = ""
     question: str

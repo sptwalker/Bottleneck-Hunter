@@ -29,13 +29,14 @@ _REL_TOL = 0.01  # 1% 相对容差，吸收四舍五入
 _USD_CCY = {"", "usd", "us$", "$", "＄", "美元"}  # 视为美元口径（或未知→按美元处理，留在可信池）
 
 
-def foreign_derivative_values(dossier) -> list[float]:
-    """从账户档案的衍生品敞口里抽出「非美元」条款价格（afp/knock_out_price）。
+def foreign_account_values(dossier) -> list[float]:
+    """从账户档案里抽出所有「非美元」口径数值：衍生品条款价/名义（afp/knock_out_price/notional_native）
+    + FIFO 非美元已实现盈亏（realized_pnl_detail.foreign_values）。
 
-    这些是标的原生币种（如 HKD）的每股价格，与叙述的统一美元口径不同币种；档案把币种
-    (`currency`) 与价格放在**不同字段**，扁平化后防伪器看不到二者相邻，故须在这里按结构取出。
+    这些是标的原生币种（如 HKD/JPY）的数值，与叙述的统一美元口径不同币种；档案把币种
+    (`currency`) 与数值放在**不同字段**，扁平化后防伪器看不到二者相邻，故须在这里按结构取出。
     传给 verify_numbers 后，$（美元）令牌不再被这些外币数字误核——否则 HK$3.45 的敲出价会
-    "核实"掉一个凭空捏造的 $3.45 美元断言（跨币纯数值容差误判）。
+    "核实"掉一个凭空捏造的 $3.45 美元断言，或港币已实现盈亏被误核为等额美元（跨币纯数值容差误判）。
     """
     out: list[float] = []
     if not isinstance(dossier, dict):
@@ -43,13 +44,20 @@ def foreign_derivative_values(dossier) -> list[float]:
     for d in (dossier.get("derivative_exposure") or []):
         if str(d.get("currency", "")).strip().lower() in _USD_CCY:
             continue  # 美元/未知币种条款价格是美元口径，保留在可信池
-        for k in ("afp", "knock_out_price"):
+        for k in ("afp", "knock_out_price", "notional_native"):
             v = d.get(k)
             try:
                 if v is not None:
                     out.append(float(v))
             except (TypeError, ValueError):
                 pass
+    # FIFO 非美元已实现盈亏（原币种口径，见 portfolio.compute_realized_pnl_fifo）——同理不得核实美元断言
+    for v in ((dossier.get("realized_pnl_detail") or {}).get("foreign_values") or []):
+        try:
+            if v is not None:
+                out.append(float(v))
+        except (TypeError, ValueError):
+            pass
     return out
 
 
@@ -100,7 +108,7 @@ def verify_numbers(text: str, facts, foreign_values: list[float] | None = None) 
 
     Returns: [{"token": str, "value": float|None, "status": "verified"|"unverified"}]
     facts 可为 str / dict / list（非 str 自动 JSON 序列化后匹配）。
-    foreign_values：非美元口径的 facts 数值（如 HKD 衍生品条款价，见 foreign_derivative_values）。
+    foreign_values：非美元口径的 facts 数值（如 HKD 衍生品条款价 / 非美元已实现盈亏，见 foreign_account_values）。
       $（美元）令牌**不得**用这些外币数字核实——避免 HK$ 数量级的捏造美元断言被跨币容差放行。
       非 $ 令牌（%/股数/净值）不受影响，仍用全量 facts。
     """
@@ -189,15 +197,18 @@ def demo() -> None:
     # 跨币防误核：HKD 衍生品条款价（afp 3.45 / KO 500）不得核验叙述里的美元 $3.45 / $500
     dossier = {"total_equity": 1205022.5, "derivative_exposure": [
         {"currency": "HKD", "afp": 3.45, "knock_out_price": 500.0},
-        {"currency": "USD", "afp": 7.89}]}  # USD 条款价留在可信池
-    fv = foreign_derivative_values(dossier)
-    assert set(fv) == {3.45, 500.0}, fv                      # 仅取非美元条款价
+        {"currency": "USD", "afp": 7.89}],  # USD 条款价留在可信池
+        "realized_pnl_detail": {"foreign_values": [1000000.0]}}  # 港币已实现盈亏 HKD 100 万，不得核验 $100 万
+    fv = foreign_account_values(dossier)
+    assert set(fv) == {3.45, 500.0, 1000000.0}, fv             # 非美元条款价 + 非美元已实现盈亏
     fdx = _facts_text(dossier)
     # 无 foreign_values → 旧行为：$3.45 被 HKD afp 误核为 verified
     assert verify_numbers("每股 $3.45", fdx)[0]["status"] == "verified"
     # 带 foreign_values → $3.45 / $500（美元断言）被拦为 unverified（子串 + 容差两通道都堵）
     assert verify_numbers("每股 $3.45", fdx, fv)[0]["status"] == "unverified"
     assert verify_numbers("敲出 $500", fdx, fv)[0]["status"] == "unverified"
+    # 非美元已实现盈亏 HKD 100 万不得为叙述里的 $100 万美元断言背书
+    assert verify_numbers("已实现盈亏 $1,000,000", fdx, fv)[0]["status"] == "unverified"
     # 真实美元总权益仍可核；USD 币种条款价 $7.89 不误伤（未进 foreign）
     assert verify_numbers("总权益 $1,205,022.50", fdx, fv)[0]["status"] == "verified"
     assert verify_numbers("每股 $7.89", fdx, fv)[0]["status"] == "verified"

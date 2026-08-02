@@ -149,8 +149,8 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
         full = msg
         yield {"event": "chunk", "data": json.dumps({"text": msg}, ensure_ascii=False)}
 
-    # 数字白名单校验（与报告同一公共件）；非美元衍生条款价不得核验叙述里的美元断言（跨币防误核）
-    fv = number_guard.foreign_derivative_values(dossier)
+    # 数字白名单校验（与报告同一公共件）；非美元衍生条款价/已实现盈亏不得核验叙述里的美元断言（跨币防误核）
+    fv = number_guard.foreign_account_values(dossier)
     unverified = [r["token"] for r in number_guard.verify_numbers(full, guard_corpus, fv) if r["status"] == "unverified"]
     final_text = number_guard.annotate_unverified(full, guard_corpus, foreign_values=fv)
     final_text = compliance.with_disclaimer(final_text)

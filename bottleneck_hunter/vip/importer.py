@@ -489,7 +489,10 @@ _SIDE_MAP = {
     "fee": "fee", "费用": "fee", "手续费": "fee", "commission": "fee",
     "interest": "interest", "利息": "interest",
     "deposit": "deposit", "入金": "deposit", "转入": "deposit",
-    "withdraw": "withdraw", "withdrawal": "withdraw", "出金": "withdraw", "转出": "withdraw",
+    # 规范值必须命中 transactions.txn_type 的 CHECK 约束(store_schema)——只有 'withdrawal' 合法。
+    # 曾误映射为半词 'withdraw'：既撞 CHECK 抛 IntegrityError 令含提取行的 CSV/Excel 整单导入失败，
+    # 又与花旗 PDF(ingest 出 'withdrawal')口径分裂、被 _overview_totals 外部现金流聚合漏计。
+    "withdraw": "withdrawal", "withdrawal": "withdrawal", "出金": "withdrawal", "转出": "withdrawal",
 }
 
 

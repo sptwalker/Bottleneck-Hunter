@@ -305,7 +305,17 @@ def _portfolio_risk_summary(store: WatchlistStore, positions: list[dict], total_
             prices = [s["close"] for s in reversed(snaps) if s.get("close")] if snaps else []
             if prices:
                 price_histories[tk] = prices
+        # 0-2: 接通基准日收益率 → portfolio_beta 生效（此前 VIP/L2 路径恒为伪数 0.0）。
+        # 复用 value_series 同一基准口径（default_benchmark_ticker + 共享桶快照），收益率按最旧→最新排列；
+        # compute 内改按"最近对齐"取各序列尾部同长窗口（截至最新交易日按日历对齐，防稀疏史错配）。
+        from bottleneck_hunter.watchlist.macro_data import default_benchmark_ticker
+        bench_code, _ = default_benchmark_ticker(getattr(store, "_market", "") or "us_stock")
+        bench_snaps = store.get_snapshots(bench_code, days=60)
+        bench_closes = [s["close"] for s in reversed(bench_snaps) if s.get("close")] if bench_snaps else []
+        benchmark_returns = [bench_closes[i] / bench_closes[i - 1] - 1
+                             for i in range(1, len(bench_closes)) if bench_closes[i - 1] > 0]
         m = compute_portfolio_risk(positions=positions, price_histories=price_histories,
+                                   benchmark_returns=benchmark_returns or None,
                                    total_equity=total_equity or 100000.0)
         return {
             "concentration_hhi": m.concentration_index,
@@ -314,6 +324,9 @@ def _portfolio_risk_summary(store: WatchlistStore, positions: list[dict], total_
             "var_95": m.var_95,
             "cvar_95": m.cvar_95,
             "portfolio_beta": m.portfolio_beta,
+            "portfolio_volatility_pct": m.portfolio_volatility,
+            "risk_coverage": {"priced": m.priced_count, "total": m.total_count,
+                              "weight_pct": m.priced_weight_pct},
             "high_correlation_pairs": m.correlation_pairs,
             "warnings": m.warnings,
         }

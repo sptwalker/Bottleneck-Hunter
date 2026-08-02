@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 # 复用 persona 的档位标签，避免重造（风险偏好/持有周期两档语义一致）
 from bottleneck_hunter.watchlist.persona import _HORIZON_LABELS, _RISK_LABELS
@@ -125,6 +126,137 @@ def format_mandate_for_prompt(store, account_ref: str = "") -> str:
     return "\n".join(lines)
 
 
+# ── P1-1：纲领数值校验器 —— 把硬约束从「prompt 文本 + LLM 自由推理」变确定性结构化对账 ──
+# 单仓/板块集中度上限按风险偏好档位映射（single%, sector%）。数据来源=dossier（零 LLM、纯读）。
+_CONCENTRATION_CEILINGS = {
+    "conservative": (15.0, 30.0),
+    "balanced": (20.0, 40.0),
+    "aggressive": (30.0, 50.0),
+}
+_APPROACH_RATIO = 0.8  # 达上限 80% 即「逼近」预警（未破为硬违规，仅 warn）
+
+
+def _split_keywords(text: str) -> list[str]:
+    """把自由文本排除/聚焦清单切成关键词（顿号/逗号/斜杠/分号/空白分隔）；丢 <2 字噪声（防单字符乱命中）。"""
+    parts = re.split(r"[、,，/／;；\s]+", str(text or ""))
+    return [p.strip() for p in parts if len(p.strip()) >= 2]
+
+
+def check_mandate_compliance(mandate: dict, dossier: dict) -> dict:
+    """确定性核算持仓 vs 纲领硬约束（集中度/排除/回撤）+ 软偏好（聚焦板块），喂投委会 risk_officer + 前端对账面板。
+
+    替代 _consensus 里「风控否决=硬约束破坏」的脆弱代理（关键词扫叙述）——这里直接结构化判定，
+    让 risk_officer 收到**结构化违规信号**而非纯文本自由推理。纯函数、零 LLM、零网络。
+
+    checks 每项：{key,label,severity(hard|soft),ok(bool|None),warn,detail,items?}
+      ok=None → 数据不足/未配置，无法判定（不硬凑通过，也不算违规）。
+    返回 compliant（无 hard 破坏）/ violations（hard 破坏项）/ warnings（逼近项）/ ceilings / basis_note。
+    """
+    m = mandate or DEFAULT_MANDATE
+    ra = m.get("risk_appetite") if m.get("risk_appetite") in _CONCENTRATION_CEILINGS else "balanced"
+    ceil_single, ceil_sector = _CONCENTRATION_CEILINGS[ra]
+    holdings = [h for h in (dossier.get("holdings") or []) if isinstance(h, dict)]
+    derivs = [d for d in (dossier.get("derivative_exposure") or []) if isinstance(d, dict)]
+    checks: list[dict] = []
+
+    # ① 排除/禁投（硬）：持仓/衍生品标的的 代码/板块/瓶颈节点 子串命中排除关键词即违规
+    ex_kws = _split_keywords(m.get("exclusions", ""))
+    if not ex_kws:
+        checks.append({"key": "exclusions", "label": "排除清单", "severity": "hard",
+                       "ok": None, "warn": False, "detail": "未设置排除清单"})
+    else:
+        hits: list[str] = []
+        for h in holdings:
+            hay = f"{h.get('ticker', '')} {h.get('sector', '')} {h.get('bottleneck_node', '')}".lower()
+            if any(kw.lower() in hay for kw in ex_kws) and h.get("ticker"):
+                hits.append(str(h["ticker"]))
+        for d in derivs:
+            hay = f"{d.get('underlying', '')} {d.get('family', '')}".lower()
+            if any(kw.lower() in hay for kw in ex_kws) and d.get("underlying"):
+                hits.append(str(d["underlying"]))
+        hits = list(dict.fromkeys(hits))
+        checks.append({"key": "exclusions", "label": "排除清单", "severity": "hard",
+                       "ok": not hits, "warn": False, "items": hits,
+                       "detail": (f"{len(hits)} 只标的命中排除清单：{'、'.join(hits)}" if hits
+                                  else "持仓/衍生品未命中排除清单")})
+
+    # ② 最大回撤（硬）：perf_summary.max_drawdown_pct（负值/稀疏近似）逼近/突破纲领上限
+    perf = dossier.get("perf_summary") or {}
+    dd = perf.get("max_drawdown_pct")
+    limit = float(m.get("max_drawdown_pct") or 0) or 0.0
+    n_pts = perf.get("n_points")
+    basis = f"基于 {n_pts} 期结单点·指示性" if n_pts else "指示性"
+    if dd is None or limit <= 0:
+        checks.append({"key": "max_drawdown", "label": "最大回撤", "severity": "hard",
+                       "ok": None, "warn": False,
+                       "detail": "结算单点不足或未设回撤上限，暂无法核算"})
+    else:
+        dd_abs = abs(float(dd))
+        breach = dd_abs >= limit
+        approach = (not breach) and dd_abs >= _APPROACH_RATIO * limit
+        checks.append({"key": "max_drawdown", "label": "最大回撤", "severity": "hard",
+                       "ok": not breach, "warn": approach,
+                       "detail": (f"组合最大回撤 {dd_abs:.2f}% "
+                                  + ("已达/超" if breach else ("逼近" if approach else "低于"))
+                                  + f"纲领上限 {limit:.0f}%（{basis}）")})
+
+    # ③ 集中度（硬）：单仓 / 板块 权重上限按风险档位映射。weight_pct 为百分比口径。
+    weights = [(str(h.get("ticker") or ""), float(h.get("weight_pct") or 0),
+                (str(h.get("sector") or "").strip())) for h in holdings]
+    if not weights:
+        checks.append({"key": "single_concentration", "label": "单仓集中度", "severity": "hard",
+                       "ok": None, "warn": False, "detail": "无持仓，未核算单仓集中度"})
+    else:
+        tk, w, _ = max(weights, key=lambda x: x[1])
+        breach = w > ceil_single
+        approach = (not breach) and w >= _APPROACH_RATIO * ceil_single
+        checks.append({"key": "single_concentration", "label": "单仓集中度", "severity": "hard",
+                       "ok": not breach, "warn": approach, "items": [tk] if breach else [],
+                       "detail": f"最大单仓 {tk} {w:.1f}% vs {ra} 档上限 {ceil_single:.0f}%"})
+
+    sector_w: dict[str, float] = {}
+    for _, w, sec in weights:
+        if sec and sec != "未知":
+            sector_w[sec] = sector_w.get(sec, 0.0) + w
+    if not sector_w:
+        checks.append({"key": "sector_concentration", "label": "板块集中度", "severity": "hard",
+                       "ok": None, "warn": False, "detail": "板块数据不全，未核算板块集中度"})
+    else:
+        sec, sw = max(sector_w.items(), key=lambda x: x[1])
+        known = sum(1 for _, _, s in weights if s and s != "未知")
+        cov = f"（板块覆盖 {known}/{len(weights)} 仓，为下限估计）" if known < len(weights) else ""
+        breach = sw > ceil_sector
+        approach = (not breach) and sw >= _APPROACH_RATIO * ceil_sector
+        checks.append({"key": "sector_concentration", "label": "板块集中度", "severity": "hard",
+                       "ok": not breach, "warn": approach, "items": [sec] if breach else [],
+                       "detail": f"最大板块「{sec}」{sw:.1f}% vs {ra} 档上限 {ceil_sector:.0f}%{cov}"})
+
+    # ④ 聚焦板块（软）：只作覆盖提示，永不硬拦
+    fk = _split_keywords(m.get("focus_sectors", ""))
+    if not fk or not weights:
+        checks.append({"key": "focus_sectors", "label": "聚焦板块", "severity": "soft",
+                       "ok": None, "warn": False, "detail": "未设置聚焦板块或无持仓"})
+    else:
+        focus_wt = sum(w for tk, w, sec in weights
+                       if any(k.lower() in f"{tk} {sec}".lower() for k in fk))
+        checks.append({"key": "focus_sectors", "label": "聚焦板块", "severity": "soft",
+                       "ok": True, "warn": False,
+                       "detail": f"专注方向覆盖约 {focus_wt:.1f}% 权益（软偏好，仅指引）"})
+
+    hard_breaches = [c for c in checks if c["severity"] == "hard" and c["ok"] is False]
+    return {
+        "compliant": not hard_breaches,
+        "risk_appetite": ra,
+        "ceilings": {"single_pct": ceil_single, "sector_pct": ceil_sector},
+        "checks": checks,
+        "violations": [{"key": c["key"], "label": c["label"], "detail": c["detail"],
+                        "items": c.get("items", [])} for c in hard_breaches],
+        "warnings": [c["detail"] for c in checks if c.get("warn")],
+        "basis_note": ("回撤基于稀疏结算单期末点为指示性；排除/板块为代码子串匹配（非公司名精确解析），"
+                       "作硬约束提示而非替代人工尽调。"),
+    }
+
+
 if __name__ == "__main__":
     # ponytail 自检：空纲领走中性；有纲领含关键字段+硬约束标记+新增字段；clamp/枚举生效；未知键丢弃
     class _FakeStore:
@@ -157,4 +289,46 @@ if __name__ == "__main__":
     assert "AI 算力、半导体" in txt and "白酒" in txt, txt
     assert "硬约束" in txt, txt
     assert load_mandate(s, "ACC-1")["risk_appetite"] == "aggressive"
+
+    # ── P1-1 check_mandate_compliance 自检 ──
+    # 保守档 single≤15/sector≤30；构造集中度破坏 + 排除命中 + 回撤逼近
+    mdt = {"risk_appetite": "conservative", "max_drawdown_pct": 20,
+           "exclusions": "白酒、TSLA", "focus_sectors": "AI 算力"}
+    dsr = {
+        "holdings": [
+            {"ticker": "NVDA", "weight_pct": 40.0, "sector": "半导体", "bottleneck_node": "AI 算力"},
+            {"ticker": "MU", "weight_pct": 25.0, "sector": "半导体", "bottleneck_node": ""},
+            {"ticker": "TSLA", "weight_pct": 10.0, "sector": "汽车", "bottleneck_node": ""},
+        ],
+        "derivative_exposure": [],
+        "perf_summary": {"max_drawdown_pct": -17.0, "n_points": 4},  # |−17| ≥ 0.8×20=16 → 逼近
+    }
+    comp = check_mandate_compliance(mdt, dsr)
+    assert comp["compliant"] is False, comp
+    keys = {v["key"] for v in comp["violations"]}
+    assert "single_concentration" in keys, comp          # NVDA 40% > 15%
+    assert "sector_concentration" in keys, comp           # 半导体 65% > 30%
+    assert "exclusions" in keys, comp                      # TSLA 命中排除
+    ex = next(c for c in comp["checks"] if c["key"] == "exclusions")
+    assert "TSLA" in ex["items"], ex
+    dd = next(c for c in comp["checks"] if c["key"] == "max_drawdown")
+    assert dd["ok"] is True and dd["warn"] is True, dd     # 逼近未破 → ok 但 warn
+    assert comp["ceilings"] == {"single_pct": 15.0, "sector_pct": 30.0}
+    focus = next(c for c in comp["checks"] if c["key"] == "focus_sectors")
+    assert focus["severity"] == "soft" and focus["ok"] is True, focus  # 软偏好永不硬拦
+
+    # 全合规：均衡档、低集中、无排除命中、回撤远低于上限 → compliant，无违规
+    ok_comp = check_mandate_compliance(
+        {"risk_appetite": "balanced", "max_drawdown_pct": 30, "exclusions": "赌博"},
+        {"holdings": [{"ticker": "AAPL", "weight_pct": 15.0, "sector": "科技"},
+                      {"ticker": "KO", "weight_pct": 12.0, "sector": "消费"}],
+         "perf_summary": {"max_drawdown_pct": -5.0, "n_points": 3}})
+    assert ok_comp["compliant"] is True and not ok_comp["violations"], ok_comp
+
+    # 数据不足：无持仓 + 无回撤点 → 集中度/回撤判 None（不硬凑通过、也不算违规）
+    thin_comp = check_mandate_compliance({"risk_appetite": "aggressive", "max_drawdown_pct": 40},
+                                         {"holdings": [], "perf_summary": {}})
+    assert thin_comp["compliant"] is True, thin_comp       # 无 hard 破坏（None 不算破坏）
+    assert all(c["ok"] is None for c in thin_comp["checks"] if c["key"] != "focus_sectors"), thin_comp
+
     print("mandate self-check OK")

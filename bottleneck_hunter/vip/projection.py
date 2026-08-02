@@ -314,6 +314,129 @@ def project_derivative_accrual(wl_store, account_ref: str, as_of: str = "") -> d
             "n_skipped": n_skipped, "as_of": as_of}
 
 
+# ── KO/KI 状态面板（P1-4：抽 project_derivative_accrual 的 KO 扫描为只读查询）─────────
+
+def _days_between_iso(a_iso: str, b_iso: str) -> int | None:
+    """两个 ISO 日期相差天数（b−a）；任一非法返回 None（诚实「未知」，不回落 365）。"""
+    from datetime import date
+    try:
+        a = date(*map(int, a_iso.split("-")))
+        b = date(*map(int, b_iso.split("-")))
+        return (b - a).days
+    except (ValueError, TypeError):
+        return None
+
+
+def _scan_barriers(t: dict, close: float, snaps: list[dict], trade_iso: str, end_iso: str) -> dict:
+    """纯函数：条款 + 当日收盘价 + 起始日以来快照 → 距障碍缓冲% + 历史是否触障。
+
+    缓冲%>0 = 距障碍的安全垫，≤0 = 已触/穿越。方向语义：
+    - KO up_and_out（累购/FCN autocall）：还需**上涨** (ko−close)/close 才触敲出（利润封顶）。
+    - KO down_and_out（累沽）：还需**下跌** (close−ko)/close 才触敲出。
+    - KI down_and_in（MLI/FCN）：还需**下跌** (close−ki)/close 才触敲入（本金风险激活）。
+    历史触障：起始日~end_iso 的收盘价任一在障碍方向越线即 True（复用 accrual 的 KO 扫描）。
+    """
+    ko = t.get("knock_out_price") or 0.0
+    ko_dir = t.get("knock_out_direction", "up_and_out") or "up_and_out"
+    ki = t.get("knock_in_price") or 0.0
+    ki_dir = t.get("knock_in_direction", "down_and_in") or "down_and_in"
+    out = {"ko_buffer_pct": None, "ki_buffer_pct": None, "knock_out": None, "knock_in": None}
+    c = float(close)
+    if ko:
+        out["ko_buffer_pct"] = round(((c - ko) if ko_dir == "down_and_out" else (ko - c)) / c * 100, 2)
+    if ki:
+        out["ki_buffer_pct"] = round(((ki - c) if ki_dir == "up_and_in" else (c - ki)) / c * 100, 2)
+    ko_hit = ki_hit = False
+    for row in snaps:
+        d = row.get("date") or ""
+        if (trade_iso and d < trade_iso) or (end_iso and d > end_iso):
+            continue
+        cc = row.get("close")
+        if cc is None:
+            continue
+        cc = float(cc)
+        if ko and ((ko_dir == "down_and_out" and cc <= ko) or (ko_dir != "down_and_out" and cc >= ko)):
+            ko_hit = True
+        if ki and ((ki_dir == "up_and_in" and cc >= ki) or (ki_dir != "up_and_in" and cc <= ki)):
+            ki_hit = True
+    if ko:
+        out["knock_out"] = ko_hit
+    if ki:
+        out["knock_in"] = ki_hit
+    return out
+
+
+def derivative_barrier_status(wl_store, account_ref: str, as_of: str = "") -> list[dict]:
+    """只读扫描各衍生品条款的敲出/敲入状态 + 距障碍缓冲% + 剩余名义额度（不写推算层/日志）。
+
+    供 KO/KI 状态面板与投委会风险信号：用户看到「累购距敲出仅 3%（利润将封顶）」「FCN 已敲入（本金风险激活）」。
+    剩余名义额度读最近一次逐日推算的累计股数（缺则 None，绝不在此重算 payoff——那是 project_derivative_accrual 的活）。
+    每项 available：barrier + 当日收盘价齐备才 True；缺价/缺障碍/缺起始日 → available False + note 说明（诚实降级）。
+    """
+    from bottleneck_hunter.vip.derivatives import list_derivative_terms
+
+    account_ref = (account_ref or "").strip()
+    as_of = (as_of or "").strip() or _today()
+    try:
+        terms = list_derivative_terms(wl_store, account_ref=account_ref, limit=200)
+    except Exception:  # noqa: BLE001 - 衍生品缺失绝不带崩面板
+        return []
+    # 最近一次逐日推算的累计股数（lot_key → quantity），用于剩余名义额度；缺则该项留 None
+    accrued: dict[str, float] = {}
+    try:
+        pdate = wl_store.latest_projection_date(account_ref) if hasattr(wl_store, "latest_projection_date") else ""
+        if pdate:
+            for p in wl_store.list_projections(account_ref=account_ref, as_of_date=pdate):
+                if (p.get("kind") or "") in ("deriv_accum", "deriv_settle"):
+                    accrued[(p.get("lot_key") or "")] = p.get("quantity")
+    except Exception:  # noqa: BLE001
+        accrued = {}
+
+    out: list[dict] = []
+    for term in terms:
+        sym = (term.underlying_symbol or "").strip()
+        t = term.terms or {}
+        ko = t.get("knock_out_price") or 0.0
+        ki = t.get("knock_in_price") or 0.0
+        trade_iso = _to_iso(t.get("trade_date", ""))
+        expiry_iso = _to_iso(t.get("expiry_date", "") or t.get("maturity", ""))
+        snap = wl_store.get_latest_snapshot(sym) if hasattr(wl_store, "get_latest_snapshot") else None
+        close = (snap or {}).get("close")
+        item = {
+            "symbol": sym, "family": term.product_family, "lot_key": term.lot_key,
+            "ko_price": ko or None, "ko_direction": t.get("knock_out_direction", "") if ko else "",
+            "ki_price": ki or None, "ki_direction": t.get("knock_in_direction", "") if ki else "",
+            "last_close": float(close) if close else None,
+            "maturity": expiry_iso,
+            "days_to_maturity": _days_between_iso(as_of, expiry_iso) if expiry_iso else None,
+            "max_nominal_shares": t.get("max_nominal_shares") or None,
+            "accrued_shares": None, "remaining_nominal_shares": None,
+            "ko_buffer_pct": None, "ki_buffer_pct": None, "knock_out": None, "knock_in": None,
+            "available": False, "note": "",
+        }
+        # 剩余名义额度（累购/累沽）：读最近推算累计股数，缺则 None（不重算 payoff）
+        max_nom = t.get("max_nominal_shares") or 0.0
+        acc = accrued.get(term.lot_key)
+        if max_nom and acc is not None:
+            item["accrued_shares"] = round(acc, 2)
+            item["remaining_nominal_shares"] = round(max(0.0, max_nom - acc), 2)
+        if not close or not (ko or ki):
+            item["note"] = "缺当日收盘价，无法算距障碍" if not close else "条款无敲出/敲入价"
+            out.append(item)
+            continue
+        try:
+            snaps = wl_store.get_snapshots(sym, days=400) if hasattr(wl_store, "get_snapshots") else []
+        except Exception:  # noqa: BLE001
+            snaps = []
+        end_iso = min(as_of, expiry_iso) if expiry_iso else as_of
+        item.update(_scan_barriers(t, close, snaps, trade_iso, end_iso))
+        item["available"] = True
+        if not trade_iso:
+            item["note"] = "缺起始交易日，历史触障扫描可能不完整"
+        out.append(item)
+    return out
+
+
 # ── 结算单校准闭环（P3） ────────────────────────────────────────────────────
 
 CALIB_FLAG_THRESHOLD = 0.15  # |推算 vs 真值| 超过此比例 → flagged 待人工核

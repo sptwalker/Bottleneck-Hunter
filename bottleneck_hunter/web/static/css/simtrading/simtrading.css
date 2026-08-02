@@ -677,6 +677,31 @@
 .vip-adv-verdict-count { font-size: 13px; color: var(--muted); }
 .vip-adv-verdict-caution { font-size: 12px; font-weight: 600; color: var(--danger); }
 
+/* 0-9：投委会主席综述行——逐条建议之上的总纲（确定性拼装，无第 2 次 LLM） */
+.vip-adv-chair {
+  padding: 10px 14px; margin-bottom: 14px;
+  border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 8px;
+  background: var(--surface); font-size: 13px; line-height: 1.6; color: var(--ink);
+}
+.vip-adv-chair b { color: var(--accent); }
+
+/* 0-10：good-path 绿色核验回执——三项皆过=绿；有未过=琥珀展开未过项 */
+.vip-receipt {
+  padding: 10px 14px; margin-bottom: 14px;
+  border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px; background: var(--bg);
+}
+.vip-receipt.ok   { border-left-color: var(--success); }
+.vip-receipt.warn { border-left-color: var(--warning); }
+.vip-receipt-head { font-size: 13px; font-weight: 600; color: var(--ink); }
+.vip-receipt.ok .vip-receipt-head   { color: var(--success); }
+.vip-receipt-items { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; }
+.vip-receipt-item { font-size: 12px; display: inline-flex; flex-direction: column; }
+.vip-receipt-item.ok  { color: var(--success); }
+.vip-receipt-item.bad { color: var(--warning-strong); }
+.vip-receipt-item.warn  { color: var(--warning); }        /* P1-1：逼近未破（△） */
+.vip-receipt-item.muted { color: var(--muted); }          /* P1-1：数据不足未判（–） */
+.vip-receipt-item small { color: var(--muted); font-size: 11px; }
+
 .vip-adv-callout {
   padding: 10px 12px; margin-bottom: 10px;
   border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; background: var(--surface);

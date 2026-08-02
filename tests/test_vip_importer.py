@@ -82,7 +82,13 @@ def client(tmp_path, monkeypatch):
 
     app.include_router(vip_api.router, prefix="/api/vip")
     c = TestClient(app)
-    c._set_user = lambda u: _user.__setitem__("holder", u)
+
+    def _set_user(u):
+        _user["holder"] = u
+        if u and u.get("sub"):
+            vip_api._unlocked_subs.add(u["sub"])   # 注入用户 = 已登录且已解锁的 VIP（真实用户凭密码解锁一次/会话）
+
+    c._set_user = _set_user
     c._set_user({"sub": "admin1", "role": "admin"})
     return c
 

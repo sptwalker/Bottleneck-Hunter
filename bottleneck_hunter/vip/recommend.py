@@ -29,9 +29,12 @@ from bottleneck_hunter.vip.advisory import (
     advisor_calibration,
     annotate_committee,
     build_committee_context,
+    chair_summary,
     committee_corpus,
     format_macro_for_prompt,
     reconcile_draft,
+    summarize_cash_budget,
+    verification_receipt,
 )
 
 _ACTIONS = {"关注", "建仓", "规避"}
@@ -248,16 +251,21 @@ async def generate_account_recommendations(wl_store, *, account_ref: str = "", u
     corpus = (json.dumps(dossier, ensure_ascii=False, default=str)
               + "\n" + inputs["mandate_text"] + "\n" + inputs["macro_text"]
               + "\n" + committee_corpus(context))
-    fv = number_guard.foreign_derivative_values(dossier)  # 非美元衍生条款价：$令牌不得据此核实（跨币防误核）
+    fv = number_guard.foreign_account_values(dossier)  # 非美元衍生价/已实现盈亏：$令牌不据此核实（跨币防误核）
     unverified = _annotate(draft, corpus, fv)
     unverified = list(dict.fromkeys(unverified + annotate_committee(committee, corpus, fv)))
 
     # ── 3b) 草案↔投委会对账：reject→建仓降关注、caution/split→加警示注（memory:vip_advisory_pass 用户已确认强度）──
     reconciled = reconcile_draft(draft["candidates"], "action", {"建仓": "关注"}, committee)
 
+    # ── 3c) 0-9 主席综述行：本 pass 只含建仓量化（advisory 侧加仓未知→None），容量口径与 budget 端点一致 ──
+    cash_budget = summarize_cash_budget(dossier, None, {"candidates": draft["candidates"]}, wl_store=wl_store)
+
     result = {
         "account_ref": account_ref,
         "generated_at": _now_iso(),
+        "data_as_of": (dossier.get("as_of_hint") or {}).get("data_as_of", ""),  # 0-1：持仓数据截至日
+        "chair_summary": chair_summary(committee, cash_budget),  # 0-9：确定性主席综述行（无第 2 次 LLM）
         "portfolio_note": draft["portfolio_note"],
         "candidates": draft["candidates"],
         "pool_stats": pool["stats"],
@@ -268,7 +276,7 @@ async def generate_account_recommendations(wl_store, *, account_ref: str = "", u
         "advisor_calibration": advisor_calibration(wl_store, provider, model),  # F1：surfaced 可信度
         "disclaimer": compliance.DISCLAIMER_ZH,
     }
-
+    result["verification_receipt"] = verification_receipt(result)  # 0-10：读 unverified/data_as_of/generated_at
     # ── C-1 复盘打点（record_prediction，只写不评）：为 5b 复盘启动数据时钟。role_context=vip_advisor +
     #    prediction_type=vip_recommend 独占桶，与 sim 的 committee_*/vote 及 advisory 的 vip_advice 都区分开；
     #    旁路容错——打点失败只 debug、绝不影响荐新主链路。记录 reconcile 后的最终动作。

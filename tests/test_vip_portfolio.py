@@ -282,7 +282,7 @@ def test_total_overview_aggregates_accounts(wl):
     assert abs(overview["cash_balance"] - 300.0) < 0.01
     assert overview["n_accounts"] == 2
     assert overview["n_holdings"] == 6
-    assert overview["total_loan_limit"] is None
+    assert overview["total_loan"] == 0.0
     assert {row["account_ref"] for row in overview["holdings"]} == {"A1", "A2"}
     assert {row["account_ref"] for row in overview["accounts"]} == {"A1", "A2"}
     assert abs(sum(row["total_equity"] for row in overview["accounts"]) - overview["total_equity"]) < 1.0
@@ -437,8 +437,10 @@ async def test_advisor_no_model_degrades(wl, monkeypatch):
     assert out["report_id"] and "持仓分析报告" in out["report_md"]
 
 
-def test_startup_purges_empty_account_ref_residue(tmp_path, monkeypatch):
-    """历史 hidden default / 空 ref 残留在下次 init 时被一次性清除，且不留孤儿 sim_*。"""
+def test_startup_preserves_empty_account_ref(tmp_path, monkeypatch):
+    """回归守卫：account_ref='' 是决策中心合法业务键，重开库绝不能清除它。
+    曾有启动迁移 _migrate_purge_empty_account_ref 无条件清空 → 每次重启丢决策模拟账户，
+    已作为数据丢失根因移除（见 memory project_dc_sim_account_decoupled_from_vip）。此测反向锁死该修复。"""
     from bottleneck_hunter.auth import store as auth_store_mod
     monkeypatch.setattr(auth_store_mod, "_DEFAULT_DB", tmp_path / "auth.db")
     db = tmp_path / "wl.db"
@@ -446,27 +448,22 @@ def test_startup_purges_empty_account_ref_residue(tmp_path, monkeypatch):
     wl = WatchlistStore(db).for_user("u1").for_market("us_stock")
     conn = wl._connect()
     try:
-        conn.execute("INSERT INTO vip_accounts(id, account_ref, display_name, user_id, market, created_at, updated_at) "
-                     "VALUES('a0','','默认账户','u1','us_stock','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
         conn.execute("INSERT INTO sim_account(id, account_ref, user_id, market, created_at) "
                      "VALUES('s0','','u1','us_stock','2026-01-01T00:00:00Z')")
         conn.execute("INSERT INTO sim_positions(id, account_id, ticker, opened_at, user_id, market) "
                      "VALUES('p0','s0','GOOGL','2026-01-01T00:00:00Z','u1','us_stock')")
-        conn.execute("INSERT INTO positions(id, instrument_id, account_ref, as_of_date, created_at, user_id, market) "
-                     "VALUES('pp0','inst0','','2026-01-01','2026-01-01T00:00:00Z','u1','us_stock')")
         conn.commit()
     finally:
         conn.close()
 
-    # 重新打开同一 DB → 触发迁移清理
+    # 重新打开同一 DB → 不得触发任何空 account_ref 清除
     WatchlistStore(db)
     conn = WatchlistStore(db)._connect()
     try:
-        for tbl, col in [("vip_accounts", "account_ref"), ("sim_account", "account_ref"),
-                         ("positions", "account_ref")]:
-            n = conn.execute(f"SELECT COUNT(*) c FROM {tbl} WHERE COALESCE({col},'')=''").fetchone()["c"]
-            assert n == 0, tbl
-        assert conn.execute("SELECT COUNT(*) c FROM sim_positions WHERE account_id='s0'").fetchone()["c"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) c FROM sim_account WHERE COALESCE(account_ref,'')=''").fetchone()["c"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) c FROM sim_positions WHERE account_id='s0'").fetchone()["c"] == 1
     finally:
         conn.close()
 
