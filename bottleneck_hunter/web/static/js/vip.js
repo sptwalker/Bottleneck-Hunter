@@ -22,6 +22,7 @@ const VIP_ACCOUNT_SUBTABS = [
   { key: 'advisory', label: '顾问决策' },
   { key: 'recommend', label: '荐新' },
   { key: 'reports', label: '报告复盘' },
+  { key: 'review', label: '复盘对错' },
   { key: 'chat', label: '咨询解读' },
 ];
 const vipState = {
@@ -549,6 +550,7 @@ function loadTab(tab) {
     case 'advisory': loadAdvisory(); break;
     case 'recommend': loadRecommend(); break;
     case 'reports': loadReports(); break;
+    case 'review': loadReviewLedger(); break;
     case 'chat': break;
     default: break;
   }
@@ -642,6 +644,7 @@ async function loadDashboard() {
         '饼图为各子账户总价值分布；衍生品名义敞口不计入，见各账户「衍生品」页');
       renderDerivList([], overview.accounts || []);
       renderOverviewAccounts();
+      renderCurrencyPie([]);  // 全账户视图不显币种敞口（各子账户币种口径不同，避免跨账户混算）
     } else {
       el('vip-total-equity', '$' + fmtNum(overview.total_equity));
       el('vip-cash-balance', '$' + fmtNum(overview.cash_balance));
@@ -663,6 +666,7 @@ async function loadDashboard() {
       el('vip-risk-top5', fmtNum(overview.top5_concentration_pct || 0, 1) + '%');
       el('vip-risk-cash', fmtNum(cashPct, 1) + '%');
       renderHoldingsPie(overview.holdings || []);
+      renderCurrencyPie(overview.exposure_breakdown?.by_currency_detail || []);
       const box = document.getElementById('vip-overview-accounts');
       if (box) box.innerHTML = '<p class="st-empty-hint">当前页为子账户视图；账户管理请回到个人资产总览。</p>';
     }
@@ -837,6 +841,34 @@ function renderHoldingsPie(holdings, capText = '饼图为股票持仓市值分�
   cap.textContent = capText;
 }
 
+// 币种敞口饼：切片按统一美元口径(market_value_usd 可比)，tooltip 补原币金额与隐含汇率。
+// 纯美元账户只有 USD 一桶(隐含汇率 1.0)照常显示；无 detail 时整卡隐藏，不占位不报错。
+function renderCurrencyPie(detail) {
+  const card = document.getElementById('vip-currency-card');
+  if (!card) return;
+  if (!detail || !detail.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  const c = vipChart('vip-currency-pie');
+  if (!c) return;
+  const data = detail.map(d => ({
+    name: d.currency,
+    value: Math.round((d.market_value_usd || 0) * 100) / 100,
+    nominal: d.market_value_nominal || 0,
+    fx: d.implied_fx || 1,
+  }));
+  c.setOption({
+    tooltip: { trigger: 'item', formatter: p => {
+      const d = p.data;
+      const fxLine = d.name === 'USD' ? '' : `<br/>原币 ${ccySym(d.name)}${fmtNum(d.nominal)}　隐含汇率 ${fmtNum(d.fx, 4)}`;
+      return `${p.name}<br/>美元敞口 $${fmtNum(d.value)}（${fmtNum(p.percent, 1)}%）${fxLine}`;
+    } },
+    legend: { type: 'scroll', bottom: 0, textStyle: { fontSize: 11 } },
+    series: [{ type: 'pie', radius: ['40%', '68%'], center: ['50%', '44%'], avoidLabelOverlap: true,
+      itemStyle: { borderColor: '#fff', borderWidth: 2 }, label: { show: false }, data }],
+  });
+}
+
+// 持仓 Tab 衍生品/结构性产品列表；accounts 非空时改渲子账户摘要表（全账户视图无单账户衍生品明细）。
 function renderDerivList(items, accounts = null) {
   const box = document.getElementById('vip-deriv-list');
   if (!box) return;
@@ -1769,6 +1801,36 @@ async function openReport(id) {
     const md = data.report_md || '';
     viewer.innerHTML = window.marked ? window.marked.parse(md) : `<pre style="white-space:pre-wrap">${esc(md)}</pre>`;
   } catch (_) { viewer.innerHTML = '<p class="st-empty-hint">加载失败</p>'; }
+}
+
+// 复盘对错：已结顾问/荐新建议的 动作/实际涨跌/对错 台账 + 命中率 KPI（顾问级，账户无关）。
+// 命中率是 vip_advisor 桶全量（Phase1 不按账户拆），故不要求具体账户。
+async function loadReviewLedger() {
+  const kpiEl = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  const box = document.getElementById('vip-review-ledger');
+  if (box) box.innerHTML = '<p class="st-empty-hint">加载中…</p>';
+  try {
+    const r = await vipGet('/account/review-ledger');
+    const k = r.kpi || {};
+    kpiEl('vip-review-hitrate', k.hit_rate_pct == null ? '--' : fmtNum(k.hit_rate_pct, 1) + '%');
+    kpiEl('vip-review-settled', String(k.settled ?? 0));
+    kpiEl('vip-review-correct', String(k.correct ?? 0));
+    kpiEl('vip-review-pending', String(k.pending ?? 0));
+    const rows = r.ledger || [];
+    if (!box) return;
+    if (!rows.length) { box.innerHTML = '<p class="st-empty-hint">暂无已结建议。顾问/荐新建议出具满一周后由周任务结算，届时在此逐条呈现对错。</p>'; return; }
+    box.innerHTML = '<table class="st-table"><thead><tr><th>预测日</th><th>标的</th><th>类型</th><th>建议动作</th><th>实际涨跌</th><th>结果</th></tr></thead><tbody>' +
+      rows.map(x => {
+        const chgCls = x.chg_pct == null ? 'st-pnl-zero' : (x.chg_pct > 0 ? 'st-pnl-pos' : (x.chg_pct < 0 ? 'st-pnl-neg' : 'st-pnl-zero'));
+        const chg = x.chg_pct == null ? '待结' : fmtNum(x.chg_pct, 1) + '%';
+        const badge = x.correct == null ? '<span class="st-pnl-zero">待结</span>'
+          : (x.correct ? '<span class="st-pnl-pos">✓ 对</span>' : '<span class="st-pnl-neg">✗ 错</span>');
+        return `<tr><td>${esc(x.date || '—')}</td><td>${esc(x.ticker || '—')}</td><td>${esc(x.kind || '—')}</td>` +
+          `<td>${esc(x.action || '—')}</td><td class="${chgCls}">${chg}</td><td>${badge}</td></tr>`;
+      }).join('') + '</tbody></table>';
+  } catch (e) {
+    if (box) box.innerHTML = `<p class="st-empty-hint">加载失败：${esc(e.message || e)}</p>`;
+  }
 }
 
 function bindReportGen() {

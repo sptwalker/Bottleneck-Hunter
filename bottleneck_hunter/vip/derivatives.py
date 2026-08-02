@@ -508,9 +508,27 @@ def payoff_mli_booster(term: DerivativeTerm, final_price: float, *,
             "knock_in_price": ki, "strike_price": strike}
 
 
+def _is_indicative_intro(text: str) -> bool:
+    """产品介绍/推介材料（indicative term sheet），非已成交持仓 → 不计入持仓。
+
+    判别信号（真实花旗/野村样本全库无误判）：出现 "Indicative Terms"（推介用假设条款），
+    且既无 "Final Terms"（已确认条款单）、也无野村 irf "RATIONALE RECORD"（成交薄记录）。
+    共有的免责声明（"discussion purposes only"/"neither an offer"）是两类共用样板，不作判据。
+    """
+    if not re.search(r"Indicative Terms", text, re.I):
+        return False
+    return not re.search(r"Final Terms", text, re.I) and "RATIONALE RECORD" not in text
+
+
 def classify_pdf(pdf_source, pdf_password: str = "") -> str:
-    """日常文件快速分类：fund_report / accumulator / decumulator / mli / other。"""
+    """日常文件快速分类：fund_report / accumulator / decumulator / mli / fcn / product_intro / other。
+
+    产品介绍/推介材料（indicative term sheet，无成交/持仓）判为 product_intro，不落衍生品持仓——
+    否则花旗 Step up AQ/DQ 等推介稿会被当作累购/累沽持仓列入持仓列表（用户反馈的根因）。
+    """
     text = _read_pdf_text(pdf_source, pages=2, pdf_password=pdf_password)
+    if _is_indicative_intro(text):
+        return "product_intro"
     if "Master Fund Highlights" in text or "Financial Statements" in text:
         return "fund_report"
     # 完整条款单标题含 "Daily ... Accumulator/Decumulator"；野村 irf 精简记录只在产品串里点名
@@ -666,7 +684,21 @@ def demo() -> None:
     _irf_selfcheck()
     _citi_fcn_selfcheck()
     _barclays_fcn_selfcheck()
+    _intro_guard_selfcheck()
     print("derivatives demo 通过")
+
+
+def _intro_guard_selfcheck() -> None:
+    """产品介绍判别自检：Indicative Terms 且无 Final Terms/RATIONALE RECORD → intro；
+    已成交单(Final Terms)与野村 irf(RATIONALE RECORD)不误判。共有免责声明不作判据。"""
+    disclaimer = "This document is neither an offer to sell; for discussion purposes only."
+    intro = "A 1-Year Daily Securities Accumulator\nIndicative Terms as of 02 June 2025\n" + disclaimer
+    assert _is_indicative_intro(intro), "推介稿(Indicative Terms)未判为 intro"
+    final = "Final Terms\nA 1-Year Daily Securities Accumulator\n" + disclaimer
+    assert not _is_indicative_intro(final), "已成交单(Final Terms)被误判为 intro"
+    irf = "INVESTMENT PRODUCT − RATIONALE RECORD\nIndicative Terms\n" + disclaimer
+    assert not _is_indicative_intro(irf), "野村 irf(RATIONALE RECORD)被误判为 intro"
+    assert not _is_indicative_intro(disclaimer), "仅免责声明不应判为 intro"
 
 
 def _irf_selfcheck() -> None:

@@ -155,7 +155,8 @@ def normalize_statement(wl_store, stmt: BrokerStatement,
                              quantity=h.quantity, market_value_base=mv_base,
                              currency=h.nominal_ccy, source_doc_id=source_doc_id,
                              avg_cost=h.avg_cost, cost_basis=h.cost_basis_usd,
-                             unrealized_pnl=h.unrealized_pnl_usd)
+                             unrealized_pnl=h.unrealized_pnl_usd,
+                             market_value_nominal=h.market_value_nominal)  # 原币市值→fx 隐含反算
             n_inst += 1
             n_pos += 1
     for t in stmt.transactions:
@@ -199,7 +200,15 @@ def _upsert_instrument(wl_store, symbol, itype, name, currency, source_doc_id) -
 
 def _upsert_position(wl_store, instrument_id, account_ref, as_of_date, *,
                      quantity, market_value_base, currency, source_doc_id,
-                     avg_cost=None, cost_basis=None, unrealized_pnl=None) -> None:
+                     avg_cost=None, cost_basis=None, unrealized_pnl=None,
+                     market_value_nominal=None, fx_rate=None) -> None:
+    # P0 币种敞口：market_value 列历来是 market_value_base 的死镜像（无 SQL 读点，已核）。
+    # 现改存"原币市值"，fx_rate/market_price 一并回填 → 币种敞口 + FX 归因可见。
+    # 缺原币口径（旧解析器/未重导）时回落 base、fx=1.0，与旧行为字节等价（诚实降级）。
+    mv_nominal = market_value_nominal if (market_value_nominal not in (None, 0)) else market_value_base
+    fx = fx_rate if (fx_rate not in (None, 0)) else (
+        round(market_value_base / mv_nominal, 6) if mv_nominal else 1.0)
+    mv_price = round(mv_nominal / quantity, 6) if quantity else 0.0   # 原币单价（供 P1 tooltip）
     with wl_store._write_conn() as conn:
         # 幂等：同 (account_ref, instrument_id, as_of_date) 已存在则更新
         q, p = wl_store._filtered(
@@ -208,9 +217,9 @@ def _upsert_position(wl_store, instrument_id, account_ref, as_of_date, *,
         row = conn.execute(q, p).fetchone()
         if row:
             q2, p2 = wl_store._filtered(
-                "UPDATE positions SET quantity=?, market_value_base=?, market_value=?, currency=?, "
-                "avg_cost=?, cost_basis=?, unrealized_pnl=?, source_doc_id=? WHERE id=?",
-                (quantity, market_value_base, market_value_base, currency,
+                "UPDATE positions SET quantity=?, market_value_base=?, market_value=?, market_price=?, "
+                "fx_rate=?, currency=?, avg_cost=?, cost_basis=?, unrealized_pnl=?, source_doc_id=? WHERE id=?",
+                (quantity, market_value_base, mv_nominal, mv_price, fx, currency,
                  avg_cost or 0, cost_basis or 0, unrealized_pnl or 0, source_doc_id, row["id"]))
             conn.execute(q2, p2)
             return
@@ -218,12 +227,14 @@ def _upsert_position(wl_store, instrument_id, account_ref, as_of_date, *,
         conn.execute(
             f"""INSERT INTO positions
                (id, instrument_id, account_ref, as_of_date, quantity, currency,
-                avg_cost, cost_basis, unrealized_pnl,
-                market_value, market_value_base, source_doc_id, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
+                avg_cost, cost_basis, unrealized_pnl, market_price, fx_rate,
+                market_value, market_value_base, source_doc_id, created_at"""
+            f"""{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"""
+            f"""{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
             (pid, instrument_id, account_ref, as_of_date, quantity, currency,
-             avg_cost or 0, cost_basis or 0, unrealized_pnl or 0,
-             market_value_base, market_value_base, source_doc_id, _now_iso())
+             avg_cost or 0, cost_basis or 0, unrealized_pnl or 0, mv_price, fx,
+             mv_nominal, market_value_base, source_doc_id, _now_iso())
             + wl_store._user_insert_params() + wl_store._market_insert_params(),
         )
 
@@ -540,6 +551,57 @@ def _contribution(wl_store, account_ref: str) -> dict:
             "note": "" if rows else "相邻两期无重叠可定价标的，归因留空(不臆造)"}
 
 
+def _nominal_fx_rows(wl_store, as_of_date: str, account_ref: str) -> list[dict]:
+    """某快照日的原币市值 + 点位 FX（喂汇率归因）：取胜出快照的 p.market_value(原币) / p.fx_rate。
+
+    与 _latest_positions 同一「胜出快照」选择口径，只是多带 nominal/fx 两列（P0 已落库）。
+    """
+    selected = _winning_snapshot_meta(wl_store, as_of_date, account_ref) if as_of_date else {}
+    conn = wl_store._connect()
+    try:
+        where = ["p.as_of_date = ?", "p.quantity != 0"]
+        params: list = [as_of_date]
+        if account_ref:
+            where.append("p.account_ref = ?")
+            params.append(account_ref)
+        if selected.get("doc_id"):
+            where.append("p.source_doc_id = ?")
+            params.append(selected["doc_id"])
+        q, p = wl_store._filtered(
+            f"""SELECT i.symbol, p.quantity, p.market_value AS mv_nominal, p.fx_rate AS fx
+               FROM positions p JOIN instruments i ON i.id = p.instrument_id
+               WHERE {' AND '.join(where)}""",
+            tuple(params), table="p")
+        return [dict(r) for r in conn.execute(q, p).fetchall()]
+    finally:
+        conn.close()
+
+
+def _fx_contribution(wl_store, account_ref: str) -> dict:
+    """特性一 P2 · 汇率损益归因：相邻两期期末 vs 期末的本币价收益 r_local + 汇率收益 r_fx（点位口径）。
+
+    逐日 FX 时序是真数据缺口（data_provider 无 FX 适配），本期只做「期末 vs 期末」点位归因（P2 deferred 逐日）。
+    数据源与贡献归因同「胜出快照」，缺 nominal/fx 锚的行 fx 腿留空（fx_attribution 内诚实降级）。
+    """
+    from bottleneck_hunter.vip import metrics as _m
+    dates = _snapshot_dates(wl_store, account_ref, limit=2)
+    if len(dates) < 2:
+        return {"rows": [], "prev_date": "", "cur_date": "", "coverage": "0/0",
+                "note": "不足两期持仓快照，无法做相邻期汇率归因"}
+    cur_date, prev_date = dates[0], dates[1]
+    prev_rows = _nominal_fx_rows(wl_store, prev_date, account_ref)
+    cur_rows = _nominal_fx_rows(wl_store, cur_date, account_ref)
+    rows = _m.fx_attribution(prev_rows, cur_rows)
+    no_fx = sum(1 for r in rows if r.get("r_fx_pct") is None)
+    note = ""
+    if not rows:
+        note = "相邻两期无重叠可定价标的，汇率归因留空(不臆造)"
+    elif no_fx:
+        note = f"{no_fx}/{len(rows)} 只缺点位汇率锚，其 FX 腿留空(total 退化为本币收益)"
+    return {"rows": rows, "prev_date": prev_date, "cur_date": cur_date,
+            "coverage": f"{len(rows) - no_fx}/{len(rows)}", "note": note}
+
+
 def _freeze_snapshot(wl_store, account, positions, account_ref: str = "") -> str:
     rid = uuid.uuid4().hex[:12]
     payload = {"account": {k: account.get(k) for k in ("total_equity", "cash_balance")},
@@ -820,6 +882,8 @@ def build_account_overview(wl_store, *, account_ref: str = "") -> dict:
         ov["holdings"] = holdings
         ov["n_holdings"] = len(holdings)
         ov["top5_concentration_pct"] = round(sum(h["weight_pct"] for h in holdings[:5]), 1)
+    # P1 币种敞口：前端账户视图渲染币种敞口饼（含原币金额/隐含汇率），复用已有分桶算法
+    ov["exposure_breakdown"] = _exposure_breakdown(wl_store, account_ref)
     return ov
 
 
@@ -1053,20 +1117,32 @@ def _exposure_breakdown(wl_store, account_ref: str) -> dict:
             where.append("p.source_doc_id = ?")
             params.append(selected["doc_id"])
         q, p = wl_store._filtered(
-            f"""SELECT p.currency, i.instrument_type, p.market_value_base
+            f"""SELECT p.currency, i.instrument_type, p.market_value_base,
+                      p.market_value AS mv_nominal, p.fx_rate
                FROM positions p JOIN instruments i ON i.id = p.instrument_id
                WHERE {' AND '.join(where)}""",
             tuple(params), table="p")
         by_ccy: dict[str, float] = {}
         by_asset: dict[str, float] = {}
+        by_ccy_nom: dict[str, float] = {}      # 原币口径累计（P1 币种敞口）
         for r in conn.execute(q, p).fetchall():
             mv = r["market_value_base"] or 0.0
             ccy = ((r["currency"] or "USD").strip().upper()) or "USD"
             asset = ((r["instrument_type"] or "stock").strip().lower()) or "stock"
             by_ccy[ccy] = round(by_ccy.get(ccy, 0.0) + mv, 2)
             by_asset[asset] = round(by_asset.get(asset, 0.0) + mv, 2)
+            by_ccy_nom[ccy] = round(by_ccy_nom.get(ccy, 0.0) + (r["mv_nominal"] or mv), 2)
+        total_base = round(sum(by_ccy.values()), 2)
+        # 每币种明细：美元敞口 + 原币敞口 + 隐含汇率（usd/nominal）+ 占比。美元桶 fx=1。
+        by_ccy_detail = [{
+            "currency": c,
+            "market_value_usd": by_ccy[c],
+            "market_value_nominal": by_ccy_nom.get(c, by_ccy[c]),
+            "implied_fx": round(by_ccy[c] / by_ccy_nom[c], 6) if by_ccy_nom.get(c) else 1.0,
+            "weight_pct": round(by_ccy[c] / total_base * 100, 2) if total_base else 0.0,
+        } for c in sorted(by_ccy, key=lambda k: by_ccy[k], reverse=True)]
         return {"by_currency": by_ccy, "by_asset_class": by_asset,
-                "total_base": round(sum(by_ccy.values()), 2)}
+                "by_currency_detail": by_ccy_detail, "total_base": total_base}
     finally:
         conn.close()
 
@@ -1287,6 +1363,8 @@ def build_account_dossier(wl_store, *, account_ref: str = "") -> dict:
         "perf_summary": perf_summary,
         # ── 标的贡献归因（P3-3，相邻两期×期初权重，剔买卖污染，须带 coverage/note）──
         "contribution": _contribution(wl_store, account_ref),
+        # ── 汇率损益归因（特性一 P2，相邻两期点位 r_local/r_fx 乘性拆解，缺 fx 锚 FX 腿留空）──
+        "fx_attribution": _fx_contribution(wl_store, account_ref),
         # ── 衍生品敞口（单列，路径依赖风险由决策层消费）──
         "derivative_exposure": derivative_exposure,
         # ── 衍生品组合级名义敞口 + 杠杆比率（0-7，名义/真实权益）──

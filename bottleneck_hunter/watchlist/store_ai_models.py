@@ -88,6 +88,35 @@ class _AIModelsMixin:
             conn.close()
 
 
+    def list_settled_predictions(self, *, role_context: str = "",
+                                 prediction_types: list[str] | None = None,
+                                 market: str = "", limit: int = 500) -> list[dict]:
+        """已结算(is_correct != -1)的预测明细，供复盘呈现（特性三 Phase1）。
+        是 list_pending_predictions 的孪生：唯一差别是结算态取反；隔离/过滤/排序一致。
+        {ticker, prediction_value(动作), outcome_value('chg=+5%'), is_correct, prediction_date}
+        五列已够渲染对错台账，无需 join vip_advisory。"""
+        conn = self._connect()
+        try:
+            q = "SELECT * FROM model_accuracy WHERE is_correct != -1"
+            p: tuple = ()
+            if role_context:
+                q += " AND role_context = ?"
+                p = p + (role_context,)
+            if prediction_types:
+                ph = ",".join("?" * len(prediction_types))
+                q += f" AND prediction_type IN ({ph})"
+                p = p + tuple(prediction_types)
+            if market:
+                q += " AND market = ?"
+                p = p + (market,)
+            q += " ORDER BY prediction_date DESC, created_at DESC LIMIT ?"
+            p = p + (int(limit),)
+            q, p = self._user_filter(q, p)
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+
     def get_model_accuracy(self, provider: str, model: str,
                            role_context: str | None = None,
                            limit: int = 100, market: str = "") -> list[dict]:

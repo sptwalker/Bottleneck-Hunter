@@ -576,6 +576,8 @@ async def upload_derivative_file(file: UploadFile = File(...),
     uid = user["sub"]
     wl = _wl(user, market)
     kind = drv.classify_pdf(raw, pdf_password=pdf_password)
+    if kind == "product_intro":
+        raise HTTPException(status_code=400, detail="该文件为产品介绍/推介材料，不含持仓信息，未计入持仓")
     if kind not in ("accumulator", "decumulator", "mli", "fcn"):
         raise HTTPException(status_code=400, detail=f"该文件类型当前不建模：{kind}")
     try:
@@ -758,6 +760,16 @@ async def get_account_advisory_history(market: str = "us_stock", account_ref: st
     """该账户历史顾问建议列表（新→旧，每条含完整 result 供点选回看）。"""
     from bottleneck_hunter.vip import advisory
     return {"history": advisory.list_advisory(_wl(user, market), account_ref=account_ref, limit=limit)}
+
+
+@router.get("/account/review-ledger")
+async def get_account_review_ledger(market: str = "us_stock", limit: int = 200,
+                                    user: dict = Depends(require_vip_unlocked)):
+    """VIP 复盘对错台账（已结建议的动作/实际涨跌/对错 + 顾问命中率 KPI）。只读呈现。
+
+    Phase1 命中率是 vip_advisor 桶全量（账户无关）；account_ref 级拆分属 Phase2 deferred，此处不吃。"""
+    from bottleneck_hunter.vip import advice_review
+    return advice_review.build_review_ledger(_wl(user, market), limit=limit)
 
 
 @router.post("/account/advisory")

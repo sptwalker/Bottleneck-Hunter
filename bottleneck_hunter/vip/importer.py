@@ -254,6 +254,11 @@ def _import_pdf(raw, filename, user_id, wl_store, market, account_ref, password)
         kind = "other"
     if kind in ("accumulator", "decumulator", "mli", "fcn"):
         return _import_derivative(raw, filename, kind, wl_store, password, account_ref=account_ref)
+    if kind == "product_intro":
+        # 产品介绍/推介材料（indicative term sheet）：无成交/持仓，明确拒绝且不计入持仓
+        return ImportResult("rejected", filename, "pdf", "product_intro",
+                            summary="产品介绍/推介材料，不含持仓信息，未计入持仓",
+                            reason="该文件为产品介绍（indicative term sheet），非成交/持仓凭证")
     return _import_statement(raw, filename, user_id, wl_store, market, account_ref, password)
 
 

@@ -643,8 +643,10 @@ async function runPhase1(sector, product, allowFallback = false) {
 
   // 强制重建产业链：勾选则忽略缓存重新拆解；不勾则复用 14 天内已拆解版本（省大量 LLM 调用）
   const forceRebuild = !!document.getElementById('wiz-force-rebuild')?.checked;
+  // 特性四：模板库直取——选了模板则跳过拆解/缓存，用快照链（空串=不使用）
+  const templateId = parseInt(document.getElementById('wiz-template')?.value || '') || null;
 
-  logMsg(`参数: 深度=${depth}, TopN=${topN}, 市场=${market}, 模型=${provider}/${model || '默认'}${forceRebuild ? '，强制重建产业链' : ''}`);
+  logMsg(`参数: 深度=${depth}, TopN=${topN}, 市场=${market}, 模型=${provider}/${model || '默认'}${forceRebuild ? '，强制重建产业链' : ''}${templateId ? '，采用共享模板' : ''}`);
 
   const body = {
     sector, end_product: product,
@@ -653,6 +655,7 @@ async function runPhase1(sector, product, allowFallback = false) {
     language: 'zh', provider, model, market,
     force_refresh_chain: forceRebuild,
     allow_fallback: allowFallback,
+    template_id: templateId,
   };
 
   _p1Abort = new AbortController();
@@ -1479,6 +1482,83 @@ function initCtxMenu() {
   });
 }
 
+/* ── 特性四：产业链共享模板库 ──────────────── */
+async function loadChainTemplates() {
+  const sel = document.getElementById('wiz-template');
+  if (!sel) return;
+  try {
+    const r = await fetch('/api/chain-templates', { credentials: 'same-origin' });
+    if (!r.ok) return;
+    const { templates = [] } = await r.json();
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">模板库：不使用</option>' +
+      templates.map(t => {
+        const tag = t.is_public ? '🌐' : '🔒';
+        const label = `${tag} ${t.template_name}${t.sector ? '·' + t.sector : ''}`;
+        return `<option value="${t.id}" data-public="${t.is_public ? 1 : 0}">${label.replace(/"/g, '&quot;')}</option>`;
+      }).join('');
+    sel.value = cur;   // 尽量保留当前选择
+  } catch { /* 静默：模板库不可用不阻断分析 */ }
+}
+
+function _selectedTemplateId() {
+  const v = parseInt(document.getElementById('wiz-template')?.value || '') || null;
+  if (!v) toast('请先在下拉框选择一个模板', 'warn');
+  return v;
+}
+
+async function toggleTemplatePublic() {
+  const id = _selectedTemplateId();
+  if (!id) return;
+  const sel = document.getElementById('wiz-template');
+  const opt = sel.options[sel.selectedIndex];
+  const next = opt?.dataset.public === '1' ? false : true;
+  try {
+    const r = await fetch(`/api/chain-templates/${id}/public`, {
+      method: 'PATCH', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_public: next }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.detail || '仅能修改自己的模板', 'error'); return; }
+    toast(next ? '已设为公开' : '已设为私有', 'success');
+    loadChainTemplates();
+  } catch (e) { toast('操作失败: ' + e.message, 'error'); }
+}
+
+async function deleteSelectedTemplate() {
+  const id = _selectedTemplateId();
+  if (!id) return;
+  if (!confirm('确定删除所选模板？（不可恢复，仅能删自己的）')) return;
+  try {
+    const r = await fetch(`/api/chain-templates/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.detail || '仅能删除自己的模板', 'error'); return; }
+    toast('已删除', 'success');
+    loadChainTemplates();
+  } catch (e) { toast('删除失败: ' + e.message, 'error'); }
+}
+
+async function saveCurrentChainAsTemplate() {
+  if (!state.analysisId) { toast('请先完成一次产业链分析再存为模板', 'warn'); return; }
+  const name = (prompt('模板名称：') || '').trim();
+  if (!name) return;
+  const isPublic = confirm('是否公开给其他用户复用？\n确定=公开，取消=仅自己可见');
+  try {
+    const r = await fetch('/api/chain-templates', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ analysis_id: state.analysisId, template_name: name, is_public: isPublic }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.detail || '存模板失败', 'error'); return; }
+    toast('已存为模板', 'success');
+    loadChainTemplates();
+  } catch (e) {
+    toast('存模板失败: ' + e.message, 'error');
+  }
+}
+
 /* ── 初始化 ──────────────────────────────── */
 export function initWizard() {
   renderSectorButtons();
@@ -1551,6 +1631,11 @@ export function initWizard() {
   // Phase 1 下一步
   document.getElementById('wiz-p1-next')?.addEventListener('click', () => goToPhase(2));
 
+  // 特性四：模板库——存为模板按钮 + 首屏拉取可见模板
+  document.getElementById('wiz-save-template')?.addEventListener('click', saveCurrentChainAsTemplate);
+  document.getElementById('wiz-template-public')?.addEventListener('click', toggleTemplatePublic);
+  document.getElementById('wiz-template-delete')?.addEventListener('click', deleteSelectedTemplate);
+  loadChainTemplates();
   // Phase 2 按钮
   document.getElementById('wiz-p2-next')?.addEventListener('click', () => goToPhase(3));
   document.getElementById('wiz-p2-back')?.addEventListener('click', () => goToPhase(1));

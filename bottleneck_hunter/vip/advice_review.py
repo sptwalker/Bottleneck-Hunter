@@ -88,6 +88,57 @@ def review_pending_advice(mstore, *, band: float = _BAND) -> dict:
     return stats
 
 
+def _parse_chg(outcome_value: str) -> float | None:
+    """从 'chg=+5.0%' 抠出 5.0；解析不出→None（缺价/异常条目诚实留空，不臆造 0）。"""
+    s = (outcome_value or "").strip()
+    if not s.startswith("chg="):
+        return None
+    try:
+        return float(s[4:].rstrip("%"))
+    except ValueError:
+        return None
+
+
+def build_review_ledger(mstore, *, limit: int = 200) -> dict:
+    """特性三 Phase1 · 面向用户的复盘对错台账（只读呈现，不结算不写库）。
+
+    五列直读 model_accuracy 的 settled 孪生（无 join vip_advisory）：逐条 建议动作/实际涨跌/
+    对错徽标；命中率 KPI 直接调 get_model_accuracy_stats 取 vip_advisor 桶（勿在此重算，口径唯一）。
+    mstore 须已 .for_user().for_market()。
+    """
+    rows = mstore.list_settled_predictions(
+        role_context=VIP_ROLE_CONTEXT,
+        prediction_types=[VIP_PT_ADVICE, VIP_PT_RECOMMEND],
+        market=getattr(mstore, "_market", "") or "",
+        limit=limit,
+    )
+    ledger = [{
+        "date": r.get("prediction_date"),
+        "ticker": r.get("ticker"),
+        "action": r.get("prediction_value", ""),
+        "kind": "荐新" if r.get("prediction_type") == VIP_PT_RECOMMEND else "持仓建议",
+        "chg_pct": _parse_chg(r.get("outcome_value", "")),
+        "correct": None if r.get("is_correct", -1) == -1 else bool(r.get("is_correct") == 1),
+    } for r in rows]
+    # 命中率 KPI：取 vip_advisor 桶汇总（跨模型合并 total/correct，与逐条明细同一数据源）
+    total = correct = pending = 0
+    for s in mstore.get_model_accuracy_stats(market=getattr(mstore, "_market", "") or ""):
+        if s.get("role_context") == VIP_ROLE_CONTEXT:
+            total += s.get("total", 0) or 0
+            correct += s.get("correct", 0) or 0
+            pending += s.get("pending", 0) or 0
+    settled = total - pending
+    return {
+        "ledger": ledger,
+        "kpi": {
+            "settled": settled,
+            "correct": correct,
+            "pending": pending,
+            "hit_rate_pct": round(correct / settled * 100, 1) if settled else None,
+        },
+    }
+
+
 if __name__ == "__main__":
     # 隔离守卫：VIP 桶绝不撞 sim 的 vote / committee_*
     assert VIP_PT_ADVICE != "vote" and VIP_PT_RECOMMEND != "vote"
@@ -107,5 +158,30 @@ if __name__ == "__main__":
     # 二值编码语义自检（与 record_outcome 内 is_correct = 1 if abs(score_delta)<2.0 else 0 对齐）
     assert abs(0.0) < 2.0       # 对 → score_delta=0 → is_correct=1
     assert abs(5.0) >= 2.0      # 错 → score_delta=5 → is_correct=0
+
+    # _parse_chg：正常/缺前缀/垃圾
+    assert _parse_chg("chg=+5.0%") == 5.0 and _parse_chg("chg=-2.3%") == -2.3
+    assert _parse_chg("") is None and _parse_chg("n/a") is None
+
+    # build_review_ledger stitch：喂 fake mstore（settled 明细 + stats 桶）→ 台账逐行 + 命中率
+    class _FakeStore:
+        _market = "us_stock"
+        def list_settled_predictions(self, **_):
+            return [
+                {"prediction_date": "2026-07-01", "ticker": "AAPL", "prediction_value": "加仓",
+                 "prediction_type": VIP_PT_ADVICE, "outcome_value": "chg=+5.0%", "is_correct": 1},
+                {"prediction_date": "2026-07-02", "ticker": "NVDA", "prediction_value": "减仓",
+                 "prediction_type": VIP_PT_RECOMMEND, "outcome_value": "chg=+8.0%", "is_correct": 0},
+            ]
+        def get_model_accuracy_stats(self, **_):
+            return [{"role_context": VIP_ROLE_CONTEXT, "total": 3, "correct": 1, "pending": 1},
+                    {"role_context": "committee_bull", "total": 99, "correct": 99, "pending": 0}]  # 别桶不得混入
+    out = build_review_ledger(_FakeStore())
+    assert len(out["ledger"]) == 2
+    assert out["ledger"][0] == {"date": "2026-07-01", "ticker": "AAPL", "action": "加仓",
+                                "kind": "持仓建议", "chg_pct": 5.0, "correct": True}
+    assert out["ledger"][1]["kind"] == "荐新" and out["ledger"][1]["correct"] is False
+    # KPI 只吃 vip_advisor 桶：settled=total-pending=2、correct=1、命中率 50%（committee_bull 的 99 不得污染）
+    assert out["kpi"] == {"settled": 2, "correct": 1, "pending": 1, "hit_rate_pct": 50.0}
 
     print("advice_review self-check OK")

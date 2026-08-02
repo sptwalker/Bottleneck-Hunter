@@ -103,6 +103,7 @@ async def stream_phase1(
     max_market_cap_yi: float | None = 200,
     force_refresh_chain: bool = False,
     allow_fallback: bool = False,
+    template_id: int | None = None,
     store=None,
 ) -> AsyncGenerator[dict, None]:
     """Phase 1: 产业链拆解 + 瓶颈分析。返回 ALL 瓶颈报告。
@@ -143,10 +144,28 @@ async def stream_phase1(
     try:
         yield _sse("step_start", step="decompose", index=0, message=STEP_LABELS["decompose"])
 
+        chain = None
+        # 特性四：从共享模板库直取产业链——快照即权威，跳过拆解/缓存/新鲜度/模型门。
+        if template_id and store is not None and hasattr(store, "get_template"):
+            try:
+                from bottleneck_hunter.chain.models import ChainGraph
+                tpl = store.get_template(template_id)
+                if tpl and tpl.get("chain_json"):
+                    chain = ChainGraph(**tpl["chain_json"])
+                    yield _sse("step_progress", step="decompose",
+                               message=f"📋 采用共享模板「{tpl.get('template_name', '')}」"
+                                       f"（{tpl.get('created_at', '')[:10]}），跳过重复拆解。", log=True)
+                    yield _sse("step_done", step="decompose", index=0, result=chain.model_dump(), reused=True)
+                else:
+                    yield _sse("step_progress", step="decompose",
+                               message="⚠ 指定模板不存在或无权访问，回退到常规拆解。", log=True)
+            except Exception:
+                logger.exception("模板直取失败，回退到重新拆解")
+                chain = None
+
         # 复用已拆解的产业链：结构稳定，14 天内的缓存直接用，省 70~360 次 LLM 拆解调用。
         # force_refresh_chain=True 或缓存过旧/过浅时才重拆。
-        chain = None
-        if not force_refresh_chain:
+        if chain is None and not force_refresh_chain:
             try:
                 from bottleneck_hunter.chain.chain_store import ChainStore
                 from bottleneck_hunter.chain.models import ChainGraph

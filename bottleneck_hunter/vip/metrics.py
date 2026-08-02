@@ -171,6 +171,45 @@ def contribution_attribution(prev_holdings: list[dict], cur_holdings: list[dict]
     return rows
 
 
+def fx_attribution(prev_holdings: list[dict], cur_holdings: list[dict]) -> list[dict]:
+    """特性一 P2 · 汇率损益归因：把总收益拆成本币价收益 r_local 与汇率收益 r_fx（乘性）。
+
+    prev/cur_holdings: [{symbol, mv_nominal(原币市值), fx(点位隐含汇率 usd/nominal), quantity}]。
+    npx = mv_nominal/quantity(原币单价)；r_local = npx1/npx0-1；r_fx = fx1/fx0-1；
+    total = (1+r_local)(1+r_fx)-1（乘性，残差天然进 total 腿，不塞 r_local/r_fx 错腿）。
+    缺 nominal/fx 锚 → 该行 fx 腿留空(r_fx=None)、total 退化为 r_local(诚实标 coverage，不臆造)。
+    返回按 |total| 降序 [{symbol, r_local_pct, r_fx_pct, total_pct}]（r_fx_pct 可能 None）。
+    """
+    def _npx(h: dict) -> float | None:
+        q = float(h.get("quantity") or 0.0)
+        mv = float(h.get("mv_nominal") or 0.0)
+        return (mv / q) if q and mv else None
+
+    prev = {str(h.get("symbol") or "").strip(): h for h in (prev_holdings or []) if h.get("symbol")}
+    cur = {str(h.get("symbol") or "").strip(): h for h in (cur_holdings or []) if h.get("symbol")}
+    rows = []
+    for sym, ph in prev.items():
+        ch = cur.get(sym)
+        if not ch:
+            continue
+        npx0, npx1 = _npx(ph), _npx(ch)
+        if npx0 is None or npx1 is None or npx0 == 0:
+            continue
+        r_local = npx1 / npx0 - 1.0
+        fx0, fx1 = float(ph.get("fx") or 0.0), float(ch.get("fx") or 0.0)
+        if fx0 > 0 and fx1 > 0:
+            r_fx = fx1 / fx0 - 1.0
+            total = (1 + r_local) * (1 + r_fx) - 1.0
+            r_fx_pct = round(r_fx * 100, 2)
+        else:   # 缺 fx 锚：fx 腿留空，total 退化为纯本币收益（不臆造汇率贡献）
+            r_fx_pct = None
+            total = r_local
+        rows.append({"symbol": sym, "r_local_pct": round(r_local * 100, 2),
+                     "r_fx_pct": r_fx_pct, "total_pct": round(total * 100, 2)})
+    rows.sort(key=lambda x: abs(x["total_pct"]), reverse=True)
+    return rows
+
+
 if __name__ == "__main__":
     # Modified Dietz 单期：期初 100 期末 150，期中(半程)注入 20 → R = (150-100-20)/(100+0.5*20)=30/110
     r = modified_dietz(100.0, 150.0, [{"amount": 20.0, "weight": 0.5}])
@@ -219,4 +258,19 @@ if __name__ == "__main__":
                     {"symbol": "B", "quantity": 20, "market_value_base": 380.0}]  # 单价 380/20=19 → -5%
     c2 = {r["symbol"]: r for r in contribution_attribution(prev_h, cur_b_bought, 1000.0)}
     assert abs(c2["B"]["price_return_pct"] - (-5.0)) < 1e-6, c2
+
+    # 汇率归因：港币标的本币 +5%、港币贬 2% → r_local≈+5%、r_fx≈-2%、乘性 total≈+2.9%
+    pf = [{"symbol": "0700.HK", "quantity": 100, "mv_nominal": 10000.0, "fx": 0.128}]   # npx0=100, fx0
+    cf = [{"symbol": "0700.HK", "quantity": 100, "mv_nominal": 10500.0, "fx": 0.128 * 0.98}]  # npx1=105(+5%), fx-2%
+    fxr = fx_attribution(pf, cf)[0]
+    assert abs(fxr["r_local_pct"] - 5.0) < 1e-6 and abs(fxr["r_fx_pct"] - (-2.0)) < 1e-6, fxr
+    assert abs(fxr["total_pct"] - 2.9) < 1e-6, fxr   # (1.05*0.98-1)=+2.9%（残差进 total 腿）
+    # 纯美元：fx 两期恒 1 → r_fx=0，total=r_local
+    us = fx_attribution([{"symbol": "AAPL", "quantity": 10, "mv_nominal": 2000.0, "fx": 1.0}],
+                        [{"symbol": "AAPL", "quantity": 10, "mv_nominal": 2200.0, "fx": 1.0}])[0]
+    assert us["r_fx_pct"] == 0.0 and abs(us["total_pct"] - 10.0) < 1e-6, us
+    # 缺 fx 锚(fx=0/None)：fx 腿留空，total 退化为纯本币收益（不臆造汇率贡献）
+    miss = fx_attribution([{"symbol": "X", "quantity": 10, "mv_nominal": 1000.0, "fx": 0}],
+                          [{"symbol": "X", "quantity": 10, "mv_nominal": 1100.0, "fx": 0}])[0]
+    assert miss["r_fx_pct"] is None and abs(miss["total_pct"] - 10.0) < 1e-6, miss
     print("vip.metrics self-check OK")

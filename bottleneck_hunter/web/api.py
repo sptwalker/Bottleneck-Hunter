@@ -204,6 +204,7 @@ class Phase1Request(BaseModel):
     max_market_cap_yi: float | None = 200
     force_refresh_chain: bool = Field(default=False, description="强制重建产业链，忽略已缓存版本")
     allow_fallback: bool = Field(default=False, description="放行智能调度/自动替换（用户在主模型失败弹窗选切换备用后重发）")
+    template_id: int | None = Field(default=None, description="从共享模板库直取产业链（跳过拆解/缓存）")
 
 
 class ShortlistConfig(BaseModel):
@@ -339,6 +340,7 @@ async def phase1(request: Request, req: Phase1Request, user: dict = Depends(get_
                 market=req.market, max_market_cap_yi=req.max_market_cap_yi,
                 force_refresh_chain=req.force_refresh_chain,
                 allow_fallback=req.allow_fallback,
+                template_id=req.template_id,
                 store=store,
             ):
                 if await request.is_disconnected():
@@ -707,6 +709,61 @@ async def delete_history(analysis_id: str, user: dict = Depends(get_current_user
     deleted = store.delete(analysis_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Analysis not found")
+    return {"ok": True}
+
+
+# ── 特性四：预设产业链共享模板库 ────────────────────────────
+class SaveTemplateRequest(BaseModel):
+    analysis_id: str = Field(description="从该已完成分析的产业链快照存模板")
+    template_name: str
+    description: str = ""
+    is_public: bool = False
+
+
+@router.get("/chain-templates")
+async def list_chain_templates(mine_only: bool = False, user: dict = Depends(get_current_user)):
+    """可见模板列表：默认自己的 + 他人公开的；mine_only=True 仅自己的。"""
+    store = _user_analysis_store(user)
+    items = store.list_my_templates() if mine_only else store.list_visible_templates()
+    return {"templates": items}
+
+
+@router.post("/chain-templates")
+async def save_chain_template(req: SaveTemplateRequest, user: dict = Depends(get_current_user)):
+    """把某已完成分析的产业链存为模板（chain_json 快照即权威）。"""
+    if not req.template_name.strip():
+        raise HTTPException(status_code=400, detail="模板名不能为空")
+    store = _user_analysis_store(user)
+    record = store.get(req.analysis_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="分析记录不存在")
+    chain = (record.get("result_json") or {}).get("chain")
+    if not chain:
+        raise HTTPException(status_code=400, detail="该分析无产业链数据，无法存为模板")
+    tid = store.save_template(
+        template_name=req.template_name.strip(), chain_json=chain,
+        description=req.description, sector=chain.get("sector", ""),
+        end_product=chain.get("end_product", ""), max_depth=chain.get("max_depth", 3),
+        source_chain_id=None, is_public=req.is_public)
+    return {"ok": True, "id": tid}
+
+
+@router.patch("/chain-templates/{template_id}/public")
+async def set_chain_template_public(template_id: int, body: dict, user: dict = Depends(get_current_user)):
+    """改公开状态（仅 owner 生效）。"""
+    store = _user_analysis_store(user)
+    ok = store.set_template_public(template_id, bool(body.get("is_public")))
+    if not ok:
+        raise HTTPException(status_code=404, detail="模板不存在或无权修改")
+    return {"ok": True}
+
+
+@router.delete("/chain-templates/{template_id}")
+async def delete_chain_template(template_id: int, user: dict = Depends(get_current_user)):
+    """删除模板（仅 owner 生效）。"""
+    store = _user_analysis_store(user)
+    if not store.delete_template(template_id):
+        raise HTTPException(status_code=404, detail="模板不存在或无权删除")
     return {"ok": True}
 
 

@@ -94,6 +94,26 @@ _MIGRATIONS = [
         updated_at     TEXT NOT NULL,
         PRIMARY KEY (user_id, ticker)
     )""",
+    # 特性四：预设产业链共享模板库。chain_json 快照为权威（重建即用，不再拆解/查缓存）；
+    # source_chain_id 仅作溯源审计（可空，永不用于查询）。is_public=1 时对全体可见（只读复用），
+    # 删除/改公开仅 owner。UNIQUE(user_id, template_name) 防同用户重名。
+    """CREATE TABLE IF NOT EXISTS chain_templates (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         TEXT DEFAULT '',
+        market          TEXT DEFAULT 'all',
+        template_name   TEXT NOT NULL,
+        description     TEXT DEFAULT '',
+        sector          TEXT DEFAULT '',
+        end_product     TEXT DEFAULT '',
+        max_depth       INTEGER DEFAULT 3,
+        source_chain_id INTEGER,
+        chain_json      TEXT NOT NULL,
+        is_public       INTEGER DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        UNIQUE(user_id, template_name)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_chain_templates_owner ON chain_templates(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_chain_templates_public ON chain_templates(is_public, created_at DESC)",
 ]
 
 # 列表查询不返回 result_json（体积大），只返回摘要
@@ -655,3 +675,91 @@ class AnalysisStore:
         if not record:
             return {}
         return record.get("result_json", {}).get("ai_reports", {})
+
+    # ── 特性四：预设产业链共享模板库 ────────────────────────────
+    # 隔离：写用 self._user_id 内联（同 save() 的 uid_col/val/param 惯例）；「我的」读用 _user_filter。
+    # 公开可见走 Python 层合并（两条各自 _user_filter 的查询），不手写 OR SQL（防绕过隔离护栏）。
+
+    @staticmethod
+    def _row_to_template(row: sqlite3.Row) -> dict:
+        d = dict(row)
+        try:
+            d["chain_json"] = json.loads(d["chain_json"]) if d.get("chain_json") else {}
+        except (json.JSONDecodeError, TypeError):
+            d["chain_json"] = {}
+        return d
+
+    def save_template(self, *, template_name: str, chain_json: dict, description: str = "",
+                      sector: str = "", end_product: str = "", max_depth: int = 3,
+                      source_chain_id: int | None = None, is_public: bool = False) -> int:
+        """存一份产业链模板。chain_json 为 ChainGraph.model_dump() 快照（权威，重建即用）。
+        UNIQUE(user_id, template_name) 冲突 → INSERT OR REPLACE 覆盖同名（视作更新）。"""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        uid_col = ", user_id" if self._user_id else ""
+        uid_val = ", ?" if self._user_id else ""
+        uid_param = (self._user_id,) if self._user_id else ()
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"""INSERT OR REPLACE INTO chain_templates
+                   (template_name, description, sector, end_product, max_depth,
+                    source_chain_id, chain_json, is_public, created_at{uid_col})
+                   VALUES (?,?,?,?,?,?,?,?,?{uid_val})""",
+                (template_name, description, sector, end_product, max_depth,
+                 source_chain_id, json.dumps(chain_json, ensure_ascii=False, default=str),
+                 1 if is_public else 0, now) + uid_param,
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    def list_my_templates(self) -> list[dict]:
+        """当前用户自己的模板（含私有），按时间倒序，不含 chain_json 体（列表轻量）。"""
+        cols = ("id, user_id, market, template_name, description, sector, end_product, "
+                "max_depth, is_public, created_at")
+        q, p = self._user_filter(f"SELECT {cols} FROM chain_templates ORDER BY created_at DESC")
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+
+    def list_visible_templates(self) -> list[dict]:
+        """可见模板 = 自己的 ∪ 他人公开的。两条各自过滤后 Python 层去重合并（不手写 OR SQL）。"""
+        cols = ("id, user_id, market, template_name, description, sector, end_product, "
+                "max_depth, is_public, created_at")
+        with self._connect() as conn:
+            q_mine, p_mine = self._user_filter(f"SELECT {cols} FROM chain_templates ORDER BY created_at DESC")
+            mine = [dict(r) for r in conn.execute(q_mine, p_mine).fetchall()]
+            # 公开集：is_public=1（含自己的公开项，靠 id 去重）。无 user_id 过滤=跨用户可见，故仅取公开列。
+            pub = [dict(r) for r in conn.execute(
+                f"SELECT {cols} FROM chain_templates WHERE is_public = 1 ORDER BY created_at DESC").fetchall()]
+        seen = {r["id"] for r in mine}
+        merged = mine + [r for r in pub if r["id"] not in seen]
+        merged.sort(key=lambda r: r["created_at"], reverse=True)
+        return merged
+
+    def get_template(self, template_id: int) -> dict | None:
+        """按 id 取一份可见模板（自己的 or 公开的）。chain_json 解析为 dict。他人私有 → None。"""
+        with self._connect() as conn:
+            q, p = self._user_filter("SELECT * FROM chain_templates WHERE id = ?", (template_id,))
+            row = conn.execute(q, p).fetchone()
+            if row:
+                return self._row_to_template(row)
+            # 非自己的：仅当公开才可见（只读复用）
+            row = conn.execute(
+                "SELECT * FROM chain_templates WHERE id = ? AND is_public = 1", (template_id,)).fetchone()
+            return self._row_to_template(row) if row else None
+
+    def set_template_public(self, template_id: int, is_public: bool) -> bool:
+        """改公开状态，仅 owner（_user_filter 保证只命中自己的行）。"""
+        with self._connect() as conn:
+            q, p = self._user_filter(
+                "UPDATE chain_templates SET is_public = ? WHERE id = ?",
+                (1 if is_public else 0, template_id))
+            cur = conn.execute(q, p)
+            conn.commit()
+            return cur.rowcount > 0
+
+    def delete_template(self, template_id: int) -> bool:
+        """删除模板，仅 owner（_user_filter 保证只命中自己的行；他人公开项删不动）。"""
+        with self._connect() as conn:
+            q, p = self._user_filter("DELETE FROM chain_templates WHERE id = ?", (template_id,))
+            cur = conn.execute(q, p)
+            conn.commit()
+            return cur.rowcount > 0

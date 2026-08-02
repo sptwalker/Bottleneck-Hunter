@@ -596,3 +596,85 @@ def test_guard_allows_normal_newer_update(wl):
     acct = wl.get_sim_account(account_ref="A1")
     pos = {p["ticker"]: p for p in wl.get_sim_positions(acct["id"])}
     assert abs(pos["GOOGL"]["market_value"] - 250000.0) < 1.0
+
+
+# ── P0/P1 币种敞口 + FX 落库 ──────────────────────────────────────────────
+
+def test_fx_rate_and_nominal_persisted_from_statement(wl):
+    """P0：多币种结单落库后，positions.market_value 存原币市值、fx_rate 存隐含汇率（非恒 1.0）。"""
+    portfolio.normalize_statement(wl, _stmt(), source_doc_id="d1", account_ref="A1")
+    conn = wl._connect()
+    try:
+        rows = {r["symbol"]: r for r in conn.execute(
+            "SELECT i.symbol, p.market_value AS nom, p.market_value_base AS usd, p.fx_rate, p.market_price "
+            "FROM positions p JOIN instruments i ON i.id = p.instrument_id").fetchall()}
+    finally:
+        conn.close()
+    # 港股 Tencent：原币市值 513181.20 HKD / 美元市值 65440.92 → fx ≈ 0.1275
+    hk = rows["700"]
+    assert abs(hk["nom"] - 513181.20) < 1.0          # market_value = 原币市值(非美元镜像)
+    assert abs(hk["usd"] - 65440.92) < 1.0
+    assert abs(hk["fx_rate"] - (65440.92 / 513181.20)) < 1e-4
+    assert hk["fx_rate"] < 0.5                          # 港币 fx 明显 != 1.0
+    assert abs(hk["market_price"] - 513181.20 / 1194) < 1e-3   # 原币单价
+    # 美元标的 GOOGL：原币==美元、fx==1.0
+    us = rows["GOOGL"]
+    assert abs(us["nom"] - us["usd"]) < 1e-6 and abs(us["fx_rate"] - 1.0) < 1e-6
+
+
+def test_exposure_breakdown_by_currency_detail(wl):
+    """P1：_exposure_breakdown 产出 by_currency_detail，含美元/原币/隐含汇率。"""
+    portfolio.normalize_statement(wl, _stmt(), source_doc_id="d1", account_ref="A1")
+    exp = portfolio._exposure_breakdown(wl, "A1")
+    detail = {d["currency"]: d for d in exp["by_currency_detail"]}
+    assert set(detail) == {"USD", "HKD"}
+    hkd = detail["HKD"]
+    assert abs(hkd["market_value_usd"] - 65440.92) < 1.0
+    assert abs(hkd["market_value_nominal"] - 513181.20) < 1.0
+    assert abs(hkd["implied_fx"] - (65440.92 / 513181.20)) < 1e-4
+    usd = detail["USD"]     # GOOGL 200000 + SOXX 961140 同币聚合
+    assert abs(usd["market_value_nominal"] - usd["market_value_usd"]) < 1e-6
+    assert abs(usd["implied_fx"] - 1.0) < 1e-6
+
+
+def test_overview_surfaces_exposure_breakdown(wl):
+    """P1 接线：build_account_overview 把 exposure_breakdown 挂进返回体（前端币种饼取数前提）。"""
+    portfolio.normalize_statement(wl, _stmt(), source_doc_id="d1", account_ref="A1")
+    ov = portfolio.build_account_overview(wl, account_ref="A1")
+    ccys = {d["currency"] for d in ov["exposure_breakdown"]["by_currency_detail"]}
+    assert ccys == {"USD", "HKD"}
+
+
+# ── P2 汇率损益归因 ───────────────────────────────────────────────────────
+
+def _hk_stmt(*, period_end, hk_nom, hk_fx):
+    """单港股账户结单：Tencent 原币市值 hk_nom @ 隐含汇率 hk_fx（qty 恒定，供 P2 相邻两期归因）。"""
+    h = EquityHolding(ticker="700", company="Tencent (700 HK)", quantity=1000,
+                      market_value_usd=round(hk_nom * hk_fx, 2), nominal_ccy="HKD",
+                      market_value_nominal=hk_nom)
+    total = h.market_value_usd
+    return BrokerStatement(content_hash=f"hk-{period_end}", period_end=period_end, holdings=[h],
+                           cash_balances=[], total_cash_usd=0.0,
+                           recon=ReconResult(holdings_count=1, holdings_total_usd=total,
+                                             statement_equities_total_usd=total, delta_usd=0.0, status="ok"))
+
+
+def test_fx_attribution_wired_into_dossier(wl):
+    """P2 接线：相邻两期本币 +5%、港币贬 2% → dossier.fx_attribution 拆出 r_local/r_fx/乘性 total。"""
+    fx0 = 0.128
+    portfolio.normalize_statement(wl, _hk_stmt(period_end="2026-06-30", hk_nom=100000.0, hk_fx=fx0),
+                                  source_doc_id="p0", account_ref="A1")
+    portfolio.materialize_portfolio(wl, as_of_date="2026-06-30", account_ref="A1", cash_total_usd=0.0)
+    # 期末：原币 +5%(100000→105000)、港币贬 2%(fx*0.98)
+    portfolio.normalize_statement(wl, _hk_stmt(period_end="2026-07-31", hk_nom=105000.0, hk_fx=fx0 * 0.98),
+                                  source_doc_id="p1", account_ref="A1")
+    portfolio.materialize_portfolio(wl, as_of_date="2026-07-31", account_ref="A1", cash_total_usd=0.0)
+
+    dossier = portfolio.build_account_dossier(wl, account_ref="A1")
+    fx = dossier["fx_attribution"]
+    assert fx["prev_date"] == "2026-06-30" and fx["cur_date"] == "2026-07-31"
+    row = {r["symbol"]: r for r in fx["rows"]}["700"]
+    assert abs(row["r_local_pct"] - 5.0) < 0.05, row       # 本币价 +5%
+    assert abs(row["r_fx_pct"] - (-2.0)) < 0.05, row       # 港币贬 2%
+    assert abs(row["total_pct"] - 2.9) < 0.05, row         # 乘性 (1.05*0.98-1)=+2.9%
+    assert fx["coverage"] == "1/1"                          # fx 锚齐全

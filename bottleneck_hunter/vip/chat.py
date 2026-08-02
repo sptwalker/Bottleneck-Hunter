@@ -129,6 +129,14 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
         sid = create_chat_session(wl_store, title=question[:40], account_ref=account_ref)
     append_chat_message(wl_store, sid, "user", question, account_ref=account_ref)
     facts_text, dossier = _build_facts(wl_store, account_ref=account_ref)
+    # 特性二 P1：对话内实时行情立查——现价并进 facts（LLM 可见）+ guard 语料（防误标"未核到"）。
+    # 只读、单趟、不写库；失败/无映射票留 skipped，不塞 0。市场从 store 取（现查只做 us_stock）。
+    from bottleneck_hunter.vip import live_quote
+    live = await live_quote.fetch_live_quotes(
+        question, dossier.get("holdings") or [],
+        market=getattr(wl_store, "_market", "") or "us_stock", user_id=user_id)
+    if live.get("usd_text"):
+        facts_text = facts_text + "\n" + live["usd_text"]
     mandate_text = _mandate.format_mandate_for_prompt(wl_store, account_ref=account_ref)
     prompt = _PROMPT.format(facts=facts_text, mandate=mandate_text, question=question)
     # number_guard 白名单语料并入纲领文本：纲领里的收益目标/回撤%是用户设定的合法数字，避免误标"未核到"
@@ -151,6 +159,7 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
 
     # 数字白名单校验（与报告同一公共件）；非美元衍生条款价/已实现盈亏不得核验叙述里的美元断言（跨币防误核）
     fv = number_guard.foreign_account_values(dossier)
+    fv = fv + list(live.get("foreign_prices") or [])   # 外币现价并入外币池，同理不核美元断言
     unverified = [r["token"] for r in number_guard.verify_numbers(full, guard_corpus, fv) if r["status"] == "unverified"]
     final_text = number_guard.annotate_unverified(full, guard_corpus, foreign_values=fv)
     final_text = compliance.with_disclaimer(final_text)
@@ -161,4 +170,6 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
         except Exception:
             pass
     yield {"event": "done", "data": json.dumps({"session_id": sid, "provider": provider, "model": model,
-                                                      "unverified": unverified, "dossier": dossier}, ensure_ascii=False)}
+                                                      "unverified": unverified, "dossier": dossier,
+                                                      "live_quotes": live.get("quotes", []),
+                                                      "live_skipped": live.get("skipped", [])}, ensure_ascii=False)}
