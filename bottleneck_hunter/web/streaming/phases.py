@@ -121,15 +121,17 @@ async def stream_phase1(
         logger.info("[phase1] LLM 解析开始 | 入参 provider=%r model=%r | 模式=%s | allow_fallback=%s",
                     provider, model, _mode, allow_fallback)
         if provider:
-            # 用户在环节下拉选了具体模型：直接用它。allow_fallback 时套自动替换壳(弹窗后重跑用备用)。
-            deep_llm = create_llm(provider, model, with_fallback=allow_fallback)
+            # 用户在环节下拉选了具体模型：以它为首选，但仍套自动替换壳——
+            # 单点超时/失败即自动切备用(并计入 provider_gate 升级)，不让整环节因主模型超时空手而归。
+            deep_llm = create_llm(provider, model, with_fallback=True)
         else:
-            # 「跟随顶栏配置」：默认锁定主模型(prefer_primary)、不自动替换(with_fallback=False)，
-            # 主模型失败即发 primary_failed 让前端弹窗；allow_fallback(弹窗选切换后重发)则恢复调度+替换。
+            # 「跟随顶栏配置」：prefer_primary 让顶栏主模型为首选；with_fallback=True 使单节点超时
+            # 自动切备用并计入 provider_gate 升级(3 次超时→配置中心禁用)。无备用时 create_llm 退化为
+            # 裸模型，主模型失败仍发 primary_failed 让前端弹窗。allow_fallback(弹窗选切换后重发)则恢复调度选型。
             deep_llm, provider, model = get_llm_for_position(
                 "pipeline_decompose",
                 prefer_primary=not allow_fallback,
-                with_fallback=allow_fallback,
+                with_fallback=True,
             )
             if deep_llm is None:
                 raise ValueError("未配置可用的 LLM provider，请在 AI 配置中设置")
@@ -348,12 +350,13 @@ async def stream_phase2(
 
     try:
         if provider:
-            deep_llm = create_llm(provider, model, with_fallback=allow_fallback)
+            # 同 phase1：以选定模型为首选，套自动替换壳——单点超时/失败自动切备用 + 计入升级。
+            deep_llm = create_llm(provider, model, with_fallback=True)
         else:
             deep_llm, provider, model = get_llm_for_position(
                 "pipeline_eval",
                 prefer_primary=not allow_fallback,
-                with_fallback=allow_fallback,
+                with_fallback=True,
             )
             if deep_llm is None:
                 raise ValueError("未配置可用的 LLM provider，请在 AI 配置中设置")

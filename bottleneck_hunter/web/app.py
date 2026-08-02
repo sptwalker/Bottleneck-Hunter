@@ -133,19 +133,19 @@ async def lifespan(app: FastAPI):
     _all_custom_providers = _auth_store.list_custom_providers()
     for cp in _all_custom_providers:
         detail = _auth_store.get_custom_provider(cp["provider_id"])
-        if detail and detail.get("is_active"):
+        if detail:  # 注册全部 provider 元数据（不再按全局 is_active 过滤——管理员禁用不阻断他人选型）
             register_custom_provider(
                 cp["provider_id"], cp["base_url"], default_model=cp["default_model"],
             )
 
-    # 推送「禁用集合 + 主要 provider」到 factory 运行时状态（禁用/主要生效于解析层）
+    # 推送「禁用集合」到 factory 运行时状态（仅管理员目录元数据/综合测试跳过用；
+    # 主模型已彻底用户级 provider_configs.is_primary，不再有全局主要 provider）
     try:
         from bottleneck_hunter.llm_clients.factory import set_provider_status
         _inactive = [c["provider_id"] for c in _all_custom_providers if not c.get("is_active")]
-        _primary = next((c["provider_id"] for c in _all_custom_providers if c.get("is_primary")), "")
-        set_provider_status(_inactive, _primary)
+        set_provider_status(_inactive)
     except Exception as e:
-        logging.getLogger(__name__).debug("加载 provider 启用/主要状态失败: %s", e)
+        logging.getLogger(__name__).debug("加载 provider 禁用状态失败: %s", e)
 
     # 一次性迁移历史全局 KEY（.env + custom_providers 全局密钥）→ admin 用户级存储，然后清除全局。
     try:

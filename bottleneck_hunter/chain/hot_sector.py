@@ -624,7 +624,8 @@ async def llm_recommend_hot_sectors(
                 logger.error("热点推荐：未配置可用 LLM provider")
                 raise MissingUserKeyError("（跟随顶栏配置）请在 AI 配置中心为「产业链拆解」角色配置可用模型")
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-        resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=30.0)
+        # 超时/切换归 FallbackChatModel 内部；全部候选超时才抛 TimeoutError（下方 except 捕获）。
+        resp = await llm.ainvoke(messages)
 
         results = extract_json_array(resp.content) or []
 

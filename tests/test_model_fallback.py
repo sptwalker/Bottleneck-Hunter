@@ -5,8 +5,8 @@
 - classify_reason: 异常 → 中文原因
 - ContextVar sink: begin/push/drain 隔离，未 begin 时 push 静默
 - build_fallback_candidates: 排除主 provider、仅取有 key 的
-- factory.create_llm: with_fallback 包壳/不包壳/无备选降级
-- get_models_for_role(默认不包壳) vs get_llm_for_position(包壳)
+- factory.create_llm: with_fallback 全链壳 / 裸 / 无备选降级为 record-only 单候选记账壳
+- get_models_for_role(默认 record-only 单候选壳，保扇出多样性) vs get_llm_for_position(全链 fallback)
 - web.streaming._notice.with_notices: 穿插 model_fallback 事件
 - committee._invoke_with_retry: 切备用模型时 push 提示
 """
@@ -233,14 +233,19 @@ class TestCreateLLMWrapping:
         llm = F.create_llm("deepseek", "deepseek-chat", with_fallback=False, user_id="u1")
         assert isinstance(llm, OkLLM)
 
-    def test_no_backups_returns_raw(self, monkeypatch):
+    def test_no_backups_wraps_record_only(self, monkeypatch):
         self._keyed(monkeypatch, {"deepseek"})  # 仅主，无备选
         llm = F.create_llm("deepseek", "deepseek-chat", with_fallback=True, user_id="u1")
-        assert isinstance(llm, OkLLM)
+        # 无备选不再降级为裸模型：包 record-only 单候选壳，失败照样记账喂 provider_gate 熔断层（消灭盲区）
+        assert isinstance(llm, FallbackChatModel)
+        assert len(llm.candidates) == 1                 # 单候选：只记账，不跨 provider 切换
+        assert isinstance(llm.candidates[0][0], OkLLM)  # 内层仍是原始主模型
+        assert llm.candidates[0][1] == "deepseek"
 
 
 class TestRoleResolution:
-    """get_models_for_role 默认不包壳（保多样性）；get_llm_for_position 包壳。"""
+    """get_models_for_role 默认包 record-only 单候选壳（记账喂熔断层、保 N 路多样性、不切换）；
+    get_llm_for_position 包全链 fallback（多候选、跨 provider 切换）。"""
 
     def _keyed(self, monkeypatch, providers):
         from bottleneck_hunter.auth import current_user
@@ -251,15 +256,18 @@ class TestRoleResolution:
         monkeypatch.setattr(F, "_create_raw_llm", lambda p, m, **k: OkLLM(f"{p}/{m}"))
         monkeypatch.setattr(F, "_load_role_configs_from_db", lambda *a, **k: [])
 
-    def test_get_models_for_role_no_fallback_by_default(self, monkeypatch):
+    def test_get_models_for_role_record_only_by_default(self, monkeypatch):
         self._keyed(monkeypatch, {"qwen", "kimi"})
         res = F.get_models_for_role("__fake_role__", user_id="u1")
-        assert res and not isinstance(res[0][0], FallbackChatModel)
+        assert res
+        first = res[0][0]
+        assert isinstance(first, FallbackChatModel)      # record-only 壳（喂熔断层）
+        assert len(first.candidates) == 1                # 单候选：保多样性、不跨 provider 切换
 
     def test_get_llm_for_position_wraps(self, monkeypatch):
         self._keyed(monkeypatch, {"qwen", "kimi"})
         llm, provider, model = F.get_llm_for_position("__fake_role__")
-        assert isinstance(llm, FallbackChatModel)
+        assert isinstance(llm, FallbackChatModel)        # 全链 fallback 壳（含备选、跨 provider 切换）
 
 
 

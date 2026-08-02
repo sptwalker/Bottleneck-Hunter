@@ -377,12 +377,10 @@ class SupplierSearcher:
         async def _akshare_source():
             if self._is_us:
                 return []
+            # 仅用显式 keywords 或从环节名提取的短词做板块检索。
+            # 不再喂 key_insights——那是论述长句，无法 substring 匹配板块名，
+            # 反而把整句灌进 term 令 akshare 100% 0 命中（Loki 归因）。
             terms = list(keywords) if keywords else self._extract_keywords(bottleneck.node_name)
-            if bottleneck.key_insights:
-                for insight in bottleneck.key_insights[:2]:
-                    extra = self._extract_keywords(insight)
-                    terms.extend(extra)
-                terms = list(dict.fromkeys(terms))[:6]
             try:
                 results = await asyncio.to_thread(
                     _try_akshare_search, terms, self.max_market_cap_yi
@@ -504,10 +502,9 @@ class SupplierSearcher:
         last_error = None
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                response = await asyncio.wait_for(
-                    self.llm.ainvoke(messages),
-                    timeout=self.LLM_TIMEOUT,
-                )
+                # 超时/切换归 FallbackChatModel 内部（按候选硬超时+记账+无感切换）；
+                # 全部候选超时才会抛 TimeoutError，仍由下方 except 捕获。
+                response = await self.llm.ainvoke(messages)
                 text = response.content.strip()
                 items = _extract_json_array(text)
                 if items:
@@ -794,14 +791,18 @@ class SupplierSearcher:
 
     @staticmethod
     def _extract_keywords(node_name: str) -> list[str]:
-        """从节点名称中提取搜索关键词（不依赖 LLM）。"""
+        """从节点名称/短语中提取搜索关键词（不依赖 LLM）。
+        按分隔符与句读切分，仅保留 2..12 字的短词——板块/概念名本就短(2-6 字)，
+        论述长句片段无法 substring 匹配板块名，在此源头剔除（防 akshare 0 命中污染回归）。"""
         for prefix in ("高端", "先进", "精密", "超高纯", "高纯", "高性能",
                         "新型", "专用", "关键", "核心", "特种"):
             node_name = node_name.removeprefix(prefix)
-        parts = re.split(r"[/、及和与]", node_name)
-        keywords = [p.strip() for p in parts if len(p.strip()) >= 2]
+        # 句读/顿号/连接词/括号/空白全部作为切分点：论述句被拆散，避免整句沦为「关键词」
+        parts = re.split(r"[/、及和与，。；：,.;:\s（）()\[\]「」【】\"'’“”]+", node_name)
+        keywords = [p.strip() for p in parts if 2 <= len(p.strip()) <= 12]
         if not keywords:
-            keywords = [node_name]
+            kw = node_name.strip()
+            keywords = [kw] if 2 <= len(kw) <= 12 else []
         return keywords
 
     # ----- Batch search across all bottlenecks -------------------------------
@@ -848,4 +849,11 @@ class SupplierSearcher:
             f"── 供应商检索完成: 共找到 {total_found} 家候选供应商 "
             f"(超时 {self._timeout_count} 次, 重试 {self._retry_count} 次) ──"
         )
+        empty_nodes = [name for name, v in result.items() if not v]
+        if empty_nodes:
+            preview = "、".join(empty_nodes[:5]) + ("…" if len(empty_nodes) > 5 else "")
+            await self._emit(
+                f"⚠️ 有 {len(empty_nodes)}/{total} 个瓶颈环节未找到任何供应商（{preview}），"
+                f"结果可能不完整；多因主模型超时所致，建议在 AI 配置中心检查/切换模型后重试"
+            )
         return result

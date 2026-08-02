@@ -248,10 +248,8 @@ class RoundtableMeeting:
     async def _invoke_llm(
         self, llm: BaseChatModel, system: str, user: str, timeout: int = 180
     ) -> str:
-        response = await asyncio.wait_for(
-            llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)]),
-            timeout=timeout,
-        )
+        # 超时/切换归 FallbackChatModel 内部（按候选硬超时+记账+无感切换）；timeout 形参保留兼容签名。
+        response = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
         return response.content.strip()
 
     async def run_round1(

@@ -80,3 +80,45 @@ def test_resave_key_clears_auth_disable(store):
     store.save_user_api_key("uY", "qwen", "enc-new-key", "sk-…wxyz")
     assert pg.is_disabled("uY", "qwen"), "限流禁用不应因重存 key 而解除"
 
+
+# ── Part D：主模型失效自动取消（用户级，绝不波及他人）──────
+@pytest.fixture
+def primary(store, monkeypatch):
+    """用内存 dict 冒充用户级主模型表：注入 factory.resolve_primary_for_user 读、
+    WatchlistStore.set_provider_config_primary 写，避开真库。"""
+    import bottleneck_hunter.llm_clients.factory as F
+    from bottleneck_hunter.llm_clients import fallback as FB
+    from bottleneck_hunter.watchlist.store import WatchlistStore
+    table = {"uidA": "deepseek", "uidB": "qwen"}
+    monkeypatch.setattr(F, "resolve_primary_for_user", lambda uid="": table.get(uid, ""))
+    monkeypatch.setattr(
+        WatchlistStore, "set_provider_config_primary",
+        lambda self, pid, uid=None: table.__setitem__(uid, (pid or "").lower().strip()),
+    )
+    FB.begin_notices()
+    yield table
+    FB.drain_notices()
+
+
+def test_disabling_primary_clears_it_and_notifies(store, primary):
+    from bottleneck_hunter.llm_clients import fallback as FB
+    pg.record_result("uidA", "deepseek", False, pg._AUTH_REASON)   # 禁用 == uidA 主模型
+    assert pg.is_disabled("uidA", "deepseek")
+    assert primary["uidA"] == "", "uidA 主模型应被自动取消"
+    assert primary["uidB"] == "qwen", "uidB 主模型不受影响（严格用户级隔离）"
+    kinds = [n["kind"] for n in FB.drain_notices()]
+    assert "primary_failed" in kinds, kinds
+
+
+def test_disabling_non_primary_leaves_primary(store, primary):
+    pg.record_result("uidA", "qwen", False, pg._AUTH_REASON)       # qwen 非 uidA 主模型
+    assert pg.is_disabled("uidA", "qwen")
+    assert primary["uidA"] == "deepseek", "非主模型被禁不应清主模型"
+
+
+def test_disabling_primary_for_one_user_not_others(store, primary):
+    # uidB 的 qwen 被禁 → 只清 uidB，uidA 的 deepseek 主模型不受扰
+    pg.record_result("uidB", "qwen", False, pg._AUTH_REASON)
+    assert primary["uidB"] == "", "uidB 主模型应被取消"
+    assert primary["uidA"] == "deepseek", "uidA 主模型不受 uidB 失效影响"
+

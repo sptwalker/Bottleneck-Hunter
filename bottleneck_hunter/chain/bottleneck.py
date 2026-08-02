@@ -562,9 +562,8 @@ class BottleneckAnalyzer:
             response = None
             for attempt in range(self.MAX_RETRIES + 1):
                 try:
-                    response = await asyncio.wait_for(
-                        active_llm.ainvoke(messages), timeout=self.LLM_TIMEOUT,
-                    )
+                    # 超时/切换归 FallbackChatModel 内部；全部候选超时才抛 TimeoutError。
+                    response = await active_llm.ainvoke(messages)
                     break
                 except asyncio.TimeoutError:
                     if attempt < self.MAX_RETRIES:

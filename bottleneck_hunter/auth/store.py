@@ -874,31 +874,12 @@ class AuthStore:
             return cur.rowcount > 0
 
     def set_custom_provider_active(self, provider_id: str, active: bool) -> bool:
-        """启用/禁用 provider。禁用时一并撤销其「主要」标记（禁用的不能是主要）。"""
+        """启用/禁用 provider（仅管理员目录元数据）。"""
         with self._conn() as conn:
-            if active:
-                cur = conn.execute(
-                    "UPDATE custom_providers SET is_active = 1 WHERE provider_id = ?", (provider_id,))
-            else:
-                cur = conn.execute(
-                    "UPDATE custom_providers SET is_active = 0, is_primary = 0 WHERE provider_id = ?", (provider_id,))
+            cur = conn.execute(
+                "UPDATE custom_providers SET is_active = ? WHERE provider_id = ?",
+                (1 if active else 0, provider_id))
             return cur.rowcount > 0
 
-    def set_provider_primary(self, provider_id: str) -> bool:
-        """设为唯一「主要」provider（自动激活自身，清除其它主要标记）。"""
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT id FROM custom_providers WHERE provider_id = ?", (provider_id,)).fetchone()
-            if not row:
-                return False
-            conn.execute("UPDATE custom_providers SET is_primary = 0")
-            conn.execute(
-                "UPDATE custom_providers SET is_primary = 1, is_active = 1 WHERE provider_id = ?", (provider_id,))
-            return True
-
-    def get_primary_provider(self) -> str:
-        """返回当前「主要」provider id，未设则空串。"""
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT provider_id FROM custom_providers WHERE is_primary = 1 LIMIT 1").fetchone()
-            return row["provider_id"] if row else ""
+    # 说明：全局「主要 provider」的 setter/getter（set_provider_primary/get_primary_provider）已删除——
+    # 主模型彻底用户级（provider_configs.is_primary，见 store_ai_models.set/get_primary_provider_config）。

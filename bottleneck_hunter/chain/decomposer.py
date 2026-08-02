@@ -393,10 +393,8 @@ class ChainDecomposer:
 
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                response = await asyncio.wait_for(
-                    self.llm.ainvoke(messages),
-                    timeout=self.LLM_TIMEOUT,
-                )
+                # 超时/切换归 FallbackChatModel 内部；全部候选超时才抛 TimeoutError。
+                response = await self.llm.ainvoke(messages)
                 break
             except asyncio.TimeoutError:
                 if attempt < self.MAX_RETRIES:
@@ -529,12 +527,9 @@ class ChainDecomposer:
 只返回 JSON 数组，不要其他文字。"""
 
         try:
-            response = await asyncio.wait_for(
-                self.llm.ainvoke(
-                    [SystemMessage(content="你是产业链分析专家，请精确识别语义重复的环节。"),
-                     HumanMessage(content=prompt)]
-                ),
-                timeout=self.LLM_TIMEOUT,
+            response = await self.llm.ainvoke(
+                [SystemMessage(content="你是产业链分析专家，请精确识别语义重复的环节。"),
+                 HumanMessage(content=prompt)]
             )
             merge_groups = extract_json_array(response.content)
             if not merge_groups:

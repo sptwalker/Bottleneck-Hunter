@@ -92,6 +92,7 @@ export function initAIConfig() {
     if (btn.dataset.aicAct === 'edit') editProvider(id, isCustom);
     else if (btn.dataset.aicAct === 'delete') deleteProvider(id, btn.dataset.name || id, isCustom);
     else if (btn.dataset.aicAct === 'primary') setProviderPrimary(id, btn.dataset.name || id);
+    else if (btn.dataset.aicAct === 'primary-clear') setProviderPrimary(id, btn.dataset.name || id, true);
     else if (btn.dataset.aicAct === 'disable') toggleProviderActive(id, btn.dataset.name || id, btn.dataset.active === '1');
     else if (btn.dataset.aicAct === 'recover') recoverProvider(id, btn.dataset.name || id, btn);
   });
@@ -244,19 +245,21 @@ function renderProviders() {
       const displayName = cp.display_name || id;
       const model = cp.default_model || '';
       const isDisabled = cp.is_active === 0;
-      const isPrimary = cp.is_primary === 1;
       const cfg = cfgMap[id] || {};
+      const isPrimary = !!cfg.is_primary;   // 用户级主模型（严格隔离，来自 _build_providers_list 按当前用户解析）
       const configured = !!cfg.configured;
       const keyHint = cfg.key_hint || '';
       const health = _providerHealth[id];
-      const gate = cfg.health;   // 持久熔断态 {status,reason,...} 或 null（认证失效/限流严重）
+      const gate = cfg.health;   // 持久熔断态 {status,reason,...} 或 null（认证失效/限流严重/超时频发）
+      const GATE_LABEL = { disabled_auth: '密钥失效', disabled_ratelimit: '限流严重', disabled_timeout: '超时频发' };
+      const gateLabel = gate ? (GATE_LABEL[gate.status] || '已禁用') : '';
 
       // 健康点：未配→灰；禁用→灰；持久熔断→红；熔断→红；成功率<70%→黄；否则绿
       let dotClass = 'aic-status-unknown', stateText = '未配置';
       if (isDisabled) { dotClass = 'aic-status-unknown'; stateText = '已禁用'; }
       else if (gate) {
         dotClass = 'aic-status-fail';
-        stateText = gate.status === 'disabled_auth' ? '密钥失效 · 已禁用' : '限流严重 · 已禁用';
+        stateText = `${gateLabel} · 已禁用`;
       }
       else if (configured) {
         stateText = keyHint ? `已连接 · ${escHtml(keyHint)}` : '已连接';
@@ -266,10 +269,10 @@ function renderProviders() {
       }
 
       const freeBadge = FREE_PROVIDERS.has(id) ? '<span class="aic-tier-badge free">免费</span>' : '';
-      const primaryBadge = isPrimary ? '<span class="aic-provider-primary-badge" title="全局主要模型（默认+兜底优先）">主要</span>' : '';
-      // 持久熔断徽章：密钥失效 / 限流严重（须重配或过流量测试恢复）
+      const primaryBadge = isPrimary ? '<span class="aic-provider-primary-badge" title="我的主要模型（默认+兜底优先，严格用户级隔离）">主要</span>' : '';
+      // 持久熔断徽章：密钥失效 / 限流严重 / 超时频发（须重配或过流量测试恢复）
       const gateBadge = gate
-        ? `<span class="aic-gate-badge" title="${escHtml(gate.reason || '')}${gate.detail ? ' · ' + escHtml(gate.detail) : ''}">⛔ ${gate.status === 'disabled_auth' ? '密钥失效' : '限流严重'}</span>`
+        ? `<span class="aic-gate-badge" title="${escHtml(gate.reason || '')}${gate.detail ? ' · ' + escHtml(gate.detail) : ''}">⛔ ${gateLabel}</span>`
         : '';
       const recoverBtn = gate
         ? `<button class="btn btn-xs btn-primary" data-aic-act="recover" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" title="用当前 Key 顺序发 3 次真实调用，全过即恢复">测试并恢复</button>`
@@ -279,9 +282,12 @@ function renderProviders() {
       const delBtn = isAdmin
         ? `<button class="btn btn-xs btn-danger" data-aic-act="delete" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-custom="1">删除</button>`
         : '';
-      const primaryBtn = (isAdmin && !isPrimary && !isDisabled)
-        ? `<button class="btn btn-xs" data-aic-act="primary" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" title="设为全局主要模型（默认+兜底优先）">设为主要</button>`
-        : '';
+      // 主模型严格用户级：任何用户都可为自己设/取消（不再限管理员）。设为主要须先配 Key（否则选型层跳过无意义）。
+      const primaryBtn = isPrimary
+        ? `<button class="btn btn-xs" data-aic-act="primary-clear" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" title="取消我的主要模型设置">取消主要</button>`
+        : (configured
+          ? `<button class="btn btn-xs" data-aic-act="primary" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" title="设为我的主要模型（默认+兜底优先）">设为主要</button>`
+          : '');
       const disableBtn = isAdmin
         ? `<button class="btn btn-xs aic-btn-disable" data-aic-act="disable" data-pid="${escHtml(id)}" data-name="${escHtml(displayName)}" data-active="${isDisabled ? '0' : '1'}">${isDisabled ? '启用' : '禁用'}</button>`
         : '';
@@ -633,16 +639,18 @@ async function deleteCustomProvider(id, name) {
   }
 }
 
-async function setProviderPrimary(id, name) {
+async function setProviderPrimary(id, name, clear = false) {
   try {
-    const resp = await fetch(`${CUSTOM_API}/${id}/primary`, { method: 'POST' });
+    // 主模型用户级：clear 时 POST /none/primary（后端把 none/null/- 视作取消自己的主模型）。
+    const resp = await fetch(`${CUSTOM_API}/${clear ? 'none' : id}/primary`, { method: 'POST' });
     if (resp.ok) {
       await loadCustomProviders();
       await loadRoles();
       window.invalidateFollowModel?.();  // 失效卡片预解析缓存，主模型改动即时反映
-      setStatus('aic-provider-status', `已将「${name}」设为主要模型（默认+兜底优先）`, 'ok');
+      setStatus('aic-provider-status',
+        clear ? '已取消我的主要模型设置' : `已将「${name}」设为我的主要模型（默认+兜底优先）`, 'ok');
     } else {
-      toast(resp.status === 403 ? '仅管理员可设置主要模型' : '设置主要失败');
+      toast('操作失败');
     }
   } catch (e) {
     toast('网络错误: ' + e.message);

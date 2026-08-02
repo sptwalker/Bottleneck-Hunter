@@ -678,6 +678,51 @@ class _AIModelsMixin:
             return cur.rowcount > 0
 
 
+    def set_provider_config_primary(self, provider_id: str, user_id: str | None = None) -> None:
+        """设该用户的**主模型**（用户级，退役全局 is_primary）：先清该 user 全部 is_primary，
+        再把目标行置 1（缺行则建）。provider_id 传空 = 仅取消主模型（主模型失效自动清除即用此）。"""
+        uid = user_id if user_id is not None else (self._user_id or "")
+        pid = (provider_id or "").lower().strip()
+        now = _now_iso()
+        with self._write_conn() as conn:
+            conn.execute(
+                "UPDATE provider_configs SET is_primary = 0, updated_at = ? WHERE user_id = ? AND is_primary = 1",
+                (now, uid),
+            )
+            if not pid:
+                return
+            existing = conn.execute(
+                "SELECT id FROM provider_configs WHERE provider_id = ? AND user_id = ?",
+                (pid, uid),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE provider_configs SET is_primary = 1, updated_at = ? WHERE id = ?",
+                    (now, existing["id"]),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO provider_configs
+                       (id, user_id, provider_id, is_primary, updated_at)
+                       VALUES (?,?,?,1,?)""",
+                    (uuid.uuid4().hex[:16], uid, pid, now),
+                )
+
+
+    def get_primary_provider_config(self, user_id: str | None = None) -> str | None:
+        """返回该用户设定的主模型 provider_id，未设则 None。严格用户级，绝不回退全局。"""
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT provider_id FROM provider_configs WHERE user_id = ? AND is_primary = 1 LIMIT 1",
+                (uid,),
+            ).fetchone()
+            return row["provider_id"] if row else None
+        finally:
+            conn.close()
+
+
     def save_test_result(self, provider: str, model: str, test_type: str,
                          score: float, raw_result: str = "{}",
                          user_id: str | None = None) -> str:

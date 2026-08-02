@@ -184,13 +184,11 @@ class CrossValidator:
             user_prompt = builder(scorecard, lang_note)
 
             try:
-                response = await asyncio.wait_for(
-                    llm.ainvoke([
-                        SystemMessage(content=sys_prompt),
-                        HumanMessage(content=user_prompt),
-                    ]),
-                    timeout=120,
-                )
+                # 超时/切换归 FallbackChatModel 内部；全部候选超时才抛（下方 except 捕获，按中性处理）。
+                response = await llm.ainvoke([
+                    SystemMessage(content=sys_prompt),
+                    HumanMessage(content=user_prompt),
+                ])
                 text = response.content.strip()
                 data = _extract_json(text)
 

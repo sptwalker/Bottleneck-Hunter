@@ -117,14 +117,12 @@ class CatalystAnalyzer:
         t0 = _time.monotonic()
 
         try:
-            response = await asyncio.wait_for(
-                self.llm.ainvoke(
-                    [
-                        SystemMessage(content=self._system_prompt),
-                        HumanMessage(content=user_prompt),
-                    ]
-                ),
-                timeout=self.LLM_TIMEOUT,
+            # 超时/切换归 FallbackChatModel 内部；全部候选超时才抛 TimeoutError（下方 except 捕获）。
+            response = await self.llm.ainvoke(
+                [
+                    SystemMessage(content=self._system_prompt),
+                    HumanMessage(content=user_prompt),
+                ]
             )
             elapsed = _time.monotonic() - t0
             text = response.content.strip()

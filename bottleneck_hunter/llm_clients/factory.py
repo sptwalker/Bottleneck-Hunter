@@ -105,30 +105,25 @@ def list_custom_provider_ids() -> list[str]:
     return list(_CUSTOM_PROVIDERS.keys())
 
 
-# ── provider 启用/禁用 + 全局「主要」运行时状态 ──────────────────────
-# 真源是 custom_providers.is_active / is_primary；由 app 启动 + 管理端点推送到此缓存，
-# 供解析层（get_models_for_role / build_fallback_candidates）跳过被禁用、优先主要。
+# ── provider 启用/禁用运行时状态（管理员目录元数据）──────────────────────
+# 真源是 custom_providers.is_active；由 app 启动 + 管理端点推送到此缓存。
+# 说明：主模型（顶栏「设为主要」）已**彻底用户级**（provider_configs.is_primary，
+# 经 resolve_primary_for_user 解析），退役全局 _PRIMARY_PROVIDER；is_active 仅留作管理员
+# 目录元数据（综合测试跳过用），**不再参与用户级选型**（管理员禁用不阻断他人，严格隔离）。
 _INACTIVE_PROVIDERS: set[str] = set()
-_PRIMARY_PROVIDER: str = ""
 
 
-def set_provider_status(inactive_ids, primary_id: str = "") -> None:
-    """刷新「已禁用 provider 集合」与「全局主要 provider」运行时状态。"""
-    global _PRIMARY_PROVIDER
+def set_provider_status(inactive_ids) -> None:
+    """刷新「已禁用 provider 集合」运行时状态（管理员目录元数据；主模型已用户级，不再全局）。"""
     _INACTIVE_PROVIDERS.clear()
     _INACTIVE_PROVIDERS.update((p or "").lower().strip() for p in (inactive_ids or []) if p)
-    _PRIMARY_PROVIDER = (primary_id or "").lower().strip()
-    logger.info("provider 状态已刷新: 禁用=%s 主要=%s", sorted(_INACTIVE_PROVIDERS), _PRIMARY_PROVIDER or "(无)")
+    logger.info("provider 禁用集合已刷新: %s", sorted(_INACTIVE_PROVIDERS) or "(无)")
 
 
 def is_provider_active(provider_id: str) -> bool:
-    """provider 是否启用（未被管理员禁用）。未知的默认视为启用。"""
+    """provider 是否启用（未被管理员禁用）。未知默认视为启用。
+    仅供管理员目录/综合测试跳过，**不参与用户级选型**（选型只认有 Key + 未被该用户熔断）。"""
     return (provider_id or "").lower().strip() not in _INACTIVE_PROVIDERS
-
-
-def get_primary_provider() -> str:
-    """当前全局「主要」provider id（管理员设定），未设则空串。"""
-    return _PRIMARY_PROVIDER
 
 
 # ── provider 覆盖（全局/user_id='' 行的运行时缓存）+ 模型/base_url 解析 ──────────
@@ -162,6 +157,23 @@ def _load_provider_config_from_db(provider_id: str, user_id: str) -> dict | None
         return WatchlistStore().get_provider_config(provider_id, user_id=user_id)
     except Exception:
         return None
+
+
+def resolve_primary_for_user(user_id: str = "") -> str:
+    """解析**当前用户**的主模型 provider_id（用户级，退役全局 _PRIMARY_PROVIDER）。
+    严格隔离：空 uid（无归属，如后台无上下文）→ 返回 ""，绝不回退全局/他人主模型。"""
+    uid = user_id
+    if not uid:
+        from bottleneck_hunter.auth.current_user import get_current_user_id
+        uid = get_current_user_id()
+    if not uid:
+        return ""
+    try:
+        from bottleneck_hunter.watchlist.store import WatchlistStore
+        return (WatchlistStore().get_primary_provider_config(uid) or "").lower().strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
 
 
 def resolve_provider_model(provider: str, user_id: str = "") -> str:
@@ -225,6 +237,7 @@ def create_llm(
     base_url: str | None = None,
     user_id: str = "",
     with_fallback: bool = True,
+    record_only: bool = False,
     **kwargs,
 ) -> BaseChatModel:
     """Create a chat LLM instance for the given provider and model.
@@ -236,19 +249,29 @@ def create_llm(
         base_url: 显式端点（最高优先级）；否则经 resolve_provider_base_url 解析
         user_id: 传入则优先用该用户的 provider_configs 覆盖
         with_fallback: True(默认) 则包一层 FallbackChatModel（调用失败自动换备选模型并提示）。
-            测试/自检类调用（要测这一个具体模型）应传 False。
+        record_only: 仅当 with_fallback=False 时有意义。True → 包**单候选** FallbackChatModel，
+            保留失败记账/熔断升级（喂 provider_gate）但**不跨 provider 切换**，供 fan-out 角色
+            （投委会/圆桌/瓶颈交叉/L1）在保持 N 路多样性的同时把失效节点喂进熔断层。
+            False（默认）→ 真正裸模型，供「只测这一个具体模型」的探活/流量测试/备选候选构造。
     """
     llm = _create_raw_llm(provider, model, api_key=api_key, base_url=base_url, user_id=user_id, **kwargs)
-    if not with_fallback:
-        return llm
-
-    from bottleneck_hunter.llm_clients.fallback import FallbackChatModel, build_fallback_candidates
+    from bottleneck_hunter.llm_clients.fallback import (
+        FallbackChatModel,
+        build_fallback_candidates,
+        wrap_record_only,
+    )
     resolved_model = model or resolve_provider_model(provider, user_id)
+    pid = provider.lower().strip()
+    if not with_fallback:
+        # record_only：单候选记账壳（喂熔断层、无切换）；否则真正裸模型（探活/候选构造）
+        return wrap_record_only(llm, pid, resolved_model) if record_only else llm
+
     temperature = kwargs.get("temperature", 0.3)
     backups = build_fallback_candidates(provider, resolved_model, user_id, temperature)
     if not backups:
-        return llm  # 无可用备选 → 不套壳，保持原样
-    return FallbackChatModel(candidates=[(llm, provider.lower().strip(), resolved_model), *backups])
+        # 无可用备选（单容器/单 provider 用户）→ 仍包单候选记账壳，失败照样喂熔断层，不再盲区
+        return wrap_record_only(llm, pid, resolved_model)
+    return FallbackChatModel(candidates=[(llm, pid, resolved_model), *backups])
 
 
 def _create_raw_llm(
@@ -348,6 +371,12 @@ def get_models_for_role(
     """
     from bottleneck_hunter.auth.current_user import get_current_user_id
     uid = user_id or get_current_user_id()
+
+    def _build(p: str, m: str):
+        """构建选中模型：with_fallback=True → 全链路 fallback；with_fallback=False（fan-out 成员）
+        → 包 record-only 单候选（记账喂熔断层、保留 N 路多样性、不跨 provider 切换）。一处覆盖全部扇出。"""
+        return create_llm(p, m, temperature=temperature, with_fallback=with_fallback,
+                          user_id=uid, record_only=not with_fallback)
     # 角色元信息：多槽 fan-out 角色需返回 N 个多样化模型（交叉验证）
     role_def = None
     try:
@@ -371,24 +400,22 @@ def get_models_for_role(
     # 先于 DB 矩阵与智能调度。仅当主模型可用(启用+有Key+未熔断)才用；否则 fallthrough 到
     # DB矩阵/调度保证可用。供产业链分析/瓶颈评分/供应商评估等重要环节使用。
     if prefer_primary:
-        prim = (_PRIMARY_PROVIDER or "").lower().strip()
-        _act = is_provider_active(prim) if prim else False
+        prim = resolve_primary_for_user(uid)  # 用户级主模型（退役全局 _PRIMARY_PROVIDER，严格隔离）
         _hk = _user_has_llm_key(prim, uid) if prim else False
-        logger.info("[resolve] role=%s prefer_primary=True | _PRIMARY_PROVIDER=%r active=%s has_key=%s | DB矩阵configs=%s",
-                    role_key, _PRIMARY_PROVIDER, _act, _hk,
+        logger.info("[resolve] role=%s prefer_primary=True | 用户主模型=%r has_key=%s | DB矩阵configs=%s",
+                    role_key, prim or "(空)", _hk,
                     [(c.get("provider"), c.get("model")) for c in (configs or [])] or "无")
-        if prim and _act and _hk:
+        if prim and _hk:
             try:
                 from bottleneck_hunter.llm_clients.health import health as _health
-                _open = _health.is_open(uid, prim)
+                _open = _health.is_open(uid, prim)  # 熔断态（已折入 provider_gate 持久禁用）
             except Exception:  # noqa: BLE001
                 _open = False
             if not _open:
                 pm = resolve_provider_model(prim, uid)
                 if pm:
                     try:
-                        _llm = create_llm(prim, pm, temperature=temperature,
-                                          with_fallback=with_fallback, user_id=uid)
+                        _llm = _build(prim, pm)
                         logger.info("[resolve] role=%s 命中【优先级0.5 主模型直用】→ %s/%s（优先于DB矩阵）", role_key, prim, pm)
                         return [(_llm, prim, pm)]  # 多槽角色也退化为单主模型(用户显式要求)
                     except Exception as e:  # noqa: BLE001
@@ -398,20 +425,18 @@ def get_models_for_role(
             else:
                 logger.warning("[resolve] role=%s 主模型 %s 处于熔断，跳过直用→DB矩阵/调度", role_key, prim)
         else:
-            logger.warning("[resolve] role=%s 主模型直用被跳过 | _PRIMARY=%r active=%s has_key=%s → DB矩阵/调度",
-                           role_key, prim or "(空)", _act, _hk)
+            logger.warning("[resolve] role=%s 主模型直用被跳过 | 主模型=%r has_key=%s → DB矩阵/调度",
+                           role_key, prim or "(空)", _hk)
 
     # 优先级1: 数据库矩阵（手动覆盖）。prefer_primary 时仅在主模型不可用后作兜底。
     if configs:
         from bottleneck_hunter.llm_clients import provider_gate
         results = []
         for cfg in configs:
-            if not is_provider_active(cfg["provider"]):
-                continue  # 跳过已被管理员禁用的 provider（其它优先级会兜底到主要/可用模型）
             if provider_gate.is_disabled(uid, cfg["provider"]):
-                continue  # 跳过因认证失效/限流严重被持久禁用的节点（须用户重配/过测试恢复）
+                continue  # 跳过因认证失效/限流严重被该用户持久禁用的节点（须用户重配/过测试恢复）
             try:
-                llm = create_llm(cfg["provider"], cfg["model"], temperature=temperature, with_fallback=with_fallback, user_id=uid)
+                llm = _build(cfg["provider"], cfg["model"])
                 results.append((llm, cfg["provider"], cfg["model"]))
             except Exception as e:
                 logger.warning("create_llm 失败 %s/%s: %s", cfg["provider"], cfg["model"], e)
@@ -432,12 +457,11 @@ def get_models_for_role(
         try:
             from bottleneck_hunter.llm_clients.health import health as _health
             dp = role_def.default_provider
-            if is_provider_active(dp) and not _health.is_open(uid, dp) and _user_has_llm_key(dp, uid):
+            if not _health.is_open(uid, dp) and _user_has_llm_key(dp, uid):
                 model = role_def.default_model or resolve_provider_model(dp, uid)
                 if model and _ctx_fits(model, role_min_ctx):  # 默认模型容量不足→落到优先级4另选
                     try:
-                        _r = [(create_llm(dp, model, temperature=temperature, with_fallback=with_fallback, user_id=uid),
-                               dp, model)]
+                        _r = [(_build(dp, model), dp, model)]
                         if prefer_primary:
                             logger.info("[resolve] role=%s 命中【优先级3 角色默认】→ %s/%s（主模型直用未生效）",
                                         role_key, dp, model)
@@ -454,7 +478,9 @@ def get_models_for_role(
         universe = list_custom_provider_ids()
     except Exception:  # noqa: BLE001
         universe = []
-    chain = ([_PRIMARY_PROVIDER] if _PRIMARY_PROVIDER else []) + universe + [p for p, _ in _FALLBACK_CHAIN]
+    from bottleneck_hunter.llm_clients import provider_gate
+    prim_sched = resolve_primary_for_user(uid)  # 用户级主模型（退役全局 _PRIMARY_PROVIDER）
+    chain = ([prim_sched] if prim_sched else []) + universe + [p for p, _ in _FALLBACK_CHAIN]
     _seen0: set[str] = set()
     chain = [p for p in ((c or "").lower().strip() for c in chain) if p and not (p in _seen0 or _seen0.add(p))]
     policy: dict = {}
@@ -462,7 +488,7 @@ def get_models_for_role(
     try:
         from bottleneck_hunter.llm_clients.health import load_routing_policy, provider_tier, rank_providers
         policy = load_routing_policy(uid, role_key)
-        chain = rank_providers(chain, uid, _PRIMARY_PROVIDER, policy=policy, role_key=role_key)
+        chain = rank_providers(chain, uid, prim_sched, policy=policy, role_key=role_key)
         tier_of = provider_tier
     except Exception:  # noqa: BLE001
         pass
@@ -470,8 +496,10 @@ def get_models_for_role(
     seen_prov: set[str] = set()
     deferred: list[tuple[str, str]] = []  # 容量不足者(provider, model)：够大的选完仍缺槽位才回填
     for provider in chain:
-        if not is_provider_active(provider) or provider in seen_prov:
+        if provider in seen_prov:
             continue
+        if provider_gate.is_disabled(uid, provider):
+            continue  # 跳过因认证失效/限流严重被该用户持久熔断的节点（无重复等待挂死节点）
         if not _user_has_llm_key(provider, uid):
             continue
         model = resolve_provider_model(provider, uid)
@@ -482,7 +510,7 @@ def get_models_for_role(
             deferred.append((provider, model))  # 容量不足重角色，暂不选
             continue
         try:
-            llm = create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid)
+            llm = _build(provider, model)
         except Exception:
             continue
         results.append((llm, provider, model))
@@ -490,7 +518,7 @@ def get_models_for_role(
         # 误报"免费不可用"并每次刷屏；只有"免费本可用但当前熔断/失效"才提示）。
         if (len(results) == 1 and tier_of and policy.get("prefer_tier") == "free"
                 and tier_of(provider) == "paid"
-                and any(tier_of(c) == "free" and is_provider_active(c) and _user_has_llm_key(c, uid)
+                and any(tier_of(c) == "free" and not provider_gate.is_disabled(uid, c) and _user_has_llm_key(c, uid)
                         for c in chain)):
             try:
                 from bottleneck_hunter.llm_clients.fallback import push_notice
@@ -506,7 +534,7 @@ def get_models_for_role(
         if len(results) >= n_slots:
             break
         try:
-            llm = create_llm(provider, model, temperature=temperature, with_fallback=with_fallback, user_id=uid)
+            llm = _build(provider, model)
         except Exception:
             continue
         results.append((llm, provider, model))

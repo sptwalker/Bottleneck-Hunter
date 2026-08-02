@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextvars import ContextVar
 
@@ -22,6 +23,14 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from pydantic import ConfigDict
 
 logger = logging.getLogger(__name__)
+
+# ── 候选内部硬超时（Part B）────────────────────────────────
+# 每个候选的 ainvoke/astream 显式包 asyncio.wait_for(_CAND_TIMEOUT)，因 SDK timeout 对
+# 流式/连接级挂死不可靠。超时抛 asyncio.TimeoutError（是 Exception，非 CancelledError）→
+# 被逐候选 except 捕获 → 记账(reason=请求超时) + 前进下一候选。这让「无感切换」在候选中途
+# 可达、超时喂进 provider_gate，且**内部**兜底后不再需要 chain/* 外层 wait_for（后者抛
+# CancelledError 会穿透 except Exception，正是自毁根因）。
+_CAND_TIMEOUT = float(os.getenv("BH_LLM_TIMEOUT", "60"))
 
 # ── 提示 sink（请求级）──────────────────────────────────
 _notices: ContextVar[list | None] = ContextVar("llm_fallback_notices", default=None)
@@ -164,6 +173,23 @@ def _build_message(fp: str, fm: str, reason: str, np: str, nm: str) -> dict:
     }
 
 
+def _live_candidates(candidates: list) -> list:
+    """剔除运行中已被 provider_gate 持久禁用的候选（至少保留末候选兜底）。
+    同一 FallbackChatModel 实例常被整轮分析复用——某节点跑到一半被升级禁用后，
+    后续调用不应再白等它超时(120s×N)，直接走健康备选。这正是「自动切换其他 LLM」。
+    禁用态读 30s TTL 缓存，开销极小；fail-silent 保持现状。"""
+    if len(candidates) <= 1:
+        return candidates
+    try:
+        from bottleneck_hunter.auth.current_user import get_current_user_id
+        from bottleneck_hunter.llm_clients import provider_gate
+        uid = get_current_user_id()
+        live = [c for c in candidates if not provider_gate.is_disabled(uid, c[1])]
+        return live or candidates[-1:]
+    except Exception:  # noqa: BLE001
+        return candidates
+
+
 class FallbackChatModel(BaseChatModel):
     """按顺序尝试候选 `[(llm, provider, model), ...]`，失败即换下一个并提示。"""
 
@@ -184,12 +210,13 @@ class FallbackChatModel(BaseChatModel):
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         last_exc = None
         first_reason = None
-        for i, (llm, provider, model) in enumerate(self.candidates):
+        cands = _live_candidates(self.candidates)
+        for i, (llm, provider, model) in enumerate(cands):
             t0 = time.monotonic()
             try:
-                msg = await llm.ainvoke(messages, stop=stop, **kwargs)
+                msg = await asyncio.wait_for(llm.ainvoke(messages, stop=stop, **kwargs), timeout=_CAND_TIMEOUT)
                 vok, vreason = _validate(msg)
-                is_last = i == len(self.candidates) - 1
+                is_last = i == len(cands) - 1
                 accept = vok or is_last  # 末候选即便格式不佳也接受，不为格式问题整体失败
                 # 接受即视为该次可用 → 记成功、不开熔断（末候选被返回给用户，是"用了它"不是"它挂了"）
                 _record_call(provider, model, accept, t0, "" if accept else vreason)
@@ -215,11 +242,17 @@ class FallbackChatModel(BaseChatModel):
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
         last_exc = None
         first_reason = None
-        for i, (llm, provider, model) in enumerate(self.candidates):
+        cands = _live_candidates(self.candidates)
+        for i, (llm, provider, model) in enumerate(cands):
             emitted = False
             t0 = time.monotonic()
             try:
-                async for chunk in llm.astream(messages, stop=stop, **kwargs):
+                aiter = llm.astream(messages, stop=stop, **kwargs).__aiter__()
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(aiter.__anext__(), timeout=_CAND_TIMEOUT)
+                    except StopAsyncIteration:
+                        break
                     emitted = True
                     yield ChatGenerationChunk(message=chunk)
                 _record_call(provider, model, True, t0)
@@ -243,12 +276,13 @@ class FallbackChatModel(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         last_exc = None
         first_reason = None
-        for i, (llm, provider, model) in enumerate(self.candidates):
+        cands = _live_candidates(self.candidates)
+        for i, (llm, provider, model) in enumerate(cands):
             t0 = time.monotonic()
             try:
                 msg = llm.invoke(messages, stop=stop, **kwargs)
                 vok, vreason = _validate(msg)
-                is_last = i == len(self.candidates) - 1
+                is_last = i == len(cands) - 1
                 accept = vok or is_last
                 _record_call(provider, model, accept, t0, "" if accept else vreason)
                 if accept:
@@ -272,7 +306,8 @@ class FallbackChatModel(BaseChatModel):
     def _stream(self, messages, stop=None, run_manager=None, **kwargs):
         last_exc = None
         first_reason = None
-        for i, (llm, provider, model) in enumerate(self.candidates):
+        cands = _live_candidates(self.candidates)
+        for i, (llm, provider, model) in enumerate(cands):
             emitted = False
             t0 = time.monotonic()
             try:
@@ -297,12 +332,21 @@ class FallbackChatModel(BaseChatModel):
             raise last_exc
 
 
+def wrap_record_only(llm, provider: str, model: str) -> FallbackChatModel:
+    """单候选 FallbackChatModel：只记账（喂 health + provider_gate 熔断层）+ 内部硬超时，
+    **无**跨 provider 收敛切换 —— 供 fan-out 角色（投委会/圆桌/瓶颈交叉/L1 宏观/vip 抽取）
+    在保持 N 路多样性的同时，把失效/超时节点喂进熔断层，由下一轮选型自动跳过（Q2「记录+选型层跳过」）。
+    ponytail: 单候选即「只记账不切换」，无需新类；同步路径(_generate/_stream)靠 SDK timeout 兜底。"""
+    return FallbackChatModel(candidates=[(llm, (provider or "").lower().strip(), model)])
+
+
 def build_fallback_candidates(primary_provider: str, primary_model: str,
                               user_id: str = "", temperature: float = 0.3) -> list:
-    """构造备选候选列表（不含主模型）：全局「主要」provider 前置，其后接用户全部已注册
-    provider + 应急链；仅取当前用户已配 KEY、启用中、且不同于主模型的 provider
-    （严格隔离 + 跳过被禁用）。不再只提供硬编码 4 家应急链——否则主模型失效时，
-    用户配的其它 provider 无法被自动替换。"""
+    """构造备选候选列表（不含主模型）：**当前用户**的主模型 provider 前置，其后接用户全部已注册
+    provider + 应急链；仅取当前用户已配 KEY、未被该用户熔断、且不同于主模型的 provider
+    （严格用户级隔离）。不再查全局 is_active（管理员禁用不阻断他人）；不再只提供硬编码应急链——
+    否则主模型失效时，用户配的其它 provider 无法被自动替换。候选以 max_retries=0 构造（快速失败，
+    单次尝试 + 内部硬超时 + 立即切换，消灭对挂死节点的重复等待）。"""
     # 延迟导入避免与 factory 循环依赖
     from bottleneck_hunter.auth.current_user import get_current_user_id
     from bottleneck_hunter.llm_clients import provider_gate
@@ -310,30 +354,28 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
         _FALLBACK_CHAIN,
         _user_has_llm_key,
         create_llm,
-        get_primary_provider,
-        is_provider_active,
         list_custom_provider_ids,
+        resolve_primary_for_user,
         resolve_provider_model,
     )
 
     uid = user_id or get_current_user_id()
+    prim_user = resolve_primary_for_user(uid)  # 用户级主模型（退役全局 get_primary_provider）
     out = []
     primary = (primary_provider or "").lower().strip()
     try:
         universe = list_custom_provider_ids()
     except Exception:
         universe = []
-    # 备选链 = 全局主要 provider 前置 + 用户全部已注册 provider + 应急链兜底
-    chain = ([get_primary_provider()] if get_primary_provider() else []) + list(universe) + [p for p, _ in _FALLBACK_CHAIN]
+    # 备选链 = 用户主模型前置 + 用户全部已注册 provider + 应急链兜底
+    chain = ([prim_user] if prim_user else []) + list(universe) + [p for p, _ in _FALLBACK_CHAIN]
     seen: set[str] = set()
     for provider in chain:
         provider = (provider or "").lower().strip()
         if not provider or provider == primary or provider in seen:
             continue
         seen.add(provider)
-        if not is_provider_active(provider):  # 跳过已被管理员禁用的 provider
-            continue
-        if provider_gate.is_disabled(uid, provider):  # 跳过认证失效/限流严重被持久禁用的节点
+        if provider_gate.is_disabled(uid, provider):  # 跳过认证失效/限流严重被该用户持久禁用的节点
             continue
         if not _user_has_llm_key(provider, uid):  # 严格：只用当前用户自己配了 KEY 的备选
             continue
@@ -341,7 +383,8 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
         if not model:
             continue
         try:
-            llm = create_llm(provider, model, temperature=temperature, with_fallback=False, user_id=uid)
+            llm = create_llm(provider, model, temperature=temperature, with_fallback=False,
+                             user_id=uid, max_retries=0)
             out.append((llm, provider, model))
         except Exception:  # noqa: BLE001
             continue
@@ -351,7 +394,7 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
     try:
         from bottleneck_hunter.llm_clients.health import load_routing_policy, rank_providers
         policy = load_routing_policy(uid, "")
-        ranked = rank_providers([c[1] for c in out], uid, get_primary_provider(), policy=policy)
+        ranked = rank_providers([c[1] for c in out], uid, prim_user, policy=policy)
         pos = {p: i for i, p in enumerate(ranked)}
         out.sort(key=lambda c: pos.get(c[1], 999))
     except Exception:  # noqa: BLE001

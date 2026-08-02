@@ -107,18 +107,22 @@ def _build_providers_list(user_id: str = "", include_unconfigured: bool = False)
     except Exception:
         return providers
 
-    # 当前用户自己的 Key 提示（provider -> key_hint）
+    # 当前用户自己的 Key 提示（provider -> key_hint）+ 用户级主模型
     user_hints: dict[str, str] = {}
+    user_primary = ""
     if user_id:
         try:
             for k in _auth_store.get_user_api_keys(user_id):
                 user_hints[k["provider"]] = k.get("key_hint", "") or ""
         except Exception:
             pass
+        try:
+            from bottleneck_hunter.watchlist.store import WatchlistStore
+            user_primary = (WatchlistStore().get_primary_provider_config(user_id) or "").lower().strip()
+        except Exception:  # noqa: BLE001
+            user_primary = ""
 
     for cp in rows:
-        if cp.get("is_active") == 0:
-            continue
         pid = cp["provider_id"]
         has_key = pid in user_hints
         health = None
@@ -137,6 +141,7 @@ def _build_providers_list(user_id: str = "", include_unconfigured: bool = False)
             "base_url": cp.get("base_url", "") or "",
             "key_hint": user_hints.get(pid, ""),  # 当前用户自己的 hint
             "health": health,                     # {status,reason,detail,disabled_at} 或 None
+            "is_primary": pid == user_primary,    # 当前用户自己设定的主模型（严格用户级隔离）
         })
     return providers
 
@@ -244,7 +249,7 @@ _RECOVER_CALLS = 3  # 流量测试：顺序发 N 次真实调用，全过才算�
 
 @router.post("/provider/{provider}/recover")
 async def recover_provider(provider: str, user: dict = Depends(get_current_user)):
-    """流量测试恢复被持久禁用（密钥失效/限流严重）的节点：用当前用户 key 顺序发
+    """流量测试恢复被持久禁用（密钥失效/限流严重/超时频发）的节点：用当前用户 key 顺序发
     _RECOVER_CALLS 次真实调用，全过 → 解除禁用；任一失败 → 保留禁用并回失败原因。"""
     from langchain_core.messages import HumanMessage
 

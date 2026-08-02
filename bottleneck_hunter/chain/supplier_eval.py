@@ -393,14 +393,11 @@ class SupplierEvaluator:
 }}"""
 
         try:
-            response = await asyncio.wait_for(
-                self.llm.ainvoke(
-                    [
-                        SystemMessage(content=self._system_prompt),
-                        HumanMessage(content=user_prompt),
-                    ]
-                ),
-                timeout=120,
+            response = await self.llm.ainvoke(
+                [
+                    SystemMessage(content=self._system_prompt),
+                    HumanMessage(content=user_prompt),
+                ]
             )
             text = response.content.strip()
             text = strip_fences(text)
