@@ -826,6 +826,11 @@ def build_account_overview(wl_store, *, account_ref: str = "") -> dict:
 def _canonical_cost_map(wl_store, account_ref: str) -> dict[str, dict]:
     """规范层最新快照的逐标的成本/盈亏（Phase A：结算单直接解析所得）。
     返回 {symbol: {avg_cost, cost_basis, unrealized_pnl, as_of_date}}。无成本(结单未含)则值为 0/None。
+
+    ★成本结转：胜出快照若是「仓盘导出(position_report)」这类无成本列的薄快照，其 cost_basis=0 → upnl 恒 0。
+    此时按 symbol 回退到该标的**最近一期带成本的历史快照**取成本基，未实现盈亏用**当前市值**重算
+    (upnl = 当前 MV − 历史 cost_basis)。仅当历史股数==当前股数(同一持仓、未买卖)才结转，否则诚实留 None
+    (股数变动后旧成本基已失真，不臆造)。—— 修「最新导入的仓盘无成本列致全部持仓未实现收益为 0」。
     """
     rows, selected = _latest_positions(wl_store, "", account_ref)  # 复用"胜出快照"选择逻辑
     conn = wl_store._connect()
@@ -839,24 +844,61 @@ def _canonical_cost_map(wl_store, account_ref: str) -> dict[str, dict]:
             where.append("p.source_doc_id = ?")
             params.append(selected["doc_id"])
         q, p = wl_store._filtered(
-            f"""SELECT i.symbol, p.as_of_date, p.avg_cost, p.cost_basis, p.unrealized_pnl, p.market_value_base
+            f"""SELECT i.symbol, p.quantity, p.as_of_date, p.avg_cost, p.cost_basis,
+                      p.unrealized_pnl, p.market_value_base
                FROM positions p JOIN instruments i ON i.id = p.instrument_id
                WHERE {' AND '.join(where)}""",
             tuple(params), table="p")
         out: dict[str, dict] = {}
         for r in conn.execute(q, p).fetchall():
             cb = r["cost_basis"] or 0.0
+            ac = r["avg_cost"] or 0.0
             mv = r["market_value_base"] or 0.0
+            upnl = r["unrealized_pnl"] or 0.0
+            carried = False
+            if cb <= 0:   # 本期快照无成本 → 结转历史同标的成本基
+                prior = _prior_cost_for_symbol(
+                    conn, wl_store, account_ref, r["symbol"], r["as_of_date"], r["quantity"])
+                if prior:
+                    cb, ac = prior["cost_basis"], prior["avg_cost"]
+                    upnl = round(mv - cb, 2)   # 成本历史、市值当前：诚实的当前未实现盈亏
+                    carried = True
             out[r["symbol"]] = {
-                "avg_cost": round(r["avg_cost"] or 0.0, 4) or None,
+                "avg_cost": round(ac, 4) or None,
                 "cost_basis": round(cb, 2) or None,
-                "unrealized_pnl": round(r["unrealized_pnl"] or 0.0, 2) if cb else None,
+                "unrealized_pnl": round(upnl, 2) if cb else None,
                 "unrealized_pnl_pct": round((mv - cb) / cb * 100, 2) if cb else None,
                 "as_of_date": r["as_of_date"],
+                "cost_carried_from": prior["as_of_date"] if carried else None,  # 披露口径
             }
         return out
     finally:
         conn.close()
+
+
+def _prior_cost_for_symbol(conn, wl_store, account_ref, symbol, before_date, cur_qty):
+    """该标的 before_date 之前**最近一期带成本**的快照 → {avg_cost, cost_basis, as_of_date}；无则 None。
+    仅当历史股数≈当前股数(同一持仓未买卖)才返回，否则 None(股数变动旧成本失真、不结转)。
+    """
+    where = ["i.symbol = ?", "p.cost_basis > 0", "p.as_of_date < ?", "p.quantity != 0"]
+    params: list = [symbol, before_date]
+    if account_ref:
+        where.append("p.account_ref = ?")
+        params.append(account_ref)
+    q, p = wl_store._filtered(
+        f"""SELECT p.avg_cost, p.cost_basis, p.quantity, p.as_of_date
+           FROM positions p JOIN instruments i ON i.id = p.instrument_id
+           WHERE {' AND '.join(where)} ORDER BY p.as_of_date DESC LIMIT 1""",
+        tuple(params), table="p")
+    row = conn.execute(q, p).fetchone()
+    if not row:
+        return None
+    # 股数变动 → 旧总成本基失真，不结转（相对容差 1%，容许结单四舍五入/拆股微差）
+    pq, cq = row["quantity"] or 0.0, cur_qty or 0.0
+    if cq and abs(pq - cq) / cq > 0.01:
+        return None
+    return {"avg_cost": row["avg_cost"] or 0.0, "cost_basis": row["cost_basis"] or 0.0,
+            "as_of_date": row["as_of_date"]}
 
 
 def _price_coverage(wl_store, holdings: list, derivative_exposure: list) -> dict:

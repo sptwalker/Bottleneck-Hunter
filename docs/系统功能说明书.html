@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BottleneckHunter 瓶颈猎手 · 系统功能说明书</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --sub:#9aa7b4;
+    --line:#2b3543; --accent:#4da3ff; --accent2:#7ee787; --warn:#ffca55; --danger:#ff6b6b;
+    --gold:#e3b341; --vip:#c792ea; --chip:#22303f;
+    --shadow:0 6px 24px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.7;font-size:15px;
+  }
+  a{color:var(--accent);text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+
+  /* ── 封面 ── */
+  .hero{
+    position:relative;overflow:hidden;text-align:center;padding:70px 20px 56px;
+    background:radial-gradient(1200px 400px at 50% -10%,rgba(77,163,255,.18),transparent 60%),
+               linear-gradient(180deg,#0f1620,#0d1117);
+    border-bottom:1px solid var(--line);
+  }
+  .hero h1{font-size:38px;margin:0 0 6px;letter-spacing:1px;
+    background:linear-gradient(90deg,#4da3ff,#7ee787 60%,#c792ea);
+    -webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800}
+  .hero .en{color:var(--sub);letter-spacing:3px;font-size:13px;text-transform:uppercase}
+  .hero .tag{color:var(--ink);font-size:18px;margin:16px auto 4px;max-width:720px}
+  .hero .meta{color:var(--sub);font-size:12.5px;margin-top:18px}
+  .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:20px}
+  .badge{background:var(--chip);border:1px solid var(--line);border-radius:30px;
+    padding:6px 15px;font-size:12.5px;color:var(--sub)}
+  .badge b{color:var(--accent2)}
+
+  /* ── 导航 ── */
+  nav.toc{position:sticky;top:0;z-index:40;background:rgba(13,17,23,.92);
+    backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  nav.toc .wrap{display:flex;gap:6px;flex-wrap:wrap;padding:10px 20px}
+  nav.toc a{color:var(--sub);font-size:13px;padding:6px 12px;border-radius:8px;transition:.15s}
+  nav.toc a:hover{color:var(--ink);background:var(--panel2)}
+
+  /* ── 区块 ── */
+  section{padding:52px 0 8px}
+  .sec-head{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+  .sec-num{flex:0 0 auto;width:44px;height:44px;border-radius:12px;display:grid;place-items:center;
+    font-weight:800;font-size:19px;color:#0d1117}
+  .sec-head h2{font-size:25px;margin:0}
+  .sec-lead{color:var(--sub);margin:6px 0 26px;max-width:820px}
+  .c-vip .sec-num{background:linear-gradient(135deg,#c792ea,#8b5cf6)}
+  .c-flow .sec-num{background:linear-gradient(135deg,#4da3ff,#2563eb)}
+  .c-dc .sec-num{background:linear-gradient(135deg,#7ee787,#22a06b)}
+  .c-ext .sec-num{background:linear-gradient(135deg,#ffca55,#e3891a)}
+  .c-road .sec-num{background:linear-gradient(135deg,#94a3b8,#64748b)}
+
+  /* ── 功能卡 ── */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px;
+    box-shadow:var(--shadow);position:relative;transition:.15s;overflow:hidden}
+  .card:hover{border-color:var(--accent);transform:translateY(-2px)}
+  .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
+  .c-vip .card::before{background:var(--vip)} .c-flow .card::before{background:var(--accent)}
+  .c-dc .card::before{background:var(--accent2)} .c-ext .card::before{background:var(--warn)}
+  .card h3{margin:0 0 8px;font-size:16px;display:flex;align-items:flex-start;gap:8px}
+  .cat{display:inline-block;font-size:11px;color:var(--sub);background:var(--chip);
+    border:1px solid var(--line);border-radius:6px;padding:2px 8px;margin-bottom:9px}
+  .card p{margin:0 0 10px;color:#cbd5e1;font-size:13.5px}
+  .bound{background:var(--panel2);border:1px dashed var(--line);border-radius:9px;
+    padding:9px 11px;font-size:12px;color:var(--sub);margin-top:8px}
+  .bound b{color:var(--warn);font-weight:600}
+  details.ev{margin-top:8px}
+  details.ev summary{cursor:pointer;font-size:11.5px;color:var(--sub);outline:none;user-select:none}
+  details.ev summary:hover{color:var(--accent)}
+  details.ev code{display:block;margin-top:6px;font-size:11px;color:#8bb9e6;
+    background:#0b0f14;border-radius:7px;padding:8px;word-break:break-all;line-height:1.6;
+    font-family:"SFMono-Regular",Consolas,monospace}
+
+  /* ── 图示通用 ── */
+  .figure{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:22px;margin:8px 0 30px;box-shadow:var(--shadow)}
+  .figure .cap{color:var(--sub);font-size:12.5px;text-align:center;margin-top:12px}
+  .figure svg{display:block;width:100%;height:auto}
+
+  /* ── 诚实原则条 ── */
+  .honesty{background:linear-gradient(180deg,rgba(255,202,85,.08),transparent);
+    border:1px solid rgba(255,202,85,.3);border-radius:14px;padding:20px 22px;margin:12px 0 34px}
+  .honesty h4{margin:0 0 12px;color:var(--warn);font-size:16px}
+  .honesty ul{margin:0;padding-left:18px;columns:2;column-gap:28px}
+  .honesty li{margin-bottom:8px;font-size:13px;color:#cbd5e1;break-inside:avoid}
+
+  /* ── 路线图 ── */
+  .road{position:relative;margin-left:8px;padding-left:26px;border-left:2px solid var(--line)}
+  .road-item{position:relative;margin-bottom:16px;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:14px 16px}
+  .road-item::before{content:"";position:absolute;left:-33px;top:18px;width:12px;height:12px;
+    border-radius:50%;border:2px solid var(--bg)}
+  .st-done::before{background:var(--accent2)} .st-yagni::before{background:var(--warn)}
+  .st-never::before{background:var(--danger)} .st-plan::before{background:var(--accent)}
+  .road-item h4{margin:0 0 6px;font-size:15px}
+  .road-item .status{font-size:11.5px;padding:2px 9px;border-radius:20px;font-weight:600;
+    display:inline-block;margin-bottom:7px}
+  .status.done{background:rgba(126,231,135,.15);color:var(--accent2);border:1px solid rgba(126,231,135,.4)}
+  .status.yagni{background:rgba(255,202,85,.14);color:var(--warn);border:1px solid rgba(255,202,85,.4)}
+  .status.never{background:rgba(255,107,107,.14);color:var(--danger);border:1px solid rgba(255,107,107,.4)}
+  .status.plan{background:rgba(77,163,255,.14);color:var(--accent);border:1px solid rgba(77,163,255,.4)}
+  .road-item p{margin:0;color:#cbd5e1;font-size:13px}
+  .road-item .src{color:var(--sub);font-size:11px;margin-top:6px}
+
+  .subhead{display:flex;align-items:center;gap:10px;margin:30px 0 14px;font-size:15px;color:var(--ink)}
+  .subhead .dot{width:9px;height:9px;border-radius:50%;background:var(--accent2);flex:0 0 auto}
+  .subhead .n{color:var(--sub);font-size:12px;font-weight:400}
+  .flowsteps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:6px 0 8px}
+  .step{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .step .no{width:28px;height:28px;border-radius:8px;background:var(--accent);color:#0d1117;
+    display:grid;place-items:center;font-weight:800;font-size:15px;margin-bottom:9px}
+  .step h4{margin:0 0 6px;font-size:15px} .step p{margin:0;font-size:13px;color:#cbd5e1}
+  @media(max-width:640px){.flowsteps{grid-template-columns:1fr}}
+  footer{border-top:1px solid var(--line);margin-top:50px;padding:30px 0 50px;color:var(--sub);
+    font-size:12.5px;text-align:center}
+  .kbd{font-family:Consolas,monospace;background:var(--chip);border:1px solid var(--line);
+    border-radius:5px;padding:1px 6px;font-size:12px;color:var(--accent2)}
+  @media(max-width:640px){.honesty ul{columns:1}.hero h1{font-size:29px}.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="en">BottleneckHunter</div>
+  <h1>瓶颈猎手 · 系统功能说明书</h1>
+  <p class="tag">一套 AI 驱动的产业链瓶颈选股与私人投资参谋系统 —— 从「找卡脖子环节」到「盯自己的账本」，全程诚实标注、止于建议。</p>
+  <div class="badges">
+    <span class="badge">🏭 <b>产业链瓶颈</b>选股三步法</span>
+    <span class="badge">🧭 <b>L1-L4</b> 四层决策中心</span>
+    <span class="badge">💼 <b>VIP</b> 私人投资参谋</span>
+    <span class="badge">🔌 <b>11+</b> AI 模型即插即用</span>
+  </div>
+  <p class="meta">面向普通用户 · 本说明书所有功能均经代码核实 · 编写于 2026-08</p>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a href="#overview">总览</a>
+  <a href="#vip">💼 VIP 私人顾问</a>
+  <a href="#flow">🏭 选股分析流程</a>
+  <a href="#dc">🧭 决策中心</a>
+  <a href="#ext">🔌 系统拓展能力</a>
+  <a href="#road">🚀 未来模块</a>
+  <a href="#honesty">🛡 诚实边界</a>
+</div></nav>
+
+<main class="wrap">
+
+<!-- ══════════ 总览 ══════════ -->
+<section id="overview">
+  <div class="sec-head c-flow"><div class="sec-num">◆</div><h2>系统总览：它到底能帮你做什么</h2></div>
+  <p class="sec-lead">BottleneckHunter 有三个各自独立又能打通的形态。你可以只用其中一个，也可以让它们连成一条从「选股」到「跟踪决策」再到「管理自己真实账户」的闭环。</p>
+
+  <div class="figure">
+    <svg viewBox="0 0 960 300" role="img" aria-label="系统三大形态架构图">
+      <defs>
+        <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+          <path d="M0,0 L8,3 L0,6 Z" fill="#4da3ff"/>
+        </marker>
+        <linearGradient id="gf" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#1e3a5f"/><stop offset="1" stop-color="#162736"/>
+        </linearGradient>
+        <linearGradient id="gd" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#1c3d2b"/><stop offset="1" stop-color="#16261c"/>
+        </linearGradient>
+        <linearGradient id="gv" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#33244a"/><stop offset="1" stop-color="#241a33"/>
+        </linearGradient>
+      </defs>
+      <!-- 三大块 -->
+      <g>
+        <rect x="30" y="60" width="270" height="180" rx="14" fill="url(#gf)" stroke="#2b4a6a"/>
+        <text x="165" y="92" text-anchor="middle" fill="#4da3ff" font-size="17" font-weight="700">🏭 选股分析流程</text>
+        <text x="165" y="116" text-anchor="middle" fill="#9aa7b4" font-size="12.5">Serenity 三步法（CLI / 向导）</text>
+        <text x="165" y="146" text-anchor="middle" fill="#cbd5e1" font-size="12.5">① 产业链拆解</text>
+        <text x="165" y="168" text-anchor="middle" fill="#cbd5e1" font-size="12.5">② 瓶颈评分 + 供应商检索</text>
+        <text x="165" y="190" text-anchor="middle" fill="#cbd5e1" font-size="12.5">③ 多模型交叉验证 / 圆桌辩论</text>
+        <text x="165" y="216" text-anchor="middle" fill="#7ee787" font-size="12">→ 产出：可关注股票名单</text>
+      </g>
+      <g>
+        <rect x="345" y="60" width="270" height="180" rx="14" fill="url(#gd)" stroke="#2c5a3f"/>
+        <text x="480" y="92" text-anchor="middle" fill="#7ee787" font-size="17" font-weight="700">🧭 决策中心</text>
+        <text x="480" y="116" text-anchor="middle" fill="#9aa7b4" font-size="12.5">Web 平台 · 持续跟踪</text>
+        <text x="480" y="146" text-anchor="middle" fill="#cbd5e1" font-size="12.5">观察池 + L1-L4 四层决策</text>
+        <text x="480" y="168" text-anchor="middle" fill="#cbd5e1" font-size="12.5">投委会评审 + 模拟交易</text>
+        <text x="480" y="190" text-anchor="middle" fill="#cbd5e1" font-size="12.5">自动复盘 + 定时调度</text>
+        <text x="480" y="216" text-anchor="middle" fill="#7ee787" font-size="12">→ 产出：可执行决策与虚拟盘</text>
+      </g>
+      <g>
+        <rect x="660" y="60" width="270" height="180" rx="14" fill="url(#gv)" stroke="#4a3568"/>
+        <text x="795" y="92" text-anchor="middle" fill="#c792ea" font-size="17" font-weight="700">💼 VIP 私人顾问</text>
+        <text x="795" y="116" text-anchor="middle" fill="#9aa7b4" font-size="12.5">周期性投资参谋（管理员专属）</text>
+        <text x="795" y="146" text-anchor="middle" fill="#cbd5e1" font-size="12.5">导入券商结单 → 重估账户</text>
+        <text x="795" y="168" text-anchor="middle" fill="#cbd5e1" font-size="12.5">收益/风险/归因 + 瓶颈布局</text>
+        <text x="795" y="190" text-anchor="middle" fill="#cbd5e1" font-size="12.5">投委会评审 + 荐新 + 对话</text>
+        <text x="795" y="216" text-anchor="middle" fill="#c792ea" font-size="12">→ 产出：一屏回望 + 前瞻建议</text>
+      </g>
+      <path d="M300,150 L343,150" stroke="#4da3ff" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M615,150 L658,150" stroke="#4da3ff" stroke-width="2" marker-end="url(#arr)"/>
+      <text x="480" y="272" text-anchor="middle" fill="#64748b" font-size="11.5">选出的股票可放进观察池持续跟踪 · 决策中心的产业链瓶颈评分反哺 VIP 账户主题分析</text>
+    </svg>
+    <div class="cap">图 1 · 三大形态：选股分析流程 → 决策中心 → VIP 私人顾问，可独立使用亦可打通</div>
+  </div>
+
+  <div class="honesty" style="margin-bottom:10px">
+    <h4>⚖ 贯穿全系统的一条底线：诚实，止于建议</h4>
+    <ul style="columns:1">
+      <li>所有 AI 生成的分数、排名、建议都是<b>研究参考</b>，不构成投资建议，系统<b>绝不自动下单、不碰真实资金</b>。</li>
+      <li>数据不足时<b>诚实留空或降级</b>（标注「样本不足 / 未核到 / 基于 N 期结单·非逐日」），绝不用一两个点冒充统计量、绝不编造数字。</li>
+      <li>AI 报告里每个金额/占比/股数都会与真实入库数据<b>逐一核对</b>，没核到当场标「⚠ 未核到」。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══════════ VIP 私人顾问 ══════════ -->
+<section id="vip">
+  <div class="sec-head c-vip"><div class="sec-num">💼</div><h2>VIP 私人投资参谋</h2></div>
+  <p class="sec-lead">这是给你自己真实券商账户配的一位「周期性投资参谋」。你把券商月结单/交易流水导进来，它把散落在多家券商、多币种、多产品（股票+累购累沽+FCN 结构性产品）的账本汇成一屏，算清真实收益与风险，再基于你的产业链瓶颈布局给出<b>加/减/持/对冲</b>建议——只出建议、绝不下单。</p>
+
+  <div class="figure">
+    <svg viewBox="0 0 960 360" role="img" aria-label="VIP 顾问数据流">
+      <defs>
+        <marker id="arr2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#c792ea"/></marker>
+      </defs>
+      <!-- 5 阶段管道 -->
+      <g font-size="12.5">
+        <rect x="20" y="30" width="170" height="300" rx="12" fill="#1a1420" stroke="#4a3568"/>
+        <text x="105" y="56" text-anchor="middle" fill="#c792ea" font-size="14" font-weight="700">① 导入</text>
+        <text x="105" y="82" text-anchor="middle" fill="#cbd5e1">花旗 / 招银 / 野村</text>
+        <text x="105" y="102" text-anchor="middle" fill="#cbd5e1">统一入库</text>
+        <text x="105" y="126" text-anchor="middle" fill="#9aa7b4">PDF / CSV / Excel</text>
+        <text x="105" y="148" text-anchor="middle" fill="#9aa7b4">加密结单解锁</text>
+        <text x="105" y="170" text-anchor="middle" fill="#9aa7b4">去重 + 回填</text>
+        <text x="105" y="192" text-anchor="middle" fill="#9aa7b4">多账户归户</text>
+
+        <rect x="210" y="30" width="170" height="300" rx="12" fill="#141a20" stroke="#2c5a3f"/>
+        <text x="295" y="56" text-anchor="middle" fill="#7ee787" font-size="14" font-weight="700">② 重估</text>
+        <text x="295" y="82" text-anchor="middle" fill="#cbd5e1">统一美元口径</text>
+        <text x="295" y="104" text-anchor="middle" fill="#cbd5e1">每日按收盘价</text>
+        <text x="295" y="124" text-anchor="middle" fill="#cbd5e1">推算重估</text>
+        <text x="295" y="148" text-anchor="middle" fill="#9aa7b4">防误覆盖护栏</text>
+        <text x="295" y="170" text-anchor="middle" fill="#9aa7b4">成本结转</text>
+        <text x="295" y="192" text-anchor="middle" fill="#9aa7b4">推算校准</text>
+
+        <rect x="400" y="30" width="170" height="300" rx="12" fill="#141820" stroke="#2b4a6a"/>
+        <text x="485" y="56" text-anchor="middle" fill="#4da3ff" font-size="14" font-weight="700">③ 度量</text>
+        <text x="485" y="82" text-anchor="middle" fill="#cbd5e1">真实收益率</text>
+        <text x="485" y="102" text-anchor="middle" fill="#cbd5e1">(剔注资)</text>
+        <text x="485" y="124" text-anchor="middle" fill="#cbd5e1">Sharpe/回撤</text>
+        <text x="485" y="148" text-anchor="middle" fill="#9aa7b4">标的贡献归因</text>
+        <text x="485" y="170" text-anchor="middle" fill="#9aa7b4">FIFO 已实现</text>
+        <text x="485" y="192" text-anchor="middle" fill="#9aa7b4">组合压力测试</text>
+
+        <rect x="590" y="30" width="170" height="300" rx="12" fill="#1a1610" stroke="#6a5320"/>
+        <text x="675" y="56" text-anchor="middle" fill="#ffca55" font-size="14" font-weight="700">④ 研判</text>
+        <text x="675" y="82" text-anchor="middle" fill="#cbd5e1">瓶颈主题暴露</text>
+        <text x="675" y="104" text-anchor="middle" fill="#cbd5e1">投资纲领对账</text>
+        <text x="675" y="126" text-anchor="middle" fill="#cbd5e1">衍生品 KO/KI 监控</text>
+        <text x="675" y="150" text-anchor="middle" fill="#9aa7b4">投委会四人评审</text>
+        <text x="675" y="172" text-anchor="middle" fill="#9aa7b4">数字幻觉防护</text>
+
+        <rect x="780" y="30" width="160" height="300" rx="12" fill="#1a1420" stroke="#4a3568"/>
+        <text x="860" y="56" text-anchor="middle" fill="#c792ea" font-size="14" font-weight="700">⑤ 建议</text>
+        <text x="860" y="82" text-anchor="middle" fill="#cbd5e1">逐仓行动计划</text>
+        <text x="860" y="104" text-anchor="middle" fill="#cbd5e1">加/减/持/对冲</text>
+        <text x="860" y="126" text-anchor="middle" fill="#cbd5e1">现金预算</text>
+        <text x="860" y="150" text-anchor="middle" fill="#cbd5e1">荐新标的</text>
+        <text x="860" y="172" text-anchor="middle" fill="#cbd5e1">实时咨询对话</text>
+        <text x="860" y="200" text-anchor="middle" fill="#ff8a8a" font-size="11">⛔ 止于建议 · 不下单</text>
+      </g>
+      <path d="M190,180 L208,180" stroke="#c792ea" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M380,180 L398,180" stroke="#c792ea" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M570,180 L588,180" stroke="#c792ea" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M760,180 L778,180" stroke="#c792ea" stroke-width="2" marker-end="url(#arr2)"/>
+    </svg>
+    <div class="cap">图 2 · VIP 顾问五段管道：导入 → 重估 → 度量 → 研判 → 建议</div>
+  </div>
+
+  <!-- 分组 1：导入与入库 -->
+  <div class="subhead"><span class="dot"></span>一、导入与入库 <span class="n">把散落多家券商的账本统一收进来</span></div>
+  <div class="grid c-vip">
+    <div class="card"><span class="cat">结单导入</span><h3>多券商结单统一入库</h3>
+      <p>花旗、招银国际(CMBI)、野村三家券商的月/日结单，用各自专属解析器抽出持仓、现金、交易、结构性产品，统一落到一套规范账本。招银的 FCN、巴克莱的 FCN 条款单也能识别入库。</p>
+      <div class="bound"><b>覆盖边界：</b>目前内置花旗/招银/野村三家结单解析器；其他券商可走通用表格(CSV/Excel)导入。</div></div>
+    <div class="card"><span class="cat">流水导入</span><h3>CSV / Excel 交易流水导入</h3>
+      <p>不是这三家券商，或想补录历史成交？直接上传 CSV/Excel 交易表，系统按列名智能识别买卖/分红/费用/转账，并入同一账本。</p></div>
+    <div class="card"><span class="cat">隐私安全</span><h3>加密结单密码解锁</h3>
+      <p>券商 PDF 常带密码。导入时输入一次即可解密读取，<b>密码绝不落库</b>、绝不写进任何日志，用完即弃。</p>
+      <div class="bound"><b>隐私承诺：</b>密码是你的凭证，系统只读、只用于本次解密。</div></div>
+    <div class="card"><span class="cat">幂等</span><h3>重复导入去重 + 字段回填</h3>
+      <p>同一份结单重复导入不会产生重复记录（按内容指纹识别）；重新导入更完整的版本时，会把缺失字段回填、以最新解析为权威。</p></div>
+    <div class="card"><span class="cat">多账户</span><h3>多账户自动归户</h3>
+      <p>你在同一券商有多个子账户？系统按结单里的账户号自动归户，各账户独立统计、互不串味。</p></div>
+    <div class="card"><span class="cat">体检</span><h3>缺数据体检报告</h3>
+      <p>哪些标的没有活跃价源（市值还是结单结转价、非最新行情）、哪些币种缺汇率锚、哪些成本缺失——一份体检清单如实告诉你，不让你误以为数字都是最新的。</p></div>
+  </div>
+
+  <!-- 分组 2：账户重估 -->
+  <div class="subhead"><span class="dot"></span>二、账户重估 <span class="n">每天按收盘价把账户估值刷新一遍</span></div>
+  <div class="grid c-vip">
+    <div class="card"><span class="cat">重估</span><h3>持仓每日重估（统一美元口径）</h3>
+      <p>多币种持仓一律折算到统一美元口径再算占比与总权益，避免港币/日元量级混淆。每个交易日按收盘价把账户重估一遍，形成一条净值曲线。</p>
+      <div class="bound"><b>诚实口径：</b>逐日推算基于「上一份权威结单 + 每日收盘价」，非券商逐日流水；结单到账即以结单为准校准。</div></div>
+    <div class="card"><span class="cat">护栏</span><h3>防误覆盖护栏</h3>
+      <p>解析异常或结单过期时，系统<b>拒绝</b>用坏数据覆盖已有的正确持仓——宁可提示「需人工复核」，也不静默写脏。</p></div>
+    <div class="card"><span class="cat">校准</span><h3>推算校准</h3>
+      <p>新结单一到账，就拿它和这段时间的每日推算对账；偏差超阈值（15%）会打旗提示，让推算始终贴近真实。</p></div>
+    <div class="card"><span class="cat">收益盈亏</span><h3>未实现盈亏 · 成本结转 · 红负绿正</h3>
+      <p>逐仓显示未实现盈亏，<b style="color:#7ee787">正收益绿色、负亏损红色</b>。当最新快照是「仓盘导出」这类无成本列的薄快照时，会自动<b>结转最近一期带成本结单的成本基</b>，用当前市值重算盈亏——不会因为换了张结单就把收益清零。</p>
+      <div class="bound"><b>诚实护栏：</b>仅当持仓股数未变动才结转成本；买卖过或从无成本记录的标的，诚实留空不臆造。</div></div>
+  </div>
+
+  <!-- 分组 3：真实业绩度量 -->
+  <div class="subhead"><span class="dot"></span>三、真实业绩度量 <span class="n">剔掉你自己的转入转出，算出真业绩</span></div>
+  <div class="grid c-vip">
+    <div class="card"><span class="cat">收益率</span><h3>真实收益率（Modified Dietz / MWR）</h3>
+      <p>账户涨了不等于你赚了——你中途转入的钱会虚增账面。系统用 Modified Dietz / 资金加权法<b>剔除你的注资与提取</b>，算出真正归功于投资的收益率。</p>
+      <div class="bound"><b>口径披露：</b>需权威净值（含现金）口径才呈现精确收益率；仅持仓市值时如实标注「非权威口径」、不硬算。</div></div>
+    <div class="card"><span class="cat">风险</span><h3>风险指标（Sharpe / Sortino / Calmar / 最大回撤）</h3>
+      <p>不只看赚多少，还看承担了多大波动与回撤。给出夏普/索提诺/卡玛比率与最大回撤（无风险利率按 4% 年化）。</p>
+      <div class="bound"><b>样本护栏：</b>结单期数少于 3 期时诚实降级为空——绝不用两三个点冒充统计量。</div></div>
+    <div class="card"><span class="cat">归因</span><h3>标的贡献归因</h3>
+      <p>这段时间是谁在赚、谁在拖后腿？按相邻两期期初权重 × 单价收益拆解，列出贡献 Top / Bottom 榜。</p></div>
+    <div class="card"><span class="cat">已实现</span><h3>FIFO 已实现盈亏</h3>
+      <p>按先进先出配对买卖，算出真正落袋的已实现盈亏。</p>
+      <div class="bound"><b>完整性闸门：</b>流水残缺或非美元标的绝不冒充美元合计——残缺就留空，不硬凑一个假数字。</div></div>
+  </div>
+
+  <!-- 分组 4：产业前瞻与衍生品 -->
+  <div class="subhead"><span class="dot"></span>四、产业前瞻与衍生品 <span class="n">把你的产业链瓶颈观点接到真实账户上</span></div>
+  <div class="grid c-vip">
+    <div class="card"><span class="cat">主题</span><h3>瓶颈主题暴露</h3>
+      <p>把你账户里的持仓按产业链瓶颈环节归类，画出「哪些卡脖子主题超配、哪些低配」的定性主题图，接进投委会研判。</p>
+      <div class="bound"><b>定性图：</b>基于观察池已有的瓶颈节点归类，是方向性主题图，非量化强度暴露（如实标注）。</div></div>
+    <div class="card"><span class="cat">纲领</span><h3>投资纲领对账</h3>
+      <p>你可以设定自己的投资纲领（风险偏好/集中度上限/聚焦方向/排除清单）。系统逐条对账：单一持仓/前五大是否超限（保守 15/30 · 均衡 20/40 · 激进 30/50）。</p></div>
+    <div class="card"><span class="cat">轮动</span><h3>行业轮动对账</h3>
+      <p>把当前板块配置与宏观轮动桶对照，提示哪些行业相对宏观判断是超配或欠配。</p></div>
+    <div class="card"><span class="cat">衍生品</span><h3>衍生品 KO/KI 监控</h3>
+      <p>累购/累沽/FCN 这类结构性产品，逐日盯敲出(KO)/敲入(KI)价位，临近关键价位时提示。</p></div>
+    <div class="card"><span class="cat">压测</span><h3>组合压力测试</h3>
+      <p>模拟市场下跌 -10%/-20% 等情景下的组合盈亏。累购跌破 AFP「加倍套牢」的尾部损失<b>如实呈现为更大亏损</b>，不会被算法反转成收益。</p>
+      <div class="bound"><b>覆盖披露：</b>无到期模型的产品（如 FCN）诚实标未建模、剔出压测，不用公式臆造。</div></div>
+    <div class="card"><span class="cat">Greeks</span><h3>组合净 Greeks</h3>
+      <p>对可重放定价的衍生品做净 delta / gamma 聚合，看组合整体的方向性与凸性敞口。非美元腿、缺价标的诚实剔出并披露。</p></div>
+  </div>
+
+  <!-- 分组 5：研判与建议 -->
+  <div class="subhead"><span class="dot"></span>五、研判与建议 <span class="n">四位 AI 委员会审，逐仓给出可执行建议</span></div>
+  <div class="grid c-vip">
+    <div class="card"><span class="cat">投委会</span><h3>投委会四人评审</h3>
+      <p>复用决策中心的投委会机制，风控/成长/价值/逆向四位 AI 委员各自独立审视你的账户，多角度拷问、给出评审意见。</p></div>
+    <div class="card"><span class="cat">行动</span><h3>逐仓行动计划 + 现金预算</h3>
+      <p>不是一句空话，而是逐个持仓给出加/减/持/对冲的具体方向、理由，并结合可用现金给出预算约束。</p>
+      <div class="bound"><b>死线：</b>止于建议层——只给方向与理由，绝不下单、不承诺收益。</div></div>
+    <div class="card"><span class="cat">荐新</span><h3>荐新标的</h3>
+      <p>结合你的瓶颈布局与纲领，从研究侧推荐值得关注的新标的作为候选。</p></div>
+    <div class="card"><span class="cat">对话</span><h3>实时咨询对话</h3>
+      <p>随时就账户里的任何问题追问 AI 顾问，流式实时回答，像和一位私人参谋聊天。</p></div>
+  </div>
+
+  <!-- 分组 6：可信保障 -->
+  <div class="subhead"><span class="dot"></span>六、可信与合规保障 <span class="n">让每个数字都可核对、每条建议都有边界</span></div>
+  <div class="grid c-vip">
+    <div class="card"><span class="cat">防幻觉</span><h3>AI 数字幻觉防护</h3>
+      <p>AI 报告里出现的每个金额/占比/股数，都会与真实入库数据<b>逐一核对</b>（1% 容差），没核到的当场标「⚠ 未核到」，杜绝 AI 编数字。</p></div>
+    <div class="card"><span class="cat">合规</span><h3>合规免责声明</h3>
+      <p>所有输出附带版本化合规免责声明，明确「研究参考、非投资建议」。</p></div>
+    <div class="card"><span class="cat">锁屏</span><h3>VIP 密码锁屏</h3>
+      <p>VIP 区独立密码锁，未解锁一律拦截（423）——你的真实账本多一道门。</p></div>
+    <div class="card"><span class="cat">隔离</span><h3>管理员专属 + 严格隔离</h3>
+      <p>VIP 顾问为单一管理员专用，数据严格按用户隔离；决策中心的模拟盘与 VIP 真实账本彻底解耦、互不污染。</p></div>
+  </div>
+</section>
+
+<!-- ══════════ 选股分析流程 ══════════ -->
+<section id="flow">
+  <div class="sec-head c-flow"><div class="sec-num">🏭</div><h2>选股分析流程 · 产业链瓶颈三步法</h2></div>
+  <p class="sec-lead">找股票不从热门名字开始，而从「哪个环节卡脖子」开始。三步法：先把终端产品逐层拆到原材料，找出供给最紧、最不可替代的瓶颈环节；再沿瓶颈找被忽视的优质供应商；最后让多个 AI 从反面拷问投资逻辑，只有扛得住质疑的才留下。</p>
+
+  <div class="flowsteps">
+    <div class="step"><div class="no">1</div><h4>产业链拆解</h4><p>从终端产品逐层拆到原材料，3-5 层深度，画出完整产业链树。</p></div>
+    <div class="step"><div class="no">2</div><h4>瓶颈 + 供应商</h4><p>五维给每个环节评瓶颈分，沿最卡环节检索被低估的优质供应商。</p></div>
+    <div class="step"><div class="no">3</div><h4>交叉验证</h4><p>多个 AI 模型从反面拷问，圆桌辩论，只留扛得住质疑的标的。</p></div>
+  </div>
+
+  <div class="grid c-flow">
+    <div class="card"><span class="cat">拆解</span><h3>AI 产业链拆解</h3>
+      <p>输入一个终端产品，AI 自动逐层拆解到上游原材料（3-5 层），生成结构化产业链树。</p></div>
+    <div class="card"><span class="cat">评分</span><h3>瓶颈五维评分</h3>
+      <p>对每个环节按稀缺性/不可替代性/供需缺口/定价权/技术壁垒五维打分，并按行业调权，定位真正的卡脖子点。</p></div>
+    <div class="card"><span class="cat">集中度</span><h3>真实集中度 CR3/CR5/HHI</h3>
+      <p>A 股环节用东财真实数据算行业集中度（CR3/CR5/HHI），佐证瓶颈判断，不靠 AI 空谈。</p>
+      <div class="bound"><b>覆盖边界：</b>真实集中度目前覆盖 A 股；美股环节以定性判断为主。</div></div>
+    <div class="card"><span class="cat">检索</span><h3>供应商检索 + 行情验证</h3>
+      <p>沿瓶颈环节检索供应商，再用四道硬规则过滤（市值≥15亿/毛利≥20%/日成交额/上市满 365 天），剔掉不可投的壳与仙股。</p></div>
+    <div class="card"><span class="cat">评估</span><h3>供应商五维评估 + 预期差</h3>
+      <p>对候选供应商做五维基本面评估，并给「预期差 Alpha」评分——市场还没充分定价的机会才有超额收益。</p></div>
+    <div class="card"><span class="cat">验证</span><h3>多模型交叉验证</h3>
+      <p>四个视角、多个 LLM 独立拷问投资逻辑，命中致命风险直接压分，只精验 Top 10，把资源花在最有希望的标的上。</p></div>
+    <div class="card"><span class="cat">辩论</span><h3>AI 投研圆桌辩论</h3>
+      <p>四个角色 AI 圆桌辩论，用 Borda 计数法综合排序，模拟一场真实的投研会。</p></div>
+    <div class="card"><span class="cat">催化剂</span><h3>催化剂时间线</h3>
+      <p>为标的梳理未来 6-18 个月可能的股价催化剂事件时间线。</p></div>
+    <div class="card"><span class="cat">热点</span><h3>全市场热点板块扫描</h3>
+      <p>A 股按板块聚合扫描当下热点，快速定位资金关注方向。</p>
+      <div class="bound"><b>覆盖边界：</b>热点扫描目前聚焦 A 股板块。</div></div>
+    <div class="card"><span class="cat">报告</span><h3>Markdown 报告 + CLI 向导</h3>
+      <p>全流程产出结构化 Markdown 报告；命令行向导带你一步步走完选股，用户数据隔离。</p></div>
+  </div>
+</section>
+
+<!-- ══════════ 决策中心 ══════════ -->
+<section id="dc">
+  <div class="sec-head c-dc"><div class="sec-num">🧭</div><h2>决策中心 · 四层决策 + 投委会 + 模拟交易</h2></div>
+  <p class="sec-lead">选出来的股票不是就完了，而是放进观察池持续跟踪。系统按四层决策把「宏观怎么看 → 组合怎么配 → 战术怎么打 → 具体怎么执行」串成一条链，投委会评审后进模拟盘验证，再自动复盘沉淀经验——一个会自我进化的决策闭环。</p>
+
+  <div class="figure">
+    <svg viewBox="0 0 960 220" role="img" aria-label="L1-L4 四层决策">
+      <defs><marker id="arr3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7ee787"/></marker></defs>
+      <g font-size="13">
+        <rect x="20" y="60" width="200" height="100" rx="12" fill="#141820" stroke="#2b4a6a"/>
+        <text x="120" y="92" text-anchor="middle" fill="#4da3ff" font-size="15" font-weight="700">L1 宏观</text>
+        <text x="120" y="116" text-anchor="middle" fill="#cbd5e1">大势 / 板块轮动桶</text>
+        <text x="120" y="138" text-anchor="middle" fill="#9aa7b4">该不该重仓、配哪些方向</text>
+
+        <rect x="250" y="60" width="200" height="100" rx="12" fill="#141a20" stroke="#2c5a3f"/>
+        <text x="350" y="92" text-anchor="middle" fill="#7ee787" font-size="15" font-weight="700">L2 组合</text>
+        <text x="350" y="116" text-anchor="middle" fill="#cbd5e1">目标配置 / 权重</text>
+        <text x="350" y="138" text-anchor="middle" fill="#9aa7b4">各标的配多少仓位</text>
+
+        <rect x="480" y="60" width="200" height="100" rx="12" fill="#1a1610" stroke="#6a5320"/>
+        <text x="580" y="92" text-anchor="middle" fill="#ffca55" font-size="15" font-weight="700">L3 战术</text>
+        <text x="580" y="116" text-anchor="middle" fill="#cbd5e1">买卖时机 / 区间</text>
+        <text x="580" y="138" text-anchor="middle" fill="#9aa7b4">什么价位分批动手</text>
+
+        <rect x="710" y="60" width="230" height="100" rx="12" fill="#1a1420" stroke="#4a3568"/>
+        <text x="825" y="92" text-anchor="middle" fill="#c792ea" font-size="15" font-weight="700">L4 执行</text>
+        <text x="825" y="116" text-anchor="middle" fill="#cbd5e1">硬约束闸门 + 自修正</text>
+        <text x="825" y="138" text-anchor="middle" fill="#9aa7b4">越界拦截 / 缩量 / 挂单</text>
+      </g>
+      <path d="M220,110 L248,110" stroke="#7ee787" stroke-width="2" marker-end="url(#arr3)"/>
+      <path d="M450,110 L478,110" stroke="#7ee787" stroke-width="2" marker-end="url(#arr3)"/>
+      <path d="M680,110 L708,110" stroke="#7ee787" stroke-width="2" marker-end="url(#arr3)"/>
+      <text x="480" y="195" text-anchor="middle" fill="#64748b" font-size="11.5">每一层都受你的个人持仓风格硬约束 · 投委会可质询改票 · 执行进模拟盘后自动复盘</text>
+    </svg>
+    <div class="cap">图 3 · L1→L4 四层决策链，逐层收敛到可执行动作</div>
+  </div>
+
+  <div class="grid c-dc">
+    <div class="card"><span class="cat">观察池</span><h3>分档跟踪观察池</h3>
+      <p>候选标的按重要度分档进观察池，各档跟踪频率与深度不同，把注意力花在刀刃上。</p></div>
+    <div class="card"><span class="cat">L1</span><h3>L1 宏观决策</h3>
+      <p>判断大势与板块轮动，给出「该不该重仓、偏向哪些方向」的宏观基调与轮动桶。</p></div>
+    <div class="card"><span class="cat">L2</span><h3>L2 组合决策</h3>
+      <p>在宏观基调下定目标配置与各标的权重，并对目标配置做上下限夹逼。</p></div>
+    <div class="card"><span class="cat">L3</span><h3>L3 战术决策</h3>
+      <p>给出买卖时机与价格区间，把组合意图落到具体的分批动作。</p></div>
+    <div class="card"><span class="cat">L4</span><h3>L4 执行 + 硬约束闸门</h3>
+      <p>最后一道关：硬约束闸门自动检查，越界先让 LLM 自修正两次，仍越界则缩量或直接拦截，绝不放行违规动作。</p></div>
+    <div class="card"><span class="cat">投委会</span><h3>投委会评审 + 质询改票</h3>
+      <p>四位 AI 委员（各挂不同模型）独立评审，可互相质询、改票，模拟真实投委会的对抗式决策。</p></div>
+    <div class="card"><span class="cat">风格</span><h3>个人持仓风格硬约束</h3>
+      <p>你的持仓风格（激进/均衡/保守等）作为硬约束注入每一层，单一持仓上限等做硬校验，决策始终贴合你的偏好。</p></div>
+    <div class="card"><span class="cat">模拟盘</span><h3>模拟交易闭环</h3>
+      <p>决策确认后进虚拟盘执行（含 0.1% 佣金），限价挂单 + 滑点模拟、挂单 14 天，完整走一遍真实交易流程——不碰真钱。</p></div>
+    <div class="card"><span class="cat">复盘</span><h3>自动复盘经验卡 + 偏好学习</h3>
+      <p>每笔交易自动复盘，沉淀成经验卡；六维度偏好学习让系统越用越懂你。</p></div>
+    <div class="card"><span class="cat">调度</span><h3>双市场定时调度</h3>
+      <p>A 股 / 美股按各自交易时段定时跑决策，漏跑自动补跑（misfire 补偿），不会因宕机丢一天。</p></div>
+    <div class="card"><span class="cat">催化剂</span><h3>催化剂监控</h3>
+      <p>持续监控观察池标的的催化剂事件，触发时提示复核。</p></div>
+    <div class="card"><span class="cat">风控</span><h3>风控仪表盘</h3>
+      <p>组合集中度(HHI)、单板块占比、相关性、VaR/CVaR/beta 一屏看清，越线预警。</p></div>
+    <div class="card"><span class="cat">追溯</span><h3>决策全链路 Trace</h3>
+      <p>每个决策从宏观到执行的完整推理链可追溯，随时回看「当时为什么这么决定」。</p></div>
+  </div>
+</section>
+
+<!-- ══════════ 系统拓展能力 ══════════ -->
+<section id="ext">
+  <div class="sec-head c-ext"><div class="sec-num">🔌</div><h2>系统拓展能力</h2></div>
+  <p class="sec-lead">系统的「能力上限」不是写死的。AI 模型、数据源、用户，都是即插即用、按用户隔离的——换更强的模型、加新数据源、多人各用各的 Key，都不用改核心代码。</p>
+
+  <div class="grid c-ext">
+    <div class="card"><span class="cat">多模型</span><h3>多 AI 模型即插即用</h3>
+      <p>内置 11+ 家 AI provider（openai/anthropic/deepseek/google/qwen/glm/kimi/minimax/硅基流动/openrouter 等），随时切换、随时加新模型，核心逻辑不动。</p></div>
+    <div class="card"><span class="cat">自助配置</span><h3>AI 配置中心自助 + 测试</h3>
+      <p>顶栏一个统一入口，自己填 Key、测连通、按角色分配模型——不用找管理员，也不用改配置文件。</p></div>
+    <div class="card"><span class="cat">自定义</span><h3>自定义 provider 目录</h3>
+      <p>管理员可建 provider 目录，每个用户填自己的 Key，Key 严格隔离——绝不共用、绝无全局 Key。</p></div>
+    <div class="card"><span class="cat">智能调度</span><h3>模型智能调度</h3>
+      <p>不是静态分配，而是数据驱动地为每个任务挑最合适的模型（主模型优先 → DB 角色矩阵 → 角色默认 → 健康度排序），遥测越多越准。</p></div>
+    <div class="card"><span class="cat">熔断</span><h3>失效自动熔断 + 无感切换</h3>
+      <p>某个模型认证失败/限流/超时，自动熔断并无感切到备节点，不重复等挂死节点、不丢已产出内容。主模型失效会自动取消并提示你重选。</p></div>
+    <div class="card"><span class="cat">数据源</span><h3>多市场数据源 failover</h3>
+      <p>行情/财务/新闻/期权跨 8 家数据源（FMP/Finnhub/Tushare/Akshare/AlphaVantage/Tiingo/Polygon 等），一家不可用自动换下一家。</p></div>
+    <div class="card"><span class="cat">隔离</span><h3>多用户级严格隔离</h3>
+      <p>Key 用 AES-256-GCM 加密存储，邀请码注册，每个用户的 Key/配置/熔断状态绝对隔离，一个用户的失败绝不波及他人。</p></div>
+    <div class="card"><span class="cat">选型</span><h3>按角色容量事前选型 + 容错</h3>
+      <p>不同角色需要的上下文容量不同，系统事前按容量选型，容量不够自动 fallback，避免「塞不下」的静默失败。</p></div>
+    <div class="card"><span class="cat">离线</span><h3>前端库全本地化</h3>
+      <p>所有前端库（echarts/d3/marked 等）本地打包，零外部 CDN 依赖——国内网络也能稳定打开，本说明书本身就是如此。</p></div>
+  </div>
+</section>
+
+<!-- ══════════ 未来可扩展模块 ══════════ -->
+<section id="road">
+  <div class="sec-head c-road"><div class="sec-num">🚀</div><h2>未来可扩展的功能模块</h2></div>
+  <p class="sec-lead">系统按「先证明价值、再加复杂度」的原则演进。下面如实标注每个方向的状态——<span style="color:var(--accent2)">已建成</span>、<span style="color:var(--accent)">已规划</span>、<span style="color:var(--warn)">守门待证明</span>（价值未在生产验证前刻意不建）、<span style="color:var(--danger)">明确不建</span>（越界或不必要）。不画不打算兑现的大饼。</p>
+
+  <div class="road">
+    <div class="road-item st-done"><span class="status done">已建成</span>
+      <h4>可信后视镜（Phase 0-4 全线）</h4>
+      <p>真实收益率/风险指标/贡献归因、FIFO 已实现盈亏、瓶颈主题暴露、投资纲领对账、衍生品逐日监控、组合压力测试与净 Greeks——从「导入结单」到「组合级尾部风险」的完整可信账户回望，已全部建成并通过验收。</p></div>
+
+    <div class="road-item st-plan"><span class="status plan">已规划</span>
+      <h4>币种敞口 + 汇率损益归因</h4>
+      <p>把多币种账户的汇率波动单独拆出来归因，看清「赚的是标的还是汇率」。数据地基已在（多币种统一美元口径），待接归因层。</p></div>
+
+    <div class="road-item st-plan"><span class="status plan">已规划</span>
+      <h4>对话内实时行情再查</h4>
+      <p>咨询对话中直接触发实时行情/基本面再查询，让顾问回答基于最新数据而非快照。</p></div>
+
+    <div class="road-item st-plan"><span class="status plan">已规划</span>
+      <h4>VIP 复盘闭环</h4>
+      <p>把 VIP 顾问的历次建议与实际走势对账复盘，沉淀「哪些建议对了/错了」，让顾问也自我进化。</p></div>
+
+    <div class="road-item st-plan"><span class="status plan">已规划</span>
+      <h4>预设产业链模板库扩充</h4>
+      <p>内置更多常见产业链模板（半导体/新能源/医药等），选股向导可一键载入，省去从零拆解。</p></div>
+
+    <div class="road-item st-yagni"><span class="status yagni">守门待证明</span>
+      <h4>量化瓶颈地基（持久化五维评分）</h4>
+      <p>把当前的「定性瓶颈主题图」升级为持久化的量化强度暴露（稀缺性/不可替代性/供需缺口/定价权/技术壁垒五维打分）。<b>刻意暂不建</b>——先等定性主题图在生产中被证明真的影响决策，再投入。避免过早工程化。</p></div>
+
+    <div class="road-item st-never"><span class="status never">明确不建</span>
+      <h4>regime → 板块目标权重自动执行器</h4>
+      <p>根据宏观 regime 自动调板块目标权重并执行。<b>明确不建</b>：越界（止于建议层已够，L1 轮动桶对账已覆盖对账需求）。</p></div>
+
+    <div class="road-item st-never"><span class="status never">明确不建</span>
+      <h4>完全实时投顾 / 券商 API 直连下单</h4>
+      <p>接券商 API 实时下单、做全自动投顾。<b>明确不建</b>：超出「只出建议、不碰真钱」的系统死线——这是刻意的产品边界，不是能力缺失。</p></div>
+  </div>
+</section>
+
+<!-- ══════════ 诚实边界 ══════════ -->
+<section id="honesty">
+  <div class="sec-head c-ext"><div class="sec-num">🛡</div><h2>诚实边界 · 这个系统的底线</h2></div>
+  <p class="sec-lead">很多系统的问题不是不能算，而是「没数据也硬算、算错了不说」。这个系统把诚实做成了硬约束——下面每一条都是代码级的红线。</p>
+
+  <div class="honesty">
+    <h4>⚖ 七条不可逾越的红线</h4>
+    <ul>
+      <li><b>止于建议</b>：只给加/减/持/对冲方向与理由，绝不自动下单、不碰真实资金。</li>
+      <li><b>数据不足就留空</b>：结单期数少于 3 期不算风险统计量，非权威口径不呈现精确收益率——诚实降级，不冒充。</li>
+      <li><b>衍生品单列</b>：结构性产品名义敞口单独列示，绝不并入权益头条虚增总资产；非美元不混美元口径。</li>
+      <li><b>已实现盈亏诚实</b>：流水残缺就留空，不用 FIFO 硬凑一个假的已实现盈亏。</li>
+      <li><b>尾部风险不反转</b>：累购跌破 AFP「加倍套牢」的巨亏如实呈现为更大亏损，不被算法符号反转成收益。</li>
+      <li><b>覆盖口径必披露</b>：哪些标的有价、哪些缺价缺锚、哪些成本靠结转——全部如实标注。</li>
+      <li><b>数字必核对</b>：AI 报告里每个数字与真实入库数据逐一核对，没核到当场标「⚠ 未核到」。</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>BottleneckHunter · 瓶颈猎手 —— AI 驱动的产业链瓶颈选股与私人投资参谋系统</p>
+    <p>本说明书为单文件离线文档（内联 SVG + CSS，零外部依赖），可直接双击用浏览器打开。所有功能均经代码核实。</p>
+    <p style="margin-top:10px;color:#5a6675">提示：点击各功能卡下方的展开箭头可查看更多细节 · 本文档面向普通用户，专业口径细节以系统内实际标注为准。</p>
+  </div>
+</footer>
+
+</body>
+</html>
+

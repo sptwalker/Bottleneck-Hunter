@@ -50,7 +50,7 @@ def _trade_confirm_stmt():
                                              status="no_statement_total"))
 
 
-def _create_doc(doc_type: str, *, user_id="u1", content_hash="x") -> str:
+def _create_doc(doc_type: str, *, user_id="u1", content_hash="x", period_end="2026-06-30") -> str:
     from bottleneck_hunter.auth.store import AuthStore
 
     return AuthStore().create_financial_doc(
@@ -58,7 +58,7 @@ def _create_doc(doc_type: str, *, user_id="u1", content_hash="x") -> str:
         content_hash=content_hash,
         broker="citi",
         doc_type=doc_type,
-        period_end="2026-06-30",
+        period_end=period_end,
         file_name=f"{doc_type}.pdf",
         parsed_json="{}",
         status="parsed_ok",
@@ -183,6 +183,69 @@ def test_position_report_beats_monthly_statement_same_day(wl):
     pos = {p["ticker"]: p for p in wl.get_sim_positions(acct["id"])}
     assert abs(pos["GOOGL"]["market_value"] - 300000.0) < 1.0
 
+
+
+def test_cost_carried_forward_when_latest_snapshot_lacks_cost(wl):
+    """最新快照(仓盘导出)无成本列 → 按 symbol 结转前期带成本快照，用当前市值重算未实现盈亏。
+    修「所有子账户未实现收益全为 0」根因。"""
+    # 前期(05-31)：带成本的完整结单，GOOGL 100股、成本基 180000、市值 200000
+    prior = _create_doc("monthly_statement", content_hash="prior", period_end="2026-05-31")
+    prior_hold = EquityHolding(ticker="GOOGL", company="Alphabet Inc", quantity=100,
+                               market_value_usd=200000.0, nominal_ccy="USD", market_value_nominal=200000.0,
+                               avg_cost=1800.0, cost_basis_usd=180000.0, unrealized_pnl_usd=20000.0)
+    portfolio.normalize_statement(
+        wl, BrokerStatement(content_hash="prior", period_end="2026-05-31", holdings=[prior_hold],
+                            cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=1, holdings_total_usd=200000.0,
+                                              statement_equities_total_usd=200000.0, delta_usd=0.0, status="ok")),
+        source_doc_id=prior, account_ref="A1")
+
+    # 本期(06-30)：仓盘导出，无成本列（cost 全 None），GOOGL 仍 100 股、市值涨到 260000
+    cur = _create_doc("position_report", content_hash="cur", period_end="2026-06-30")
+    cur_hold = EquityHolding(ticker="GOOGL", company="Alphabet Inc", quantity=100,
+                             market_value_usd=260000.0, nominal_ccy="USD", market_value_nominal=260000.0)
+    portfolio.normalize_statement(
+        wl, BrokerStatement(content_hash="cur", period_end="2026-06-30", holdings=[cur_hold],
+                            cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=1, holdings_total_usd=260000.0,
+                                              statement_equities_total_usd=260000.0, delta_usd=0.0, status="ok")),
+        source_doc_id=cur, account_ref="A1")
+
+    cm = portfolio._canonical_cost_map(wl, "A1")
+    g = cm["GOOGL"]
+    assert g["cost_basis"] == 180000.0                    # 成本自 05-31 结转
+    assert g["cost_carried_from"] == "2026-05-31"         # 披露结转来源
+    assert g["unrealized_pnl"] == 80000.0                 # 当前市值260000 − 历史成本180000（非旧 20000）
+    assert g["unrealized_pnl_pct"] == round(80000.0 / 180000.0 * 100, 2)
+
+
+def test_cost_not_carried_when_quantity_changed(wl):
+    """股数变动(买卖)后旧成本基失真 → 不结转、诚实留 None，不臆造未实现盈亏。"""
+    prior = _create_doc("monthly_statement", content_hash="q-prior", period_end="2026-05-31")
+    portfolio.normalize_statement(
+        wl, BrokerStatement(content_hash="q-prior", period_end="2026-05-31",
+                            holdings=[EquityHolding(ticker="GOOGL", company="Alphabet", quantity=100,
+                                                    market_value_usd=200000.0, nominal_ccy="USD",
+                                                    market_value_nominal=200000.0, avg_cost=1800.0,
+                                                    cost_basis_usd=180000.0, unrealized_pnl_usd=20000.0)],
+                            cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=1, holdings_total_usd=200000.0,
+                                              statement_equities_total_usd=200000.0, delta_usd=0.0, status="ok")),
+        source_doc_id=prior, account_ref="A1")
+    # 本期股数翻倍(加仓) + 无成本
+    cur = _create_doc("position_report", content_hash="q-cur", period_end="2026-06-30")
+    portfolio.normalize_statement(
+        wl, BrokerStatement(content_hash="q-cur", period_end="2026-06-30",
+                            holdings=[EquityHolding(ticker="GOOGL", company="Alphabet", quantity=200,
+                                                    market_value_usd=520000.0, nominal_ccy="USD",
+                                                    market_value_nominal=520000.0)],
+                            cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=1, holdings_total_usd=520000.0,
+                                              statement_equities_total_usd=520000.0, delta_usd=0.0, status="ok")),
+        source_doc_id=cur, account_ref="A1")
+    g = portfolio._canonical_cost_map(wl, "A1")["GOOGL"]
+    assert g["cost_basis"] is None and g["unrealized_pnl"] is None   # 股数变→不结转，诚实留空
+    assert g["cost_carried_from"] is None
 
 
 def test_monthly_statement_does_not_override_position_report(wl):
