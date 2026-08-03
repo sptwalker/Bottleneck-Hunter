@@ -511,7 +511,7 @@ export function openCompanyDrawer(ctx) {
   document.querySelectorAll('.wl-drawer-tab[data-wl-only]').forEach(t => {
     t.style.display = (entry.id && !isFund) ? '' : 'none';
   });
-  // 股票专属页签(系统评分/新闻/期权资金/情报)：基金标的隐藏，只留 基本信息 + 市场K线
+  // 股票专属页签(系统评分/市场K线/新闻/期权资金/情报)：基金标的一律隐藏，只留 基本信息
   document.querySelectorAll('.wl-drawer-tab[data-stock-only]').forEach(t => {
     t.style.display = isFund ? 'none' : '';
   });
@@ -692,10 +692,12 @@ async function loadInfoTab(entry) {
 
   let html = '';
 
-  /* ── 报价卡片（简化版：名称 + 价格 + 涨跌 + 市值） ── */
-  html += '<div class="wl-overview-cards">';
-  html += _buildQuoteCard(entry, snap);
-  html += '</div>';
+  /* ── 报价卡片（股票口径：市值/PE/成交量）；基金不展示，净值见「基本规则」 ── */
+  if (!isFund) {
+    html += '<div class="wl-overview-cards">';
+    html += _buildQuoteCard(entry, snap);
+    html += '</div>';
+  }
 
   /* ── 来源 & 加入时间：仅观察池条目显示（入围/最终评选等分析环节不显示）── */
   if (entry.id) {
