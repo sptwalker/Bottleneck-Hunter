@@ -219,6 +219,37 @@ def test_cost_carried_forward_when_latest_snapshot_lacks_cost(wl):
     assert g["unrealized_pnl_pct"] == round(80000.0 / 180000.0 * 100, 2)
 
 
+def test_materialize_carries_cost_into_sim_positions(wl):
+    """成本结转必须穿透到 sim_positions（「持仓」标签页 /account/positions 读的表），
+    否则概览层已修、持仓表仍全 0 无红绿。修「未实现盈亏全为0又复发」根因。"""
+    prior = _create_doc("monthly_statement", content_hash="mp-prior", period_end="2026-05-31")
+    portfolio.normalize_statement(
+        wl, BrokerStatement(content_hash="mp-prior", period_end="2026-05-31",
+                            holdings=[EquityHolding(ticker="GOOGL", company="Alphabet", quantity=100,
+                                                    market_value_usd=200000.0, nominal_ccy="USD",
+                                                    market_value_nominal=200000.0, avg_cost=1800.0,
+                                                    cost_basis_usd=180000.0, unrealized_pnl_usd=20000.0)],
+                            cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=1, holdings_total_usd=200000.0,
+                                              statement_equities_total_usd=200000.0, delta_usd=0.0, status="ok")),
+        source_doc_id=prior, account_ref="A1")
+    # 本期仓盘导出无成本、股数未变、市值涨到 260000
+    cur = _create_doc("position_report", content_hash="mp-cur", period_end="2026-06-30")
+    portfolio.normalize_statement(
+        wl, BrokerStatement(content_hash="mp-cur", period_end="2026-06-30",
+                            holdings=[EquityHolding(ticker="GOOGL", company="Alphabet", quantity=100,
+                                                    market_value_usd=260000.0, nominal_ccy="USD",
+                                                    market_value_nominal=260000.0)],
+                            cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=1, holdings_total_usd=260000.0,
+                                              statement_equities_total_usd=260000.0, delta_usd=0.0, status="ok")),
+        source_doc_id=cur, account_ref="A1")
+    portfolio.materialize_portfolio(wl, as_of_date="2026-06-30", account_ref="A1", cash_total_usd=0.0)
+    acct = wl.get_sim_account(account_ref="A1")
+    pos = {p["ticker"]: p for p in wl.get_sim_positions(acct["id"])}
+    assert abs(pos["GOOGL"]["unrealized_pnl"] - 80000.0) < 1.0   # 结转成本后非 0 → 前端上绿色
+
+
 def test_cost_not_carried_when_quantity_changed(wl):
     """股数变动(买卖)后旧成本基失真 → 不结转、诚实留 None，不臆造未实现盈亏。"""
     prior = _create_doc("monthly_statement", content_hash="q-prior", period_end="2026-05-31")

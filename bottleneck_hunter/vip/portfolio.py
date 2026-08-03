@@ -491,25 +491,37 @@ def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
     computed_total = total_positions + (cash_total_usd or 0.0)
     total_equity = account_total_usd if account_total_usd is not None else computed_total
     n = 0
-    for r in rows:
-        symbol = r["symbol"]
-        mv = r["market_value_base"] or 0.0
-        qty = r["quantity"] or 0.0
-        cur_price = (mv / qty) if qty else 0.0          # 当前每股价（市值/数量）
-        # 成本优先用结单抽出的每股成本；缺失(如仓盘导出不含成本)则回落当前价 → pnl=0，前端色显中性
-        cost = r["avg_cost"] or 0.0
-        if cost <= 0 and r["cost_basis"] and qty:
-            cost = r["cost_basis"] / qty
-        avg = cost if cost > 0 else cur_price
-        # 未实现盈亏优先用结单值；缺失则由 市值−成本 自算（成本回落当前价时自然为 0）
-        upnl = r["unrealized_pnl"]
-        if upnl is None:
-            upnl = round(mv - avg * qty, 2)
-        pid = wl_store.create_sim_position(acct_id, symbol, int(qty), avg)
-        wl_store.update_sim_position(
-            pid, current_price=cur_price, market_value=mv, unrealized_pnl=round(upnl, 2),
-            weight_pct=round(mv / total_equity * 100, 2) if total_equity else 0.0)
-        n += 1
+    conn_cf = wl_store._connect()  # 成本结转按标的查历史快照，复用一条连接
+    try:
+        for r in rows:
+            symbol = r["symbol"]
+            mv = r["market_value_base"] or 0.0
+            qty = r["quantity"] or 0.0
+            cur_price = (mv / qty) if qty else 0.0          # 当前每股价（市值/数量）
+            # 成本优先用结单抽出的每股成本；缺失(如仓盘导出不含成本)则按 symbol 结转最近一期带成本、
+            # 且股数未变的历史快照(与概览层 _canonical_cost_map 同口径)，未实现盈亏用当前市值重算；
+            # 仍无历史成本才回落当前价 → pnl=0，前端色显中性（诚实降级，绝不臆造成本）。
+            cost = r["avg_cost"] or 0.0
+            if cost <= 0 and r["cost_basis"] and qty:
+                cost = r["cost_basis"] / qty
+            upnl = r["unrealized_pnl"]
+            if cost <= 0:
+                prior = _prior_cost_for_symbol(conn_cf, wl_store, account_ref,
+                                               symbol, r["as_of_date"], qty)
+                if prior and qty:
+                    cost = (prior["cost_basis"] / qty) if prior["cost_basis"] else prior["avg_cost"]
+                    upnl = round(mv - cost * qty, 2)        # 成本历史、市值当前：诚实的当前未实现盈亏
+            avg = cost if cost > 0 else cur_price
+            # 未实现盈亏优先用结单值/结转值；仍缺失则由 市值−成本 自算（成本回落当前价时自然为 0）
+            if upnl is None:
+                upnl = round(mv - avg * qty, 2)
+            pid = wl_store.create_sim_position(acct_id, symbol, int(qty), avg)
+            wl_store.update_sim_position(
+                pid, current_price=cur_price, market_value=mv, unrealized_pnl=round(upnl, 2),
+                weight_pct=round(mv / total_equity * 100, 2) if total_equity else 0.0)
+            n += 1
+    finally:
+        conn_cf.close()
 
     wl_store.update_sim_account(account_ref=account_ref,
                                 total_equity=round(total_equity, 2),
@@ -557,7 +569,7 @@ def _latest_positions(wl_store, as_of_date, account_ref) -> tuple[list[dict], di
             params.append(selected["doc_id"])
         q, p = wl_store._filtered(
             f"""SELECT p.quantity, p.market_value_base, p.avg_cost, p.cost_basis, p.unrealized_pnl,
-                      i.symbol, i.instrument_type, i.name
+                      p.as_of_date, i.symbol, i.instrument_type, i.name
                FROM positions p JOIN instruments i ON i.id = p.instrument_id
                WHERE {' AND '.join(where)}""",
             tuple(params), table="p")
