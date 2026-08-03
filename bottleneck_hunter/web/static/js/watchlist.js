@@ -595,10 +595,12 @@ function setDrawerTab(tab) {
 
 async function loadDrawerTabData(entry, tab) {
   // 场外基金净值走势按结算单取数(VIP account_ref+symbol)，不依赖观察池 entry_id
-  const isOtcFund = entry._assetClass === 'fund' && entry._exchangeTraded === false;
-  // 需要观察池存储(entry_id)的页签：分析环节无 id 时给友好兜底，不打空端点
+  const isFund = entry._assetClass === 'fund';
+  const isOtcFund = isFund && entry._exchangeTraded === false;
+  // 需要观察池存储(entry_id)的页签：分析环节无 id 时给友好兜底，不打空端点。
+  // 基金的价格页签例外：场外→结算单净值、场内ETF→按ticker直取真行情，均不依赖观察池 id。
   const needsEntry = ['price', 'news', 'capital', 'intelligence', 'strategy', 'uzi'];
-  if (!entry.id && needsEntry.includes(tab) && !(tab === 'price' && isOtcFund)) {
+  if (!entry.id && needsEntry.includes(tab) && !(tab === 'price' && isFund)) {
     const pane = document.getElementById(`wl-tab-${tab}`);
     if (pane) pane.innerHTML = '<div class="wl-empty" style="padding:40px;text-align:center;color:var(--muted)">该企业未加入观察池<br><span style="font-size:12px">加入观察池后可查看实时行情/新闻/资金/情报/策略</span></div>';
     return;
@@ -611,8 +613,9 @@ async function loadDrawerTabData(entry, tab) {
       await loadScoreTab(entry);
       break;
     case 'price':
-      if (isOtcFund) await loadNavTab(entry);
-      else await loadPriceTab(entry);
+      if (isOtcFund) await loadNavTab(entry);            // 场外基金：结算单净值走势
+      else if (isFund && !entry.id) await loadOhlcTab(entry);  // 场内ETF未入观察池：按ticker直取真行情
+      else await loadPriceTab(entry);                    // 股票/已跟踪：观察池缓存快照
       break;
     case 'news':
       await loadNewsTab(entry);
@@ -1303,6 +1306,29 @@ async function loadPriceTab(entry) {
     renderIndicators(entry);
   } catch (e) {
     pane.innerHTML = `<div class="wl-empty-hint"><p>暂无价格数据</p><p>请先点击工具栏的 <b>刷新数据</b> 获取市场行情</p></div>`;
+  }
+}
+
+/* ── 场内 ETF 行情K线（按 ticker 直取历史OHLC，未加入观察池也能看真行情）───────── */
+async function loadOhlcTab(entry) {
+  const pane = document.getElementById('wl-tab-price');
+  if (!pane) return;
+  pane.innerHTML = `
+    <div class="wl-price-chart" id="wl-price-chart-container">
+      <div class="skeleton skeleton-text" style="height:200px"></div>
+    </div>
+    <div class="wl-indicators" id="wl-price-indicators"></div>`;
+  try {
+    const mk = entry.market || 'us_stock';
+    const url = `/api/vip/account/ohlc?symbol=${encodeURIComponent(entry.ticker || '')}`
+      + `&market=${encodeURIComponent(mk)}&days=90`;
+    const r = await fetch(url);
+    const data = r.ok ? await r.json() : {};
+    renderPriceChart(data.snapshots || []);
+    renderIndicators(entry);  // 无观察池快照 → 诚实显示"暂无技术指标"
+  } catch (e) {
+    const c = document.getElementById('wl-price-chart-container');
+    if (c) c.innerHTML = '<div class="wl-empty-hint"><p>行情加载失败</p><p>请稍后重试</p></div>';
   }
 }
 

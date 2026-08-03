@@ -487,6 +487,33 @@ async def get_fund_nav_series(symbol: str, market: str = "us_stock", account_ref
     return portfolio.fund_nav_series(_wl(user, market), account_ref=account_ref, symbol=symbol)
 
 
+@router.get("/account/ohlc")
+async def get_ticker_ohlc(symbol: str, market: str = "us_stock", days: int = 90,
+                          user: dict = Depends(require_vip_unlocked)):
+    """场内 ETF/标的行情 K 线：按 ticker 直取历史日 OHLC（未加入观察池也能看真行情）。
+
+    数据源＝data_provider 统一调度(yfinance/akshare…)，非观察池缓存快照；账户无关的市场数据。
+    """
+    from bottleneck_hunter.data_provider import get_fetcher_manager
+    sym = (symbol or "").strip()
+    if not sym:
+        return {"snapshots": []}
+    df = await get_fetcher_manager().fetch_daily(sym, market, days)
+    if df is None or getattr(df, "empty", True) or "close" not in df.columns:
+        return {"snapshots": []}
+    snaps = []
+    for rec in df.to_dict("records"):  # manager 契约：小写列 date/open/high/low/close/volume
+        if rec.get("close") is None:
+            continue
+        snaps.append({
+            "date": str(rec.get("date", ""))[:10],
+            "open": rec.get("open"), "high": rec.get("high"),
+            "low": rec.get("low"), "close": rec.get("close"),
+            "volume": int(rec["volume"]) if rec.get("volume") else 0,
+        })
+    return {"snapshots": snaps}
+
+
 @router.get("/account/missing")
 async def get_missing(market: str = "us_stock", account_ref: str = "", user: dict = Depends(require_vip_unlocked)):
     """数据体检：还缺哪些数据、如何补充。"""
