@@ -498,21 +498,14 @@ async def get_account_staleness(market: str = "us_stock", account_ref: str = "",
                                 user: dict = Depends(require_vip_unlocked)):
     """校准新鲜度：距上一份结算单校准已过多少天、最近一次推算日、待校准推算条数。"""
     from datetime import datetime, timezone
+
+    from bottleneck_hunter.vip import portfolio
     wl = _wl(user, market)
     ref = (account_ref or "").strip()
 
-    # 最近一次真值校准日 = 该账户 positions 的最新 as_of_date
-    conn = wl._connect()
-    try:
-        if ref:
-            q, p = wl._filtered("SELECT MAX(as_of_date) AS d FROM positions WHERE account_ref=?",
-                                (ref,), table="positions")
-        else:
-            q, p = wl._filtered("SELECT MAX(as_of_date) AS d FROM positions", table="positions")
-        row = conn.execute(q, p).fetchone()
-        last_calib = (row["d"] if row and row["d"] else "") or ""
-    finally:
-        conn.close()
+    # 最近一次真值校准日：positions 有非零持仓 → 取其 MAX(as_of_date)；
+    # 纯衍生品账户(positions 空)→ 回落最新结单期末日(与价值曲线锚点同源)。
+    last_calib = portfolio._holdings_as_of(wl, ref) or ""
 
     days_since = None
     if last_calib:

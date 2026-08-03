@@ -411,6 +411,22 @@ def test_value_series_derivative_only_account_uses_import_totals(wl):
     assert abs(vs["returns"][0]["pct"] - 2.0) < 0.01  # (1020000-1000000)/1000000
 
 
+def test_holdings_as_of_falls_back_to_statement_period_for_derivative_only(wl):
+    """§1 staleness 锚点:纯衍生品账户 positions 空 → _holdings_as_of 回落最新结单期末(非空串)。
+    /account/staleness 端点改用此 helper,故此断言锁死"招银 CMBIS 导入后校准日 = 结单期末"而非硬查空 positions。"""
+    import json
+
+    with wl._write_conn() as conn:
+        conn.execute(
+            "INSERT INTO vip_imports(id,file_name,file_hash,file_type,detected_kind,status,"
+            "key_metrics_json,account_ref,created_at,user_id,market) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("s1", "s1.pdf", "s1", "pdf", "monthly_statement", "imported",
+             json.dumps({"period_end": "2026-07-31", "total_equity": 1063096.5}),
+             "CMBIS", "2026-07-31T00:00:00+00:00", "u1", "us_stock"))
+
+    assert portfolio._holdings_as_of(wl, "CMBIS") == "2026-07-31"   # positions 空 → 结单期末
+
+
 def test_report_number_guard(wl):
     stmt = _stmt()
     portfolio.normalize_statement(wl, stmt, account_ref="A1")
