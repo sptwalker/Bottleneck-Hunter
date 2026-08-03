@@ -465,6 +465,10 @@ export function openCompanyDrawer(ctx) {
   if (ctx.scorecard) entry._scorecard = ctx.scorecard;
   if (ctx.assetClass) entry._assetClass = ctx.assetClass;  // 基金标的：loadInfoTab 走基金分支
   if (ctx.sourceFile) entry._sourceFile = ctx.sourceFile;  // 基金对应结算单文件名（基金分支渲染）
+  // 场内 ETF(可取行情K线) vs 场外基金(仅结算单净值走势)：'1'/'0'→true/false，缺省 undefined
+  if (ctx.exchangeTraded === '1') entry._exchangeTraded = true;
+  else if (ctx.exchangeTraded === '0') entry._exchangeTraded = false;
+  if (ctx.accountRef != null) entry._accountRef = ctx.accountRef;  // 净值走势按结算单取数需带 VIP 账户
   // 无 entry_id 但有 ticker：匹配已入池的同标的 → 升级为全量视图
   if (!entry.id && entry.ticker) {
     const hit = (wlState.entries || []).find(e => _sameTicker(e.ticker, entry.ticker));
@@ -508,13 +512,17 @@ export function openCompanyDrawer(ctx) {
 
   // 观察池特有页签(持仓策略/UZI)：无 entry_id 时隐藏；基金标的一律隐藏（不看持仓策略）
   const isFund = entry._assetClass === 'fund';
+  const isOtcFund = isFund && entry._exchangeTraded === false;  // 场外基金：价格页签改「净值走势」
   document.querySelectorAll('.wl-drawer-tab[data-wl-only]').forEach(t => {
     t.style.display = (entry.id && !isFund) ? '' : 'none';
   });
-  // 股票专属页签(系统评分/市场K线/新闻/期权资金/情报)：基金标的一律隐藏，只留 基本信息
+  // 股票专属页签(系统评分/新闻/期权资金/情报)：基金标的一律隐藏，只留 基本信息 + 价格/净值
   document.querySelectorAll('.wl-drawer-tab[data-stock-only]').forEach(t => {
     t.style.display = isFund ? 'none' : '';
   });
+  // 价格页签：场内 ETF/股票→「市场K线」(蜡烛图)，场外基金→「净值走势」(结算单净值折线)
+  const priceTab = document.querySelector('.wl-drawer-tab[data-tab="price"]');
+  if (priceTab) priceTab.textContent = isOtcFund ? '净值走势' : '市场K线';
 
   drawer.style.display = 'flex';
   overlay.style.display = 'block';
@@ -558,6 +566,8 @@ if (typeof document !== 'undefined') {
       market: el.getAttribute('data-company-market') || window.appState?.market || 'us_stock',
       assetClass: el.getAttribute('data-asset-class') || '',
       sourceFile: el.getAttribute('data-source-file') || '',
+      exchangeTraded: el.getAttribute('data-exchange-traded'),  // '1'/'0'/null：场内ETF vs 场外基金
+      accountRef: el.getAttribute('data-account-ref'),          // 净值走势取数用的 VIP 账户
     });
   });
 }
@@ -584,9 +594,11 @@ function setDrawerTab(tab) {
 }
 
 async function loadDrawerTabData(entry, tab) {
+  // 场外基金净值走势按结算单取数(VIP account_ref+symbol)，不依赖观察池 entry_id
+  const isOtcFund = entry._assetClass === 'fund' && entry._exchangeTraded === false;
   // 需要观察池存储(entry_id)的页签：分析环节无 id 时给友好兜底，不打空端点
   const needsEntry = ['price', 'news', 'capital', 'intelligence', 'strategy', 'uzi'];
-  if (!entry.id && needsEntry.includes(tab)) {
+  if (!entry.id && needsEntry.includes(tab) && !(tab === 'price' && isOtcFund)) {
     const pane = document.getElementById(`wl-tab-${tab}`);
     if (pane) pane.innerHTML = '<div class="wl-empty" style="padding:40px;text-align:center;color:var(--muted)">该企业未加入观察池<br><span style="font-size:12px">加入观察池后可查看实时行情/新闻/资金/情报/策略</span></div>';
     return;
@@ -599,7 +611,8 @@ async function loadDrawerTabData(entry, tab) {
       await loadScoreTab(entry);
       break;
     case 'price':
-      await loadPriceTab(entry);
+      if (isOtcFund) await loadNavTab(entry);
+      else await loadPriceTab(entry);
       break;
     case 'news':
       await loadNewsTab(entry);
@@ -1346,6 +1359,71 @@ function renderPriceChart(snapshots) {
     ],
   });
 
+  const resizeObs = new ResizeObserver(() => chart.resize());
+  resizeObs.observe(container);
+}
+
+/* ── 场外基金净值走势（按结算单逐期 市值/份额，非行情K线）──────────────────── */
+async function loadNavTab(entry) {
+  const pane = document.getElementById('wl-tab-price');
+  if (!pane) return;
+  pane.innerHTML = `
+    <div style="margin:0 0 10px;padding:8px 10px;font-size:12px;line-height:1.5;color:var(--muted);background:rgba(127,127,127,.08);border-radius:8px">
+      场外基金只显示净值走势 / 非行情K线（按结算单估值，非实时行情）
+    </div>
+    <div class="wl-price-chart" id="wl-nav-chart-container">
+      <div class="skeleton skeleton-text" style="height:200px"></div>
+    </div>`;
+  try {
+    const mk = entry.market || 'us_stock';
+    const ref = entry._accountRef || '';
+    const url = `/api/vip/account/nav-series?symbol=${encodeURIComponent(entry.ticker || '')}`
+      + `&market=${encodeURIComponent(mk)}&account_ref=${encodeURIComponent(ref)}`;
+    const r = await fetch(url);
+    const data = r.ok ? await r.json() : {};
+    renderNavChart(data.series || []);
+  } catch (e) {
+    const c = document.getElementById('wl-nav-chart-container');
+    if (c) c.innerHTML = '<div class="wl-empty-hint"><p>净值走势加载失败</p><p>请稍后重试</p></div>';
+  }
+}
+
+function renderNavChart(series) {
+  const container = document.getElementById('wl-nav-chart-container');
+  if (!container) return;
+  if (!Array.isArray(series) || series.length === 0) {
+    container.innerHTML = '<div class="wl-empty-hint"><p>暂无净值数据</p><p>导入含该基金的结算单后显示净值走势</p></div>';
+    return;
+  }
+  if (series.length === 1) {  // 单期无法连线：诚实提示，给出下一步
+    const p = series[0];
+    container.innerHTML = `<div class="wl-empty-hint"><p>结算单仅一期（${p.as_of_date}）</p>`
+      + `<p>单位净值 ${Number(p.nav).toFixed(4)}；再导入一份结算单即可连成走势</p></div>`;
+    return;
+  }
+  if (typeof echarts === 'undefined') {
+    container.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px">图表库未加载</p>';
+    return;
+  }
+  const chart = echarts.init(container);
+  chart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      formatter: (ps) => {
+        const p = ps[0];
+        return `${p.axisValue}<br/>单位净值 <b>${Number(p.data).toFixed(4)}</b>`;
+      },
+    },
+    grid: { left: '11%', right: '5%', top: '10%', bottom: '12%' },
+    xAxis: { type: 'category', data: series.map(s => s.as_of_date), axisLabel: { fontSize: 10 } },
+    yAxis: { type: 'value', scale: true, splitLine: { lineStyle: { type: 'dashed', color: '#eee' } } },
+    series: [{
+      type: 'line', data: series.map(s => s.nav), smooth: false, showSymbol: true, symbolSize: 6,
+      lineStyle: { color: 'oklch(0.55 0.15 250)', width: 2 },
+      itemStyle: { color: 'oklch(0.55 0.15 250)' },
+      areaStyle: { color: 'oklch(0.55 0.15 250 / 0.08)' },
+    }],
+  });
   const resizeObs = new ResizeObserver(() => chart.resize());
   resizeObs.observe(container);
 }

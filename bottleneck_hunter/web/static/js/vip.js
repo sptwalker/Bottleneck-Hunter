@@ -1166,7 +1166,11 @@ async function loadPositions() {
     const tk = esc(p.ticker);
     const acAttr = p.kind === 'fund' ? ' data-asset-class="fund"' : '';
     const sfAttr = p.kind === 'fund' && p.source_file ? ` data-source-file="${esc(p.source_file)}"` : '';
-    return `<tr data-company-ticker="${tk}" data-company-name="${tk}" data-company-market="${esc(market())}"${acAttr}${sfAttr} style="cursor:pointer" title="双击查看${p.kind === 'fund' ? '基金' : '企业'}详情">` +
+    // 场内 ETF(可取行情K线) vs 场外基金(仅结算单净值走势)：透传给共享抽屉分流页签；
+    // 净值走势按结算单逐期取数需带 account_ref（抽屉在 watchlist.js，不知 VIP 账户上下文）。
+    const etAttr = p.kind === 'fund' ? ` data-exchange-traded="${p.exchange_traded ? '1' : '0'}"` : '';
+    const arAttr = p.kind === 'fund' ? ` data-account-ref="${esc(selectedAccountRef())}"` : '';
+    return `<tr data-company-ticker="${tk}" data-company-name="${tk}" data-company-market="${esc(market())}"${acAttr}${sfAttr}${etAttr}${arAttr} style="cursor:pointer" title="双击查看${p.kind === 'fund' ? '基金' : '企业'}详情">` +
       `<td style="font-weight:600">${tk}</td><td>${fmtNum(p.shares, 0)}</td>` +
       `<td>$${fmtNum(p.avg_cost)}</td><td class="${pcls}">$${fmtNum(p.current_price)}</td><td>$${fmtNum(p.market_value)}</td>` +
       `<td class="${cls}">${pnl >= 0 ? '+' : '-'}$${fmtNum(Math.abs(pnl))}</td><td>${fmtNum(p.weight_pct, 1)}%</td></tr>`;

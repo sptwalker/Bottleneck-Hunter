@@ -742,6 +742,43 @@ def test_classify_asset_class():
     assert c("700", "Tencent Holdings Ltd") == "stock"          # 港股正常股票
 
 
+def test_fund_is_exchange_traded():
+    """场内(可取行情K线) vs 场外(仅结算单净值)形态判别：A股 15/5x ETF 与美股 GLD/SPY/QQQ → 场内；
+    欧洲 ISIN / 美国开放式共同基金(5位X) / A股非ETF前缀(如 00 开头开放式) → 场外。"""
+    f = portfolio.fund_is_exchange_traded
+    assert f("GLD") is True and f("SPY") is True and f("QQQ") is True  # 美股场内 ETF
+    assert f("IE00SYNTH001") is False              # 欧洲 ISIN 形态场外基金：无公开行情源
+    assert f("VFIAX") is False                     # 美国开放式共同基金(5位X)
+    assert f("510300", "a_stock") is True          # 沪 ETF(51 前缀)
+    assert f("159919", "a_stock") is True          # 深 ETF(15 前缀)
+    assert f("000001", "a_stock") is False         # A股场外开放式基金(00 前缀)
+    assert f("") is False
+
+
+def test_fund_nav_series(wl):
+    """场外基金净值走势：各期结算单 市值/份额 连点。两期 → 两点，nav=mv/qty，按日升序。"""
+    wl.create_vip_account(account_ref="A1", display_name="账户1")
+
+    def isin_stmt(period, mv, ch):
+        return BrokerStatement(
+            broker="citi", period_end=period, content_hash=ch,
+            holdings=[EquityHolding(ticker="IE00SYNTH001", company="某场外基金",
+                                    quantity=1000, market_value_usd=mv)],
+            recon=ReconResult(holdings_count=1, holdings_total_usd=mv,
+                              statement_equities_total_usd=mv, delta_usd=0.0, status="ok"))
+
+    portfolio.normalize_statement(wl, isin_stmt("2026-05-31", 100000.0, "nav-may"),
+                                  source_doc_id="nav-d1", account_ref="A1")
+    portfolio.normalize_statement(wl, isin_stmt("2026-06-30", 110000.0, "nav-jun"),
+                                  source_doc_id="nav-d2", account_ref="A1")
+
+    out = portfolio.fund_nav_series(wl, account_ref="A1", symbol="IE00SYNTH001")
+    assert out["basis"] == "statement_valuation"
+    assert [s["as_of_date"] for s in out["series"]] == ["2026-05-31", "2026-06-30"]  # 升序
+    assert {s["as_of_date"]: s["nav"] for s in out["series"]} == {"2026-05-31": 100.0, "2026-06-30": 110.0}
+    assert portfolio.fund_nav_series(wl, account_ref="A1", symbol="NOPE")["series"] == []  # 无此标的→空
+
+
 def test_company_profile_negative_cache_non_clobber(wl):
     """空 info → 落负缓存 stub(带 fetched_at, raw 空)；真 info 覆盖之；再空 info 绝不覆盖真资料。
     根治 GLD 等 .info 反复超时/429 时空结果永不落库 → 每次打开抽屉都重拉的洪流。"""

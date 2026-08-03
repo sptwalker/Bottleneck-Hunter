@@ -10,12 +10,13 @@ M1 范围：EQUITIES（股票/ETF），单券商单账户。衍生品/固收留 
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 
 from bottleneck_hunter.vip import compliance, number_guard
 from bottleneck_hunter.vip.ingest import BrokerStatement, StatementTransaction
-from bottleneck_hunter.watchlist.store_base import normalize_ticker
+from bottleneck_hunter.watchlist.store_base import extract_astock_code, normalize_ticker
 
 
 def _now_iso() -> str:
@@ -156,6 +157,34 @@ def classify_asset_class(symbol: str, name: str = "", instrument_type: str = "")
     if len(sym) == 5 and sym.isalpha() and sym.endswith("X"):
         return "fund"
     return "stock"
+
+
+# 美股 ticker 形态（与 projection._US_TICKER_RE 同源）；ISIN=2字母+9位字母数字+1校验位共 12 位。
+_US_TICKER_RE = re.compile(r"^[A-Z][A-Z.\-]{0,5}$")
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+# A股 ETF/LOF 代码前缀（深 15/16、沪 50/51/52/56/58）；场外开放式基金(00x/16x 混杂,靠前缀区隔)不含。
+_ASTOCK_ETF_PREFIXES = ("15", "16", "50", "51", "52", "56", "58")
+
+
+def fund_is_exchange_traded(symbol: str, market: str = "us_stock") -> bool:
+    """基金是否场内（可取行情 K 线）。仅对已判为 fund 的持仓调用。
+
+    离线形态启发式、不联网：A股 15/16/5x 开头 6 位 → 场内 ETF·LOF；欧洲 ISIN(12 位) /
+    美国开放式共同基金(5 位 X 结尾) → 场外（无公开逐日行情源）；其余美股形态 ticker(GLD/SPY/QQQ)
+    → 场内 ETF。# ponytail: 形态启发式，升级路径＝某次 yfinance .info 成功时把 quoteType
+    (ETF vs MUTUALFUND) 落库并优先采用。
+    """
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return False
+    code = extract_astock_code(sym)
+    if code:  # A股：仅 ETF/LOF 前缀场内，场外开放式基金 → False
+        return code[:2] in _ASTOCK_ETF_PREFIXES
+    if _ISIN_RE.match(sym):  # 欧洲 ISIN 场外基金：无稳定行情映射
+        return False
+    if len(sym) == 5 and sym.isalpha() and sym.endswith("X"):  # 美国开放式共同基金
+        return False
+    return bool(_US_TICKER_RE.match(sym))  # GLD/SPY/QQQ… 场内 ETF
 
 
 def _instruments_by_ticker(wl_store) -> dict[str, tuple[str, str, str]]:
@@ -1726,6 +1755,57 @@ def value_series(wl_store, *, account_ref: str = "") -> dict:
         if _rebase_benchmark(series, snaps):
             benchmark_meta = {"ticker": bench_code, "label": bench_label}
     return {"series": series, "returns": returns, "benchmark": benchmark_meta, "basis": basis}
+
+
+def fund_nav_series(wl_store, *, account_ref: str = "", symbol: str) -> dict:
+    """某场外基金按结算单逐期的单位净值走势（各期 市值/份额）。真实、来自用户结算单、稀疏。
+
+    非行情 K 线——场外基金无公开逐日行情，只能按各期结算单估值连点。account_ref 为空则跨账户
+    合并该标的（同一 as_of_date 的多账户行累加后再算净值）。返回
+    {series:[{as_of_date, nav, market_value, quantity}], basis:'statement_valuation'}。
+    """
+    ref = (account_ref or "").strip()
+    key = normalize_ticker(symbol or "", getattr(wl_store, "_market", None))
+    empty = {"series": [], "basis": "statement_valuation"}
+    if not key:
+        return empty
+    conn = wl_store._connect()
+    try:
+        where = ["p.quantity != 0"]
+        params: list = []
+        if ref:
+            where.append("p.account_ref = ?")
+            params.append(ref)
+        q, p = wl_store._filtered(
+            f"""SELECT i.symbol AS sym, p.as_of_date AS d,
+                       SUM(p.market_value_base) AS mv, SUM(p.quantity) AS qty
+                FROM positions p JOIN instruments i ON i.id = p.instrument_id
+                WHERE {' AND '.join(where)}
+                GROUP BY i.symbol, p.as_of_date ORDER BY p.as_of_date""",
+            tuple(params), table="p",
+        )
+        rows = conn.execute(q, p).fetchall()
+    finally:
+        conn.close()
+    # 归一 symbol 对齐（instruments.symbol 可能带/不带后缀），跨账户同日累加
+    agg: dict[str, dict] = {}
+    for r in rows:
+        if normalize_ticker(r["sym"] or "", getattr(wl_store, "_market", None)) != key:
+            continue
+        d = r["d"]
+        if not d:
+            continue
+        a = agg.setdefault(d, {"mv": 0.0, "qty": 0.0})
+        a["mv"] += r["mv"] or 0.0
+        a["qty"] += r["qty"] or 0.0
+    series = []
+    for d in sorted(agg):
+        mv, qty = agg[d]["mv"], agg[d]["qty"]
+        if not qty:
+            continue
+        series.append({"as_of_date": d, "nav": round(mv / qty, 4),
+                       "market_value": round(mv, 2), "quantity": round(qty, 4)})
+    return {"series": series, "basis": "statement_valuation"}
 
 
 def missing_data_report(wl_store, *, account_ref: str = "") -> list[dict]:

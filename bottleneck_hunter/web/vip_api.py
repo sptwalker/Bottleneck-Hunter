@@ -400,8 +400,11 @@ async def get_account_positions(market: str = "us_stock",
     for p in positions:
         itype, name, doc_id = imap.get(p.get("ticker", ""), ("", "", ""))
         p["kind"] = portfolio.classify_asset_class(p.get("ticker", ""), name, itype)
-        if p["kind"] == "fund" and doc_id:
-            p["_doc_id"] = doc_id  # 暂存，下方按去重 doc_id 解出结算单文件名
+        if p["kind"] == "fund":
+            # 场内 ETF(可取行情K线) vs 场外基金(仅结算单净值走势)：前端据此分流抽屉页签
+            p["exchange_traded"] = portfolio.fund_is_exchange_traded(p.get("ticker", ""), market)
+            if doc_id:
+                p["_doc_id"] = doc_id  # 暂存，下方按去重 doc_id 解出结算单文件名
     # 基金持仓溯源结算单文件名（instruments.source_doc_id → auth.db financial_documents.file_name）；
     # 去重 doc_id 一次解析，文件名仅回给本用户浏览器渲染，不入库不提交。
     fund_doc_ids = {p["_doc_id"] for p in positions if p.get("_doc_id")}
@@ -471,6 +474,17 @@ async def get_value_series(market: str = "us_stock", account_ref: str = "", scop
         return portfolio.value_series(_wl(user, market))
     wl = _wl(user, market)
     return portfolio.value_series(wl, account_ref=_resolve_ref(wl, account_ref))
+
+
+@router.get("/account/nav-series")
+async def get_fund_nav_series(symbol: str, market: str = "us_stock", account_ref: str = "",
+                              user: dict = Depends(require_vip_unlocked)):
+    """场外基金净值走势：按结算单逐期 市值/份额 连点（非实时行情 K 线）。
+
+    account_ref 为空 → 跨账户合并该标的（与「全部账户」视图一致）；非空 → 仅该账户。
+    """
+    from bottleneck_hunter.vip import portfolio
+    return portfolio.fund_nav_series(_wl(user, market), account_ref=account_ref, symbol=symbol)
 
 
 @router.get("/account/missing")
