@@ -1177,6 +1177,19 @@ def _nomura_tenor_days(as_of: str, maturity_ddmmyyyy: str) -> int:
         return 0
 
 
+def _nomura_maturity_iso(maturity_ddmmyyyy: str) -> str:
+    """野村到期日 `DD.MM.YYYY`(16.10.2026) → ISO。落库 terms.maturity/expiry_date 必须 ISO：
+    到期过滤(derivatives/vip_api)按 ISO 串裸比较，存 DD.MM.YYYY 会令 '16.10.2026' < today 恒真、
+    活票被误判到期而从"当前持仓"下架。与 citi/cmbi 出口即 ISO 保持同一口径。不可解析则空串。"""
+    if not _NOMURA_MATURITY_RE.match(maturity_ddmmyyyy or ""):
+        return ""
+    try:
+        d, m, y = maturity_ddmmyyyy.split(".")
+        return datetime(int(y), int(m), int(d)).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return ""
+
+
 def _parse_nomura_derivatives(pages: list[str], as_of: str) -> list[dict]:
     """Position Details − Derivatives (Derivatives − Equities)：逐笔 OTC 累计/减持期权 → 薄记录。
     锚 `OTC EQUITY ACCUMULATOR/DECUMULATOR <SYM> <MKT>`；下一行 `(strike/ko) maturitycode`；
@@ -1212,6 +1225,7 @@ def _parse_nomura_derivatives(pages: list[str], as_of: str) -> list[dict]:
             continue
         qty = _num(lines[mk + 1])
         maturity = lines[mk + 2] if _NOMURA_MATURITY_RE.match(lines[mk + 2]) else ""
+        maturity_iso = _nomura_maturity_iso(maturity)  # terms 落 ISO；tenor_days 仍吃原始 DD.MM.YYYY
         mv_usd = _num(lines[mk + 6])   # Value (USD) 列（负值=负债 MTM）
         if qty is None or mv_usd is None:
             continue
@@ -1221,7 +1235,7 @@ def _parse_nomura_derivatives(pages: list[str], as_of: str) -> list[dict]:
             "tenor_days": _nomura_tenor_days(as_of, maturity),
             "lot_key": lot_key,
             "terms": {"market_value_usd": mv_usd, "quantity": qty, "strike": strike,
-                      "knock_out_price": ko, "maturity": maturity, "expiry_date": maturity,
+                      "knock_out_price": ko, "maturity": maturity_iso, "expiry_date": maturity_iso,
                       "underlying_name": underlying, "nominal_ccy": "USD", "settlement_style": "physical_spot"},
         })
     return out
@@ -1260,6 +1274,7 @@ def _parse_nomura_structured(pages: list[str], as_of: str) -> list[dict]:
             continue
         nominal = _num(lines[mk + 1])
         maturity = lines[mk + 2] if _NOMURA_MATURITY_RE.match(lines[mk + 2]) else ""
+        maturity_iso = _nomura_maturity_iso(maturity)  # terms 落 ISO；lot_key 保持原样以保重导幂等命中
         mv_usd = _num(lines[mk + 7])   # Value (USD) 列
         if nominal is None or mv_usd is None:
             continue
@@ -1269,7 +1284,7 @@ def _parse_nomura_structured(pages: list[str], as_of: str) -> list[dict]:
             "tenor_days": _nomura_tenor_days(as_of, maturity),
             "lot_key": lot_key,
             "terms": {"market_value_usd": mv_usd, "notional": nominal, "isin": isin,
-                      "maturity": maturity, "expiry_date": maturity, "nominal_ccy": "USD",
+                      "maturity": maturity_iso, "expiry_date": maturity_iso, "nominal_ccy": "USD",
                       "product_type": "fixed_coupon_note"},
         })
     return out
@@ -1798,6 +1813,9 @@ def _deriv_selfcheck() -> None:
     assert len(nd) == 2, f"野村双 ORCL 应两条，得 {len(nd)}"
     assert {t["lot_key"] for t in nd} == {"244.0263:161026", "230.5649:261026"}, "lot_key 折叠了"
     assert all(t["product_family"] == "equity_accumulator" for t in nd)
+    # 到期日必须落 ISO(非原始 16.10.2026)——否则到期过滤 mat<today 按 ASCII 恒真、活票被误判到期下架
+    assert {t["terms"]["maturity"] for t in nd} == {"2026-10-16", "2026-10-26"}, \
+        [t["terms"]["maturity"] for t in nd]
 
     # 野村结构性产品 FCN
     nomura_sp = ("FIXED COUPON NOTE\nXS3164880992\nn\n1,000,000\n14.12.2026\nx\nx\nx\nx\n976,300.00\n"
@@ -1805,6 +1823,7 @@ def _deriv_selfcheck() -> None:
     ns = _parse_nomura_structured([nomura_sp], "2026-06-30")
     assert len(ns) == 1 and ns[0]["product_family"] == "equity_fcn", "野村 FCN 未抽到"
     assert ns[0]["terms"]["market_value_usd"] == 976300.0
+    assert ns[0]["terms"]["maturity"] == "2026-12-14", ns[0]["terms"]["maturity"]  # 到期日必须 ISO
 
     # 花旗 Total Assets 锚（合计行下一数值）
     assert _citi_total_assets_usd(["Total Assets\n36,128,828.16\nUSD"]) == 36128828.16

@@ -107,6 +107,15 @@ def test_save_derivative_term_dedup_stable_id(tmp_path):
     assert a == b
     rows = d.list_derivative_terms(wl, account_ref="A1")
     assert len(rows) == 1
+    # Bug#2: 重导同文件(同 hash/family/symbol/lot_key)但 terms 变化 → 保留同一 id/单行，且 terms 刷新。
+    # 否则 parser 升级(如野村到期日改 ISO)的修复永远进不了旧行(与 vip_imports 重导刷新同理)。
+    term2 = d.DerivativeTerm("equity_accumulator", "MU", "USD", 365, {"afp": 2, "maturity": "2026-12-14"})
+    c = d.save_derivative_term(wl, term2, source_file_name="x.pdf", source_file_hash="h1",
+                               broker="nomura", account_ref="A1")
+    assert c == a
+    rows2 = d.list_derivative_terms(wl, account_ref="A1")
+    assert len(rows2) == 1
+    assert rows2[0].terms["afp"] == 2 and rows2[0].terms["maturity"] == "2026-12-14"
 
 
 def test_classify_pdf():

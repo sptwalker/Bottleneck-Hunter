@@ -553,17 +553,24 @@ def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: st
     import uuid
     account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
     lot_key = (lot_key or "").strip()  # 同标的多笔头寸判别键；条款单单条路径留空(行为不变)
-    # 幂等：重复上传同一文件保留原 id/created_at（不做 OR REPLACE 重建）
+    # 幂等：重复上传同一文件保留原 id/created_at，但刷新 terms_json/currency——否则 parser 升级
+    # (如野村到期日改 ISO)的修复永远进不了旧行。与 vip_imports「重导刷新既有行」同理(见
+    # importer.create_vip_import 注释：is_redo 直接 return 会令代码升级后的字段永远写不进旧行)。
     conn = wl_store._connect()
     try:
         q, p = wl_store._filtered(
             "SELECT id FROM vip_derivative_terms WHERE account_ref=? AND source_file_hash=? AND product_family=? AND underlying_symbol=? AND lot_key=?",
             (account_ref, source_file_hash, term.product_family, term.underlying_symbol, lot_key))
         row = conn.execute(q, p).fetchone()
-        if row:
-            return row["id"]
     finally:
         conn.close()
+    if row:
+        with wl_store._write_conn() as conn:
+            q2, p2 = wl_store._filtered(
+                "UPDATE vip_derivative_terms SET terms_json=?, currency=? WHERE id=?",
+                (json.dumps(term.terms, ensure_ascii=False), term.currency, row["id"]))
+            conn.execute(q2, p2)
+        return row["id"]
     did = uuid.uuid4().hex[:12]
     with wl_store._write_conn() as conn:
         conn.execute(
