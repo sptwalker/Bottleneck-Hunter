@@ -846,8 +846,14 @@ function renderHoldingsPie(holdings, capText = '饼图为股票持仓市值分�
 function renderCurrencyPie(detail) {
   const card = document.getElementById('vip-currency-card');
   if (!card) return;
-  if (!detail || !detail.length) { card.style.display = 'none'; return; }
+  const grid = document.getElementById('vip-perf-grid');  // 无币种敞口→给栅格挂 vip-no-ccy，风险卡补通栏(见 css)
+  if (!detail || !detail.length) {
+    card.style.display = 'none';
+    if (grid) grid.classList.add('vip-no-ccy');
+    return;
+  }
   card.style.display = '';
+  if (grid) grid.classList.remove('vip-no-ccy');
   const c = vipChart('vip-currency-pie');
   if (!c) return;
   const data = detail.map(d => ({

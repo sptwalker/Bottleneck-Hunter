@@ -1611,8 +1611,10 @@
         </div>
       </div>
 
-      <div class="st-perf-grid" style="margin-top:16px">
-        <div class="st-card">
+      <!-- 单栅格：价值曲线通栏(双倍宽)，其余卡片依序流排，消除币种敞口卡引入的半格空缺。
+           无币种敞口时(纯衍生品账户)由 vip.js 给栅格挂 vip-no-ccy → 风险仪表盘补通栏，两种账户都无空缺。 -->
+      <div class="st-perf-grid vip-no-ccy" id="vip-perf-grid" style="margin-top:16px">
+        <div class="st-card" style="grid-column:1/-1">
           <div class="st-card-header">
             <h3>价值变化曲线</h3>
             <div style="display:flex;align-items:center;gap:8px">
@@ -1630,25 +1632,23 @@
             <div id="vip-holdings-pie" style="width:100%;height:260px"></div>
           </div>
         </div>
-      </div>
-
-      <div class="st-perf-grid" style="margin-top:16px">
         <div class="st-card" id="vip-currency-card" style="display:none">
           <div class="st-card-header"><h3>币种敞口</h3></div>
           <div class="st-card-body">
             <div id="vip-currency-pie" style="width:100%;height:260px"></div>
+            <p style="margin:8px 2px 0;font-size:12px;line-height:1.6;color:var(--muted,#8a94a6)">
+              按<strong>最近结算单时点</strong>、统一折美元口径切分各币种占比；悬停切片可见原币金额与隐含汇率。<br>
+              仅统计本账户<strong>带持仓的证券</strong>（现金余额、衍生品名义金额不计入）；隐含汇率由结单市值反推、为期末快照非实时。跨账户口径不同，故仅在单账户视图呈现。
+            </p>
           </div>
         </div>
-      </div>
-
-      <div class="st-perf-grid" style="margin-top:16px">
         <div class="st-card">
           <div class="st-card-header"><h3>逐期收益率</h3></div>
           <div class="st-card-body">
             <div id="vip-returns-chart" style="width:100%;height:240px"></div>
           </div>
         </div>
-        <div class="st-card">
+        <div class="st-card" id="vip-risk-card">
           <div class="st-card-header"><h3>风险仪表盘</h3></div>
           <div class="st-card-body">
             <div class="st-stat-grid st-stat-grid-4" id="vip-risk-grid">

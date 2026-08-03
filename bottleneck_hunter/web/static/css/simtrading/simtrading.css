@@ -463,6 +463,10 @@
    顶破 1fr 轨道使图表被压窄；归零让轨道纯按 1fr 定宽，图表 width:100% 随之正确铺满 */
 .st-perf-grid > * { min-width: 0; }
 
+/* 币种敞口卡缺席时(纯衍生品账户/全账户视图)风险仪表盘补通栏，消除尾部半格空缺；
+   有币种敞口时不加此类，风险卡照常半宽与逐期收益率成对。类由 vip.js renderCurrencyPie 切换。 */
+.st-perf-grid.vip-no-ccy #vip-risk-card { grid-column: 1 / -1; }
+
 @media (max-width: 700px) {
   .st-perf-grid { grid-template-columns: 1fr; }
 }
