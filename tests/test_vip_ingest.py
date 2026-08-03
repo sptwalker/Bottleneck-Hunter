@@ -316,6 +316,19 @@ def test_classify_statement_content_fallbacks(citi_position_pdf, monkeypatch):
 
 
 
+def test_merge_classification_citi_deterministic_not_overridden_by_llm():
+    """花旗交易/持仓导出的确定性启发式(content_match)不容 LLM 覆盖:LLM 把 交易_*.pdf 误判成
+    monthly_statement 时,仍须保 trade_confirm——否则走持仓分支抽空 → unsupported_non_statement:citi。
+    但启发式 ambiguous(月结兜底)时应放行 LLM 细分。"""
+    h_trade = {"broker": "citi", "doc_type": "trade_confirm", "reason_code": "content_match"}
+    llm_wrong = {"broker": "citi", "doc_type": "monthly_statement", "reason_code": "ambiguous"}
+    assert ingest._merge_classification(h_trade, llm_wrong)["doc_type"] == "trade_confirm"
+
+    h_ambiguous = {"broker": "citi", "doc_type": "monthly_statement", "reason_code": "ambiguous"}
+    llm_refine = {"broker": "citi", "doc_type": "trade_confirm", "reason_code": "content_match"}
+    assert ingest._merge_classification(h_ambiguous, llm_refine)["doc_type"] == "trade_confirm"
+
+
 def test_ingest_and_store_llm_position_report_overrides_filename(citi_position_pdf, tmp_path, monkeypatch):
     from bottleneck_hunter.auth import store as store_mod
 

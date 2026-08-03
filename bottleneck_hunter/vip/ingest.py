@@ -223,11 +223,17 @@ def _merge_classification(heuristic: dict, llm_result: dict | None) -> dict:
     - 启发式判为 cmbi(招银)→ 直接用启发式：LLM 分类 prompt 的 broker 枚举**不含 cmbi**，对招银单必然
       猜成 citi/nomura，进而在 ingest_pdf 强制走错解析器、抽空后报 unsupported_non_statement:citi。cmbi 由
       auz441/champion tower/cmbi 品牌 + 文件名 M…-Daily|Monthly 判定，确定性、绝不误报，故不容 LLM 猜测覆盖。
+    - 花旗启发式已 content_match(交易_/仓盘_ 文件名或 交易描述/资产级别-全部持仓 正文锚)→ 直接用启发式：
+      这些是花旗导出的确定性命名/内容约定，doc_type 已定。若放任 LLM 把交易流水误判成 monthly_statement，
+      会在 _parse_citi_statement 走持仓分支抽空 → 回落月结单桶 → 报 unsupported_non_statement:citi
+      (交易_*.pdf 导入失败的根因)。与 cmbi 同规矩：确定性券商信号不容 LLM 覆盖，LLM 只在 ambiguous(月结兜底)时细分。
     - LLM 报 unknown 而启发式有值 → 回填启发式 broker（保留 LLM 的 doc_type 细分）。
     """
     if not llm_result:
         return heuristic
     if heuristic["broker"] == "cmbi":
+        return heuristic
+    if heuristic["broker"] == "citi" and heuristic["reason_code"] == "content_match":
         return heuristic
     if llm_result["broker"] == "unknown" and heuristic["broker"] != "unknown":
         llm_result["broker"] = heuristic["broker"]
