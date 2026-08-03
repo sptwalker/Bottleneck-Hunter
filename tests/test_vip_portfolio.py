@@ -694,3 +694,48 @@ def test_fx_attribution_wired_into_dossier(wl):
     assert abs(row["r_fx_pct"] - (-2.0)) < 0.05, row       # 港币贬 2%
     assert abs(row["total_pct"] - 2.9) < 0.05, row         # 乘性 (1.05*0.98-1)=+2.9%
     assert fx["coverage"] == "1/1"                          # fx 锚齐全
+
+
+# ── 股票/基金读时分类 + company_profile 负缓存 + 概览冷却窗 ───────────────────
+
+def test_classify_asset_class():
+    """读时派生分类(不写库、不依赖会超时的 yfinance)：instrument_type / 名称 token /
+    精选基金 ticker / 美国共同基金形态(5位大写以X结尾) → fund；否则 stock。"""
+    c = portfolio.classify_asset_class
+    assert c("GLD") == "fund"                                   # 精选基金 ticker
+    assert c("AAPL") == "stock"                                 # 普通股
+    assert c("XYZ", "iShares MSCI Emerging Markets ETF") == "fund"   # 名称 token
+    assert c("VFIAX") == "fund"                                 # 共同基金形态
+    assert c("ANYTHING", "", "etf") == "fund"                   # instrument_type 权威
+    assert c("MSFT", "Microsoft Corporation") == "stock"        # 普通名股票
+    assert c("700", "Tencent Holdings Ltd") == "stock"          # 港股正常股票
+
+
+def test_company_profile_negative_cache_non_clobber(wl):
+    """空 info → 落负缓存 stub(带 fetched_at, raw 空)；真 info 覆盖之；再空 info 绝不覆盖真资料。
+    根治 GLD 等 .info 反复超时/429 时空结果永不落库 → 每次打开抽屉都重拉的洪流。"""
+    wl.save_company_profile("GLD", {})
+    stub = wl.get_company_profile("GLD")
+    assert stub is not None and stub["fetched_at"] and stub["raw"] == {}   # stub 有时刻、raw 空
+
+    wl.save_company_profile("GLD", {"sector": "Financial", "quoteType": "ETF",
+                                    "longBusinessSummary": "Gold ETF"})
+    real = wl.get_company_profile("GLD")
+    assert real["raw"]["quoteType"] == "ETF"                    # 真 info 覆盖 stub
+
+    wl.save_company_profile("GLD", {})                          # 再抓空 → 不得覆盖真资料
+    assert wl.get_company_profile("GLD")["raw"]["quoteType"] == "ETF"
+
+
+def test_profile_is_stale():
+    from datetime import datetime, timedelta, timezone
+
+    from bottleneck_hunter.web.watchlist_api import _profile_is_stale
+
+    now = datetime(2026, 7, 31, 12, 0, 0, tzinfo=timezone.utc)
+    fresh = {"fetched_at": (now - timedelta(hours=1)).isoformat()}
+    stale = {"fetched_at": (now - timedelta(hours=25)).isoformat()}
+    assert _profile_is_stale(fresh, now) is False              # 冷却窗内 → 新鲜
+    assert _profile_is_stale(stale, now) is True               # 超 24h → 过期，允许重拉一次
+    assert _profile_is_stale(None, now) is True                # 无 profile → 拉
+    assert _profile_is_stale({"fetched_at": ""}, now) is True   # 无时刻 → 拉

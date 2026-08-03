@@ -1152,25 +1152,36 @@ async function loadPositions() {
   clearScopeHint('positions');
   const body = document.getElementById('vip-positions-body');
   const empty = document.getElementById('vip-positions-empty');
+  const fundBody = document.getElementById('vip-positions-fund-body');
+  const fundCard = document.getElementById('vip-positions-fund-card');
+  const fundEmpty = document.getElementById('vip-positions-fund-empty');
   if (!body) return;
+  // 单行渲染：fund 行多带 data-asset-class="fund"，双击委托据此走基金专属抽屉（见 watchlist.js）。
+  const renderRow = (p) => {
+    const pnl = p.unrealized_pnl || 0;
+    const cls = pnl > 0 ? 'st-pnl-pos' : pnl < 0 ? 'st-pnl-neg' : 'st-pnl-zero';
+    // 现价相对成本着色：高于成本绿、低于红、无成本(成本≤0)中性
+    const cp = p.current_price || 0, ac = p.avg_cost || 0;
+    const pcls = ac > 0 ? (cp > ac ? 'st-pnl-pos' : cp < ac ? 'st-pnl-neg' : 'st-pnl-zero') : 'st-pnl-zero';
+    const tk = esc(p.ticker);
+    const acAttr = p.kind === 'fund' ? ' data-asset-class="fund"' : '';
+    return `<tr data-company-ticker="${tk}" data-company-name="${tk}" data-company-market="${esc(market())}"${acAttr} style="cursor:pointer" title="双击查看${p.kind === 'fund' ? '基金' : '企业'}详情">` +
+      `<td style="font-weight:600">${tk}</td><td>${fmtNum(p.shares, 0)}</td>` +
+      `<td>$${fmtNum(p.avg_cost)}</td><td class="${pcls}">$${fmtNum(p.current_price)}</td><td>$${fmtNum(p.market_value)}</td>` +
+      `<td class="${cls}">${pnl >= 0 ? '+' : '-'}$${fmtNum(Math.abs(pnl))}</td><td>${fmtNum(p.weight_pct, 1)}%</td></tr>`;
+  };
   try {
     const { positions } = await vipGet(`/account/positions?account_ref=${encodeURIComponent(selectedAccountRef())}`);
-    if (!positions?.length) { body.innerHTML = ''; if (empty) { empty.textContent = '暂无持仓记录'; empty.style.display = ''; } return; }
-    if (empty) empty.style.display = 'none';
-    body.innerHTML = positions.map(p => {
-      const pnl = p.unrealized_pnl || 0;
-      const cls = pnl > 0 ? 'st-pnl-pos' : pnl < 0 ? 'st-pnl-neg' : 'st-pnl-zero';
-      // 现价相对成本着色：高于成本绿、低于红、无成本(成本≤0)中性
-      const cp = p.current_price || 0, ac = p.avg_cost || 0;
-      const pcls = ac > 0 ? (cp > ac ? 'st-pnl-pos' : cp < ac ? 'st-pnl-neg' : 'st-pnl-zero') : 'st-pnl-zero';
-      // 双击整行 → 复用观察池统一企业详情抽屉（全局 data-company-ticker 委托，见 watchlist.js）
-      const tk = esc(p.ticker);
-      return `<tr data-company-ticker="${tk}" data-company-name="${tk}" data-company-market="${esc(market())}" style="cursor:pointer" title="双击查看企业详情">` +
-        `<td style="font-weight:600">${tk}</td><td>${fmtNum(p.shares, 0)}</td>` +
-        `<td>$${fmtNum(p.avg_cost)}</td><td class="${pcls}">$${fmtNum(p.current_price)}</td><td>$${fmtNum(p.market_value)}</td>` +
-        `<td class="${cls}">${pnl >= 0 ? '+' : '-'}$${fmtNum(Math.abs(pnl))}</td><td>${fmtNum(p.weight_pct, 1)}%</td></tr>`;
-    }).join('');
-  } catch (_) { body.innerHTML = ''; if (empty) { empty.textContent = '加载失败，请重试'; empty.style.display = ''; } toast('持仓加载失败，请重试', 'error'); }
+    const list = positions || [];
+    const funds = list.filter(p => p.kind === 'fund');
+    const stocks = list.filter(p => p.kind !== 'fund');
+    if (!stocks.length) { body.innerHTML = ''; if (empty) { empty.textContent = list.length ? '暂无股票持仓' : '暂无持仓记录'; empty.style.display = ''; } }
+    else { if (empty) empty.style.display = 'none'; body.innerHTML = stocks.map(renderRow).join(''); }
+    // 基金卡：有基金才显示；空账户/纯股票账户整卡隐藏，不占版面。
+    if (fundCard) fundCard.style.display = funds.length ? '' : 'none';
+    if (fundBody) fundBody.innerHTML = funds.map(renderRow).join('');
+    if (fundEmpty) fundEmpty.style.display = funds.length ? 'none' : '';
+  } catch (_) { body.innerHTML = ''; if (empty) { empty.textContent = '加载失败，请重试'; empty.style.display = ''; } if (fundCard) fundCard.style.display = 'none'; toast('持仓加载失败，请重试', 'error'); }
   finally { loadPositionsDeriv(); }  // 纯衍生品账户股票持仓恒空会提前 return，衍生品/结构性产品卡必须在 finally 里始终加载
 }
 

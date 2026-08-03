@@ -520,11 +520,12 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market
                 if cache is not None:
                     cache[ck] = (snapshots, company_info)
 
-            if company_info:
-                try:
-                    store.save_company_profile(ticker, company_info)
-                except Exception as e:
-                    logger.debug("保存 %s company profile 失败: %s", ticker, e)
+            # 总是落库：空 info 由 save_company_profile 落负缓存 stub(不覆盖真资料)，
+            # 让 on-demand 端点凭 fetched_at 冷却，消除对超时/429 标的的重复抓取洪流。
+            try:
+                store.save_company_profile(ticker, company_info)
+            except Exception as e:
+                logger.debug("保存 %s company profile 失败: %s", ticker, e)
 
             if snapshots:
                 # 浅拷贝每条快照：校验会往 snap 里写 market/data_quality/quality_notes，

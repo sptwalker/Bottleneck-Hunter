@@ -121,6 +121,62 @@ def _map_symbol(symbol: str) -> tuple[str, str]:
     return symbol, "stock"
 
 
+# ── 资产大类读时派生（stock vs fund）——离线确定性，不依赖会超时的 yfinance ──
+# _map_symbol 把 GLD/SPY/QQQ 这类普通 ticker 一律落成 "stock"（instrument_type 供敞口/Greeks
+# SUM 依赖，不改），故 UI 分栏另用本函数读时重判。精选集是下限；# ponytail: 升级路径＝某次
+# yfinance .info 成功时把 quoteType 落库并优先采用。
+_FUND_ITYPES = {"etf", "fund", "bond"}
+_FUND_NAME_TOKENS = (
+    "ETF", "ETN", "FUND", "TRUST", "ISHARES", "SPDR", "VANGUARD",
+    "PROSHARES", "INVESCO", "基金",
+)
+_KNOWN_FUND_TICKERS = {
+    "GLD", "IAU", "SLV", "GDX", "GDXJ",            # 贵金属/矿业
+    "SPY", "VOO", "IVV", "QQQ", "VTI", "DIA",      # 宽基
+    "TLT", "IEF", "SHY", "AGG", "BND", "LQD", "HYG",  # 债券
+    "SOXX", "SMH", "XLK", "XLF", "XLE", "ARKK",    # 行业/主题
+    "EEM", "EFA", "VEA", "VWO",                    # 海外
+}
+
+
+def classify_asset_class(symbol: str, name: str = "", instrument_type: str = "") -> str:
+    """把一笔持仓判成 "stock" 或 "fund"（含 ETF）。离线、确定性、无网络。
+
+    优先级：instrument_type → 名称关键词 → 精选基金 ticker → 美国共同基金形态 → 默认 stock。
+    """
+    if (instrument_type or "").strip().lower() in _FUND_ITYPES:
+        return "fund"
+    up_name = (name or "").upper()
+    if any(tok in up_name for tok in _FUND_NAME_TOKENS):
+        return "fund"
+    sym = (symbol or "").strip().upper()
+    if sym in _KNOWN_FUND_TICKERS:
+        return "fund"
+    # 美国开放式共同基金：5 位纯字母且以 X 结尾（如 VFIAX/FXAIX）
+    if len(sym) == 5 and sym.isalpha() and sym.endswith("X"):
+        return "fund"
+    return "stock"
+
+
+def _instruments_by_ticker(wl_store) -> dict[str, tuple[str, str]]:
+    """读本用户+市场的 instruments，键为归一 ticker，值 (instrument_type, name)。
+
+    供 /account/positions 给裸 sim_positions 补类型/名称做资产大类判定。复用 _filtered 隔离。
+    """
+    conn = wl_store._connect()
+    try:
+        q, p = wl_store._filtered("SELECT symbol, instrument_type, name FROM instruments")
+        rows = conn.execute(q, p).fetchall()
+    finally:
+        conn.close()
+    out: dict[str, tuple[str, str]] = {}
+    market = getattr(wl_store, "_market", None)
+    for r in rows:
+        key = normalize_ticker(r["symbol"] or "", market)
+        out[key] = (r["instrument_type"] or "", r["name"] or "")
+    return out
+
+
 # ── P2: 规范化 —— BrokerStatement → instruments + positions ──────────────
 
 def normalize_statement(wl_store, stmt: BrokerStatement,

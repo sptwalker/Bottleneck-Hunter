@@ -389,10 +389,17 @@ async def get_account_transactions(market: str = "us_stock",
 async def get_account_positions(market: str = "us_stock",
                                 account_ref: str = "",
                                 user: dict = Depends(require_vip_unlocked)):
+    from bottleneck_hunter.vip import portfolio
+
     wl = _wl(user, market)
     acct = wl.get_sim_account(account_ref=_resolve_ref(wl, account_ref))
     positions = sorted(wl.get_sim_positions(acct["id"]),
                        key=lambda p: p.get("market_value", 0), reverse=True)
+    # 读时判资产大类（stock/fund），供前端分栏 + 基金专属抽屉；不依赖会超时的 yfinance。
+    imap = portfolio._instruments_by_ticker(wl)
+    for p in positions:
+        itype, name = imap.get(p.get("ticker", ""), ("", ""))
+        p["kind"] = portfolio.classify_asset_class(p.get("ticker", ""), name, itype)
     return {"positions": positions}
 
 

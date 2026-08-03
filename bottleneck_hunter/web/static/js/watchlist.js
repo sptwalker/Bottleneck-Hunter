@@ -463,6 +463,7 @@ export function openCompanyDrawer(ctx) {
     latest_snapshot: ctx.snapshot || null,
   };
   if (ctx.scorecard) entry._scorecard = ctx.scorecard;
+  if (ctx.assetClass) entry._assetClass = ctx.assetClass;  // 基金标的：loadInfoTab 走基金分支
   // 无 entry_id 但有 ticker：匹配已入池的同标的 → 升级为全量视图
   if (!entry.id && entry.ticker) {
     const hit = (wlState.entries || []).find(e => _sameTicker(e.ticker, entry.ticker));
@@ -549,6 +550,7 @@ if (typeof document !== 'undefined') {
       ticker,
       name: el.getAttribute('data-company-name') || ticker,
       market: el.getAttribute('data-company-market') || window.appState?.market || 'us_stock',
+      assetClass: el.getAttribute('data-asset-class') || '',
     });
   });
 }
@@ -738,59 +740,80 @@ async function loadInfoTab(entry) {
     profileHtml += '</div>';
   }
 
-  /* ── 估值指标 ── */
-  html += _buildProfileGrid('估值指标', [
-    ['市盈率(TTM)', _fmtNum(raw.trailingPE, 2)],
-    ['市盈率(预期)', _fmtNum(raw.forwardPE, 2)],
-    ['市净率', _fmtNum(raw.priceToBook, 2)],
-    ['市销率', _fmtNum(raw.priceToSalesTrailing12Months, 2)],
-    ['EV/EBITDA', _fmtNum(raw.enterpriseToEbitda, 2)],
-    ['PEG', _fmtNum(raw.trailingPegRatio, 2)],
-    ['市值', _fmtBigNum(raw.marketCap)],
-    ['企业价值', _fmtBigNum(raw.enterpriseValue)],
-  ]);
+  if (entry._assetClass === 'fund') {
+    /* ── 基金概况（按基金信息重设，不套用股票五块基本面）── */
+    const fundGrid = _buildProfileGrid('基金概况', [
+      ['类别', raw.category || '-'],
+      ['基金公司', raw.fundFamily || '-'],
+      ['类型', raw.legalType || raw.quoteType || '-'],
+      ['净资产', _fmtBigNum(raw.totalAssets)],
+      ['净值(NAV)', _fmtNum(raw.navPrice, 2)],
+      ['收益率', _fmtPct(raw.yield)],
+      ['年初至今', _fmtPct(raw.ytdReturn)],
+      ['三年平均', _fmtPct(raw.threeYearAverageReturn)],
+      ['五年平均', _fmtPct(raw.fiveYearAverageReturn)],
+      ['费用率', _fmtPct(raw.annualReportExpenseRatio)],
+      ['Beta(3年)', _fmtNum(raw.beta3Year, 2)],
+    ]);
+    html += fundGrid;
+    if (!fundGrid) {   // 全字段皆空 → 诚实兜底，不触发强制抓取
+      html += '<div class="wl-info-section"><p style="color:var(--muted);font-size:13px">暂无基金资料</p></div>';
+    }
+  } else {
+    /* ── 估值指标 ── */
+    html += _buildProfileGrid('估值指标', [
+      ['市盈率(TTM)', _fmtNum(raw.trailingPE, 2)],
+      ['市盈率(预期)', _fmtNum(raw.forwardPE, 2)],
+      ['市净率', _fmtNum(raw.priceToBook, 2)],
+      ['市销率', _fmtNum(raw.priceToSalesTrailing12Months, 2)],
+      ['EV/EBITDA', _fmtNum(raw.enterpriseToEbitda, 2)],
+      ['PEG', _fmtNum(raw.trailingPegRatio, 2)],
+      ['市值', _fmtBigNum(raw.marketCap)],
+      ['企业价值', _fmtBigNum(raw.enterpriseValue)],
+    ]);
 
-  /* ── 盈利能力 ── */
-  html += _buildProfileGrid('盈利能力', [
-    ['毛利率', _fmtPct(raw.grossMargins)],
-    ['营业利润率', _fmtPct(raw.operatingMargins)],
-    ['净利率', _fmtPct(raw.profitMargins)],
-    ['ROE', _fmtPct(raw.returnOnEquity)],
-    ['ROA', _fmtPct(raw.returnOnAssets)],
-    ['每股收益(TTM)', _fmtNum(raw.trailingEps, 2)],
-    ['每股营收', _fmtNum(raw.revenuePerShare, 2)],
-  ]);
+    /* ── 盈利能力 ── */
+    html += _buildProfileGrid('盈利能力', [
+      ['毛利率', _fmtPct(raw.grossMargins)],
+      ['营业利润率', _fmtPct(raw.operatingMargins)],
+      ['净利率', _fmtPct(raw.profitMargins)],
+      ['ROE', _fmtPct(raw.returnOnEquity)],
+      ['ROA', _fmtPct(raw.returnOnAssets)],
+      ['每股收益(TTM)', _fmtNum(raw.trailingEps, 2)],
+      ['每股营收', _fmtNum(raw.revenuePerShare, 2)],
+    ]);
 
-  /* ── 财务健康 ── */
-  html += _buildProfileGrid('财务健康', [
-    ['资产负债率', _fmtNum(raw.debtToEquity, 1)],
-    ['流动比率', _fmtNum(raw.currentRatio, 2)],
-    ['速动比率', _fmtNum(raw.quickRatio, 2)],
-    ['总现金', _fmtBigNum(raw.totalCash)],
-    ['总负债', _fmtBigNum(raw.totalDebt)],
-    ['总营收', _fmtBigNum(raw.totalRevenue)],
-    ['自由现金流', _fmtBigNum(raw.freeCashflow)],
-  ]);
+    /* ── 财务健康 ── */
+    html += _buildProfileGrid('财务健康', [
+      ['资产负债率', _fmtNum(raw.debtToEquity, 1)],
+      ['流动比率', _fmtNum(raw.currentRatio, 2)],
+      ['速动比率', _fmtNum(raw.quickRatio, 2)],
+      ['总现金', _fmtBigNum(raw.totalCash)],
+      ['总负债', _fmtBigNum(raw.totalDebt)],
+      ['总营收', _fmtBigNum(raw.totalRevenue)],
+      ['自由现金流', _fmtBigNum(raw.freeCashflow)],
+    ]);
 
-  /* ── 增长 & 分红 ── */
-  html += _buildProfileGrid('增长 & 分红', [
-    ['营收增长', _fmtPct(raw.revenueGrowth)],
-    ['利润增长', _fmtPct(raw.earningsGrowth)],
-    ['季度利润增长', _fmtPct(raw.earningsQuarterlyGrowth)],
-    ['股息率', _fmtPct(raw.dividendYield)],
-    ['每股股息', _fmtNum(raw.dividendRate, 2)],
-    ['派息率', _fmtPct(raw.payoutRatio)],
-  ]);
+    /* ── 增长 & 分红 ── */
+    html += _buildProfileGrid('增长 & 分红', [
+      ['营收增长', _fmtPct(raw.revenueGrowth)],
+      ['利润增长', _fmtPct(raw.earningsGrowth)],
+      ['季度利润增长', _fmtPct(raw.earningsQuarterlyGrowth)],
+      ['股息率', _fmtPct(raw.dividendYield)],
+      ['每股股息', _fmtNum(raw.dividendRate, 2)],
+      ['派息率', _fmtPct(raw.payoutRatio)],
+    ]);
 
-  /* ── 风险指标 ── */
-  html += _buildProfileGrid('风险指标', [
-    ['Beta', _fmtNum(raw.beta, 2)],
-    ['52周变动', _fmtPct(raw['52WeekChange'])],
-    ['52周最高', _fmtNum(raw.fiftyTwoWeekHigh, 2)],
-    ['52周最低', _fmtNum(raw.fiftyTwoWeekLow, 2)],
-    ['做空比率', _fmtNum(raw.shortRatio, 2)],
-    ['做空占比', _fmtPct(raw.shortPercentOfFloat)],
-  ]);
+    /* ── 风险指标 ── */
+    html += _buildProfileGrid('风险指标', [
+      ['Beta', _fmtNum(raw.beta, 2)],
+      ['52周变动', _fmtPct(raw['52WeekChange'])],
+      ['52周最高', _fmtNum(raw.fiftyTwoWeekHigh, 2)],
+      ['52周最低', _fmtNum(raw.fiftyTwoWeekLow, 2)],
+      ['做空比率', _fmtNum(raw.shortRatio, 2)],
+      ['做空占比', _fmtPct(raw.shortPercentOfFloat)],
+    ]);
+  }
 
   /* ── 备注 & 决策路径：仅观察池条目显示 ── */
   if (entry.id) {

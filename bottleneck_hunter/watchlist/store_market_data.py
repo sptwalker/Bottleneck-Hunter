@@ -418,8 +418,21 @@ class _MarketDataMixin:
 
 
     def save_company_profile(self, ticker: str, info: dict) -> None:
-        """从 yfinance info dict 提取企业基本面并 upsert。"""
+        """从 yfinance info dict 提取企业基本面并 upsert。
+
+        info 为空（抓取超时/429/无数据）时落一条最小 stub 作负缓存——但仅在
+        无既有行时 INSERT，绝不 REPLACE 覆盖已有真资料（批量管线空刷不伤真数据）。
+        有了带 fetched_at 的 stub，on-demand 端点即可按冷却窗跳过重复抓取。
+        """
         if not info:
+            with self._write_conn() as conn:
+                conn.execute(
+                    """INSERT OR IGNORE INTO company_profiles
+                       (ticker, raw_json, sector, industry, description, website,
+                        employees, country, exchange, currency, fetched_at, user_id)
+                       VALUES (?, '{}', '', '', '', '', 0, '', '', '', ?, ?)""",
+                    (ticker, _now_iso(), SHARED_UID),
+                )
             return
         with self._write_conn() as conn:
             conn.execute(

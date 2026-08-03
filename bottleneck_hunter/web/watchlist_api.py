@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
@@ -27,6 +28,26 @@ from bottleneck_hunter.web.streaming._notice import with_notices
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["watchlist"])
+
+# on-demand 概览重拉冷却窗：GLD 等 .info 反复超时/429 的标的，首拉落负缓存 stub(带 fetched_at)后
+# 24h 内不再重拉 → 消除每次打开抽屉都触发的抓取失败洪流。批量调度管线不受此限，仍是正路刷新。
+_PROFILE_REFETCH_COOLDOWN_H = 24
+
+
+def _profile_is_stale(profile: dict | None, now: datetime) -> bool:
+    """profile 缺失/无 fetched_at/不可解析/超冷却窗 → True(允许重拉一次)；否则新鲜 → False。"""
+    if not profile:
+        return True
+    ts = (profile.get("fetched_at") or "").strip()
+    if not ts:
+        return True
+    try:
+        fetched = datetime.fromisoformat(ts)
+    except ValueError:
+        return True
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    return (now - fetched) > timedelta(hours=_PROFILE_REFETCH_COOLDOWN_H)
 
 
 def _busy_event():
@@ -321,7 +342,8 @@ async def company_overview(ticker: str, market: str = "us_stock", user: dict = D
     profile = store.get_company_profile(tk)
     # 非观察池企业(入围/最终评选/交叉验证候选)库里没有行情/基本面 → 按需拉一次并落库，
     # 让所有入围企业的"基本信息"都可见(下次直接读缓存)。best-effort：拉不到(如 yfinance 限流)则维持空。
-    if not snap or not profile:
+    # 冷却窗护栏：profile 新鲜(含负缓存 stub)则不重拉，避免 GLD 等超时/429 标的每次打开都触发抓取洪流。
+    if not snap or _profile_is_stale(profile, datetime.now(timezone.utc)):
         try:
             from bottleneck_hunter.watchlist.price_pipeline import _fetch_one
             await _fetch_one(tk, store, market=market)

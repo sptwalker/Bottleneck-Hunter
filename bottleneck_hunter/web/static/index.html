@@ -1741,7 +1741,7 @@
 
     <div class="st-tab-pane" id="vip-pane-positions" role="tabpanel">
       <div class="st-card">
-        <div class="st-card-header"><h3>最近持仓</h3></div>
+        <div class="st-card-header"><h3>股票持仓</h3></div>
         <div class="st-card-body">
           <table class="st-table">
             <thead>
@@ -1758,6 +1758,26 @@
             <tbody id="vip-positions-body"></tbody>
           </table>
           <p class="st-empty-hint" id="vip-positions-empty">暂无持仓记录</p>
+        </div>
+      </div>
+      <div class="st-card" id="vip-positions-fund-card" style="margin-top:16px;display:none">
+        <div class="st-card-header"><h3>基金 / ETF</h3></div>
+        <div class="st-card-body">
+          <table class="st-table">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>持仓数</th>
+                <th>成本价</th>
+                <th>当前价</th>
+                <th>市值</th>
+                <th>未实现盈亏</th>
+                <th>权重</th>
+              </tr>
+            </thead>
+            <tbody id="vip-positions-fund-body"></tbody>
+          </table>
+          <p class="st-empty-hint" id="vip-positions-fund-empty" style="display:none">暂无基金 / ETF 持仓</p>
         </div>
       </div>
       <div class="st-card" id="vip-positions-deriv-card" style="margin-top:16px;display:none">
