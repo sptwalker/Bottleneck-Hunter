@@ -158,22 +158,23 @@ def classify_asset_class(symbol: str, name: str = "", instrument_type: str = "")
     return "stock"
 
 
-def _instruments_by_ticker(wl_store) -> dict[str, tuple[str, str]]:
-    """读本用户+市场的 instruments，键为归一 ticker，值 (instrument_type, name)。
+def _instruments_by_ticker(wl_store) -> dict[str, tuple[str, str, str]]:
+    """读本用户+市场的 instruments，键为归一 ticker，值 (instrument_type, name, source_doc_id)。
 
-    供 /account/positions 给裸 sim_positions 补类型/名称做资产大类判定。复用 _filtered 隔离。
+    供 /account/positions 给裸 sim_positions 补类型/名称做资产大类判定，并溯源结算单文件名
+    （source_doc_id → auth.db financial_documents.file_name）。复用 _filtered 隔离。
     """
     conn = wl_store._connect()
     try:
-        q, p = wl_store._filtered("SELECT symbol, instrument_type, name FROM instruments")
+        q, p = wl_store._filtered("SELECT symbol, instrument_type, name, source_doc_id FROM instruments")
         rows = conn.execute(q, p).fetchall()
     finally:
         conn.close()
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[str, str, str]] = {}
     market = getattr(wl_store, "_market", None)
     for r in rows:
         key = normalize_ticker(r["symbol"] or "", market)
-        out[key] = (r["instrument_type"] or "", r["name"] or "")
+        out[key] = (r["instrument_type"] or "", r["name"] or "", r["source_doc_id"] or "")
     return out
 
 

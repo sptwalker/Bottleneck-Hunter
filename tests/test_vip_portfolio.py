@@ -739,3 +739,11 @@ def test_profile_is_stale():
     assert _profile_is_stale(stale, now) is True               # 超 24h → 过期，允许重拉一次
     assert _profile_is_stale(None, now) is True                # 无 profile → 拉
     assert _profile_is_stale({"fetched_at": ""}, now) is True   # 无时刻 → 拉
+
+
+def test_instruments_by_ticker_carries_source_doc(wl):
+    """_instruments_by_ticker 返回 (instrument_type, name, source_doc_id)——供 /account/positions
+    给基金持仓溯源结算单文件名(source_doc_id → auth.db financial_documents.file_name)。"""
+    portfolio._upsert_instrument(wl, "GLD", "etf", "SPDR Gold Shares", "USD", "doc1")
+    imap = portfolio._instruments_by_ticker(wl)
+    assert imap["GLD"] == ("etf", "SPDR Gold Shares", "doc1")

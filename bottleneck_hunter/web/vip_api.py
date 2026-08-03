@@ -398,8 +398,25 @@ async def get_account_positions(market: str = "us_stock",
     # 读时判资产大类（stock/fund），供前端分栏 + 基金专属抽屉；不依赖会超时的 yfinance。
     imap = portfolio._instruments_by_ticker(wl)
     for p in positions:
-        itype, name = imap.get(p.get("ticker", ""), ("", ""))
+        itype, name, doc_id = imap.get(p.get("ticker", ""), ("", "", ""))
         p["kind"] = portfolio.classify_asset_class(p.get("ticker", ""), name, itype)
+        if p["kind"] == "fund" and doc_id:
+            p["_doc_id"] = doc_id  # 暂存，下方按去重 doc_id 解出结算单文件名
+    # 基金持仓溯源结算单文件名（instruments.source_doc_id → auth.db financial_documents.file_name）；
+    # 去重 doc_id 一次解析，文件名仅回给本用户浏览器渲染，不入库不提交。
+    fund_doc_ids = {p["_doc_id"] for p in positions if p.get("_doc_id")}
+    if fund_doc_ids:
+        from bottleneck_hunter.auth.store import AuthStore
+        auth = AuthStore()
+        uid = user["sub"]
+        name_by_doc = {}
+        for did in fund_doc_ids:
+            d = auth.get_financial_doc(uid, did)
+            name_by_doc[did] = (d or {}).get("file_name", "")
+        for p in positions:
+            did = p.pop("_doc_id", "")
+            if did:
+                p["source_file"] = name_by_doc.get(did, "")
     return {"positions": positions}
 
 

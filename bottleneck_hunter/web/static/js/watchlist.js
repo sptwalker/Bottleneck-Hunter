@@ -464,6 +464,7 @@ export function openCompanyDrawer(ctx) {
   };
   if (ctx.scorecard) entry._scorecard = ctx.scorecard;
   if (ctx.assetClass) entry._assetClass = ctx.assetClass;  // 基金标的：loadInfoTab 走基金分支
+  if (ctx.sourceFile) entry._sourceFile = ctx.sourceFile;  // 基金对应结算单文件名（基金分支渲染）
   // 无 entry_id 但有 ticker：匹配已入池的同标的 → 升级为全量视图
   if (!entry.id && entry.ticker) {
     const hit = (wlState.entries || []).find(e => _sameTicker(e.ticker, entry.ticker));
@@ -505,9 +506,14 @@ export function openCompanyDrawer(ctx) {
     tierEl.innerHTML = `<span class="wl-tier-dot wl-dot-${entry.tier}"></span>${tierLabel(entry.tier)}`;
   } else { tierEl.style.display = 'none'; }
 
-  // 观察池特有页签(持仓策略/UZI)：无 entry_id 时隐藏
+  // 观察池特有页签(持仓策略/UZI)：无 entry_id 时隐藏；基金标的一律隐藏（不看持仓策略）
+  const isFund = entry._assetClass === 'fund';
   document.querySelectorAll('.wl-drawer-tab[data-wl-only]').forEach(t => {
-    t.style.display = entry.id ? '' : 'none';
+    t.style.display = (entry.id && !isFund) ? '' : 'none';
+  });
+  // 股票专属页签(系统评分/新闻/期权资金/情报)：基金标的隐藏，只留 基本信息 + 市场K线
+  document.querySelectorAll('.wl-drawer-tab[data-stock-only]').forEach(t => {
+    t.style.display = isFund ? 'none' : '';
   });
 
   drawer.style.display = 'flex';
@@ -530,7 +536,7 @@ export function openCompanyDrawer(ctx) {
         entry.latest_snapshot = entry.latest_snapshot || hit.latest_snapshot;
         if (hit.market) entry.market = hit.market;
         wlState.drawerEntryId = entry.id;
-        document.querySelectorAll('.wl-drawer-tab[data-wl-only]').forEach(t => { t.style.display = ''; });
+        document.querySelectorAll('.wl-drawer-tab[data-wl-only]').forEach(t => { t.style.display = isFund ? 'none' : ''; });
         loadDrawerTabData(entry, wlState.drawerTab);
       }
     }).catch(() => {});
@@ -551,6 +557,7 @@ if (typeof document !== 'undefined') {
       name: el.getAttribute('data-company-name') || ticker,
       market: el.getAttribute('data-company-market') || window.appState?.market || 'us_stock',
       assetClass: el.getAttribute('data-asset-class') || '',
+      sourceFile: el.getAttribute('data-source-file') || '',
     });
   });
 }
@@ -681,6 +688,7 @@ async function loadInfoTab(entry) {
   const snap = overview.latest_snapshot || entry.latest_snapshot || {};
   const profile = overview.profile || {};
   const raw = profile.raw || {};
+  const isFund = entry._assetClass === 'fund';
 
   let html = '';
 
@@ -714,7 +722,7 @@ async function loadInfoTab(entry) {
   const employees = profile.employees || raw.fullTimeEmployees || 0;
 
   let profileHtml = '';
-  if (desc || sector || industry) {
+  if (!isFund && (desc || sector || industry)) {
     profileHtml += '<div class="wl-info-section wl-profile-section"><h4>公司概况</h4>';
     if (sector || industry || country || exchange) {
       profileHtml += '<div class="wl-profile-tags">';
@@ -740,25 +748,9 @@ async function loadInfoTab(entry) {
     profileHtml += '</div>';
   }
 
-  if (entry._assetClass === 'fund') {
-    /* ── 基金概况（按基金信息重设，不套用股票五块基本面）── */
-    const fundGrid = _buildProfileGrid('基金概况', [
-      ['类别', raw.category || '-'],
-      ['基金公司', raw.fundFamily || '-'],
-      ['类型', raw.legalType || raw.quoteType || '-'],
-      ['净资产', _fmtBigNum(raw.totalAssets)],
-      ['净值(NAV)', _fmtNum(raw.navPrice, 2)],
-      ['收益率', _fmtPct(raw.yield)],
-      ['年初至今', _fmtPct(raw.ytdReturn)],
-      ['三年平均', _fmtPct(raw.threeYearAverageReturn)],
-      ['五年平均', _fmtPct(raw.fiveYearAverageReturn)],
-      ['费用率', _fmtPct(raw.annualReportExpenseRatio)],
-      ['Beta(3年)', _fmtNum(raw.beta3Year, 2)],
-    ]);
-    html += fundGrid;
-    if (!fundGrid) {   // 全字段皆空 → 诚实兜底，不触发强制抓取
-      html += '<div class="wl-info-section"><p style="color:var(--muted);font-size:13px">暂无基金资料</p></div>';
-    }
+  if (isFund) {
+    /* ── 基金详情按基金实际信息重设：通俗介绍 / 发行方介绍 / 基本规则 / 对应文件 ── */
+    html += _buildFundInfoHtml(entry, raw);
   } else {
     /* ── 估值指标 ── */
     html += _buildProfileGrid('估值指标', [
@@ -913,7 +905,107 @@ function _buildProfileGrid(title, rows) {
   return html;
 }
 
-/* ── Overview helper builders ── */
+/* ── 基金详情（独立于股票，按基金实际信息重设）─────────────────────
+   真实字段优先 + 内置精选中文简介兜底；不接 LLM、绝不杜撰。 */
+
+// 精选发行方中文一句介绍（大写家族名子串匹配）。# ponytail: 精选下限，真实 fundFamily 名始终显示。
+const _FUND_ISSUER_INTRO = {
+  'SPDR': 'SPDR 是道富环球（State Street Global Advisors）旗下 ETF 品牌，全球最早的 ETF 发行商之一。',
+  'STATE STREET': '道富环球（State Street Global Advisors），SPDR 品牌母公司，全球顶级资管机构。',
+  'ISHARES': 'iShares 是全球最大资管公司贝莱德（BlackRock）旗下 ETF 品牌，产品线覆盖最广。',
+  'BLACKROCK': '贝莱德（BlackRock），全球最大资产管理公司，iShares ETF 品牌母公司。',
+  'VANGUARD': 'Vanguard（先锋领航）以低费率指数基金著称，由基金持有人共同拥有，长期成本极低。',
+  'INVESCO': 'Invesco（景顺），全球性资管公司，旗下含知名的纳斯达克 100 ETF（QQQ）。',
+  'PROSHARES': 'ProShares 专注杠杆型、反向型及主题型 ETF。',
+  'WISDOMTREE': 'WisdomTree 以基本面加权与主题型 ETF 见长。',
+  'VANECK': 'VanEck 以行业主题（如金矿、半导体）与新兴市场 ETF 著称。',
+  'SCHWAB': '嘉信（Charles Schwab）旗下低费率宽基 ETF 系列。',
+};
+
+// 精选常见基金中文通俗介绍。# ponytail: 精选下限，.info 的 longBusinessSummary 成功时优先采用。
+const _FUND_TICKER_INTRO = {
+  GLD: 'SPDR 黄金 ETF：持有实物黄金，份额价格随金价波动，是全球规模最大的黄金 ETF，便于低门槛跟踪金价。',
+  IAU: 'iShares 黄金信托：持有实物黄金，费率低于 GLD，同样用于跟踪国际金价。',
+  SLV: 'iShares 白银信托：持有实物白银，跟踪国际银价。',
+  GDX: 'VanEck 金矿商 ETF：持有全球主要金矿开采公司股票，波动通常大于金价本身。',
+  SPY: 'SPDR 标普 500 ETF：跟踪美股大盘标普 500 指数，全球成交最活跃的 ETF。',
+  VOO: 'Vanguard 标普 500 ETF：低费率跟踪标普 500 指数。',
+  IVV: 'iShares 标普 500 ETF：低费率跟踪标普 500 指数。',
+  QQQ: 'Invesco 纳斯达克 100 ETF：跟踪以科技股为主的纳斯达克 100 指数。',
+  VTI: 'Vanguard 全美股票市场 ETF：一篮子覆盖美股几乎所有上市公司。',
+  DIA: 'SPDR 道琼斯工业平均 ETF：跟踪道指 30 只蓝筹股。',
+  TLT: 'iShares 20 年期以上美国国债 ETF：跟踪长久期美债，对利率高度敏感。',
+  IEF: 'iShares 7-10 年期美国国债 ETF：跟踪中久期美债。',
+  AGG: 'iShares 美国综合债券 ETF：跟踪美国投资级债券整体市场。',
+  BND: 'Vanguard 全债市场 ETF：一篮子美国投资级债券。',
+  LQD: 'iShares 投资级公司债 ETF：跟踪美国投资级公司债。',
+  HYG: 'iShares 高收益公司债 ETF：跟踪美国高收益（垃圾级）公司债，收益高、风险高。',
+};
+
+function _fundIssuerIntro(family) {
+  const up = (family || '').toUpperCase();
+  for (const k in _FUND_ISSUER_INTRO) if (up.includes(k)) return _FUND_ISSUER_INTRO[k];
+  return '';
+}
+
+function _buildFundInfoHtml(entry, raw) {
+  const ticker = (entry.ticker || '').toUpperCase();
+  const summary = raw.longBusinessSummary || '';   // 真实资料，中英对照（_fillTranslations 回填）
+  const intro = _FUND_TICKER_INTRO[ticker] || '';  // 精选中文兜底
+  const family = raw.fundFamily || '';
+  const issuerIntro = _fundIssuerIntro(family);
+  let html = '';
+
+  // ① 通俗介绍
+  html += '<div class="wl-info-section wl-profile-section"><h4>通俗介绍</h4>';
+  if (summary) {
+    html += `<div class="wl-profile-desc">
+      <p class="wl-profile-desc-text">${escHtml(summary)}</p>
+      <div class="wl-profile-trans" data-tt="${escHtml(summary)}"></div>
+    </div>`;
+  } else if (intro) {
+    html += `<p style="line-height:1.7">${escHtml(intro)}</p>`;
+  } else {
+    html += '<p style="color:var(--muted);font-size:13px">暂无介绍</p>';
+  }
+  html += '</div>';
+
+  // ② 发行方介绍
+  html += '<div class="wl-info-section wl-profile-section"><h4>发行方介绍</h4>';
+  if (family || issuerIntro) {
+    if (family) html += `<p style="font-weight:600;margin-bottom:4px">${escHtml(family)}</p>`;
+    if (issuerIntro) html += `<p style="line-height:1.7;color:var(--muted)">${escHtml(issuerIntro)}</p>`;
+  } else {
+    html += '<p style="color:var(--muted);font-size:13px">暂无发行方信息</p>';
+  }
+  html += '</div>';
+
+  // ③ 基本规则（真实字段；全空则整块诚实兜底，不触发强制抓取）
+  const rules = _buildProfileGrid('基本规则', [
+    ['类别', raw.category || '-'],
+    ['类型', raw.legalType || raw.quoteType || '-'],
+    ['净资产', _fmtBigNum(raw.totalAssets)],
+    ['净值(NAV)', _fmtNum(raw.navPrice, 2)],
+    ['收益率', _fmtPct(raw.yield)],
+    ['年初至今', _fmtPct(raw.ytdReturn)],
+    ['三年平均', _fmtPct(raw.threeYearAverageReturn)],
+    ['五年平均', _fmtPct(raw.fiveYearAverageReturn)],
+    ['费用率', _fmtPct(raw.annualReportExpenseRatio)],
+    ['Beta(3年)', _fmtNum(raw.beta3Year, 2)],
+  ]);
+  html += rules || '<div class="wl-info-section"><h4>基本规则</h4>' +
+    '<p style="color:var(--muted);font-size:13px">暂无基金资料（未能获取该基金的公开数据）</p></div>';
+
+  // ④ 对应文件（来源结算单文件名；本用户自有数据，仅其浏览器内渲染）
+  const srcFile = entry._sourceFile || '';
+  html += '<div class="wl-info-section"><h4>对应文件</h4>';
+  html += srcFile
+    ? `<p style="font-size:13px;word-break:break-all">${escHtml(srcFile)}</p>`
+    : '<p style="color:var(--muted);font-size:13px">暂无来源文件（未关联结算单）</p>';
+  html += '</div>';
+
+  return html;
+}
 
 function _buildQuoteCard(entry, snap) {
   const price = snap.close;
