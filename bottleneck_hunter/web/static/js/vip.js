@@ -1165,7 +1165,7 @@ async function loadPositions() {
         `<td class="${cls}">${pnl >= 0 ? '+' : '-'}$${fmtNum(Math.abs(pnl))}</td><td>${fmtNum(p.weight_pct, 1)}%</td></tr>`;
     }).join('');
   } catch (_) { body.innerHTML = ''; if (empty) { empty.textContent = '加载失败，请重试'; empty.style.display = ''; } toast('持仓加载失败，请重试', 'error'); }
-  loadPositionsDeriv();
+  finally { loadPositionsDeriv(); }  // 纯衍生品账户股票持仓恒空会提前 return，衍生品/结构性产品卡必须在 finally 里始终加载
 }
 
 // 三类持仓分栏：股票在 sim_positions；衍生品(accumulator/decumulator)与结构性产品(mli/fcn)同源
