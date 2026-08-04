@@ -968,11 +968,17 @@ function _fundIssuerIntro(family) {
 
 function _buildFundInfoHtml(entry, raw) {
   const ticker = (entry.ticker || '').toUpperCase();
+  const fundName = entry.company_name || entry.name || '';   // 结算单里的基金名（回填；ISIN 场外基金靠它显示名称）
   const summary = raw.longBusinessSummary || '';   // 真实资料，中英对照（_fillTranslations 回填）
   const intro = _FUND_TICKER_INTRO[ticker] || '';  // 精选中文兜底
   const family = raw.fundFamily || '';
-  const issuerIntro = _fundIssuerIntro(family);
+  const issuerIntro = _fundIssuerIntro(family || fundName);  // family 空(ISIN 场外基金)时用结算单名兜底匹配发行方
   let html = '';
+
+  // ⓪ 基金标识（结算单已知的确定信息，恒显示）
+  const idRows = [['代码', entry.ticker || '-']];
+  if (fundName && fundName.toUpperCase() !== ticker) idRows.push(['名称', fundName]);
+  html += _buildProfileGrid('基金标识', idRows) || '';
 
   // ① 通俗介绍
   html += '<div class="wl-info-section wl-profile-section"><h4>通俗介绍</h4>';

@@ -403,6 +403,8 @@ async def get_account_positions(market: str = "us_stock",
         if p["kind"] == "fund":
             # 场内 ETF(可取行情K线) vs 场外基金(仅结算单净值走势)：前端据此分流抽屉页签
             p["exchange_traded"] = portfolio.fund_is_exchange_traded(p.get("ticker", ""), market)
+            if name:
+                p["name"] = name  # 结算单里的基金名，回填给抽屉「基本信息」（ISIN 场外基金靠它显示名称）
             if doc_id:
                 p["_doc_id"] = doc_id  # 暂存，下方按去重 doc_id 解出结算单文件名
     # 基金持仓溯源结算单文件名（instruments.source_doc_id → auth.db financial_documents.file_name）；

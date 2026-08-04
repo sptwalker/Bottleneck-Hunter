@@ -755,6 +755,15 @@ def test_fund_is_exchange_traded():
     assert f("") is False
 
 
+def test_company_overview_isin_gate():
+    """company-overview 对 ISIN 形态跳过 yfinance 按需抓取（无公开源→避免 429/错配垃圾行情/.info 超时）；
+    GLD 场内 ETF、A股/美股普通股票不被误跳过（保留正常抓取）。gate 由 _ISIN_RE 判定驱动。"""
+    from bottleneck_hunter.web.watchlist_api import _ISIN_RE
+    assert _ISIN_RE.match("IE00SYNTH001")                                  # 欧洲 ISIN 场外基金 → 跳过按需抓取
+    assert not _ISIN_RE.match("GLD") and not _ISIN_RE.match("SPY")         # 场内 ETF 保留 K 线抓取
+    assert not _ISIN_RE.match("AAPL") and not _ISIN_RE.match("600519.SH")  # 普通美股 / A股股票保留抓取
+
+
 def test_fund_nav_series(wl):
     """场外基金净值走势：各期结算单 市值/份额 连点。两期 → 两点，nav=mv/qty，按日升序。"""
     wl.create_vip_account(account_ref="A1", display_name="账户1")

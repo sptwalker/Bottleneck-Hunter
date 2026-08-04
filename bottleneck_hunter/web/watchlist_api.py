@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -32,6 +33,10 @@ router = APIRouter(tags=["watchlist"])
 # on-demand 概览重拉冷却窗：GLD 等 .info 反复超时/429 的标的，首拉落负缓存 stub(带 fetched_at)后
 # 24h 内不再重拉 → 消除每次打开抽屉都触发的抓取失败洪流。批量调度管线不受此限，仍是正路刷新。
 _PROFILE_REFETCH_COOLDOWN_H = 24
+
+# 欧洲 ISIN 形态：2字母+9位字母数字+1校验位=12位（与 vip.portfolio._ISIN_RE 同源）。
+# 这类场外基金无公开逐日行情/基本面源，yfinance 按 ISIN 检索必然 429 或错配垃圾行情+.info 超时。
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 
 
 def _profile_is_stale(profile: dict | None, now: datetime) -> bool:
@@ -340,6 +345,11 @@ async def company_overview(ticker: str, market: str = "us_stock", user: dict = D
         return {"latest_snapshot": None, "profile": {}, "earnings": None}
     snap = store.get_latest_snapshot(tk)
     profile = store.get_company_profile(tk)
+    # 场外基金(欧洲 ISIN)无公开行情/基本面源：yfinance 按 ISIN 检索必然 429(拖累同批真实 ticker)
+    # 或错配到别的标的返回垃圾行情，而 .info 必然 20s 超时 → profile 恒空。直接跳过按需抓取、
+    # 返回诚实空态，由前端基金卡兜底（基金名/来源文件来自结算单，不依赖公开行情源）。
+    if _ISIN_RE.match(tk.upper()):
+        return {"latest_snapshot": snap, "profile": profile or {}, "earnings": store.get_earnings(tk)}
     # 非观察池企业(入围/最终评选/交叉验证候选)库里没有行情/基本面 → 按需拉一次并落库，
     # 让所有入围企业的"基本信息"都可见(下次直接读缓存)。best-effort：拉不到(如 yfinance 限流)则维持空。
     # 冷却窗护栏：profile 新鲜(含负缓存 stub)则不重拉，避免 GLD 等超时/429 标的每次打开都触发抓取洪流。
