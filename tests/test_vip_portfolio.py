@@ -279,6 +279,47 @@ def test_cost_not_carried_when_quantity_changed(wl):
     assert g["cost_carried_from"] is None
 
 
+def test_backfill_heals_stale_sim_without_reimport(wl):
+    """B1：成本结转能对【存量】sim 主动回填——不必重传结算单。
+    复现根因：sim 在成本结转修复【之前】物化 → 行冻结为无成本(avg_cost=现价、pnl=0)；改码不回写旧行，
+    页面永远读到 0。backfill_account_cost 每次重估前跑一次即自愈，且不覆盖已有真成本。"""
+    prior = _create_doc("monthly_statement", content_hash="bf-prior", period_end="2026-05-31")
+    portfolio.normalize_statement(
+        wl, BrokerStatement(content_hash="bf-prior", period_end="2026-05-31",
+                            holdings=[EquityHolding(ticker="GOOGL", company="Alphabet", quantity=100,
+                                                    market_value_usd=200000.0, nominal_ccy="USD",
+                                                    market_value_nominal=200000.0, avg_cost=1800.0,
+                                                    cost_basis_usd=180000.0, unrealized_pnl_usd=20000.0)],
+                            cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=1, holdings_total_usd=200000.0,
+                                              statement_equities_total_usd=200000.0, delta_usd=0.0, status="ok")),
+        source_doc_id=prior, account_ref="A1")
+    cur = _create_doc("position_report", content_hash="bf-cur", period_end="2026-06-30")
+    portfolio.normalize_statement(
+        wl, BrokerStatement(content_hash="bf-cur", period_end="2026-06-30",
+                            holdings=[EquityHolding(ticker="GOOGL", company="Alphabet", quantity=100,
+                                                    market_value_usd=260000.0, nominal_ccy="USD",
+                                                    market_value_nominal=260000.0)],
+                            cash_balances=[], total_cash_usd=0.0,
+                            recon=ReconResult(holdings_count=1, holdings_total_usd=260000.0,
+                                              statement_equities_total_usd=260000.0, delta_usd=0.0, status="ok")),
+        source_doc_id=cur, account_ref="A1")
+    portfolio.materialize_portfolio(wl, as_of_date="2026-06-30", account_ref="A1", cash_total_usd=0.0)
+    acct = wl.get_sim_account(account_ref="A1")
+    pos0 = wl.get_sim_positions(acct["id"])[0]
+    # 模拟"修复前"物化：把 sim 成本抹成=现价、盈亏抹成 0（冻结的无成本行）
+    wl.update_sim_position(pos0["id"], avg_cost=pos0["current_price"], unrealized_pnl=0.0)
+    assert wl.get_sim_positions(acct["id"])[0]["unrealized_pnl"] == 0.0
+
+    n = portfolio.backfill_account_cost(wl, "A1")
+    assert n == 1
+    healed = wl.get_sim_positions(acct["id"])[0]
+    assert abs(healed["unrealized_pnl"] - 80000.0) < 1.0    # 市值260000 − 结转成本180000 → 前端绿色
+
+    # 幂等 + 不覆盖真成本：再跑一次不应改动（已是真成本，had_cost 分支跳过）
+    assert portfolio.backfill_account_cost(wl, "A1") == 0
+
+
 def test_monthly_statement_does_not_override_position_report(wl):
     pr_doc = _create_doc("position_report", content_hash="p2")
     monthly_doc = _create_doc("monthly_statement", content_hash="m2")

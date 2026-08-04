@@ -95,6 +95,17 @@ def project_stock_mtm(wl_store, account_ref: str, as_of: str = "") -> dict:
         return {"account_ref": account_ref, "n": 0, "n_priced": 0, "n_skipped": 0,
                 "total_mv_base": 0.0, "total_pnl": 0.0, "as_of": as_of, "snap_date": snap_date}
 
+    # B1：每次重估先把规范层结转成本(含历史结转)回填到存量 sim 真值层，根治「成本只在导入时结转、
+    #     改码不回写已物化旧行」的复发。B2：本次推算的成本基也优先取结转值(_cost_map)，回退本快照原值
+    #     → 薄快照(仓盘导出)cost_basis=0 时不再恒 pnl=0。均以历史真值快照为源，非臆造。
+    from bottleneck_hunter.vip import portfolio  # 局部导入避免 portfolio→projection 循环
+    try:
+        portfolio.backfill_account_cost(wl_store, account_ref)
+    except Exception:  # noqa: BLE001 —— 成本回填失败不拖垮重估主流程
+        import logging
+        logging.getLogger(__name__).warning("sim 成本回填失败 (acct=%s)", account_ref, exc_info=True)
+    _cost_map = portfolio._canonical_cost_map(wl_store, account_ref)
+
     n_priced = n_skipped = 0
     total_mv = total_pnl = 0.0
     skipped_syms: list[str] = []
@@ -121,7 +132,8 @@ def project_stock_mtm(wl_store, account_ref: str, as_of: str = "") -> dict:
         close = (snap or {}).get("close")
         qty = r["quantity"] or 0.0
         fx = r["fx_rate"] or 1.0
-        cost_basis = r["cost_basis"] or 0.0
+        # 成本基优先取规范层结转(含历史结转)，回退本快照原值 → 薄快照(仓盘导出)也有成本、pnl 不再恒 0
+        cost_basis = (_cost_map.get(symbol, {}).get("cost_basis")) or r["cost_basis"] or 0.0
         if not close:
             # 无收盘价：保留真值，记日志说明
             n_skipped += 1

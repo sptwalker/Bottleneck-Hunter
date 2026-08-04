@@ -392,7 +392,8 @@ async def get_account_positions(market: str = "us_stock",
     from bottleneck_hunter.vip import portfolio
 
     wl = _wl(user, market)
-    acct = wl.get_sim_account(account_ref=_resolve_ref(wl, account_ref))
+    ref = _resolve_ref(wl, account_ref)
+    acct = wl.get_sim_account(account_ref=ref)
     positions = sorted(wl.get_sim_positions(acct["id"]),
                        key=lambda p: p.get("market_value", 0), reverse=True)
     # 读时判资产大类（stock/fund），供前端分栏 + 基金专属抽屉；不依赖会超时的 yfinance。
@@ -422,6 +423,29 @@ async def get_account_positions(market: str = "us_stock",
             did = p.pop("_doc_id", "")
             if did:
                 p["source_file"] = name_by_doc.get(did, "")
+    # C：读时叠加真成本 + 最新推算价——不写库。成本走规范层结转(_canonical_cost_map，含历史结转，
+    # 永不随已物化 sim 冻结而失真)；当前价/市值优先取推算层最新重估(latest_projection_map，随日频刷新，
+    # 不再冻结在结单日)；未实现盈亏 = 市值 − 成本基 每次读时自算(无可结转成本的标的诚实保持 0/中性)。
+    from bottleneck_hunter.watchlist.store_base import normalize_ticker
+    cost_map = {normalize_ticker(k, market): v
+                for k, v in portfolio._canonical_cost_map(wl, ref).items()}
+    proj_map = {normalize_ticker(k, market): v
+                for k, v in wl.latest_projection_map(ref).items()}
+    for p in positions:
+        t = p.get("ticker", "")
+        pm = proj_map.get(t)
+        if pm and pm.get("market_value_base") is not None:
+            mv = round(pm["market_value_base"], 2)
+            p["market_value"] = mv
+            sh = p.get("shares") or 0
+            if sh:
+                p["current_price"] = round(mv / sh, 4)
+        cb = (cost_map.get(t) or {}).get("cost_basis")
+        if cb:
+            sh = p.get("shares") or 0
+            if sh:
+                p["avg_cost"] = round(cb / sh, 6)
+            p["unrealized_pnl"] = round((p.get("market_value") or 0.0) - cb, 2)
     return {"positions": positions}
 
 

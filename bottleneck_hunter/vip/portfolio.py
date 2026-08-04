@@ -454,6 +454,39 @@ def _backfill_cost(wl_store, acct_id, rows) -> int:
     return n
 
 
+def backfill_account_cost(wl_store, account_ref: str) -> int:
+    """把规范层结转成本(含历史结转 _canonical_cost_map)主动回填到该账户【存量】sim_positions——
+    无需重传结算单。修根因：成本结转此前只在物化(导入)时跑，改码不回写已物化的旧 sim 行 →
+    页面永远读到修复前冻结的无成本行(pnl 恒 0、无红绿)。每次重估前跑一次即自愈。
+
+    仅补「无成本」行(avg_cost 缺失或≈现价即 pnl≈0)，绝不覆盖已有真成本；成本按 USD 口径由
+    cost_basis/shares 反推(与 sim.current_price 同为 USD/股)，未实现盈亏 = 当前市值 − 结转成本基。
+    股数变动无法结转的标的在 _canonical_cost_map 已诚实留 None → 此处跳过、保持 0(不臆造)。返回回填条数。
+    """
+    account = wl_store.get_sim_account(account_ref=account_ref)
+    if not account:
+        return 0
+    market = getattr(wl_store, "_market", "") or ""
+    # cost_map 键为原始 symbol，sim.ticker 为 normalize_ticker 后形态 → 统一归一后匹配
+    cost_map = {normalize_ticker(k, market): v
+                for k, v in _canonical_cost_map(wl_store, account_ref).items()}
+    n = 0
+    for pos in wl_store.get_sim_positions(account["id"]):
+        cb = (cost_map.get(pos["ticker"]) or {}).get("cost_basis")
+        if not cb:
+            continue
+        cur = pos.get("current_price") or 0.0
+        had_cost = (pos.get("avg_cost") or 0.0) > 0 and abs((pos.get("avg_cost") or 0.0) - cur) > 1e-6
+        if had_cost:  # 已有真成本(与现价不同)→ 不覆盖
+            continue
+        shares = pos.get("shares") or 0
+        avg = (cb / shares) if shares else cur
+        upnl = round((pos.get("market_value") or 0.0) - cb, 2)
+        wl_store.update_sim_position(pos["id"], avg_cost=round(avg, 6), unrealized_pnl=upnl)
+        n += 1
+    return n
+
+
 def materialize_portfolio(wl_store, as_of_date: str = "", account_ref: str = "",
                           cash_total_usd: float = 0.0,
                           account_total_usd: float | None = None,
