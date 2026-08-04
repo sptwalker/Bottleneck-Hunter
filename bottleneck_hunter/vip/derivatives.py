@@ -451,6 +451,192 @@ def _parse_barclays_fcn(text: str, pdf_source) -> DerivativeTerm:
         mat_txt=mat_txt, source_kind="barclays_fcn_termsheet", extra={"coupon_pct": coupon})
 
 
+# ── FCN 条款单：Word(.docx) 版式（招银国际分销，摩根士丹利发行 Worst-of Autocall）──────────
+
+def _docx_tables(raw: bytes) -> list[list[list[str]]]:
+    """读 .docx 全部表格 → 行×格文本；合并单元格产生的"连续相等"文本折叠为一格。
+    ponytail: 折叠连续相等即可去除合并列冗余(招银 basket 表每列跨 6~8 格)；相邻两列文本恰好全等的概率
+    在价位/标签场景可忽略(strike=74.43%×initial 必不等于 initial)。要精确 grid 再上 gridSpan 解析。"""
+    import io
+    from docx import Document
+    tables: list[list[list[str]]] = []
+    for t in Document(io.BytesIO(raw)).tables:
+        rows: list[list[str]] = []
+        for r in t.rows:
+            cells: list[str] = []
+            for c in r.cells:
+                txt = (c.text or "").replace("\xa0", " ").strip()
+                if not cells or cells[-1] != txt:
+                    cells.append(txt)
+            rows.append(cells)
+        tables.append(rows)
+    return tables
+
+
+def _first_date_str(s: str) -> str:
+    m = re.search(r"(\d{1,2}\s+[A-Za-z]+\s+\d{4})", s or "")
+    return m.group(1) if m else ""
+
+
+def _dt_iso(s: str) -> str:
+    d = _first_date_str(s)
+    for f in ("%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(d, f).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return ""
+
+
+def _usd_num(s: str) -> float:
+    m = re.search(r"[\d,]+\.?\d*", s or "")
+    return float(m.group(0).replace(",", "")) if m else 0.0
+
+
+def extract_cmbi_fcn_docx(raw: bytes) -> DerivativeTerm:
+    """招银国际分销的 Word 条款单(Final Termsheet) → equity_fcn 记录。
+    支持 Worst-of 多标的：underlying_symbol 用 'NVDA/SOXX' 篮子标签，逐腿明细存 terms['underlyings']；
+    标量价位(initial/strike/knock_out)取首腿供 barrier/展示读取(条款期各腿同 %，实际最劣按收盘定)。"""
+    tables = _docx_tables(raw)
+    kv: dict[str, str] = {}
+    for tbl in tables:
+        for row in tbl:
+            if len(row) == 2 and row[0] and row[0] != row[1]:
+                kv.setdefault(row[0], row[1])
+
+    def kget(*needles: str) -> str:
+        for k, v in kv.items():
+            kl = k.lower()
+            if all(nd.lower() in kl for nd in needles):
+                return v
+        return ""
+
+    def pct(s: str) -> float | None:
+        m = re.search(r"([\d.]+)\s*%", s or "")
+        return float(m.group(1)) if m else None
+
+    ccy = (kget("Settlement Currency") or "USD").strip()[:3] or "USD"
+    notional = _usd_num(kget("Aggregate Notional"))
+    strike_pct = pct(kget("Strike Price"))          # 74.43
+    autocall_pct = pct(kget("Autocallable Price"))  # 120
+    coupon_pct = pct(kget("Coupon"))                # 1 (每观察期)
+    trade_txt = _first_date_str(kget("Trade Date"))
+    mat_txt = _first_date_str(kget("Maturity Date"))
+    isin_raw = kget("ISIN")
+    isin, _, common = isin_raw.partition("/")
+    isin, common = isin.strip(), common.strip()
+
+    # 标的篮子：定位含 INITIAL PRICE + BLOOMBERG 的表头行，按表头名映射列，读数字行(首格为序号)
+    basket: list[dict] = []
+    for tbl in tables:
+        hidx = next((i for i, row in enumerate(tbl)
+                     if "INITIAL PRICE" in " ".join(row).upper()
+                     and "BLOOMBERG" in " ".join(row).upper()), None)
+        if hidx is None:
+            continue
+        hdr = [c.upper() for c in tbl[hidx]]
+
+        def col(*names: str) -> int:
+            return next((j for j, h in enumerate(hdr) if any(n in h for n in names)), -1)
+
+        ci = {k: col(*n) for k, n in {
+            "name": ("UNDERLYING SEC",), "bbg": ("BLOOMBERG",), "init": ("INITIAL",),
+            "strike": ("STRIKE",), "auto": ("AUTOCALL",), "exch": ("EXCHANGE",)}.items()}
+        for row in tbl[hidx + 1:]:
+            if not row or not row[0].strip().isdigit():
+                continue
+            def cell(key: str) -> str:
+                j = ci[key]
+                return row[j] if 0 <= j < len(row) else ""
+            bbg = cell("bbg")
+            sym = (bbg.split()[0] if bbg else cell("name").split()[0] if cell("name") else "SP").upper()
+            basket.append({
+                "symbol": sym, "name": cell("name"), "bloomberg": bbg,
+                "initial_price": _usd_num(cell("init")), "strike_price": _usd_num(cell("strike")),
+                "autocall_price": _usd_num(cell("auto")), "exchange": cell("exch")})
+        break
+
+    und_label = "/".join(b["symbol"] for b in basket) or "SP"
+    mat_iso = _dt_iso(mat_txt)
+    tenor = _days_between(trade_txt, mat_txt) if trade_txt and mat_txt else 0
+    terms: dict = {
+        "product_type": "autocallable_worst_of_fcn", "worst_of": len(basket) > 1,
+        "underlyings": basket,
+        "strike_pct": (strike_pct / 100.0) if strike_pct is not None else None,
+        "autocall_pct": (autocall_pct / 100.0) if autocall_pct is not None else None,
+        "coupon_pct": coupon_pct, "coupon_frequency": "per_observation_period",
+        "notional": notional, "denomination": notional, "notional_ccy": ccy, "issue_price_pct": 100.0,
+        "trade_date": _dt_iso(trade_txt), "strike_date": _dt_iso(kget("Strike Date")),
+        "issue_date": _dt_iso(kget("Issue Date")), "final_valuation_date": _dt_iso(kget("Final Valuation Date")),
+        "expiry_date": mat_iso, "maturity": mat_iso, "tenor_days": tenor,
+        "autocall_observation_start": _dt_iso(kget("Autocallable Observation Period")),
+        "autocall_frequency": "daily", "knock_out_direction": "up_and_out",
+        "settlement_style": "cash_or_physical", "market_value_usd": None,
+        "issuer": kget("Issuer"), "guarantor": kget("Guarantor"), "distributor": "cmbi",
+        "isin": isin, "common_code": common, "source_kind": "cmbi_termsheet_docx",
+    }
+    if basket:  # 标量首腿：供 barrier_status/all-accounts 展示读取(worst-of 逐腿真值在 underlyings)
+        b0 = basket[0]
+        terms.update({"initial_price": b0["initial_price"], "strike": b0["strike_price"],
+                      "afp": b0["strike_price"], "knock_out_price": b0["autocall_price"],
+                      "autocall_barrier": b0["autocall_price"]})
+    term = DerivativeTerm(product_family="equity_fcn", underlying_symbol=und_label,
+                          currency=ccy, tenor_days=tenor, terms=terms)
+    term.lot_key = f"{isin}:{mat_iso}" if isin else f"{und_label}:{mat_iso}"
+    return term
+
+
+def _cmbi_docx_selfcheck() -> None:
+    import io
+    try:
+        from docx import Document
+    except ImportError:
+        return  # python-docx 未装(生产已装 1.2.0)：跳过自检
+    econ = [("Issuer", "Morgan Stanley B.V. (not rated)"), ("Guarantor", "Morgan Stanley (A-)"),
+            ("Trade Date", "26 May 2026"), ("Strike Date", "26 May 2026"), ("Issue Date", "2 June 2026"),
+            ("Final Valuation Date", "2 September 2026"),
+            ("Maturity Date", "4 September 2026, subject to adjustment in accordance with..."),
+            ("Aggregate Notional Amount of the Notes", 'United States Dollar 1,060,000 ("USD")'),
+            ("Specified Denomination", 'USD 1,060,000 per Note ("Par")'), ("Settlement Currency", "USD"),
+            ("Strike Price", "equal to 74.43% of the Initial Price of such Underlying Security."),
+            ("Autocallable Price", "equal to 120% of the Initial Price of such Underlying Security."),
+            ("ISIN/Common Code", "XS3372957897/337295789"),
+            ("Autocallable Observation Period", "From and including 2 July 2026 to the Final Valuation Date."),
+            ("Coupon Amount", '"Coupon" means 1% per Observation Period.')]
+    d = Document()
+    t1 = d.add_table(rows=len(econ), cols=2)
+    for i, (k, v) in enumerate(econ):
+        t1.rows[i].cells[0].text = k
+        t1.rows[i].cells[1].text = v
+    bk_rows = [
+        ["k", "UNDERLYING SECURITY", "BLOOMBERG CODE", "INITIAL PRICE",
+         "STRIKE PRICE", "AUTOCALLABLE PRICE", "EXCHANGE"],
+        ["1", "NVIDIA CORP", "NVDA UQ Equity", "USD 216.5100",
+         "USD 161.1484", "USD 259.8120", "Nasdaq - All Markets"],
+        ["2", "ISHARES SEMICONDUCTOR ETF", "SOXX UQ Equity", "USD 557.4000",
+         "USD 414.8728", "USD 668.8800", "Nasdaq - All Markets"]]
+    t2 = d.add_table(rows=len(bk_rows), cols=7)
+    for i, r in enumerate(bk_rows):
+        for j, val in enumerate(r):
+            t2.rows[i].cells[j].text = val
+    buf = io.BytesIO()
+    d.save(buf)
+    term = extract_cmbi_fcn_docx(buf.getvalue())
+    assert term.product_family == "equity_fcn", term.product_family
+    assert term.underlying_symbol == "NVDA/SOXX", term.underlying_symbol
+    u = term.terms["underlyings"]
+    assert len(u) == 2 and u[0]["symbol"] == "NVDA" and u[1]["symbol"] == "SOXX", u
+    assert abs(u[0]["initial_price"] - 216.51) < 1e-6 and abs(u[1]["strike_price"] - 414.8728) < 1e-6, u
+    assert abs(term.terms["strike_pct"] - 0.7443) < 1e-9, term.terms["strike_pct"]
+    assert abs(term.terms["autocall_pct"] - 1.20) < 1e-9, term.terms["autocall_pct"]
+    assert abs(term.terms["coupon_pct"] - 1.0) < 1e-9, term.terms["coupon_pct"]
+    assert term.terms["maturity"] == "2026-09-04", term.terms["maturity"]
+    assert term.terms["isin"] == "XS3372957897" and term.terms["common_code"] == "337295789", term.terms
+    assert term.lot_key == "XS3372957897:2026-09-04", term.lot_key
+    assert term.tenor_days == 101, term.tenor_days
+    print("cmbi docx termsheet selfcheck 通过")
+
+
 # ── 场景收益引擎 ─────────────────────────────────────────────────────────
 
 def payoff_accumulator(term: DerivativeTerm, final_price: float, *,
@@ -547,6 +733,44 @@ def classify_pdf(pdf_source, pdf_password: str = "") -> str:
     return "other"
 
 
+def validate_derivative_term(term: DerivativeTerm, *, today: str = "") -> str:
+    """导入前合理性护栏：返回非空原因串 = 不该入库（疑似解析残缺/错位）；空串 = 通过。
+
+    衍生品/结构性产品被有意跳过股票的「陈旧/骤降」两道快照护栏（账户级头寸与快照时效无关，见
+    importer._import_statement 注释），故此处补一道针对**条款数值本身**的合理性校验——否则解析
+    错位（小数点/日期/版式列偏移）产出的荒谬记录会静默入库并展示给用户，误导持仓与风险判断。
+
+    只查**能明确判定为错**的信号，宁松勿误拒（私行大额头寸不设名义/市值上限）：
+      1. product_family / underlying_symbol 缺失 → 空壳记录（如风险披露页被误当条款单，实测有此样本）。
+      2. notional 非正或非数 → 名义金额按定义恒正，<=0 是抽取错位。
+      3. maturity 落在荒谬窗口（早于今年前 5 年 / 晚于今年后 30 年）→ 日期/数字错位
+         （如把 strike 74.43 当年份、或版式偏移抽错列）。近期已到期票是正常历史，读时另有到期剔除。
+    # ponytail: 不校 strike_pct/coupon_pct 等百分比——各字段单位口径不统一（fraction vs 1.0=1%），
+    #   区间护栏易误拒；拿到"百分号错位"真实样本再按字段单独加。
+    """
+    from bottleneck_hunter.watchlist.store_base import _today
+    if not (term.product_family or "").strip():
+        return "missing_product_family"
+    if not (term.underlying_symbol or "").strip():
+        return "missing_underlying_symbol"
+    t = term.terms or {}
+    notional = t.get("notional")
+    if notional is not None:
+        try:
+            if float(notional) <= 0:
+                return f"nonpositive_notional:{notional}"
+        except (TypeError, ValueError):
+            return f"bad_notional:{notional!r}"
+    maturity = (t.get("maturity") or t.get("expiry_date") or "").strip()
+    m = re.match(r"^(\d{4})-", maturity)
+    if m:                                    # 只在能抽出年份时判窗；非 ISO 版式不因格式误拒
+        y = int(m.group(1))
+        cur_year = int((today or _today())[:4])
+        if not (cur_year - 5 <= y <= cur_year + 30):
+            return f"maturity_out_of_window:{maturity}"
+    return ""
+
+
 def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: str, source_file_hash: str,
                          broker: str, rationale_ref: str = "", account_ref: str = "", lot_key: str = "") -> str:
     import json
@@ -623,50 +847,82 @@ def list_derivative_terms(wl_store, limit: int = 50, account_ref: str = "") -> l
     return out
 
 
-def list_derivative_terms_all_accounts(wl_store, limit: int = 200) -> list[dict]:
-    """全部账户"当前"结构性产品/衍生品明细（供总览聚合明细区）。
+def _merge_fcn_terms(rows: list[dict]) -> dict:
+    """同一笔 FCN 的多份记录(条款单 docx + 月结单)合并为一条 terms。
+    条款结构字段(strike_pct/autocall/coupon/underlyings/价位…)以 docx 条款单为准(最全、无 MTM)；
+    MTM/名义/当期结余以最新月结单为准。都缺则各自兜底。rows 已按 (created_at,id) 升序。"""
+    docx = next((r for r in reversed(rows) if r["_terms"].get("source_kind") == "cmbi_termsheet_docx"), None)
+    latest_stmt = next((r for r in reversed(rows) if r["_terms"].get("source_kind") != "cmbi_termsheet_docx"), None)
+    base = dict((docx or rows[-1])["_terms"])  # 条款基底：优先 docx，否则最新那份
+    if latest_stmt is not None:  # 月结单独有的鲜活值覆盖上来（条款单 market_value_usd 恒 None）
+        st = latest_stmt["_terms"]
+        for k in ("market_value_usd", "market_value_nominal", "notional", "underlying_name", "nominal_ccy"):
+            v = st.get(k)
+            if v is not None:
+                base[k] = v
+    return base
 
-    同一 (account_ref, family, underlying, lot_key) 只取最新一期(MAX created_at)——否则招银 05/06/07
-    三份月结单会为同一笔 FCN 落三行，明细区重复虚增。SQLite 3.7.11+ 保证 GROUP BY + MAX 时其余裸列取自最大行。
+
+def list_derivative_terms_all_accounts(wl_store, limit: int = 200, account_ref: str | None = None) -> list[dict]:
+    """结构性产品/衍生品"当前"明细（account_ref=None 全账户总览；给定则单账户「持仓 Tab」，两处共此一份口径）。
+
+    同一 (account_ref, family, lot_key) 折成一条——lot_key(=ISIN:到期)已唯一标识一笔，**不含 underlying_symbol**：
+    否则条款单 docx(篮子标签 NVDA/SOXX) 与月结单(NVDA) 同一笔 FCN 折叠键不匹配 → 双计虚增(commit 本轮根因)。
+    多份记录跨源合并 terms（条款以 docx 为准、MTM 以最新月结单为准，见 _merge_fcn_terms），而非整份取最新丢字段。
     再剔除已过到期日(北京日期口径)的头寸——到期的旧票(如招银 CMBIGP step-up notes)不该再挂在当前持仓里。
     """
     import json
+    from collections import defaultdict
 
     from bottleneck_hunter.watchlist.store_base import _today
 
     conn = wl_store._connect()
     try:
-        q, p = wl_store._filtered(
-            "SELECT account_ref, product_family, underlying_symbol, currency, terms_json, "
-            "source_file_name, MAX(created_at) AS _mx FROM vip_derivative_terms "
-            "GROUP BY account_ref, product_family, underlying_symbol, lot_key "
-            "ORDER BY _mx DESC LIMIT ?",
-            (limit,),
-            table="vip_derivative_terms",
-        )
+        base = ("SELECT account_ref, product_family, underlying_symbol, currency, terms_json, lot_key, "
+                "source_file_name, created_at, id FROM vip_derivative_terms")
+        args: tuple = ()
+        if account_ref is not None:
+            ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
+            base += " WHERE account_ref=?"
+            args = (ref,)
+        q, p = wl_store._filtered(base + " ORDER BY created_at ASC, id ASC", args, table="vip_derivative_terms")
         rows = [dict(r) for r in conn.execute(q, p).fetchall()]
     finally:
         conn.close()
+    for r in rows:
+        r["_terms"] = json.loads(r["terms_json"] or "{}")
+    groups: dict = defaultdict(list)
+    for r in rows:  # 折叠键去 symbol：同 (account, family, lot_key) 即同一笔（lot_key=ISIN:到期 已唯一）。
+        # 但 lot_key 空(条款单版式没抽到 strike/ISIN)时**不折叠**——退回按 id 各自独立：否则同账户同 family
+        # 不同标的的多份无 key 条款单(如花旗 MU 与 9988 accumulator)会塌进同一空键被错折、丢数据。
+        lk = (r.get("lot_key") or "").strip()
+        key = (r.get("account_ref") or "", r["product_family"], lk or f"\x00id={r['id']}")
+        groups[key].append(r)
     today = _today()
     items = []
-    for r in rows:
-        t = json.loads(r["terms_json"] or "{}")
+    for grp in groups.values():
+        t = _merge_fcn_terms(grp)
         maturity = t.get("maturity") or t.get("expiry_date") or ""
         if maturity and maturity < today:  # 已过到期日 → 不再是当前持仓（ISO 日期串直接比较）
             continue
+        latest = grp[-1]  # 展示元数据(symbol/币种/来源文件)取最新一份；symbol 篮子标签优先(更全)
+        symbol = next((r["underlying_symbol"] for r in reversed(grp) if "/" in (r["underlying_symbol"] or "")),
+                      latest["underlying_symbol"])
         items.append({
-            "product_family": r["product_family"],
-            "underlying_symbol": r["underlying_symbol"],
-            "currency": r["currency"],
+            "id": latest["id"],  # 最新一份的 id：reextract 覆盖最新单，符合「跟最新单」语义
+            "product_family": latest["product_family"],
+            "underlying_symbol": symbol,
+            "currency": latest["currency"],
             "tenor_days": int(t.get("tenor_days", 0) or 0),
             "market_value_usd": t.get("market_value_usd"),
             "notional": t.get("notional"),
             "maturity": maturity,
             "terms": t,
-            "source_file": r["source_file_name"],
-            "account_ref": r.get("account_ref") or "",
+            "source_file": latest["source_file_name"],
+            "account_ref": latest.get("account_ref") or "",
         })
-    return items
+    items.sort(key=lambda x: x["maturity"] or "", reverse=True)
+    return items[:limit]
 
 
 def demo() -> None:
@@ -687,12 +943,50 @@ def demo() -> None:
     assert payoff_mli_booster(mli, 130.0, knock_in_happened=False)["return_pct"] > 0
     assert payoff_mli_booster(mli, 80.0, knock_in_happened=True)["return_pct"] < 0
     _lot_key_selfcheck()
+    _sanity_guard_selfcheck()
     _all_accounts_selfcheck()
     _irf_selfcheck()
     _citi_fcn_selfcheck()
     _barclays_fcn_selfcheck()
+    _cmbi_docx_selfcheck()
     _intro_guard_selfcheck()
     print("derivatives demo 通过")
+
+
+def _sanity_guard_selfcheck() -> None:
+    """导入护栏 validate_derivative_term：坏数据被拦、正常大额头寸放行、边界日期不误伤。"""
+    good = DerivativeTerm("equity_fcn", "NVDA", "USD", 100,
+                          {"notional": 1060000, "maturity": "2026-09-04", "strike_pct": 0.7443})
+    assert validate_derivative_term(good, today="2026-08-04") == "", "正常 FCN 被误拒"
+    # 私行大额名义(千万级)不设上限 → 放行
+    assert validate_derivative_term(
+        DerivativeTerm("equity_fcn", "TSLA", "USD", 90, {"notional": 50_000_000, "maturity": "2027-01-01"}),
+        today="2026-08-04") == ""
+    # 空壳：无 family / 无标的（风险披露页被误当条款单）
+    assert validate_derivative_term(DerivativeTerm("", "NVDA", "USD", 1, {})).startswith("missing_product_family")
+    assert validate_derivative_term(DerivativeTerm("equity_fcn", "", "USD", 1, {})).startswith("missing_underlying")
+    # 名义非正 / 非数（抽取错位）
+    assert validate_derivative_term(
+        DerivativeTerm("equity_fcn", "NVDA", "USD", 1, {"notional": 0})).startswith("nonpositive_notional")
+    assert validate_derivative_term(
+        DerivativeTerm("equity_fcn", "NVDA", "USD", 1, {"notional": -5})).startswith("nonpositive_notional")
+    assert validate_derivative_term(
+        DerivativeTerm("equity_fcn", "NVDA", "USD", 1, {"notional": "abc"})).startswith("bad_notional")
+    # 到期日荒谬（strike 74 被当年份 / 版式偏移）→ 拦；近期已到期(去年)属正常历史 → 放行
+    assert validate_derivative_term(
+        DerivativeTerm("equity_fcn", "NVDA", "USD", 1, {"maturity": "0074-01-01"}),
+        today="2026-08-04").startswith("maturity_out_of_window")
+    assert validate_derivative_term(
+        DerivativeTerm("equity_fcn", "NVDA", "USD", 1, {"maturity": "2099-01-01"}),
+        today="2026-08-04").startswith("maturity_out_of_window")
+    assert validate_derivative_term(
+        DerivativeTerm("equity_fcn", "NVDA", "USD", 1, {"maturity": "2025-06-30"}),
+        today="2026-08-04") == "", "近期已到期票不该被合理性护栏拦(读时另有到期剔除)"
+    # 非 ISO 日期版式不因格式误拒（无年份可判 → 跳过窗判）
+    assert validate_derivative_term(
+        DerivativeTerm("equity_fcn", "NVDA", "USD", 1, {"maturity": "04SEP26"}),
+        today="2026-08-04") == ""
+    print("sanity_guard 自检通过")
 
 
 def _intro_guard_selfcheck() -> None:
@@ -768,6 +1062,35 @@ def _all_accounts_selfcheck() -> None:
         nv = next(i for i in items if i["underlying_symbol"] == "NVDA")
         assert nv["market_value_usd"] == 12345.6 and nv["notional"] == 1000000, nv
         assert nv["maturity"] == "2099-12-31" and nv["account_ref"], nv
+
+        # 跨源同 ISIN：条款单 docx(篮子标签 NVDA/SOXX) + 月结单(NVDA) 同 lot_key → 折一条 + terms 合并（本轮根因）
+        docx_t = DerivativeTerm("equity_fcn", "NVDA/SOXX", "USD", 101,
+                                {"maturity": "2099-06-30", "strike_pct": 0.7443, "autocall_pct": 1.20,
+                                 "coupon_pct": 1.0, "underlyings": [{"symbol": "NVDA"}, {"symbol": "SOXX"}],
+                                 "market_value_usd": None, "source_kind": "cmbi_termsheet_docx"})
+        stmt_t = DerivativeTerm("equity_fcn", "NVDA", "USD", 101,
+                                {"maturity": "2099-06-30", "market_value_usd": 55555.5, "notional": 1060000,
+                                 "underlying_name": "NVIDIA CORP"})
+        save_derivative_term(wl, stmt_t, source_file_name="m07.pdf", source_file_hash="hs7",
+                             lot_key="XS337:2099-06-30", **common)
+        save_derivative_term(wl, docx_t, source_file_name="ts.docx", source_file_hash="hd",
+                             lot_key="XS337:2099-06-30", **common)
+        it2 = list_derivative_terms_all_accounts(wl)
+        wo = [i for i in it2 if i["maturity"] == "2099-06-30"]
+        assert len(wo) == 1, f"跨源同 ISIN 未折叠：{[i['underlying_symbol'] for i in it2]}"
+        m = wo[0]
+        assert m["underlying_symbol"] == "NVDA/SOXX", f"篮子标签未保留：{m['underlying_symbol']}"
+        assert m["terms"]["strike_pct"] == 0.7443 and m["terms"]["coupon_pct"] == 1.0, "条款(docx)未合入"
+        assert m["market_value_usd"] == 55555.5 and m["notional"] == 1060000, "MTM/名义(月结单)未合入"
+
+        # 空 lot_key 不折叠：同账户同 family 不同标的的无 key 条款单(花旗 MU 与 9988)必须各自独立，不被错折
+        for sym in ("MU", "BABA"):
+            nokey = DerivativeTerm("equity_accumulator", sym, "USD", 365, {"maturity": "2099-01-01"})
+            save_derivative_term(wl, nokey, source_file_name=f"{sym}.pdf", source_file_hash=f"h{sym}",
+                                 lot_key="", **common)
+        it3 = list_derivative_terms_all_accounts(wl)
+        acc_syms = [i["underlying_symbol"] for i in it3 if i["product_family"] == "equity_accumulator"]
+        assert "MU" in acc_syms and "BABA" in acc_syms, f"空 lot_key 跨标的被错折：{acc_syms}"
 
 
 def _lot_key_selfcheck() -> None:

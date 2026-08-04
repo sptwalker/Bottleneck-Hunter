@@ -76,9 +76,11 @@ def dispatch_import(raw: bytes, filename: str, *, user_id: str, wl_store,
         result = _import_pdf(raw, filename, user_id, wl_store, market, resolved_account_ref, password)
     elif file_type in ("csv", "excel"):
         result = _import_tabular(raw, filename, file_type, wl_store, resolved_account_ref)
+    elif file_type == "docx":
+        result = _import_termsheet_docx(raw, filename, wl_store, resolved_account_ref)
     else:
         result = ImportResult("unparseable", filename, "unknown", "unknown",
-                              summary="无法识别的文件类型", reason="仅支持 PDF / CSV / Excel")
+                              summary="无法识别的文件类型", reason="仅支持 PDF / CSV / Excel / Word 条款单")
 
     if auto_reason and result.status == "imported":
         result.summary = f"{result.summary}（已自动归户）" if result.summary else "已自动归户"
@@ -103,8 +105,9 @@ def dispatch_import(raw: bytes, filename: str, *, user_id: str, wl_store,
 def _detect_file_type(raw: bytes, filename: str) -> str:
     if raw[:5] == b"%PDF-":
         return "pdf"
-    if raw[:2] == b"PK":                 # xlsx 是 zip 容器
-        return "excel"
+    if raw[:2] == b"PK":                 # zip 容器：docx 与 xlsx 同魔数，靠扩展名区分
+        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+        return "docx" if ext == "docx" else "excel"
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     if ext in ("csv", "tsv", "txt"):
         return "csv"
@@ -282,6 +285,11 @@ def _import_derivative(raw, filename, kind, wl_store, password, account_ref: str
             return _pwd_result(filename)
         return ImportResult("unparseable", filename, "pdf", kind,
                             summary="衍生品条款抽取失败", reason=str(e))
+    bad = drv.validate_derivative_term(term)
+    if bad:
+        return ImportResult("unparseable", filename, "pdf", term.product_family or kind,
+                            summary="衍生品条款数值异常，疑似解析残缺，未入库，请人工核对",
+                            reason=f"sanity_guard:{bad}")
     drv.save_derivative_term(wl_store, term, source_file_name=filename,
                              source_file_hash=hashlib.sha256(raw).hexdigest(), broker=broker,
                              account_ref=account_ref, lot_key=getattr(term, "lot_key", ""))
@@ -289,6 +297,39 @@ def _import_derivative(raw, filename, kind, wl_store, password, account_ref: str
                         summary=f"衍生品条款：{term.underlying_symbol} · {term.product_family}",
                         key_metrics={"underlying": term.underlying_symbol,
                                      "family": term.product_family, "currency": term.currency})
+
+
+def _import_termsheet_docx(raw, filename, wl_store, account_ref: str = "") -> ImportResult:
+    """Word(.docx) 结构性产品条款单(招银国际 Worst-of Autocall FCN) → equity_fcn 记录。
+    与 PDF 衍生品同落 vip_derivative_terms（幂等，lot_key=ISIN:到期日），不进 sim_positions。"""
+    from bottleneck_hunter.vip import derivatives as drv
+    try:
+        term = drv.extract_cmbi_fcn_docx(raw)
+    except ImportError:
+        return ImportResult("rejected", filename, "docx", "unknown",
+                            summary="服务器缺少 python-docx，无法解析 Word 条款单", reason="python-docx 未安装")
+    except Exception as e:  # noqa: BLE001
+        return ImportResult("unparseable", filename, "docx", "unknown",
+                            summary="Word 条款单解析失败", reason=str(e))
+    if not term.terms.get("underlyings"):
+        return ImportResult("unparseable", filename, "docx", "unknown",
+                            summary="未能从条款单识别标的篮子", reason="no_basket_parsed")
+    bad = drv.validate_derivative_term(term)
+    if bad:
+        return ImportResult("unparseable", filename, "docx", term.product_family or "unknown",
+                            summary="条款单数值异常，疑似解析残缺，未入库，请人工核对",
+                            reason=f"sanity_guard:{bad}")
+    drv.save_derivative_term(wl_store, term, source_file_name=filename,
+                             source_file_hash=hashlib.sha256(raw).hexdigest(), broker="cmbi",
+                             account_ref=account_ref, lot_key=term.lot_key)
+    unds = "/".join(b["symbol"] for b in term.terms["underlyings"])
+    wo = "（Worst-of）" if term.terms.get("worst_of") else ""
+    mat = term.terms.get("maturity") or "—"
+    return ImportResult("imported", filename, "docx", term.product_family,
+                        summary=f"结构性产品条款单：{unds} · {term.product_family}{wo}，到期 {mat}",
+                        key_metrics={"underlying": term.underlying_symbol, "family": term.product_family,
+                                     "currency": term.currency, "notional": term.terms.get("notional"),
+                                     "maturity": term.terms.get("maturity"), "isin": term.terms.get("isin")})
 
 
 def _statement_from_doc(user_id: str, doc_id: str):
@@ -310,6 +351,7 @@ def _persist_derivative_terms(wl_store, stmt, filename, account_ref) -> int:
     rows = getattr(stmt, "derivative_terms", None) or []
     if not rows:
         return 0
+    from bottleneck_hunter.vip.derivatives import validate_derivative_term
     broker = getattr(stmt, "broker", "") or ""
     file_hash = getattr(stmt, "content_hash", "") or ""
     n = 0
@@ -323,6 +365,10 @@ def _persist_derivative_terms(wl_store, stmt, filename, account_ref) -> int:
                 terms=r.get("terms", {}) or {},
                 source_file=filename,
             )
+            # 单条薄记录也过合理性护栏：坏条(数值错位/空壳)跳过不入库，不拖垮整单其余好条。
+            # ponytail: 跳过计数暂不透出到 UI(月结单薄记录本就稀疏、坏条罕见)；真出现批量误跳再加账户日志。
+            if validate_derivative_term(term):
+                continue
             save_derivative_term(wl_store, term, source_file_name=filename, source_file_hash=file_hash,
                                  broker=broker, account_ref=account_ref, lot_key=r.get("lot_key", ""))
             n += 1

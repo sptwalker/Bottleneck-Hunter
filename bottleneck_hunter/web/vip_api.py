@@ -701,33 +701,15 @@ async def list_derivatives(market: str = "us_stock", account_ref: str = "", scop
             "source_file": t["source_file"],
             "account_ref": t["account_ref"],
         } for t in items]}
-    terms = drv.list_derivative_terms(wl, account_ref=account_ref, limit=500)
-    # 与总览「全账户」明细口径一致：同 (family,标的,lot_key) 只留最新一期(list 已按 created_at DESC)，
-    # 并剔除已过到期日(北京日期)的旧票——否则持仓 Tab 会把多份月结单的同笔 FCN 重复列出、到期票不下架。
-    # ponytail: 折叠/剔到期逻辑与 derivatives.list_derivative_terms_all_accounts 各写一份(类型不同)，
-    #   两处口径须同步；若第三处再需要，再抽公共谓词。
-    from bottleneck_hunter.watchlist.store_base import _today
-    today = _today()
-    seen: set = set()
-    current = []
-    for t in terms:
-        key = (t.product_family, t.underlying_symbol, t.lot_key)
-        if key in seen:
-            continue
-        seen.add(key)
-        mat = (t.terms or {}).get("maturity") or (t.terms or {}).get("expiry_date") or ""
-        if mat and mat < today:
-            continue
-        current.append(t)
-    # 结构性产品分栏需展示当期 MTM/名义/到期 → 暴露 terms 里这几项（结单薄记录权威字段）
-    # 双击展开需完整 terms（主要指标 + 合约说明），一并透出 terms 原始 dict。
-    return {"items": [{"id": t.id, "product_family": t.product_family, "underlying_symbol": t.underlying_symbol,
-                        "currency": t.currency, "tenor_days": t.tenor_days, "source_file": t.source_file,
-                        "market_value_usd": (t.terms or {}).get("market_value_usd"),
-                        "notional": (t.terms or {}).get("notional"),
-                        "maturity": (t.terms or {}).get("maturity") or (t.terms or {}).get("expiry_date"),
-                        "terms": t.terms or {}}
-                       for t in current]}
+    # 单账户「持仓 Tab」与总览「全账户」明细共用同一折叠口径(去 symbol 折叠 + 跨源合并 terms + 剔到期)：
+    # 传 account_ref 走单账户分支，避免两处折叠逻辑分叉致同笔 FCN 双计(docx NVDA/SOXX vs 月结单 NVDA)。
+    items = drv.list_derivative_terms_all_accounts(wl, limit=500, account_ref=account_ref)
+    return {"items": [{
+        "id": t.get("id"), "product_family": t["product_family"], "underlying_symbol": t["underlying_symbol"],
+        "currency": t["currency"], "tenor_days": t.get("tenor_days"), "source_file": t["source_file"],
+        "market_value_usd": t.get("market_value_usd"), "notional": t.get("notional"),
+        "maturity": t.get("maturity"), "terms": t.get("terms") or {}}
+        for t in items]}
 
 
 @router.post("/derivatives/{did}/reextract")
