@@ -66,3 +66,41 @@ def test_scheduler_excludes_small_when_enough_big(monkeypatch):
     provs = [p for _, p, _ in res]
     assert provs == ["deepseek", "glm"]
     assert "kimi" not in provs
+
+
+def test_matrix_reresolves_live_not_frozen(monkeypatch):
+    """根因修复：矩阵条目钉着旧模型(moonshot-v1-8k)，但装配时按 provider **当前**默认(32k)实时解析——
+    不再残留冻结快照（系统配置改默认模型即刻对矩阵角色生效）。"""
+    # 矩阵里 kimi 槽还钉着历史的 8k（模拟"改配前保存的快照"）
+    monkeypatch.setattr(F, "_load_role_configs_from_db",
+                        lambda rk, uid: [{"provider": "kimi", "model": "moonshot-v1-8k", "slot_index": 0}])
+    # 但 provider 当前默认已是 32k（系统配置已改）
+    monkeypatch.setattr(F, "resolve_provider_model", lambda p, uid="": "moonshot-v1-32k" if p == "kimi" else "")
+    monkeypatch.setattr(F, "_user_has_llm_key", lambda p, uid: True)
+    monkeypatch.setattr(F, "create_llm", lambda p, m, **k: f"llm:{p}:{m}")
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.provider_gate.is_disabled", lambda uid, p: False)
+
+    res = F.get_models_for_role("L1_macro", user_id="u1")
+    assert res, "应装配出模型"
+    assert all(m == "moonshot-v1-32k" for _, _, m in res)   # 用实时默认，非冻结的 8k
+
+
+def test_matrix_skips_undersized_default(monkeypatch):
+    """矩阵 provider 的**当前**默认若对重角色仍欠容量(8k<16k)，跳过该槽交后续优先级——
+    杜绝 8k 误装到 L1_macro（Bug2：小窗口误套模板的根因不再复现）。"""
+    monkeypatch.setattr(F, "_load_role_configs_from_db",
+                        lambda rk, uid: [{"provider": "kimi", "model": "x", "slot_index": 0}])
+    # kimi 当前默认仍是 8k（欠容量）；优先级4 调度里 deepseek 兜底
+    monkeypatch.setattr(F, "resolve_provider_model",
+                        lambda p, uid="": {"kimi": "moonshot-v1-8k", "deepseek": "deepseek-chat"}.get(p, ""))
+    monkeypatch.setattr(F, "_user_has_llm_key", lambda p, uid: True)
+    monkeypatch.setattr(F, "create_llm", lambda p, m, **k: f"llm:{p}:{m}")
+    monkeypatch.setattr(F, "list_custom_provider_ids", lambda: ["deepseek"])
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.provider_gate.is_disabled", lambda uid, p: False)
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.health.rank_providers", lambda provs, *a, **k: ["deepseek"])
+    monkeypatch.setattr("bottleneck_hunter.llm_clients.health.load_routing_policy", lambda *a, **k: {})
+
+    res = F.get_models_for_role("L1_macro", user_id="u1")
+    provs = [p for _, p, _ in res]
+    assert "kimi" not in provs          # 欠容量的矩阵槽被跳过
+    assert "deepseek" in provs          # 落到调度另选够大的

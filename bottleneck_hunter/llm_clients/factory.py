@@ -389,8 +389,9 @@ def get_models_for_role(
         pass
     multi = bool(role_def and role_def.multi_model)
     n_slots = (role_def.max_slots if (multi and role_def.max_slots) else 1)
-    # 事前容量门：重上下文角色不选窗口不足的模型（本次 kimi-8k 踩坑）。仅作用于系统自动选的
-    # 优先级3(默认)/优先级4(调度)，用户手填矩阵(优先级1)尊重其显式选择。
+    # 事前容量门：重上下文角色不选窗口不足的模型（本次 kimi-8k 踩坑）。作用于**全部**优先级——
+    # 优先级1(矩阵，对实时解析出的 provider 默认套门)/优先级3(默认)/优先级4(调度)。改配后 provider
+    # 默认若仍欠容量，不再套用到重角色（Bug2 防复发）。未知模型 fail-open 放行，不误伤未收录大模型。
     from bottleneck_hunter.llm_clients.model_context import fits as _ctx_fits
     role_min_ctx = getattr(role_def, "min_context", 0) if role_def else 0
 
@@ -432,17 +433,32 @@ def get_models_for_role(
                            role_key, prim or "(空)", _hk)
 
     # 优先级1: 数据库矩阵（手动覆盖）。prefer_primary 时仅在主模型不可用后作兜底。
+    #
+    # 根因修复（禁止任何角色钉死历史配置）：矩阵只保存**用户选的 provider**，**不信任其冻结的
+    # model 快照**——model 一律经 resolve_provider_model 按该 provider 的**当前**默认实时解析。
+    # 因本项目「一个模型建一个 provider」，provider 即模型选择；系统配置改默认模型（如 kimi 8k→32k）
+    # 后，矩阵角色下次装配自动读到新模型，绝不残留旧值。再套容量门：实时解析出的默认若仍欠容量
+    # （重角色），跳过该槽交由后续优先级另选，杜绝 8k 误装到 L1_macro（Bug1+Bug2 同一根因）。
     if configs:
         from bottleneck_hunter.llm_clients import provider_gate
         results = []
         for cfg in configs:
-            if provider_gate.is_disabled(uid, cfg["provider"]):
+            prov = cfg["provider"]
+            if provider_gate.is_disabled(uid, prov):
                 continue  # 跳过因认证失效/限流严重被该用户持久禁用的节点（须用户重配/过测试恢复）
+            model = resolve_provider_model(prov, uid)  # 实时解析该 provider 当前默认，不用冻结快照
+            if not model:
+                logger.warning("[resolve] role=%s 矩阵 provider=%s 无可解析 model，跳过", role_key, prov)
+                continue
+            if not _ctx_fits(model, role_min_ctx):
+                logger.warning("[resolve] role=%s 矩阵 provider=%s 当前默认 %s 容量不足(<%s)，跳过交后续优先级",
+                               role_key, prov, model, role_min_ctx)
+                continue
             try:
-                llm = _build(cfg["provider"], cfg["model"])
-                results.append((llm, cfg["provider"], cfg["model"]))
+                llm = _build(prov, model)
+                results.append((llm, prov, model))
             except Exception as e:
-                logger.warning("create_llm 失败 %s/%s: %s", cfg["provider"], cfg["model"], e)
+                logger.warning("create_llm 失败 %s/%s: %s", prov, model, e)
         if results:
             if prefer_primary:
                 logger.info("[resolve] role=%s 命中【优先级1 DB矩阵】(主模型不可用后的兜底)→ %s",

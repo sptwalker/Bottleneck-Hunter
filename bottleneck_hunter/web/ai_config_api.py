@@ -71,10 +71,12 @@ async def get_roles(user: dict = Depends(get_current_user)):
         db_slots = config_map.get(role_def.key, [])
         if db_slots:
             for s in sorted(db_slots, key=lambda x: x["slot_index"]):
+                # 回显 model 亦按 provider 当前默认实时解析，不回显冻结快照——与运行时装配口径一致，
+                # 避免「系统配置改了默认模型、矩阵仍显示旧值」的误导（与 get_models_for_role 同根因修复）。
                 slots.append({
                     "slot_index": s["slot_index"],
                     "provider": s["provider"],
-                    "model": s["model"],
+                    "model": resolve_provider_model(s["provider"], uid) or s["model"],
                 })
         # 矩阵留空即由智能调度自动选型（DC_MODEL_* 环境影子配置已退役，不再回显）
 
