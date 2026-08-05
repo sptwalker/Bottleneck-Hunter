@@ -827,6 +827,18 @@ def update_derivative_term(wl_store, did: str, term: DerivativeTerm) -> bool:
         return cur.rowcount > 0
 
 
+def delete_derivative_term(wl_store, did: str) -> bool:
+    """按 id 删除一条衍生品条款记录（误导入清理用，如推介稿/风险披露稿被误判为持仓）。
+
+    用户/市场隔离由 _filtered 保证；无补删机制此前是历史脏数据只能永久残留的根因（用户反馈）。
+    返回是否命中并删除（未命中该用户名下的 id 则 False）。
+    """
+    with wl_store._write_conn() as conn:
+        q, p = wl_store._filtered("DELETE FROM vip_derivative_terms WHERE id=?", (did,))
+        cur = conn.execute(q, p)
+        return cur.rowcount > 0
+
+
 def list_derivative_terms(wl_store, limit: int = 50, account_ref: str = "") -> list[DerivativeTerm]:
     import json
     account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
@@ -944,6 +956,7 @@ def demo() -> None:
     assert payoff_mli_booster(mli, 80.0, knock_in_happened=True)["return_pct"] < 0
     _lot_key_selfcheck()
     _sanity_guard_selfcheck()
+    _delete_selfcheck()
     _all_accounts_selfcheck()
     _irf_selfcheck()
     _citi_fcn_selfcheck()
@@ -1091,6 +1104,24 @@ def _all_accounts_selfcheck() -> None:
         it3 = list_derivative_terms_all_accounts(wl)
         acc_syms = [i["underlying_symbol"] for i in it3 if i["product_family"] == "equity_accumulator"]
         assert "MU" in acc_syms and "BABA" in acc_syms, f"空 lot_key 跨标的被错折：{acc_syms}"
+
+
+def _delete_selfcheck() -> None:
+    """delete_derivative_term 自检：命中删除返回 True 且真实清除；未命中(id 不存在)返回 False。
+    历史误导入(推介稿/风险披露稿被误判为持仓)无补删机制是脏数据永久残留的根因(用户反馈)。"""
+    import tempfile
+    from pathlib import Path
+
+    from bottleneck_hunter.watchlist.store import WatchlistStore
+    with tempfile.TemporaryDirectory() as d:
+        wl = WatchlistStore(db_path=Path(d) / "t.db").for_user("u1").for_market("us_stock")
+        junk = DerivativeTerm("equity_accumulator", "9988", "USD", 0, {})
+        did = save_derivative_term(wl, junk, source_file_name="junk.pdf", source_file_hash="hj",
+                                   broker="citi", account_ref="acc")
+        assert delete_derivative_term(wl, did), "命中的 id 删除应返回 True"
+        assert list_derivative_terms(wl, account_ref="acc") == [], "删除后应不再出现在列表里"
+        assert not delete_derivative_term(wl, did), "已删除的 id 再删应返回 False（非报错）"
+        assert not delete_derivative_term(wl, "nonexistent"), "不存在的 id 应返回 False"
 
 
 def _lot_key_selfcheck() -> None:
