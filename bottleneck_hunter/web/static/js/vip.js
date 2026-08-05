@@ -593,6 +593,13 @@ export async function applyVipLock() {
       showActivePane();
     }
     ensureVipLoaded();
+    // 每日首进自动刷新一次：localStorage 记「今天已触发」，同日反复进入不重复拉；
+    // 真伪门控在后端(staleness)，已最新则秒回不打网络。
+    const today = bjDateStr();
+    if (localStorage.getItem('vipAutoRefreshDay') !== today) {
+      localStorage.setItem('vipAutoRefreshDay', today);
+      refreshNow({ auto: true });
+    }
   }
 }
 
@@ -888,10 +895,12 @@ function renderDerivList(items, accounts = null) {
   if (!items.length) { box.innerHTML = '<p class="st-empty-hint">暂无已建模衍生品文件</p>'; return; }
   box.innerHTML = '<table class="st-table"><thead><tr><th>产品族</th><th>标的</th><th>币种</th><th>操作</th></tr></thead><tbody>' +
     items.map(d => `<tr><td>${esc(d.product_family || '—')}</td><td>${esc(d.underlying_symbol || '—')}</td><td>${esc(d.currency || '—')}</td>` +
-      `<td>${d.id ? `<button class="btn btn-sm" data-reextract="${esc(d.id)}">重新抽取条款</button>` : '—'}</td></tr>`).join('') +
+      `<td>${d.id ? `<button class="btn btn-sm" data-reextract="${esc(d.id)}">重新抽取条款</button> <button class="btn btn-sm" data-delete-deriv="${esc(d.id)}">删除</button>` : '—'}</td></tr>`).join('') +
     '</tbody></table>';
   box.querySelectorAll('button[data-reextract]').forEach(btn =>
     btn.addEventListener('click', () => reextractDeriv(btn.getAttribute('data-reextract'))));
+  box.querySelectorAll('button[data-delete-deriv]').forEach(btn =>
+    btn.addEventListener('click', () => deleteDeriv(btn.getAttribute('data-delete-deriv'))));
 }
 
 // 总览「全账户」结构性产品/衍生品明细：/derivatives?scope=all 拉取后按 family 分流填两卡体，各带所属账户列。
@@ -957,6 +966,59 @@ function reextractDeriv(did) {
     }
   });
   input.click();
+}
+
+// 删除误导入的衍生品条款记录（如推介稿/风险披露稿被误判为持仓）
+async function deleteDeriv(did) {
+  if (!did) return;
+  if (!confirm('确认删除该条款记录？此操作不可撤销。')) return;
+  try {
+    const r = await fetch(vipApiUrl(`/derivatives/${encodeURIComponent(did)}`), { method: 'DELETE' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { setStatus('vip-account-status', d.detail || '删除失败', false); return; }
+    setStatus('vip-account-status', '已删除该条款记录', true);
+    loadDashboard();
+  } catch (e) {
+    setStatus('vip-account-status', String(e), false);
+  }
+}
+
+// 北京日期 YYYY-MM-DD（en-CA 恰好输出该格式），用于「每日首进只自动刷新一次」的去重键
+function bjDateStr() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+}
+
+// 即时刷新：全账户持仓补价 + 逐账户重估 + 宏观指标补采（后端自门控，已最新则秒回不拉网络）。
+// auto=true 为每日首进自动触发，静默不弹「刷新中」；手动点击则给全程状态提示。
+let _vipRefreshing = false;
+async function refreshNow({ auto = false } = {}) {
+  if (_vipRefreshing) return;                 // 防连点/自动与手动并发
+  _vipRefreshing = true;
+  const btn = document.getElementById('vip-refresh-now');
+  if (btn) btn.disabled = true;
+  if (!auto) setStatus('vip-account-status', '刷新中…（补齐最新收盘价 + 宏观指标）', true);
+  try {
+    const r = await fetch(vipApiUrl('/account/refresh-now'), { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { if (!auto) setStatus('vip-account-status', d.detail || '刷新失败', false); return; }
+    if (d.reason === 'no_account') { if (!auto) setStatus('vip-account-status', '暂无账户可刷新', true); return; }
+    if (d.refreshed) {
+      const parts = [];
+      if (d.priced_symbols) parts.push(`已刷新 ${d.priced_symbols} 只持仓最新价`);
+      if (d.macro_refreshed) parts.push('宏观指标已更新');
+      setStatus('vip-account-status', (parts.join('，') || '已刷新') + `（${d.accounts} 个账户已重估）`, true);
+      invalidateVipCache();
+      loadDashboard();
+      ensureVipLoaded();                       // 强制重渲当前页签（持仓表拿到最新市值）
+    } else if (!auto) {
+      setStatus('vip-account-status', '行情与宏观指标已是最新，无需刷新', true);
+    }
+  } catch (e) {
+    if (!auto) setStatus('vip-account-status', String(e), false);
+  } finally {
+    _vipRefreshing = false;
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ── 导入中心 ──────────────────────────────────────────────────────────────
@@ -1980,6 +2042,7 @@ export function initVip() {
   document.getElementById('vip-overview-manage')?.addEventListener('click', openDrawer);
   document.getElementById('vip-import-manage')?.addEventListener('click', openDrawer);
   document.getElementById('vip-toolbar-import')?.addEventListener('click', () => setPrimaryTab(VIP_PRIMARY_IMPORT));
+  document.getElementById('vip-refresh-now')?.addEventListener('click', () => refreshNow());
   document.getElementById('vip-accounts-close')?.addEventListener('click', closeAccountsDrawer);
   document.getElementById('vip-accounts-drawer')?.addEventListener('click', e => {
     if (e.target.id === 'vip-accounts-drawer') closeAccountsDrawer();

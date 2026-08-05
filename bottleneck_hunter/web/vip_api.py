@@ -632,6 +632,58 @@ async def project_now(market: str = "us_stock", account_ref: str = "",
     return {"result": res}
 
 
+@router.post("/account/refresh-now")
+async def refresh_now(market: str = "us_stock", force: bool = False,
+                      user: dict = Depends(require_vip_unlocked)):
+    """即时刷新：全账户持仓补价→逐账户按最新收盘价重估→宏观指标补采。已最新则自门控跳过网络。
+
+    与定时任务盘后三件事(补价/重估/宏观)同逻辑，串成用户可手动触发的入口。宏观仅刷指标数据
+    (macro_snapshots)，不重跑 L1 策略 LLM——宏观咨询下次生成时自然用到新数据，零额度消耗。
+    """
+    from bottleneck_hunter.vip import projection
+    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+    wl = _wl(user, market)
+    accounts = wl.list_vip_accounts(include_hidden_default=False)
+    if not accounts:
+        return {"refreshed": False, "reason": "no_account", "accounts": 0}
+
+    expected = projection._expected_snapshot_date(market)
+    symbols = projection._account_priceable_symbols(wl)
+    stale = list(symbols) if force else projection.stale_symbols(wl, symbols, market)
+
+    # 补价：仅拉过期/缺价的票(force 时全量)；已最新则一支不拉，避免无谓限流。
+    if stale:
+        try:
+            await fetch_price_batch(stale, wl, market=market)
+        except Exception as e:  # noqa: BLE001 —— 补价失败不拖垮重估(用已有收盘价重估亦有意义)
+            logger.warning("VIP 手动补价失败 (user=%s): %s", user["sub"][:8], e)
+
+    # 逐账户重估(幂等)：即便无补价也重估一次，保证读时叠加拿到最新推算。
+    proj = projection.project_all_accounts_mtm(wl)
+
+    # 宏观指标门控 + 补采：最新快照日晚于应有交易日(或 force)才拉，写全局共享 macro_snapshots。
+    macro_refreshed = False
+    gstore = _store.for_market(market)
+    macro_rows = gstore.get_latest_macro_snapshots()
+    macro_date = max((r.get("date") or "" for r in macro_rows), default="")
+    if force or macro_date < expected:
+        try:
+            from bottleneck_hunter.watchlist.macro_data import fetch_macro_data
+            await fetch_macro_data(gstore, [market])
+            macro_refreshed = True
+        except Exception as e:  # noqa: BLE001 —— 宏观补采失败不影响持仓刷新结果
+            logger.warning("VIP 手动宏观补采失败 (user=%s): %s", user["sub"][:8], e)
+
+    return {
+        "refreshed": bool(stale) or macro_refreshed,
+        "priced_symbols": len(stale),
+        "skipped_fresh": len(symbols) - len(stale),
+        "accounts": proj["accounts"],
+        "macro_refreshed": macro_refreshed,
+        "as_of": expected,
+    }
+
+
 @router.get("/statements")
 async def list_statements(market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
     """列出该用户的月结单（元数据，无 PII 金额）。"""
@@ -749,6 +801,18 @@ async def reextract_derivative(did: str, file: UploadFile = File(...),
     trade_date = term.terms.get("trade_date", "")
     return {"id": did, "kind": kind, "trade_date": trade_date,
             "term": {"family": term.product_family, "underlying": term.underlying_symbol}}
+
+
+@router.delete("/derivatives/{did}")
+async def delete_derivative(did: str, market: str = "us_stock", user: dict = Depends(require_vip_unlocked)):
+    """删除一条衍生品条款记录（误导入清理，如推介稿/风险披露稿被误判为持仓）。"""
+    from bottleneck_hunter.vip import derivatives as drv
+    from bottleneck_hunter.web.oplog import record_operation
+    wl = _wl(user, market)
+    if not drv.delete_derivative_term(wl, did):
+        raise HTTPException(status_code=404, detail="未找到该条款记录（或不属当前用户）")
+    record_operation(user["sub"], "删除衍生品条款", category="vip_financial", detail=f"deriv={did[:8]}")
+    return {"deleted": True}
 
 
 @router.post("/reports/generate")

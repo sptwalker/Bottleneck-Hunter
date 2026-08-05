@@ -44,6 +44,85 @@ def collect_priceable_symbols(wl_store, market: str = "us_stock") -> set[str]:
     return {s for s in syms if s and _US_TICKER_RE.match(s) and s not in pool}
 
 
+def _expected_snapshot_date(market: str = "us_stock") -> str:
+    """该市场"最近应有收盘价"的交易日(北京日期口径)，用于判断行情是否已最新。
+
+    # ponytail: 无交易日历，用「今天(北京)，周末回退到最近周五」的日级下限——收盘价按交易日
+    # 更新，非交易日不该判 stale。够手动刷新门控用；接真实交易日历(含节假日)是升级路径。
+    """
+    from datetime import datetime, timedelta
+
+    from bottleneck_hunter.watchlist.store_base import _today
+    d = datetime.strptime(_today(), "%Y-%m-%d").date()
+    # 周六(5)回退 1 天、周日(6)回退 2 天到最近周五；工作日取当天。
+    if d.weekday() == 5:
+        d -= timedelta(days=1)
+    elif d.weekday() == 6:
+        d -= timedelta(days=2)
+    return d.isoformat()
+
+
+def _account_priceable_symbols(wl_store, account_ref: str = "") -> set[str]:
+    """汇总(单账户或全部)持仓 + 衍生品标的中的美股 ticker，供手动刷新补价/门控。
+
+    与 collect_priceable_symbols 不同：这里 **不** 排除观察池已有的票——手动刷新要保证
+    该用户全部持仓都判新鲜度，不能因"某票恰在观察池"就漏掉(观察池由定时任务刷，手动路径不等)。
+    港股数字码/欧洲 ISIN 无稳定 yfinance 映射，仍留 carry-forward，与推算引擎同口径。
+    """
+    from bottleneck_hunter.vip.derivatives import list_derivative_terms_all_accounts
+    ref = (account_ref or "").strip()
+    syms: set[str] = set()
+    if ref:
+        refs = [ref]
+    else:
+        refs = [(a.get("account_ref") or "").strip()
+                for a in wl_store.list_vip_accounts(include_hidden_default=False)]
+        refs = [r for r in refs if r]
+    for r in refs:
+        rows, _ = _latest_snapshot_positions(wl_store, r)
+        for row in rows:
+            if (row.get("instrument_type") or "").lower() in ("", "stock", "equity", "etf"):
+                syms.add((row.get("symbol") or "").strip())
+    for it in list_derivative_terms_all_accounts(wl_store, limit=500, account_ref=ref or None):
+        syms.add((it.get("underlying_symbol") or "").strip())
+    return {s for s in syms if s and _US_TICKER_RE.match(s)}
+
+
+def stale_symbols(wl_store, symbols, market: str = "us_stock") -> list[str]:
+    """返回行情层里收盘价晚于"最近应有交易日"之前(缺价或过期)的标的，即需补价的票。"""
+    expected = _expected_snapshot_date(market)
+    stale = []
+    for s in symbols:
+        snap = wl_store.get_latest_snapshot(s)
+        d = (snap or {}).get("date") or ""
+        if d < expected:
+            stale.append(s)
+    return sorted(stale)
+
+
+def project_all_accounts_mtm(wl_store) -> dict:
+    """对该用户(当前市场)全部可见账户逐个重估股票 + 衍生品(与定时任务同逻辑，幂等)。
+
+    返回 {accounts, priced, skipped}。不补价、不刷宏观——补价/宏观由调用方(端点)前置处理，
+    这里只做纯 DB 重估，便于单测(不打网络)。
+    """
+    n_acct = n_priced = n_skipped = 0
+    for acct in wl_store.list_vip_accounts(include_hidden_default=False):
+        ref = (acct.get("account_ref") or "").strip()
+        if not ref:
+            continue
+        res = project_stock_mtm(wl_store, ref)
+        n_priced += res.get("n_priced", 0)
+        n_skipped += res.get("n_skipped", 0)
+        try:
+            project_derivative_accrual(wl_store, ref)
+        except Exception:  # noqa: BLE001 —— 衍生品推算失败不拖垮股票重估
+            import logging
+            logging.getLogger(__name__).warning("衍生品推算失败 (acct=%s)", ref, exc_info=True)
+        n_acct += 1
+    return {"accounts": n_acct, "priced": n_priced, "skipped": n_skipped}
+
+
 def _latest_snapshot_positions(wl_store, account_ref: str) -> tuple[list[dict], str]:
     """取该账户规范层最新一日、优先级最高来源的持仓（含 symbol/fx/成本）。
 

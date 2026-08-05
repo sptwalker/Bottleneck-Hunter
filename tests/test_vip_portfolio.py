@@ -865,3 +865,39 @@ def test_instruments_by_ticker_carries_source_doc(wl):
     portfolio._upsert_instrument(wl, "GLD", "etf", "SPDR Gold Shares", "USD", "doc1")
     imap = portfolio._instruments_by_ticker(wl)
     assert imap["GLD"] == ("etf", "SPDR Gold Shares", "doc1")
+
+
+def test_refresh_staleness_gate_and_all_account_projection(wl):
+    """即时刷新核心逻辑：新鲜度门控 + 全账户重估。GOOGL/SOXX 为美股形态持仓(700=HK 数字码被排除)。
+
+    - 收盘价日=应有交易日 → stale 为空(走"已最新"分支，不打网络)；
+    - 收盘价日为上周 → 对应标的进 stale；
+    - project_all_accounts_mtm 对每个账户各写一条推算(验证"全账户覆盖"，非只刷打开的那个)。
+    """
+    from bottleneck_hunter.vip import projection
+
+    # 两个账户各持一份(含 GOOGL/SOXX)——覆盖"全账户"而非单账户
+    for ref in ("A1", "A2"):
+        portfolio.normalize_statement(wl, _stmt(), account_ref=ref)
+        portfolio.materialize_portfolio(wl, as_of_date="2026-06-30", account_ref=ref, cash_total_usd=0.0)
+
+    syms = projection._account_priceable_symbols(wl)
+    assert syms == {"GOOGL", "SOXX"}   # 700(HK 数字码)不入美股补价集；ISIN ETF 已归一为 SOXX
+
+    expected = projection._expected_snapshot_date("us_stock")
+    # 应有交易日当天两只都有收盘价 → 不 stale
+    wl.save_snapshots([{"ticker": "GOOGL", "date": expected, "close": 190.0, "market": "us_stock"},
+                       {"ticker": "SOXX", "date": expected, "close": 640.0, "market": "us_stock"}])
+    assert projection.stale_symbols(wl, syms, "us_stock") == []
+    # 删掉 GOOGL 的新鲜快照，只留 SOXX 新鲜 → 仅 GOOGL 进 stale（验证逐标的判据）
+    with wl._write_conn() as conn:
+        conn.execute("DELETE FROM market_snapshots WHERE ticker='GOOGL' AND date=?", (expected,))
+    assert projection.stale_symbols(wl, syms, "us_stock") == ["GOOGL"]
+
+    # 全账户重估：2 个账户各写 GOOGL/SOXX 推算(用留存的收盘价，幂等)
+    res = projection.project_all_accounts_mtm(wl)
+    assert res["accounts"] == 2
+    for ref in ("A1", "A2"):
+        tickers = {r["ticker"] for r in wl.list_projections(account_ref=ref, kind="stock_mtm")}
+        assert "SOXX" in tickers, f"账户 {ref} 未写入 SOXX 推算"
+
