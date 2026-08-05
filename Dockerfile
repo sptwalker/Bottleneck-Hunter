@@ -33,8 +33,10 @@ WORKDIR /app
 # 旧写法把源码 COPY 放在 pip install 之前，每次改码都让该层缓存失效 → 全量重装
 # akshare/pandas/langchain 等重依赖 → 构建严重超时。这里把重依赖安装与源码解耦。
 COPY pyproject.toml README.md ./
+# [datasources]：装 finnhub/efinance/pytdx 兜底源。缺 finnhub 时 Yahoo 被 IP 级 429 限流
+# 就没有非 Yahoo 的公司名来源，反向分析必报「无法核实企业信息」（护栏拒绝臆测）。
 RUN mkdir -p bottleneck_hunter && touch bottleneck_hunter/__init__.py \
-    && pip install -e . \
+    && pip install -e ".[datasources]" \
     && rm -rf bottleneck_hunter bottleneck_hunter.egg-info
 
 # ── 源码/非包文件层：改动只影响这之后，依赖层命中缓存（秒级重建）──────────
