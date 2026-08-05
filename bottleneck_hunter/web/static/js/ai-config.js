@@ -251,7 +251,7 @@ function renderProviders() {
       const keyHint = cfg.key_hint || '';
       const health = _providerHealth[id];
       const gate = cfg.health;   // 持久熔断态 {status,reason,...} 或 null（认证失效/限流严重/超时频发）
-      const GATE_LABEL = { disabled_auth: '密钥失效', disabled_ratelimit: '限流严重', disabled_timeout: '超时频发' };
+      const GATE_LABEL = { disabled_auth: '密钥失效', disabled_ratelimit: '限流严重', disabled_timeout: '超时频发', disabled_arrears: '余额欠费' };
       const gateLabel = gate ? (GATE_LABEL[gate.status] || '已禁用') : '';
 
       // 健康点：未配→灰；禁用→灰；持久熔断→红；熔断→红；成功率<70%→黄；否则绿

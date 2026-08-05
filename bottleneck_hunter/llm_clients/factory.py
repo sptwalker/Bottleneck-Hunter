@@ -353,6 +353,7 @@ def get_models_for_role(
     temperature: float = 0.3,
     with_fallback: bool = False,
     prefer_primary: bool = False,
+    max_retries: int | None = None,
 ) -> list[tuple[BaseChatModel, str, str]]:
     """统一接口: 返回该角色配置的所有模型实例列表。
 
@@ -374,9 +375,11 @@ def get_models_for_role(
 
     def _build(p: str, m: str):
         """构建选中模型：with_fallback=True → 全链路 fallback；with_fallback=False（fan-out 成员）
-        → 包 record-only 单候选（记账喂熔断层、保留 N 路多样性、不跨 provider 切换）。一处覆盖全部扇出。"""
+        → 包 record-only 单候选（记账喂熔断层、保留 N 路多样性、不跨 provider 切换）。一处覆盖全部扇出。
+        max_retries 显式传入时透传给 SDK（委员会自管重试链传 0，避免 SDK 再 3× 放大慢模型等待）。"""
+        extra = {} if max_retries is None else {"max_retries": max_retries}
         return create_llm(p, m, temperature=temperature, with_fallback=with_fallback,
-                          user_id=uid, record_only=not with_fallback)
+                          user_id=uid, record_only=not with_fallback, **extra)
     # 角色元信息：多槽 fan-out 角色需返回 N 个多样化模型（交叉验证）
     role_def = None
     try:
@@ -551,6 +554,7 @@ def get_llm_for_position(
     temperature: float = 0.3,
     with_fallback: bool = True,
     prefer_primary: bool = False,
+    max_retries: int | None = None,
 ) -> tuple[BaseChatModel | None, str, str]:
     """统一的「按 position 获取 LLM」入口（向后兼容）。
 
@@ -560,6 +564,8 @@ def get_llm_for_position(
         不走智能调度；主模型不可用才回退。透传给 get_models_for_role。
     with_fallback: 默认 True，单模型位获得调用失败自动替换；自管重试链的调用方
         （如 committee._build_llm_chain）传 False 以拿到裸模型。
+    max_retries: 显式传入时透传给 SDK（None=沿用默认 2）；委员会自管重试链传 0，
+        避免 SDK 对同一慢/失败模型再 3× 放大等待，拖垮整体时长。
     返回: (llm_instance, provider_id, model_name) 或 (None, '', '')
     """
     try:
@@ -567,20 +573,28 @@ def get_llm_for_position(
         uid = get_current_user_id()
         if position:
             results = get_models_for_role(position, user_id=uid, temperature=temperature,
-                                          with_fallback=with_fallback, prefer_primary=prefer_primary)
+                                          with_fallback=with_fallback, prefer_primary=prefer_primary,
+                                          max_retries=max_retries)
             if results:
                 return results[0]
 
         if provider_hint and _user_has_llm_key(provider_hint, uid):
             model = resolve_provider_model(provider_hint, uid)
             if model:
-                return create_llm(provider_hint, model, temperature=temperature, with_fallback=with_fallback, user_id=uid), provider_hint, model
+                extra = {} if max_retries is None else {"max_retries": max_retries}
+                # 与 get_models_for_role._build 对齐：with_fallback=False 时包 record-only 单候选记账壳，
+                # 让失败照喂 provider_gate（欠费/限流/超时升级为持久禁用 + 配置中心标红 + 取消主模型），
+                # 不跨 provider 切换、不改调用方自管重试语义。堵住「仅作委员会备用的 provider 从不喂熔断」边角。
+                return create_llm(provider_hint, model, temperature=temperature,
+                                  with_fallback=with_fallback, record_only=not with_fallback,
+                                  user_id=uid, **extra), provider_hint, model
 
         # 无 position / hint 未命中 → 统一智能调度。传一个未注册的通用 role_key，使
         # get_models_for_role 跳过角色专属默认(优先级3)、直接落到优先级4 的全域调度：
         # 主模型 + 用户所有已注册 provider + 应急链，按健康度排序取 top-1。
         # 绝不再只试硬编码 4 条应急链(deepseek/qwen/kimi/glm)——用户配的其它 provider 会被无视。
-        results = get_models_for_role("__default__", user_id=uid, temperature=temperature, with_fallback=with_fallback)
+        results = get_models_for_role("__default__", user_id=uid, temperature=temperature,
+                                      with_fallback=with_fallback, max_retries=max_retries)
         if results:
             return results[0]
     except Exception as e:

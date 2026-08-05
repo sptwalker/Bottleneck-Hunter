@@ -85,9 +85,13 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     """
     chain: list[tuple] = []
     seen: set[str] = set()
-    # 委员链自管重试降级，取裸模型（勿再套 FallbackChatModel，避免双重重试/破坏多样性）
+    # 委员链自管重试降级，取裸模型（勿再套 FallbackChatModel，避免双重重试/破坏多样性）。
+    # max_retries=0：SDK 不再对同一慢/失败模型内部 3× 重试（那会把单模型等待放大到
+    # (2+1)×timeout=180s，正是 Loki 归因里"单个失败模型拖 6.5 分钟"的根因）；重试/降级由
+    # _invoke_with_retry 显式掌控，慢模型单次超时即切下一个备用，不白等。
     llm, provider, model = get_llm_for_position(
-        position=member.get("config_key"), provider_hint=member["provider_hint"], with_fallback=False)
+        position=member.get("config_key"), provider_hint=member["provider_hint"],
+        with_fallback=False, max_retries=0)
     if llm:
         chain.append((llm, provider, model))
         seen.add(provider)
@@ -111,14 +115,14 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     for hint in backup_pool:
         if hint in seen or health.is_open(uid, hint):
             continue
-        fl, fp, fm = get_llm_for_position(provider_hint=hint, with_fallback=False)
+        fl, fp, fm = get_llm_for_position(provider_hint=hint, with_fallback=False, max_retries=0)
         if fl and fp not in seen:
             chain.append((fl, fp, fm))
             seen.add(fp)
             break
     # 仍为空则退到通用默认
     if not chain:
-        dl, dp, dm = get_llm_for_position(with_fallback=False)
+        dl, dp, dm = get_llm_for_position(with_fallback=False, max_retries=0)
         if dl:
             chain.append((dl, dp, dm))
     return chain
@@ -133,7 +137,9 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
                              max_retry: int = 2) -> tuple[str, str, str]:
     """带重试 + 降级的 LLM 调用。
 
-    对每个模型重试 max_retry 次（仅瞬态错误退避重试），失败则切换到链中下一个备用模型。
+    主模型(idx=0)对瞬态错误退避重试 max_retry 次；备用模型(idx>0)只试一次即切下一个——
+    已经降级到备用还慢/失败，说明该备用同样不可靠，再在它身上重试 2× 只会继续拖时间。
+    这正是「不要因单个失败模型过长拖延，及时替换」：单次超时立刻换下一个可用节点。
     返回 (content, provider, model)；全部失败则抛出最后一个异常。
     """
     last_err: Exception | None = None
@@ -142,7 +148,8 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
     from bottleneck_hunter.llm_clients.health import health
     uid = get_current_user_id()
     for idx, (llm, provider, model) in enumerate(chain):
-        for attempt in range(max_retry):
+        attempts = max_retry if idx == 0 else 1   # 备用模型不在同一节点上重试，快速切换
+        for attempt in range(attempts):
             try:
                 content = await asyncio.to_thread(lambda: llm.invoke(prompt).content)  # noqa: B023  立即 await，无延迟绑定后果
                 health.record_success(uid, provider)  # 恢复：清该 provider 的失败计数
@@ -171,8 +178,8 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
                                "瞬态" if transient else "非瞬态", e)
                 if not transient:
                     break  # 非瞬态错误：不在同模型重试，直接换备用模型
-                if attempt < max_retry - 1:
-                    await asyncio.sleep(1.5 * (attempt + 1))  # 退避
+                if attempt < attempts - 1:
+                    await asyncio.sleep(1.5 * (attempt + 1))  # 退避（仅主模型多次尝试时）
     raise last_err or RuntimeError(f"委员 {role} 无可用 LLM")
 
 
@@ -1155,3 +1162,45 @@ async def challenge_member(
         "approval_rate": consensus.get("approval_rate"),
         "gating_action": gating_action,
     }
+
+
+def _selfcheck() -> None:
+    """assert 自检：主模型瞬态失败会重试 max_retry 次；备用模型只试一次即快速切换。"""
+    class _Boom:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, *a, **k):
+            self.calls += 1
+            raise RuntimeError("rate limit exceeded")  # 瞬态
+
+    class _OK:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, *a, **k):
+            self.calls += 1
+            class _R:
+                content = "ok"
+            return _R()
+
+    # 主模型瞬态失败(retry 2) → 备用成功：主被调 2 次，备用 1 次
+    primary, backup = _Boom(), _OK()
+    chain = [(primary, "deepseek", "d"), (backup, "qwen", "q")]
+    content, prov, _ = asyncio.run(_invoke_with_retry(chain, "hi", "risk_officer", max_retry=2))
+    assert content == "ok" and prov == "qwen", (content, prov)
+    assert primary.calls == 2, f"主模型应重试 max_retry=2 次，实际 {primary.calls}"
+
+    # 备用模型也瞬态失败：应只试 1 次即切下一个（不再在备用上重试 2×）——防"慢模型拖时间"
+    b0, b1, ok = _Boom(), _Boom(), _OK()
+    chain2 = [(b0, "deepseek", "d"), (b1, "qwen", "q"), (ok, "glm", "g")]
+    content2, prov2, _ = asyncio.run(_invoke_with_retry(chain2, "hi", "risk_officer", max_retry=2))
+    assert content2 == "ok" and prov2 == "glm", (content2, prov2)
+    assert b0.calls == 2, f"主模型重试 2 次，实际 {b0.calls}"
+    assert b1.calls == 1, f"备用模型应只试 1 次即切换，实际 {b1.calls}"
+    print(f"committee selfcheck OK; primary_retries={b0.calls} backup_calls={b1.calls}")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.WARNING)
+    _selfcheck()

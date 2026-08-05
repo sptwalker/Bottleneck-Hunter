@@ -32,9 +32,11 @@ logger = logging.getLogger(__name__)
 _AUTH_REASON = "认证失败(密钥无效)"      # 必须与 fallback.classify_reason 完全一致
 _RL_REASON = "频率限制/额度不足"
 _TIMEOUT_REASON = "请求超时"            # 同上：与 classify_reason 完全一致
+_ARREARS_REASON = "余额欠费"            # 同上：与 classify_reason 完全一致
 _STATUS_AUTH = "disabled_auth"
 _STATUS_RL = "disabled_ratelimit"
 _STATUS_TIMEOUT = "disabled_timeout"
+_STATUS_ARREARS = "disabled_arrears"
 
 _RL_STRIKES = 5        # 限流达此次数才判「严重」→ 禁用
 _RL_WINDOW = 600.0     # 秒：strike 计数滑窗（超窗的旧 strike 丢弃）
@@ -42,9 +44,10 @@ _TIMEOUT_STRIKES = 3   # 超时达此次数（用户指定：3 次以上）→ �
 _TIMEOUT_WINDOW = 600.0
 _CACHE_TTL = 30.0      # 秒：is_disabled/disabled_info 进程内缓存 TTL
 
-# 禁用态展示标签 / 须过流量测试才恢复的状态（认证仅重存 key 即恢复；限流+超时须测试）
-_STATUS_LABEL = {_STATUS_AUTH: "密钥失效", _STATUS_RL: "限流严重", _STATUS_TIMEOUT: "超时频发"}
-_TEST_REQUIRED = (_STATUS_RL, _STATUS_TIMEOUT)
+# 禁用态展示标签 / 须过流量测试才恢复的状态（认证仅重存 key 即恢复；限流+超时+欠费须测试）
+_STATUS_LABEL = {_STATUS_AUTH: "密钥失效", _STATUS_RL: "限流严重",
+                 _STATUS_TIMEOUT: "超时频发", _STATUS_ARREARS: "余额欠费"}
+_TEST_REQUIRED = (_STATUS_RL, _STATUS_TIMEOUT, _STATUS_ARREARS)
 
 _lock = threading.Lock()
 # strike 时间戳滑窗，按类别隔离：(uid, provider, cat) → [monotonic, ...]，cat ∈ {"rl","to"}
@@ -130,12 +133,16 @@ def _do_disable(uid: str, provider: str, status: str, reason: str, detail: str) 
     _clear_strikes(uid, provider)
     if not already:
         label = _STATUS_LABEL.get(status, "异常")
+        if status == _STATUS_ARREARS:
+            msg = f"⛔ {p} 节点余额不足/欠费已暂停调用，请充值后在 AI 配置中心「测试并恢复」"
+        else:
+            msg = (f"⛔ {p} 节点因{label}已被禁用，请在 AI 配置中心重新配置"
+                   + ("并通过流量测试" if status in _TEST_REQUIRED else ""))
         try:
             from bottleneck_hunter.llm_clients.fallback import push_notice
             push_notice({
                 "kind": "provider_disabled",
-                "message": f"⛔ {p} 节点因{label}已被禁用，请在 AI 配置中心重新配置"
-                           + ("并通过流量测试" if status in _TEST_REQUIRED else ""),
+                "message": msg,
                 "provider": p,
                 "status": status,
                 "reason": reason,
@@ -183,6 +190,10 @@ def record_result(uid: str, provider: str, ok: bool, reason: str = "") -> None:
         return
     if reason == _AUTH_REASON:
         _do_disable(uid, p, _STATUS_AUTH, reason, "")
+        return
+    if reason == _ARREARS_REASON:
+        # 欠费是持久性问题（钱没了不会自愈），1 击即禁，须充值后过流量测试恢复
+        _do_disable(uid, p, _STATUS_ARREARS, reason, "")
         return
     if reason == _RL_REASON:
         if _bump_strike(uid, p, "rl", _RL_WINDOW, _RL_STRIKES):
@@ -287,6 +298,15 @@ def _selfcheck() -> None:
         assert is_disabled("u1", "kimi")
         assert clear("u1", "kimi")                # 过流量测试后 clear 清除
         assert not is_disabled("u1", "kimi")
+
+        # 欠费：1 击即禁；但须过流量测试才恢复（重存 key 不清，与认证不同）
+        _reset_for_test()
+        record_result("u1", "openai", False, _ARREARS_REASON)
+        assert is_disabled("u1", "openai") and disabled_info("u1", "openai")["status"] == _STATUS_ARREARS
+        assert not clear_auth_disable("u1", "openai"), "欠费禁用不因重存 key 而清"
+        assert is_disabled("u1", "openai")
+        assert clear("u1", "openai")               # 充值后过流量测试 clear 清除
+        assert not is_disabled("u1", "openai")
 
         # 类别隔离：2 次超时 + 4 次限流（各差 1 达阈值）不应相加误触发
         _reset_for_test()

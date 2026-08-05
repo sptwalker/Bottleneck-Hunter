@@ -150,7 +150,17 @@ def classify_reason(exc: Exception) -> str:
     status = getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
     if status in (401, 403) or any(k in msg for k in ("api key", "api_key", "unauthorized", "authentication", "invalid key", "permission")):
         return "认证失败(密钥无效)"
-    if status == 429 or any(k in msg for k in ("rate limit", "rate_limit", "too many requests", "quota", "余额", "insufficient")):
+    # 余额欠费/账户停用（需充值，持久性问题）——须在 429 分支之前判定：
+    # OpenAI 的 insufficient_quota、Anthropic 的 credit balance too low、DeepSeek 的
+    # Insufficient Balance 等常以 402/429/400 返回，但本质是「没钱了」，须提示充值并
+    # 1 击禁用，不该当成可自愈的偶发限流被 5 次滑窗放过、每轮反复白撞。
+    if status == 402 or any(k in msg for k in (
+        "arrearage", "overdue", "good standing", "more credits", "requires more credits",
+        "insufficient", "credit balance", "balance is too low", "billing",
+        "recharge", "欠费", "余额", "充值",
+    )):
+        return "余额欠费"
+    if status == 429 or any(k in msg for k in ("rate limit", "rate_limit", "too many requests", "quota")):
         return "频率限制/额度不足"
     if isinstance(exc, (ConnectionError, OSError)) or any(k in msg for k in ("connection", "connect", "getaddrinfo", "network", "remotedisconnected")):
         return "连接失败"
@@ -422,6 +432,13 @@ def _selfcheck() -> None:
     assert len(notes) == 1 and notes[0]["kind"] == "model_fallback", notes
     assert "已自动替换为 qwen/qwen-plus" in notes[0]["message"], notes[0]["message"]
     assert notes[0]["reason"] == "请求超时", notes[0]
+    # classify_reason：欠费类异常须归「余额欠费」（而非被 429 分支吞成「频率限制」）
+    class _Err402(Exception):
+        status_code = 402
+    assert classify_reason(_Err402("payment required")) == "余额欠费"
+    assert classify_reason(Exception("Your credit balance is too low")) == "余额欠费"
+    assert classify_reason(Exception("This organization has been disabled due to arrearage")) == "余额欠费"
+    assert classify_reason(Exception("rate limit exceeded")) == "频率限制/额度不足"
     print("fallback selfcheck OK; reason=", notes[0]["reason"], "replaced=", notes[0]["replaced"])
 
 
