@@ -30,7 +30,9 @@ async def test_fred_indicators_via_shared_client(monkeypatch):
         lambda src, *a, **k: "FAKEKEY",
     )
 
-    out = await macro_data._fetch_fred_indicators()
+    # 失业率/CPI 已从 _FRED_GLOBAL 拆到 _FRED_US_DOMESTIC（美国本土数据，只灌美股口径），
+    # 无参调用不含它们；显式经 extra 注入以验证其解析路径（fetch_macro_data 对美股也是这样传）。
+    out = await macro_data._fetch_fred_indicators(extra=macro_data._FRED_US_DOMESTIC)
     await client.aclose()
 
     assert out["unemployment_rate"]["value"] == 4.1

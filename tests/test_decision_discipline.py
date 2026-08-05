@@ -176,7 +176,9 @@ class TestDeviationDrift:
         from bottleneck_hunter.watchlist.decision_engine import _compute_deviation_drift
         s = store.for_market("us_stock")
         acct = s.get_sim_account()
-        te = acct.get("total_equity", 100000)
+        # 显式固定 total_equity=10 万，使「市值 5 万 = 50% 权益」成立——脱钩账户默认本金
+        # （美股本金已上调至 100 万，若读账户真值会算成 5%，本用例只验算法非本金口径）。
+        te = 100000
         eid = s.add({"ticker": "NVDA", "company_name": "NVIDIA", "tier": "focus",
                      "market": "us_stock", "sector": "Tech"})
         s.create_sim_position(acct["id"], "NVDA", shares=100, avg_cost=100.0, entry_id=eid)

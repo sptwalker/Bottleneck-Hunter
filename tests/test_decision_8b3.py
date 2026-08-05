@@ -101,7 +101,8 @@ class TestTradeExecutor:
         assert 188.0 <= result["price"] <= 188.0 * 1.01
 
         account = s.get_sim_account()
-        assert account["cash_balance"] < 100000
+        # 买入后现金应低于初始本金（相对口径，不写死 10 万——美股本金已上调至 100 万）
+        assert account["cash_balance"] < account["initial_capital"]
 
         pos = s.get_sim_position(account["id"], "AAPL")
         assert pos is not None
