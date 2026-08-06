@@ -269,7 +269,7 @@ async def resolve_model_debug(role: str = "pipeline_decompose", user: dict = Dep
             score = None
         rows.append({
             "provider": p,
-            "tier": H.provider_tier(p),
+            "tier": H.provider_tier(p, uid),
             "is_primary": p == (primary or "").lower().strip(),
             "active": F.is_provider_active(p),
             "has_key": F._user_has_llm_key(p, uid),

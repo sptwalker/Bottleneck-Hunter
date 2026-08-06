@@ -752,6 +752,64 @@ class _AIModelsMixin:
             conn.close()
 
 
+    def set_provider_config_tier(self, provider_id: str, tier: str,
+                                 user_id: str | None = None) -> None:
+        """设该用户对某 provider 的**付费类型**（用户级，压过 health 静态表）。
+        tier ∈ {'', 'free', 'paid'}；缺行则建（复用主模型 upsert 写法）。"""
+        uid = user_id if user_id is not None else (self._user_id or "")
+        pid = (provider_id or "").lower().strip()
+        t = (tier or "").strip().lower()
+        if t not in ("", "free", "paid"):
+            t = ""
+        now = _now_iso()
+        with self._write_conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM provider_configs WHERE provider_id = ? AND user_id = ?",
+                (pid, uid),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE provider_configs SET tier = ?, updated_at = ? WHERE id = ?",
+                    (t, now, existing["id"]),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO provider_configs
+                       (id, user_id, provider_id, tier, updated_at)
+                       VALUES (?,?,?,?,?)""",
+                    (uuid.uuid4().hex[:16], uid, pid, t, now),
+                )
+
+
+    def get_provider_tier(self, provider_id: str, user_id: str | None = None) -> str:
+        """读该用户对某 provider 的付费类型；未设返回 ''。严格用户级。"""
+        uid = user_id if user_id is not None else (self._user_id or "")
+        pid = (provider_id or "").lower().strip()
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT tier FROM provider_configs WHERE provider_id = ? AND user_id = ?",
+                (pid, uid),
+            ).fetchone()
+            return (row["tier"] if row else "") or ""
+        finally:
+            conn.close()
+
+
+    def get_provider_tiers(self, user_id: str | None = None) -> dict[str, str]:
+        """批量返回该用户所有已设付费类型 {provider_id: tier}（供列表一次性取，免 N 次单查）。"""
+        uid = user_id if user_id is not None else (self._user_id or "")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT provider_id, tier FROM provider_configs WHERE user_id = ? AND tier != ''",
+                (uid,),
+            ).fetchall()
+            return {r["provider_id"]: r["tier"] for r in rows}
+        finally:
+            conn.close()
+
+
     def save_test_result(self, provider: str, model: str, test_type: str,
                          score: float, raw_result: str = "{}",
                          user_id: str | None = None) -> str:

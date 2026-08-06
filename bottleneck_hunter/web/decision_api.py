@@ -1162,7 +1162,7 @@ async def get_model_usage(days: int = 14, user: dict = Depends(get_current_user)
     series = store.get_model_call_series(days=days)
     from bottleneck_hunter.llm_clients.health import health, provider_tier
     for r in stats:
-        r["tier"] = provider_tier(r["provider"])
+        r["tier"] = provider_tier(r["provider"], uid)  # 传 uid：看板徽标反映该用户自定档
         r["cooldown_s"] = health.cooldown_remaining(uid, r["provider"])
     cooling = [{"provider": r["provider"], "cooldown_s": r["cooldown_s"]}
                for r in stats if r["cooldown_s"] > 0]

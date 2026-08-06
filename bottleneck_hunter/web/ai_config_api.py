@@ -109,9 +109,10 @@ def _build_providers_list(user_id: str = "", include_unconfigured: bool = False)
     except Exception:
         return providers
 
-    # 当前用户自己的 Key 提示（provider -> key_hint）+ 用户级主模型
+    # 当前用户自己的 Key 提示（provider -> key_hint）+ 用户级主模型 + 用户级付费类型
     user_hints: dict[str, str] = {}
     user_primary = ""
+    user_tiers: dict[str, str] = {}
     if user_id:
         try:
             for k in _auth_store.get_user_api_keys(user_id):
@@ -120,7 +121,9 @@ def _build_providers_list(user_id: str = "", include_unconfigured: bool = False)
             pass
         try:
             from bottleneck_hunter.watchlist.store import WatchlistStore
-            user_primary = (WatchlistStore().get_primary_provider_config(user_id) or "").lower().strip()
+            wl = WatchlistStore()
+            user_primary = (wl.get_primary_provider_config(user_id) or "").lower().strip()
+            user_tiers = wl.get_provider_tiers(user_id)  # {provider_id: 'free'|'paid'} 一次性取，免 N 次单查
         except Exception:  # noqa: BLE001
             user_primary = ""
 
@@ -144,6 +147,7 @@ def _build_providers_list(user_id: str = "", include_unconfigured: bool = False)
             "key_hint": user_hints.get(pid, ""),  # 当前用户自己的 hint
             "health": health,                     # {status,reason,detail,disabled_at} 或 None
             "is_primary": pid == user_primary,    # 当前用户自己设定的主模型（严格用户级隔离）
+            "tier": user_tiers.get(pid, ""),      # 当前用户自定付费类型 'free'/'paid'/''（徽标唯一真源，退役前端硬编码）
         })
     return providers
 
@@ -291,6 +295,28 @@ async def recover_provider(provider: str, user: dict = Depends(get_current_user)
 
     provider_gate.clear(uid, provider)  # 全过才解除禁用
     return {"ok": True, "recovered": True, "calls": _RECOVER_CALLS}
+
+
+# ── POST /provider/{provider}/tier ──
+
+
+class TierRequest(BaseModel):
+    tier: str = ""  # '' 未设 / 'free' 免费 / 'paid' 付费
+
+
+@router.post("/provider/{provider}/tier")
+async def set_provider_tier(provider: str, req: TierRequest, user: dict = Depends(get_current_user)):
+    """设当前用户对某 provider 的**付费类型**（用户级，压过 health 静态表；策略「免费/付费优先」据此判定）。
+    任何登录用户可设自己的档（tier per-user，非共享定义，故不限管理员）。"""
+    uid = user.get("sub", "")
+    pid = (provider or "").strip()
+    tier = (req.tier or "").strip().lower()
+    if tier not in ("", "free", "paid"):
+        raise HTTPException(400, "tier 仅接受 '' / 'free' / 'paid'")
+    if not pid:
+        raise HTTPException(400, "provider 不能为空")
+    _get_store(user).set_provider_config_tier(pid, tier, uid)
+    return {"ok": True, "provider": pid, "tier": tier}
 
 
 # ── POST /test/connectivity ──

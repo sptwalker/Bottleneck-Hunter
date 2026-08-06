@@ -536,8 +536,8 @@ def get_models_for_role(
         # 免费→付费回落强提示（仅首个主选，且用户确有免费 provider 的 KEY——否则纯付费用户会被
         # 误报"免费不可用"并每次刷屏；只有"免费本可用但当前熔断/失效"才提示）。
         if (len(results) == 1 and tier_of and policy.get("prefer_tier") == "free"
-                and tier_of(provider) == "paid"
-                and any(tier_of(c) == "free" and not provider_gate.is_disabled(uid, c) and _user_has_llm_key(c, uid)
+                and tier_of(provider, uid) == "paid"
+                and any(tier_of(c, uid) == "free" and not provider_gate.is_disabled(uid, c) and _user_has_llm_key(c, uid)
                         for c in chain)):
             try:
                 from bottleneck_hunter.llm_clients.fallback import push_notice

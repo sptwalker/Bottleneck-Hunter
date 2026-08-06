@@ -55,9 +55,8 @@ let _activeModule = '产业链分析';
 let _providerHealth = {};   // provider_id -> {ok_rate, cooldown_s}（来自 /model-usage，健康点用）
 let _rolesLoaded = false;    // /roles 是否至少成功返回过一次（configured 判定就绪门闩，防竞态误弹引导卡）
 
-// 免费档 provider（与后端 health._PROVIDER_TIER 对应，前端仅用于引导徽标/推荐排序）。
-// ponytail: 小白名单，非精确 tier；新增自定义 provider 默认按"未知档"处理。
-const FREE_PROVIDERS = new Set(['deepseek', 'qwen', 'glm', 'kimi', 'siliconflow']);
+// 付费类型（免费/付费）判定已后移到后端 per-user tier（provider_configs.tier），前端徽标读 cfg.tier，
+// 不再前端硬编码。RECOMMEND_ORDER 仅用于首次引导的推荐排序（与档位判定无关）。
 const RECOMMEND_ORDER = ['deepseek', 'qwen', 'glm', 'kimi'];  // 引导优先推荐的国内免费模型
 
 /* ── Init ─────────────────────────────────────────────── */
@@ -268,7 +267,9 @@ function renderProviders() {
         else { dotClass = 'aic-status-ok'; if (health && health.calls >= 5) stateText += ` · 成功率${health.ok_rate}%`; }
       }
 
-      const freeBadge = FREE_PROVIDERS.has(id) ? '<span class="aic-tier-badge free">免费</span>' : '';
+      // 付费类型徽标：单一真源＝后端 per-user tier（cfg.tier，来自 _build_providers_list）。退役前端硬编码 FREE_PROVIDERS 判定。
+      const tierBadge = cfg.tier === 'free' ? '<span class="aic-tier-badge free">免费</span>'
+        : cfg.tier === 'paid' ? '<span class="aic-tier-badge paid">付费</span>' : '';
       const primaryBadge = isPrimary ? '<span class="aic-provider-primary-badge" title="我的主要模型（默认+兜底优先，严格用户级隔离）">主要</span>' : '';
       // 持久熔断徽章：密钥失效 / 限流严重 / 超时频发（须重配或过流量测试恢复）
       const gateBadge = gate
@@ -296,7 +297,7 @@ function renderProviders() {
         <div class="aic-provider-row-top">
           <span class="aic-provider-status ${dotClass}"></span>
           <div class="aic-provider-info">
-            <span class="aic-provider-name">${escHtml(displayName)}${freeBadge}${primaryBadge}${gateBadge}</span>
+            <span class="aic-provider-name">${escHtml(displayName)}${tierBadge}${primaryBadge}${gateBadge}</span>
             <span class="aic-provider-state">${stateText}${model ? ` · ${escHtml(model)}` : ''}</span>
           </div>
         </div>
@@ -475,6 +476,9 @@ function showCustomForm(editData) {
     document.getElementById('aic-custom-key').value = '';
     document.getElementById('aic-custom-key').placeholder = editData.api_key_hint ? '已配置（留空保持不变）' : '可选';
     document.getElementById('aic-custom-model').value = editData.default_model || '';
+    // 付费类型是 per-user（provider_configs.tier），不在共享定义 editData 里 —— 从 _providers 回填当前用户自定档
+    document.getElementById('aic-custom-tier').value =
+      _providers.find(p => p.id === editData.provider_id)?.tier || '';
   } else {
     // 新增 provider
     show('aic-field-name', true); show('aic-field-id', true);
@@ -489,6 +493,7 @@ function showCustomForm(editData) {
     document.getElementById('aic-custom-key').value = '';
     document.getElementById('aic-custom-key').placeholder = '可选（如 Ollama 无需填写）';
     document.getElementById('aic-custom-model').value = '';
+    document.getElementById('aic-custom-tier').value = '';
   }
 
   form.style.display = 'block';
@@ -541,6 +546,15 @@ async function saveCustomProvider() {
     }
 
     if (resp.ok) {
+      // 付费类型是 per-user，走独立用户级端点（provider 定义走上面的 CUSTOM_API 共享/admin 轨）。幂等，失败不阻断。
+      const tier = document.getElementById('aic-custom-tier')?.value || '';
+      try {
+        await fetch(`${API}/provider/${encodeURIComponent(provider_id)}/tier`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tier }),
+        });
+      } catch (_) { /* 档位写失败不阻断 provider 保存主流程 */ }
       hideCustomForm();
       await loadCustomProviders();
       await loadRoles();

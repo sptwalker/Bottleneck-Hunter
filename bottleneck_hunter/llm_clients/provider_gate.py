@@ -120,8 +120,10 @@ def disabled_info(uid: str, provider: str) -> dict | None:
     return _read_info(uid, provider)
 
 
-def _do_disable(uid: str, provider: str, status: str, reason: str, detail: str) -> None:
-    """落库禁用；仅在**由启用→禁用**的首次弹一次提示（已禁用不重复弹）。"""
+def _do_disable(uid: str, provider: str, status: str, reason: str, detail: str,
+                arrears_flipped: bool = False) -> None:
+    """落库禁用；仅在**由启用→禁用**的首次弹一次提示（已禁用不重复弹）。
+    arrears_flipped=True 表示该节点因欠费刚被从免费翻成付费档，提示文案随之调整。"""
     p = _norm(provider)
     already = is_disabled(uid, provider)
     try:
@@ -134,7 +136,10 @@ def _do_disable(uid: str, provider: str, status: str, reason: str, detail: str) 
     if not already:
         label = _STATUS_LABEL.get(status, "异常")
         if status == _STATUS_ARREARS:
-            msg = f"⛔ {p} 节点余额不足/欠费已暂停调用，请充值后在 AI 配置中心「测试并恢复」"
+            if arrears_flipped:
+                msg = f"⛔ {p} 出现欠费，已判定为**付费模型**并暂停调用，请充值后在 AI 配置中心「测试并恢复」"
+            else:
+                msg = f"⛔ {p} 节点余额不足/欠费已暂停调用，请充值后在 AI 配置中心「测试并恢复」"
         else:
             msg = (f"⛔ {p} 节点因{label}已被禁用，请在 AI 配置中心重新配置"
                    + ("并通过流量测试" if status in _TEST_REQUIRED else ""))
@@ -180,6 +185,25 @@ def _clear_primary_if_matches(uid: str, provider: str, label: str, status: str) 
     logger.warning("用户 %s 主模型 %s 失效，已自动取消主模型设置", uid, provider)
 
 
+def _flip_free_to_paid_on_arrears(uid: str, provider: str) -> bool:
+    """欠费触发时：若该用户对该 provider 的**有效档**当前为免费，翻成付费并返回 True。
+    免费模型不该欠费——欠费即证明其实是付费。惰性 import 断循环依赖；fail-silent，
+    翻档失败不阻断后续熔断落库。返回是否发生翻档（供提示文案区分）。"""
+    if not uid:
+        return False
+    try:
+        from bottleneck_hunter.llm_clients.health import provider_tier
+        if provider_tier(provider, uid) != "free":
+            return False
+        from bottleneck_hunter.watchlist.store import WatchlistStore
+        WatchlistStore().set_provider_config_tier(provider, "paid", uid)
+        logger.warning("用户 %s 的 %s 出现欠费，付费类型已自动 免费→付费", uid, provider)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("欠费自动翻档失败 (%s/%s): %s", uid, provider, e)
+        return False
+
+
 def record_result(uid: str, provider: str, ok: bool, reason: str = "") -> None:
     """在 fallback._record_call 里对每个候选调用旁路调用。fail-silent。"""
     p = _norm(provider)
@@ -192,8 +216,10 @@ def record_result(uid: str, provider: str, ok: bool, reason: str = "") -> None:
         _do_disable(uid, p, _STATUS_AUTH, reason, "")
         return
     if reason == _ARREARS_REASON:
-        # 欠费是持久性问题（钱没了不会自愈），1 击即禁，须充值后过流量测试恢复
-        _do_disable(uid, p, _STATUS_ARREARS, reason, "")
+        # 欠费是持久性问题（钱没了不会自愈），1 击即禁，须充值后过流量测试恢复。
+        # 免费模型本不该欠费——触发即证明其实是付费，自动翻档 free→paid（用户已定：照常熔断+翻档）。
+        flipped = _flip_free_to_paid_on_arrears(uid, p)
+        _do_disable(uid, p, _STATUS_ARREARS, reason, "", arrears_flipped=flipped)
         return
     if reason == _RL_REASON:
         if _bump_strike(uid, p, "rl", _RL_WINDOW, _RL_STRIKES):
@@ -250,10 +276,15 @@ def _selfcheck() -> None:
         def clear_llm_provider_health(self, uid, prov):
             return self.rows.pop((uid, prov), None) is not None
 
-    global _get_store
+    global _get_store, _flip_free_to_paid_on_arrears
     orig = _get_store
+    orig_flip = _flip_free_to_paid_on_arrears
     fake = _FakeStore()
     _get_store = lambda: fake  # noqa: E731
+    flip_calls: list = []
+    # fake 翻档钩子：selfcheck 保持纯内存（不连真 WatchlistStore/health）；只验证 arrears 会触发它。
+    # 翻档内部逻辑(provider_tier=='free' 才翻)由 pytest 用 fake store 覆盖。
+    _flip_free_to_paid_on_arrears = lambda u, pv: (flip_calls.append((u, pv)) or True)  # noqa: E731
     try:
         _reset_for_test()
         # 认证：1 击即禁
@@ -301,8 +332,10 @@ def _selfcheck() -> None:
 
         # 欠费：1 击即禁；但须过流量测试才恢复（重存 key 不清，与认证不同）
         _reset_for_test()
+        flip_calls.clear()
         record_result("u1", "openai", False, _ARREARS_REASON)
         assert is_disabled("u1", "openai") and disabled_info("u1", "openai")["status"] == _STATUS_ARREARS
+        assert flip_calls == [("u1", "openai")], ("欠费须触发翻档钩子", flip_calls)  # arrears→翻档连接
         assert not clear_auth_disable("u1", "openai"), "欠费禁用不因重存 key 而清"
         assert is_disabled("u1", "openai")
         assert clear("u1", "openai")               # 充值后过流量测试 clear 清除
@@ -318,6 +351,7 @@ def _selfcheck() -> None:
         print("provider_gate selfcheck OK")
     finally:
         _get_store = orig
+        _flip_free_to_paid_on_arrears = orig_flip
         _reset_for_test()
 
 

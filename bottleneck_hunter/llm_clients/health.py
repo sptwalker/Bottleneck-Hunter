@@ -103,14 +103,23 @@ _PROVIDER_TIER = {
 }
 
 
-def provider_tier(provider: str) -> str:
+def provider_tier(provider: str, user_id: str = "") -> str:
     """返回 'free' / 'paid' / ''（未知）。
 
-    自定义 provider id(如 siliconflow_nex_n2_pro / huawei_glm_5_2)不在 _PROVIDER_TIER 表里，
-    直接查会得空档，导致付费/免费策略对它们失效。故先精确查表，未命中再按**子串**推断：
-    id 里含哪个已知 provider 名就继承其档(按已知名长度降序，最具体优先)。仍无则空(中性)。
+    优先级：**用户在配置中心显式设定的档**（provider_configs.tier，per-user）压过一切；
+    未设定再回退静态表——精确查 _PROVIDER_TIER，未命中按**子串**继承（id 里含哪个已知
+    provider 名就继承其档，按已知名长度降序，最具体优先）。仍无则空(中性)。
+
+    user_id 为空时跳过用户档查询，完全等价旧行为（未接用户上下文的调用点不破）。
     """
     p = (provider or "").lower().strip()
+    if user_id:
+        try:
+            ut = _get_store().get_provider_tier(p, user_id)
+            if ut:
+                return ut
+        except Exception:  # noqa: BLE001  读用户档失败 → 回退静态表，不因此阻断排序
+            pass
     if p in _PROVIDER_TIER:
         return _PROVIDER_TIER[p]
     for known in sorted(_PROVIDER_TIER, key=len, reverse=True):
@@ -214,7 +223,7 @@ def _score(provider: str, user_id: str, primary: str, stats: dict, policy: dict,
         score += PRIMARY_BONUS   # 主模型加成上限
     # 用户策略：免费/付费偏好 + 质量/价格优化
     if policy:
-        tier = provider_tier(p)
+        tier = provider_tier(p, user_id)
         pref = policy.get("prefer_tier", "auto")
         opt = policy.get("optimize_for", "balanced")
         if pref == "free" and tier == "free":

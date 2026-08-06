@@ -1222,6 +1222,14 @@
                     <label>默认模型</label>
                     <input type="text" id="aic-custom-model" placeholder="如：llama3.1:8b" maxlength="128">
                   </div>
+                  <div class="aic-form-field">
+                    <label>付费类型</label>
+                    <select id="aic-custom-tier">
+                      <option value="">未设（按系统默认）</option>
+                      <option value="free">免费</option>
+                      <option value="paid">付费</option>
+                    </select>
+                  </div>
                 </div>
                 <div class="aic-form-actions">
                   <button class="btn btn-sm" id="aic-custom-cancel">取消</button>

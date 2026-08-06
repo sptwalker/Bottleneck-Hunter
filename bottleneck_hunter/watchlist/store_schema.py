@@ -1064,6 +1064,7 @@ MIGRATIONS: list[str] = [
         base_url      TEXT DEFAULT '',
         display_name  TEXT DEFAULT '',
         is_primary    INTEGER DEFAULT 0,
+        tier          TEXT DEFAULT '',
         updated_at    TEXT,
         UNIQUE(provider_id, user_id)
     )""",
@@ -1071,6 +1072,8 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE provider_configs ADD COLUMN display_name TEXT DEFAULT ''",
     # 老库补列：主模型（顶栏「设为主要」）改为**用户级**落此表，退役全局 custom_providers.is_primary
     "ALTER TABLE provider_configs ADD COLUMN is_primary INTEGER DEFAULT 0",
+    # 老库补列：付费类型（免费/付费）用户级——用户自定档，压过 health._PROVIDER_TIER 静态表；欠费自动翻付费
+    "ALTER TABLE provider_configs ADD COLUMN tier TEXT DEFAULT ''",
     # ── DataHub 数据源用量统计（全局表，无 user_id）：按 日期×源×能力×市场 累加调用/成功/失败/延迟/行数 ──
     """CREATE TABLE IF NOT EXISTS datasource_stats (
         date        TEXT NOT NULL,
