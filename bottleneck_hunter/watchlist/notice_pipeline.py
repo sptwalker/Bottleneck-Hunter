@@ -158,11 +158,14 @@ async def fetch_notice_batch(tickers: list[str], store: WatchlistStore, cache: d
     """批量获取 A 股公告。返回 {ticker: {filings, trades}}。"""
     if not tickers:
         return {}
-    results = {}
-    for ticker in tickers:
+
+    # 并发拉取(受 _fetch_one 内 Semaphore(4) 限流)：原串行 for-await 让信号量形同虚设。
+    async def _guarded(t: str) -> dict:
         try:
-            results[ticker] = await _fetch_one(ticker, store, cache=cache)
+            return await _fetch_one(t, store, cache=cache)
         except Exception as e:
-            logger.error("A 股公告管道错误 %s: %s", ticker, e)
-            results[ticker] = {"filings": -1, "trades": 0, "error": str(e)}
-    return results
+            logger.error("A 股公告管道错误 %s: %s", t, e)
+            return {"filings": -1, "trades": 0, "error": str(e)}
+
+    tasks = {t: asyncio.create_task(_guarded(t)) for t in tickers}
+    return {t: await task for t, task in tasks.items()}

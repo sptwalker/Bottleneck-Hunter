@@ -184,6 +184,28 @@ class _MarketDataMixin:
             conn.close()
 
 
+    def existing_filing_ids(self, ids: list[str]) -> set[str]:
+        """返回 ids 中已入库的 filing id 子集（用于增量跳过：已抓过的 filing 不再重复拉 Form 4 XML）。
+
+        filing id = md5(cik:accession)，全局唯一且随内容不变，故不按用户/市场过滤——
+        任一行存在即表示该 filing 上轮已抓取并落库，本轮跳过其昂贵的 XML 拉取。
+        """
+        if not ids:
+            return set()
+        conn = self._connect()
+        try:
+            out: set[str] = set()
+            # 分批 IN 查询，避免 SQLite 变量上限（999）
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                ph = ",".join("?" * len(chunk))
+                rows = conn.execute(f"SELECT id FROM sec_filings WHERE id IN ({ph})", chunk).fetchall()
+                out.update(r["id"] for r in rows)
+            return out
+        finally:
+            conn.close()
+
+
     def get_filings(self, ticker: str, filing_type: str | None = None, limit: int = 20) -> list[dict]:
         conn = self._connect()
         try:

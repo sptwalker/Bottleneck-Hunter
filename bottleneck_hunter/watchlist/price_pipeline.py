@@ -478,6 +478,31 @@ def _fetch_astock_daily(ticker: str, days: int = 180) -> tuple[list[dict], dict]
     return result, {}
 
 
+_PROFILE_COOLDOWN_H = 24  # 公司档案(行业/市值/员工)季度级变动，24h 内已抓到真档案则本轮跳过重拉
+
+
+def _profile_fresh(store: WatchlistStore, ticker: str) -> bool:
+    """近 24h 内已抓到**真实**公司档案(非空 stub) → 批量刷新本轮跳过重拉。
+
+    档案季度级才变，每轮(尤其 A股 baostock 登录×6+akshare)重拉纯浪费——这是 sec_pipeline
+    "重拉已存不变数据" 同类问题在 price 主路径的体现。空 stub(sector/industry/description
+    全空)不算新鲜，仍允许重试拉真数据。on-demand 端点另有 24h 冷却，此为批量路径的对应护栏。
+    """
+    prof = store.get_company_profile(ticker)
+    if not prof:
+        return False
+    if not (prof.get("sector") or prof.get("industry") or prof.get("description")):
+        return False
+    ts = (prof.get("fetched_at") or "").strip()
+    try:
+        fetched = datetime.fromisoformat(ts)
+    except ValueError:
+        return False
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - fetched) <= timedelta(hours=_PROFILE_COOLDOWN_H)
+
+
 async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market: str = "us_stock",
                      cache: dict | None = None) -> str:
     """Fetch one ticker asynchronously with semaphore. Returns status string.
@@ -509,7 +534,7 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market
                         logger.warning("抓取 %s 行情超时(25s)，跳过本轮", ticker)
                         snapshots, company_info = [], {}
 
-                if not company_info:
+                if not company_info and not _profile_fresh(store, ticker):
                     info_fn = _fetch_astock_profile_fused if market == "a_stock" else _fetch_company_info_us
                     try:
                         company_info = await fetch_with_timeout(

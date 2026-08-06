@@ -367,8 +367,10 @@ async def fetch_news_batch(
     """
     if not tickers:
         return {}
-    results = {}
-    for ticker in tickers:
+
+    # 并发拉取：原串行 for-await 让 _fetch_one 内的 Semaphore(4) 形同虚设。
+    # LLM 路径经 _fetch_one 自带信号量限流；无 LLM 的调度器路径在此就地加信号量，避免裸并发打爆源。
+    async def _guarded(ticker: str) -> int:
         src = "akshare" if market == "a_stock" else "yfinance"
         try:
             from bottleneck_hunter.data_provider.hub import CAP_NEWS, get_hub
@@ -377,23 +379,26 @@ async def fetch_news_batch(
                     count = await _fetch_one(ticker, store, llm, budget, market=market, cache=cache)
                 else:
                     # 调度器无 LLM 路径：纯免费源拉取，可周期内去重
-                    _ck = ("news_sched", market, ticker)
-                    if cache is not None and _ck in cache:
-                        articles = [dict(a) for a in cache[_ck]]
-                    else:
-                        if market == "a_stock":
-                            articles = await _news_in_thread(_fetch_astock_news, ticker)
+                    async with _get_sem():
+                        _ck = ("news_sched", market, ticker)
+                        if cache is not None and _ck in cache:
+                            articles = [dict(a) for a in cache[_ck]]
                         else:
-                            articles = await _news_in_thread(_fetch_yfinance_news, ticker)
-                        if cache is not None:
-                            cache[_ck] = [dict(a) for a in (articles or [])]
-                    count = store.save_news(articles) if articles else 0
+                            if market == "a_stock":
+                                articles = await _news_in_thread(_fetch_astock_news, ticker)
+                            else:
+                                articles = await _news_in_thread(_fetch_yfinance_news, ticker)
+                            if cache is not None:
+                                cache[_ck] = [dict(a) for a in (articles or [])]
+                        count = store.save_news(articles) if articles else 0
                 _sink["rows"] = max(count, 0)
-            results[ticker] = count
+            return count
         except Exception as e:
             logger.error("News pipeline error for %s: %s", ticker, e)
-            results[ticker] = -1
-    return results
+            return -1
+
+    tasks = {t: asyncio.create_task(_guarded(t)) for t in tickers}
+    return {t: await task for t, task in tasks.items()}
 
 
 # ---------------------------------------------------------------------------

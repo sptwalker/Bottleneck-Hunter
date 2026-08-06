@@ -207,6 +207,24 @@ class TestParseInsiderTrades:
         assert trades[0]["price"] == 150.0
 
     @pytest.mark.asyncio
+    async def test_skip_ids_avoids_refetch(self):
+        """增量：已入库的 filing id 命中 skip_ids → 不再拉 Form 4 XML（不重复读取）。"""
+        filings = [
+            {"id": "seen", "filing_type": "4", "filed_date": "2025-03-15",
+             "title": "Form 4", "is_insider_trade": True},
+            {"id": "new", "filing_type": "4", "filed_date": "2025-03-16",
+             "title": "Form 4", "is_insider_trade": True},
+        ]
+        fake_xml = [{"insider_name": "X", "insider_title": "", "transaction_type": "Buy",
+                     "shares": 1, "price": 1.0, "total_value": 1.0, "date": "2025-03-16"}]
+        with patch("bottleneck_hunter.watchlist.sec_pipeline._fetch_form4_xml",
+                   new=AsyncMock(return_value=fake_xml)) as m:
+            trades = await _parse_insider_trades_from_filings(
+                "0000320193", "AAPL", filings, skip_ids={"seen"})
+        assert m.await_count == 1  # 只对未入库的 "new" 拉一次，"seen" 被跳过
+        assert {t["source_filing_id"] for t in trades} == {"new"}
+
+    @pytest.mark.asyncio
     async def test_empty_filings(self):
         assert await _parse_insider_trades_from_filings("0000320193", "AAPL", []) == []
 

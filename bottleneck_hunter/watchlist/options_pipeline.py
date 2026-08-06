@@ -106,6 +106,12 @@ async def _fetch_one(ticker: str, store: WatchlistStore) -> str:
         return "no_data"
     async with _get_sem():
         try:
+            # 当日已抓过整条期权链则跳过：id=md5(ticker:opt:YYYYMMDD) 当日唯一，
+            # 同日重复运行会重拉整条链再被 INSERT OR IGNORE 丢弃 → 纯浪费网络。
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            latest = store.get_options(ticker, limit=1)
+            if latest and latest[0].get("date") == today:
+                return "cached"
             # DataHub 多源：polygon(付费,priority0) → yfinance(免费兜底)，按额度/熔断自动换源
             from bottleneck_hunter.data_provider.hub import CAP_OPTIONS, get_hub
             uid = getattr(store, "_user_id", "")  # 用本用户自己的 key，避免跨用户借用
@@ -123,7 +129,6 @@ async def fetch_options_batch(tickers: list[str], store: WatchlistStore) -> dict
     """Batch-analyze options for US stock tickers. Returns {ticker: status}."""
     if not tickers:
         return {}
-    results = {}
-    for ticker in tickers:
-        results[ticker] = await _fetch_one(ticker, store)
-    return results
+    # 并发拉取(受 _fetch_one 内 Semaphore(4) 限流)：原串行 for-await 让信号量形同虚设。
+    tasks = {t: asyncio.create_task(_fetch_one(t, store)) for t in tickers}
+    return {t: await task for t, task in tasks.items()}

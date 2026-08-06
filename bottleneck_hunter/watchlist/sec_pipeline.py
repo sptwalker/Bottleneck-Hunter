@@ -240,8 +240,9 @@ async def _fetch_filing_documents(cik: str, accession: str) -> list[dict]:
     cik_stripped = cik.lstrip("0")
     acc_clean = accession.replace("-", "")
 
-    # Try the JSON index first (most reliable)
-    index_json_url = f"https://www.sec.gov/Archives/edgar/data/{cik_stripped}/{acc_clean}/{accession}-index.json"
+    # Try the JSON directory index first (most reliable)。
+    # 注意：目录清单是 .../{acc}/index.json，不是 {accession}-index.json（后者恒 404，旧代码之误）。
+    index_json_url = f"https://www.sec.gov/Archives/edgar/data/{cik_stripped}/{acc_clean}/index.json"
     client = get_http_client()
 
     await asyncio.sleep(0.15)  # SEC rate limit
@@ -305,17 +306,23 @@ async def _fetch_form4_xml(cik: str, filing: dict) -> list[dict]:
     return []
 
 
-async def _parse_insider_trades_from_filings(cik: str, ticker: str, filings: list[dict]) -> list[dict]:
+async def _parse_insider_trades_from_filings(
+    cik: str, ticker: str, filings: list[dict], skip_ids: set[str] | None = None,
+) -> list[dict]:
     """Extract insider trade records from Form 4 filings.
 
     For each Form 4 filing, attempts to fetch and parse the actual XML to get
     real transaction data (insider name, shares, price, etc.).
     Falls back to stub records if XML parsing fails.
+
+    skip_ids: 已入库的 filing id，跳过其 XML 拉取（增量：filing 内容不变，抓过就不再抓）。
     """
     trades = []
     for f in filings:
         if not f.get("is_insider_trade"):
             continue
+        if skip_ids and f.get("id") in skip_ids:
+            continue  # 上轮已抓取并落库，跳过昂贵的 Form 4 XML 拉取
 
         # Try to parse real Form 4 XML data
         try:
@@ -354,8 +361,11 @@ async def _parse_insider_trades_from_filings(cik: str, ticker: str, filings: lis
 # Batch pipeline
 # ---------------------------------------------------------------------------
 
-async def _fetch_sec_raw(ticker: str) -> tuple[list[dict], list[dict]]:
-    """从 EDGAR 拉取一支票的 filings + insider trades（纯公开数据，无 key/LLM）。返回 (filing_dicts, trades)。"""
+async def _fetch_sec_raw(ticker: str, store: WatchlistStore | None = None) -> tuple[list[dict], list[dict]]:
+    """从 EDGAR 拉取一支票的 filings + insider trades（纯公开数据，无 key/LLM）。返回 (filing_dicts, trades)。
+
+    store 给定时做增量：仅对未入库的 Form 4 filing 拉 XML（已抓过的 filing 内容不变，跳过）。
+    """
     from bottleneck_hunter.data_provider.hub import CAP_SEC, get_hub
     async with get_hub().track("sec_edgar", CAP_SEC, "us_stock") as _sink:
         cik = await _get_cik(ticker)
@@ -366,7 +376,8 @@ async def _fetch_sec_raw(ticker: str) -> tuple[list[dict], list[dict]]:
             return [], []
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         filing_dicts = [{**f, "ticker": ticker, "fetched_at": now_iso} for f in filings]
-        trades = await _parse_insider_trades_from_filings(cik, ticker, filings)
+        skip_ids = store.existing_filing_ids([f["id"] for f in filings]) if store is not None else None
+        trades = await _parse_insider_trades_from_filings(cik, ticker, filings, skip_ids=skip_ids)
         for t in trades:
             t["fetched_at"] = now_iso
         _sink["rows"] = len(filing_dicts) + len(trades)
@@ -384,7 +395,7 @@ async def _fetch_one(ticker: str, store: WatchlistStore, cache: dict | None = No
         if cache is not None and ck in cache:
             filing_dicts, trades = cache[ck]
         else:
-            filing_dicts, trades = await _fetch_sec_raw(ticker)
+            filing_dicts, trades = await _fetch_sec_raw(ticker, store=store)
             if cache is not None:
                 cache[ck] = (filing_dicts, trades)
         # 每用户落库（拷贝，避免共享 dict 被 save 改写）

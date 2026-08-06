@@ -12,6 +12,9 @@ class _FakeStore:
     def save_macro_snapshot(self, *a, **k):
         pass
 
+    def get_latest_macro_snapshots(self):
+        return []   # 库空 → 同日短路不触发，走正常 FRED/yfinance 抓取路径
+
 
 def test_fred_primary_yfinance_skips_covered(monkeypatch):
     yf_called = []

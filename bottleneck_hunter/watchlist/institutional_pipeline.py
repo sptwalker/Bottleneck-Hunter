@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import yfinance as yf
 
@@ -24,6 +24,27 @@ def _get_sem() -> asyncio.Semaphore:
     if _SEM is None:
         _SEM = asyncio.Semaphore(5)
     return _SEM
+
+
+_HOLDERS_COOLDOWN_DAYS = 30  # 13F 季度申报：近 30 天已有持仓则跳过(周频/按需重拉季度级数据纯浪费)
+
+
+def _holders_fresh(store: WatchlistStore, ticker: str) -> bool:
+    """近 30 天内已抓到 13F 机构持仓 → 本轮跳过重拉(季度级数据，周频刷新 3/4 是重复)。
+
+    分析师评级(周频更新)不套此冷却，仍每轮刷新。
+    """
+    latest = store.get_institutional_holders(ticker, limit=1)
+    if not latest:
+        return False
+    ts = (latest[0].get("fetched_at") or "").strip()
+    try:
+        fetched = datetime.fromisoformat(ts)
+    except ValueError:
+        return False
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - fetched) <= timedelta(days=_HOLDERS_COOLDOWN_DAYS)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +123,8 @@ async def fetch_institutional_holders(
     """
     async with _get_sem():
         try:
+            if _holders_fresh(store, ticker):
+                return "cached"  # 13F 季度级数据近 30 天已抓，跳过重拉
             from bottleneck_hunter.data_provider.hub import CAP_INSTITUTIONAL, get_hub
             async with get_hub().track("yfinance", CAP_INSTITUTIONAL, "us_stock") as _sink:
                 holders = await asyncio.to_thread(

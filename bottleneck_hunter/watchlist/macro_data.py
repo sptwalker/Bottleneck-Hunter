@@ -396,6 +396,26 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+    # 同日去重：本次 markets 应取的 yfinance 指标今日已采齐则直接用库里的值，跳过全部网络。
+    # fetch_macro_data 一天被日程+每次决策+每次VIP流程多次调用，宏观(尤其CPI/M2/LPR月频)
+    # 当日不变，重复抓取纯浪费。label_by_key(各市场专属 yfinance 指标)是「本市场今日已跑」的可靠探针：
+    # 他市场的 run 不会采到本市场专属指标 → issubset 不成立 → 照常抓，不会误短路。
+    # 命中后 emit 须剔除他市专属 key(foreign_indicator_keys)，与库空兜底同源，防跨市场串味。
+    label_by_key = {key: label for key, _sym, label in indicators}
+    today_rows = {r["indicator"]: r for r in store.get_latest_macro_snapshots()
+                  if r.get("date") == today}
+    if today_rows and set(label_by_key).issubset(today_rows):
+        foreign = foreign_indicator_keys(markets)
+        for ind, row in today_rows.items():
+            if ind in foreign:
+                continue
+            results[ind] = {
+                "value": row["value"],
+                "change_pct": row.get("change_pct", 0.0) or 0.0,
+                "label": label_by_key.get(ind, ind),
+            }
+        return results
+
     async def _fetch_one(key: str, symbol: str, label: str):
         if key in results:
             return  # FRED 已取到该 key(可靠源) → yfinance 不再重复打(省 Yahoo 限流预算)
