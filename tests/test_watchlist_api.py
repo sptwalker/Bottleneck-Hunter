@@ -204,3 +204,29 @@ class TestSubResources:
     def test_sub_resource_404(self, client):
         resp = client.get("/api/watchlist/nonexistent/snapshots")
         assert resp.status_code == 404
+
+
+class TestOverviewOnDemandFetch:
+    """反向分析/手动加入的新条目无快照 → 打开详情概览须按需拉取（否则永远「暂无行情数据」）。"""
+
+    def test_overview_triggers_fetch_when_no_snapshot(self, client, store, monkeypatch):
+        entry_id = _add_stock(client, "NEWCO").json()["id"]
+        called = {}
+
+        async def fake_fetch_one(ticker, st, days=180, market="us_stock", cache=None):
+            called["ticker"] = ticker
+            called["market"] = market
+            st.save_snapshots([{"ticker": ticker, "date": "2026-08-06", "close": 12.5, "market": market}])
+            return "ok"
+
+        monkeypatch.setattr("bottleneck_hunter.watchlist.price_pipeline._fetch_one", fake_fetch_one)
+        resp = client.get(f"/api/watchlist/{entry_id}/overview")
+        assert resp.status_code == 200
+        assert called.get("ticker") == "NEWCO"          # 空快照 → 触发了按需抓取
+        assert resp.json()["latest_snapshot"]["close"] == 12.5   # 抓取结果已回填
+
+    def test_overview_skips_fetch_for_isin(self):
+        # 场外基金 ISIN 无公开源 → 端点须跳过按需抓取（否则 yfinance 按 ISIN 检索必然 429/超时）
+        from bottleneck_hunter.web.watchlist_api import _ISIN_RE
+        assert _ISIN_RE.match("IE00B4L5Y983")   # 命中即 get_overview 短路，不调 _fetch_one
+        assert not _ISIN_RE.match("NVDA")

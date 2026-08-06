@@ -72,7 +72,12 @@ def normalize_ticker(ticker: str | None, market: str = "") -> str:
     if code:
         return code + _astock_suffix(code)
     # 非 A股（美股字母 ticker 等）：仅规范大小写
-    return t.upper()
+    t = t.upper()
+    # 反向分析/EOD 源偶带交易所后缀 .US（如 MRVL.US）→ yfinance/finnhub 无法解析(403/超时)，剥除。
+    # .US 是交易所定位符，非份额类别（美股类别股是单字母 .A/.B，如 BRK.B），剥除对合法代码无损。
+    if t.endswith(".US") and len(t) > 3:
+        t = t[:-3]
+    return t
 
 
 # 美股代码：1-5 位字母/数字根 + 可选 .X/-X 类别股后缀（如 BRK.B、BRK-B）。

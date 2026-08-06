@@ -518,9 +518,22 @@ async def get_overview(entry_id: str, user: dict = Depends(get_current_user)):
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
     ticker = entry["ticker"]
+    snap = store.get_latest_snapshot(ticker)
+    profile = store.get_company_profile(ticker)
+    # 反向分析/手动加入的新条目尚未被批量调度抓取过 → 快照为空，详情页只会显示「暂无行情数据」。
+    # 打开详情即按需拉一次并落库（与 /company-overview 同策略）：ISIN 场外基金跳过（无公开源），
+    # 冷却窗护栏靠 profile.fetched_at 负缓存，避免超时/429 标的每次打开都触发抓取洪流。批量刷新不受此限。
+    if not _ISIN_RE.match(ticker.upper()) and (not snap or _profile_is_stale(profile, datetime.now(timezone.utc))):
+        try:
+            from bottleneck_hunter.watchlist.price_pipeline import _fetch_one
+            await _fetch_one(ticker, store, market=entry.get("market") or "us_stock")
+            snap = store.get_latest_snapshot(ticker)
+            profile = store.get_company_profile(ticker)
+        except Exception:
+            logger.debug("按需拉取观察池概览失败: %s", ticker, exc_info=True)
     return {
-        "latest_snapshot": store.get_latest_snapshot(ticker),
-        "profile": store.get_company_profile(ticker),
+        "latest_snapshot": snap,
+        "profile": profile,
         "earnings": store.get_earnings(ticker),
     }
 

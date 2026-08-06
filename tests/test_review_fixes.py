@@ -55,6 +55,29 @@ def test_validate_ticker_astock_lenient():
     validate_ticker(normalize_ticker("600519.SH", "a_stock"), "a_stock")  # 不强校验，不抛
 
 
+def test_normalize_strips_us_exchange_suffix():
+    # 反向分析/EOD 源的 .US 后缀 yfinance/finnhub 无法解析 → 必须剥除
+    assert normalize_ticker("MRVL.US", "us_stock") == "MRVL"
+    assert normalize_ticker("mrvl.us", "us_stock") == "MRVL"
+    assert normalize_ticker("BRK.B", "us_stock") == "BRK.B"   # 类别股(单字母)不误伤
+    assert normalize_ticker("AAPL", "us_stock") == "AAPL"
+
+
+def test_migration_heals_stored_us_suffix(store):
+    # 已入库的 MRVL.US 旧行须被迁移剥成 MRVL（否则按需抓取仍用错代码）
+    store.add({"ticker": "MRVL", "company_name": "Marvell", "market": "us_stock"})
+    conn = store._connect()
+    try:
+        conn.execute("UPDATE watchlist SET ticker='MRVL.US' WHERE ticker='MRVL'")
+        conn.commit()
+        store._migrate_normalize_us_exchange_suffix(conn)
+        conn.commit()
+        row = conn.execute("SELECT ticker FROM watchlist").fetchone()
+        assert row["ticker"] == "MRVL"
+    finally:
+        conn.close()
+
+
 # ── 反向 finnhub 兜底（无 key 优雅返回）────────────────
 def test_finnhub_fallback_no_key():
     from bottleneck_hunter.web.streaming.reverse import _finnhub_company_profile

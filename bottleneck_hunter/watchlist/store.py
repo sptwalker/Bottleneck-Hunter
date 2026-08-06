@@ -233,6 +233,7 @@ class WatchlistStore(
             self._migrate_catalyst_market_from_entry(conn)
             self._migrate_market_labels_from_source(conn)
             self._migrate_normalize_astock_tickers(conn)
+            self._migrate_normalize_us_exchange_suffix(conn)
             self._migrate_sim_account_per_account(conn)
             self._migrate_vip_imports_account_ref(conn)
             self._migrate_vip_derivative_terms_account_ref(conn)
@@ -474,6 +475,29 @@ class WatchlistStore(
                 logger.info("A股 ticker 归一 %d 处（.SH→.SS，统一 canonical，修 L2/L3/L4 连接漏配）", total)
         except sqlite3.OperationalError as e:
             logger.warning("A股 ticker 归一迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_normalize_us_exchange_suffix(self, conn) -> None:
+        """剥除历史美股 ticker 的交易所后缀 .US（如 MRVL.US→MRVL）。
+
+        反向分析/EOD 源偶带 .US 后缀 → yfinance/finnhub 无法解析(403/超时)，行情/基本面恒空。
+        只动带 .US 的美股票；A股(.SS/.SZ/.BJ)不受影响。幂等（无 .US 则 0 行）。
+        """
+        plain = ("watchlist", "execution_plans", "tactical_plans", "sim_positions",
+                 "sim_trades", "catalyst_tracking", "market_snapshots",
+                 "investment_theses", "scenario_valuations", "auto_reviews", "trade_feedback")
+        total = 0
+        for t in plain:
+            try:
+                n = conn.execute(
+                    f"UPDATE {t} SET ticker = substr(ticker,1,length(ticker)-3) "
+                    f"WHERE ticker LIKE '%.US' AND length(ticker) > 3"
+                ).rowcount
+                total += n or 0
+            except sqlite3.OperationalError:
+                pass
+        if total:
+            logger.info("美股 ticker 剥除交易所后缀 %d 处（.US→裸码，修 yfinance/finnhub 解析失败）", total)
 
 
     def _migrate_shared_company_profiles(self, conn) -> None:
