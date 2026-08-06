@@ -433,16 +433,29 @@ def _import_statement(raw, filename, user_id, wl_store, market, account_ref, pas
             return ImportResult("imported", filename, "pdf", "position_report",
                                 summary="当前持仓导出已入库，待人工复核", reason=res["status"],
                                 key_metrics={"broker": stmt.broker, "period_end": stmt.period_end})
+        # 花旗新版仓盘含结构性产品/期权(→衍生品薄记录)：与月结单分支同口径落 vip_derivative_terms，
+        # 否则仓盘里的 MLI/accumulator 永进不了库。幂等按 lot_key 去重，不受股票快照时效护栏影响。
+        n_deriv = _persist_derivative_terms(wl_store, stmt, filename, account_ref)
+        deriv_hint = f"，另 {n_deriv} 笔结构性产品/衍生品" if n_deriv else ""
         norm = portfolio.normalize_statement(wl_store, stmt, source_doc_id=doc_id, account_ref=account_ref)
         mat = portfolio.materialize_portfolio(wl_store, as_of_date=norm["as_of_date"],
                                               account_ref=account_ref,
-                                              cash_total_usd=stmt.total_cash_usd)
+                                              cash_total_usd=stmt.total_cash_usd,
+                                              loan_total_usd=(stmt.account_summary or {}).get("loan_outstanding_usd"))
         if mat.get("guard_skipped"):
             return _guarded_result(filename, "position_report", stmt, norm["as_of_date"], mat["guard_skipped"],
-                                   n_back=mat.get("n_cost_backfilled", 0))
+                                   n_deriv, n_back=mat.get("n_cost_backfilled", 0))
+        if mat.get("skipped_empty"):
+            return ImportResult("imported", filename, "pdf", "position_report",
+                                summary=f"当前持仓导出：未识别到持仓，未更新账户{deriv_hint}",
+                                reason="empty_positions",
+                                key_metrics={"n_positions": 0, "n_derivatives": n_deriv,
+                                             "period_end": stmt.period_end, "broker": stmt.broker})
         return ImportResult("imported", filename, "pdf", "position_report",
-                            summary=f"当前持仓导出：{mat['n_positions']} 只持仓，期末 {stmt.period_end or '—'}",
-                            key_metrics={"n_positions": mat["n_positions"], "period_end": stmt.period_end,
+                            summary=f"当前持仓导出：{mat['n_positions']} 只持仓{deriv_hint}"
+                                    f"，期末 {stmt.period_end or '—'}",
+                            key_metrics={"n_positions": mat["n_positions"], "n_derivatives": n_deriv,
+                                         "period_end": stmt.period_end,
                                          "broker": stmt.broker, "as_of_date": norm["as_of_date"]})
 
     if res["status"] != "parsed_ok":

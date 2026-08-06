@@ -407,8 +407,27 @@ def _position_usd_value(report_value: tuple[str, float] | None,
 
 
 def _parse_citi_position_report(pages: list[str], filename: str, content_hash: str) -> BrokerStatement:
-    """解析花旗仓盘导出：按持仓块抽股票/基金/ETF/现金，结构化产品/负债先跳过。"""
+    """解析花旗仓盘导出（"全部-仓盘"）：按持仓块抽股票/基金/ETF/固收/现金，结构性产品/期权→衍生品薄记录，
+    私募股权→account_summary 单列留档，负债(贷款)→loan_outstanding_usd。
+
+    2026-08 起花旗改版：块锚 "Investment Advisory Portfolio" 被换行拆成两行，且块内字段列序重排、
+    应计利息列浮动（`-` 1 行 vs 成对 2 行），固定偏移不可靠 → 新版式走语义列抽取。旧版式(≤7/24)仍按
+    固定偏移路径保留，双版式由块首特征自动判别。"""
     lines = [_clean_position_line(x) for pg in pages for x in pg.splitlines() if x.strip()]
+    # 新版式(2026-08 起)把块锚 "Investment Advisory Portfolio" 换行拆成 "Investment Advisory" + "Portfolio"
+    # 两行，令下方单行等值匹配全落空(抽 0 只)。此处把拆行合回单行，兼容新旧版式；旧版式无此对、不受影响。
+    _merged: list[str] = []
+    _skip = False
+    for _i, _l in enumerate(lines):
+        if _skip:
+            _skip = False
+            continue
+        if _l == "Investment Advisory" and _i + 1 < len(lines) and lines[_i + 1] == "Portfolio":
+            _merged.append("Investment Advisory Portfolio")
+            _skip = True
+        else:
+            _merged.append(_l)
+    lines = _merged
     report_ccy = "USD"
     period = _parse_period(filename)
     for line in lines:
@@ -431,9 +450,32 @@ def _parse_citi_position_report(pages: list[str], filename: str, content_hash: s
 
     holdings: list[EquityHolding] = []
     cash_balances: list[CashBalance] = []
+    derivative_terms: list[dict] = []
+    private_equity: list[dict] = []
+    loan_usd = 0.0
     anchors = [i for i, line in enumerate(lines) if line == "Investment Advisory Portfolio"]
     last_end = 0
     report_per_usd: float | None = None
+
+    # 新版式(2026-08+)判别：块内含 `截⾄ <date>`(市场价格截止日)行；旧版式(≤7/24)无此行、data[2] 即币种金额。
+    # 新版式块首无「报告币/本地币」金额对(data[2]=账户种类) → 顶层 report_per_usd 建不起来。先全局预扫：
+    # 从任一「本地币=USD」块的市值对反推 CNY-per-USD，供现金(AUD/HKD)、负债(EUR)等非美元块折算。
+    for k, x in enumerate(lines):
+        if not x.startswith("截⾄") or k < 2:
+            continue
+        la = _currency_amount(lines[k - 1])
+        ra = _currency_amount(lines[k - 2])
+        if la and ra and la[0] == "USD" and la[1] > 0 and ra[0] == report_ccy:
+            report_per_usd = ra[1] / la[1]
+            break
+
+    # 资产级别值域（新版式 +15 列）——据此分类别
+    _STOCK_ASSET = ("股票", "商品", "固定收益")
+    _STRUCTURED_ASSET = ("其他资产/结构性产品", "其他资产/股票期权")
+    _ASSET_RE = re.compile(r"^(股票|商品|固定收益|其他资产/结构性产品|其他资产/股票期权|私募股权|现⾦/投资现⾦|负债)$")
+    # 块内 "平均单位成本原值 ISIN"（如 `6.74875 US02079K3059`）
+    _COST_ISIN_RE = re.compile(r"([\d,.]+)\s+(US[0-9A-Z]{10})")
+    _MLI_DESC_RE = re.compile(r"(\d+)\s*MTH\s+USD\s+(.+?)\s+MLI", re.I)
 
     for idx, anchor in enumerate(anchors):
         if anchor + 9 >= len(lines):
@@ -446,6 +488,7 @@ def _parse_citi_position_report(pages: list[str], filename: str, content_hash: s
 
         report_value = _currency_amount(data[2]) if len(data) > 2 else None
         local_value = _currency_amount(data[3]) if len(data) > 3 else None
+        # 旧版式判别：data[2] 即币种金额（新版式 data[1]='-' data[2]=账户种类，_currency_amount 返 None）
         if report_value and local_value and local_value[0] == "USD" and local_value[1] > 0:
             report_per_usd = report_value[1] / local_value[1]
 
@@ -464,8 +507,57 @@ def _parse_citi_position_report(pages: list[str], filename: str, content_hash: s
         company = " ".join(company_lines).strip()
         company_upper = company.upper()
 
+        # ── 新版式（2026-08+）：块内含 `截⾄` 行 → 语义列抽取，分类别落库 ──
+        if any(x.startswith("截⾄") for x in data):
+            nv = _parse_citi_position_block_new(data, desc_block, symbol, report_ccy,
+                                                report_per_usd, period)
+            if nv is None:
+                continue
+            kind, mv_usd, mv_nominal, qty, isin, cost_usd, ccy = nv
+            if kind == "现金":
+                if mv_nominal > 0:
+                    cash_balances.append(CashBalance(
+                        currency=ccy or "USD",
+                        market_value_nominal=mv_nominal,
+                        market_value_usd=mv_usd,
+                    ))
+            elif kind in _STOCK_ASSET:
+                if not symbol:
+                    symbol = isin or ""
+                if not symbol:
+                    continue
+                if not qty or qty <= 0:
+                    qty = 1.0
+                holdings.append(EquityHolding(
+                    ticker=symbol,
+                    company=company,
+                    quantity=qty,
+                    nominal_ccy=ccy or "USD",
+                    market_value_nominal=mv_nominal,
+                    market_value_usd=mv_usd,
+                    avg_cost=None,
+                    cost_basis_usd=cost_usd,
+                    unrealized_pnl_usd=(round(mv_usd - cost_usd, 2) if cost_usd is not None else None),
+                ))
+            elif kind in _STRUCTURED_ASSET:
+                dt = _citi_position_derivative_dict(data, desc_block, symbol, qty, mv_usd, mv_nominal,
+                                                    report_ccy, report_per_usd, period)
+                if dt:
+                    derivative_terms.append(dt)
+            elif kind == "私募股权":
+                private_equity.append({
+                    "name": company or "私募股权",
+                    "market_value_nominal": mv_nominal,
+                    "market_value_usd": mv_usd,
+                    "nominal_ccy": ccy or "USD",
+                })
+            elif kind == "负债":
+                loan_usd += mv_usd  # 负债(贷款)不进持仓，市值累加进 loan_outstanding_usd
+            continue
+
         if not company or not report_value or not local_value:
             continue
+
         if company_upper.startswith("LOAN ACCOUNT"):
             continue
 
@@ -496,6 +588,11 @@ def _parse_citi_position_report(pages: list[str], filename: str, content_hash: s
         ))
 
     total_cash_usd = round(sum(x.market_value_usd for x in cash_balances), 2)
+    summary: dict = {"report_currency": report_ccy}
+    if private_equity:
+        summary["private_equity"] = private_equity
+    if loan_usd > 0:
+        summary["loan_outstanding_usd"] = round(loan_usd, 2)
     recon = ReconResult(
         holdings_count=len(holdings),
         holdings_total_usd=round(sum(h.market_value_usd for h in holdings), 2),
@@ -510,9 +607,150 @@ def _parse_citi_position_report(pages: list[str], filename: str, content_hash: s
         holdings=holdings,
         cash_balances=cash_balances,
         total_cash_usd=total_cash_usd,
-        account_summary={"report_currency": report_ccy},
+        account_summary=summary,
         recon=recon,
+        derivative_terms=derivative_terms,
     )
+
+
+def _parse_citi_position_block_new(data: list[str], desc_block: list[str], symbol: str,
+                                   report_ccy: str, report_per_usd: float | None,
+                                   as_of_iso: str):
+    """新版式(2026-08+)单个持仓块：语义列抽取，返回 (资产级别, mv_usd, mv_nominal, qty, isin, cost_usd, 本地币)。
+
+    块布局（相对块首 anchor，偏移随应计利息列浮动，故按语义锚定位，不写死偏移）：
+      `截⾄ <date>`(市场价格截止日) 之前一对金额 = 市值(报告币/本地币)
+      `截⾄ <date>` 之后第一个纯数字 = 名义单位(数量)
+      块内 `数字 ISIN`(如 `6.74875 US02079K3059`) = 平均成本原值 + ISIN
+      资产级别行(股票/固定收益/…/负债) 决定分类去向
+      现金类：本地币金额即现金余额（无 symbol/数量/成本）
+    """
+    # 市值：`截⾄` 行前一对金额（+2 报告币 CNY / +1 本地币，如 `CNY 8,284,430.83` / `$1,227,550.41`）
+    mv_nominal = mv_usd = 0.0
+    ccy = "USD"
+    mkt_date_idx = next((k for k, x in enumerate(data) if x.startswith("截⾄")), None)
+    if mkt_date_idx is None:
+        return None
+    local_amt = _currency_amount(data[mkt_date_idx - 1]) if mkt_date_idx - 1 >= 0 else None
+    report_amt = _currency_amount(data[mkt_date_idx - 2]) if mkt_date_idx - 2 >= 0 else None
+    if report_amt and local_amt and local_amt[0] == "USD" and local_amt[1] > 0:
+        report_per_usd = report_amt[1] / local_amt[1]
+    if local_amt:
+        ccy = local_amt[0]
+        mv_nominal = local_amt[1]
+    mv_usd = _position_usd_value(report_amt, local_amt, report_ccy, report_per_usd)
+
+    # 数量：`截⾄` 行后第一个纯数字行
+    qty: float | None = None
+    for k in range(mkt_date_idx + 1, min(mkt_date_idx + 8, len(data))):
+        v = _num(data[k])
+        if v is not None:
+            qty = v
+            break
+
+    # 成本/ISIN：块内 `数字 ISIN`
+    cost_usd = None
+    isin = ""
+    _COST_ISIN_RE = re.compile(r"([\d,.]+)\s+(US[0-9A-Z]{10})")
+    for x in data:
+        m = _COST_ISIN_RE.search(x)
+        if m:
+            cost_nom = _num(m.group(1))
+            isin = m.group(2)
+            if cost_nom and mv_usd and mv_nominal:
+                cost_usd = round(cost_nom * (mv_usd / mv_nominal), 2)
+            break
+
+    # 资产级别行
+    _ASSET_RE = re.compile(r"^(股票|商品|固定收益|其他资产/结构性产品|其他资产/股票期权|私募股权|现⾦/投资现⾦|负债)$")
+    kind = ""
+    for x in data:
+        if _ASSET_RE.match(x):
+            kind = x
+            break
+    if kind == "现⾦/投资现⾦":
+        return ("现金", mv_usd, mv_nominal, None, "", None, ccy)
+    if not kind:
+        return None
+    return (kind, mv_usd, mv_nominal, qty, isin, cost_usd, ccy)
+
+
+def _citi_position_derivative_dict(data: list[str], desc_block: list[str], symbol: str, qty: float | None,
+                                   mv_usd: float, mv_nominal: float,
+                                   report_ccy: str, report_per_usd: float | None,
+                                   as_of_iso: str) -> dict | None:
+    """新版式结构化产品/股票期权块 → 衍生品薄记录 dict。symbol/family 口径与月结单
+    _parse_citi_derivatives/_parse_citi_structured 完全对齐（跨源去重靠一致口径，见 FCN 去重教训）。
+
+    期权(其他资产/股票期权)：desc 折行 `NVIDIA CORP`/`ACCUMULATOR`/`09JUN26-`/`09JUN27/AFP`/`KO 221.298/PREM 0`，
+      family=equity_accumulator、symbol=公司名首词、负 MTM 是合法头寸(不因 mv<0 丢弃)。
+    结构化(其他资产/结构性产品)：desc 折行 `... N MTH USD <SYM..> MLI` / `Value` / `MAT`，
+      symbol 取 `split()[0].split('+')[0]`(第一标的，同月结单)；名义用名义单位 qty。"""
+    full_desc = " ".join(desc_block)
+    up = full_desc.upper()
+
+    # ── 股票期权：Accumulator / Decumulator ──
+    if "股票期权" in "\n".join(data) or "ACCUMULATOR" in up or "DECUMULATOR" in up:
+        fam = "equity_decumulator" if "DECUMULATOR" in up else "equity_accumulator"
+        name = ""
+        for x in desc_block:                       # 公司名行：非标签/非日期/非条款行
+            xu = x.strip().upper()
+            if xu in ("ACCUMULATOR", "DECUMULATOR") or x.startswith("*"):
+                continue
+            if x.startswith(("KO ", "AFP", "PREM", "Value ", "MAT ", "Ref ")) or re.match(r"^\d", x):
+                continue
+            name = x.strip()
+            break
+        sym = name.split()[0].upper() if name else (symbol or "SP")
+        mexp = re.search(r"-\s*(\d{1,2}[A-Z]{3}\d{2})/", full_desc)   # `-09JUN27/AFP`(可折行含空格)
+        expiry = _citi_ddmmmyy_to_iso(mexp.group(1)) if mexp else ""
+        mko = re.search(r"KO\s+([\d.]+)", full_desc)
+        ko = _num(mko.group(1)) if mko else 0.0
+        maf = re.search(r"AFP\s+([\d.]+)", full_desc)
+        strike = _num(maf.group(1)) if maf else 0.0
+        notional = abs(qty) if qty else abs(mv_nominal)
+        if not notional or notional <= 0:
+            return None
+        lot_key = f"{strike or 0.0}:{mexp.group(1) if mexp else (expiry or len(desc_block))}"
+        return {
+            "product_family": fam, "underlying_symbol": sym, "currency": "USD",
+            "tenor_days": _citi_tenor_days(as_of_iso, expiry) if expiry else 0,
+            "lot_key": lot_key,
+            "terms": {"market_value_usd": mv_usd, "strike": strike or 0.0, "knock_out_price": ko or 0.0,
+                      "expiry_date": expiry, "maturity": expiry, "underlying_name": name,
+                      "notional": notional, "nominal_ccy": "USD", "settlement_style": "physical_spot"},
+        }
+
+    # ── 结构性产品：Market Linked Investment (MLI Booster) ──
+    desc = " ".join(x for x in desc_block if not x.startswith(("Value ", "MAT ", "Ref ")))
+    md = re.search(r"(\d+)\s*MTH\s+USD\s+(.+?)\s+MLI", desc, re.I)
+    sym = (md.group(2).split()[0].split("+")[0] if md else (symbol or "MLI")).upper()
+    value_date = maturity = ref = ""
+    for x in desc_block:
+        if x.startswith("Value ") and not value_date:
+            value_date = _citi_ddmmmyy_to_iso(x[6:].strip())
+        elif x.startswith("MAT ") and not maturity:
+            maturity = _citi_ddmmmyy_to_iso(x[4:].strip())
+        elif x.startswith("Ref ") and not ref:
+            ref = x[4:].strip()
+    notional = mv_nominal if mv_nominal > 0 else (abs(qty) if qty else 0.0)
+    if notional <= 0:                               # 名义恒正；抽不到名义=空壳，跳过
+        return None
+    lot_key = ref or f"{sym}:{maturity}:{len(desc_block)}"
+    return {
+        "product_family": "equity_mli_booster",
+        "underlying_symbol": sym,
+        "currency": "USD",
+        "tenor_days": _citi_tenor_days(as_of_iso, maturity) if maturity else 0,
+        "lot_key": lot_key,
+        "terms": {
+            "market_value_usd": mv_usd, "notional": notional,
+            "description": desc,
+            "value_date": value_date, "maturity": maturity, "expiry_date": maturity,
+            "reference": ref, "nominal_ccy": "USD",
+            "product_type": "market_linked_investment",
+        },
+    }
 
 
 # ── 期末日解析 ────────────────────────────────────────────────────────────
@@ -543,8 +781,9 @@ def _currency_amount(raw: str) -> tuple[str, float] | None:
     s = (raw or "").strip()
     if not s:
         return None
-    neg = s.startswith("(") and s.endswith(")")
-    s = s.strip("() ")
+    # 会计式负数：括号可在整体外 `(CNY 78,252.14)` 或币种符号之后 `$(11,595.06)`（花旗期权负 MTM）
+    neg = "(" in s and s.rstrip().endswith(")")
+    s = s.replace("(", "").replace(")", "").strip()
     m = re.match(r"([A-Z$€¥￥£HKDUSDJPYCNHEURAUDSGD]{1,4})\s*([\d,]+(?:\.\d+)?)$", s)
     if not m:
         return None
