@@ -155,16 +155,16 @@ def test_contribution_empty_when_single_period(wl):
 # ── P3-4：确定性叙事块(收益率+贡献+仓位事件，无 LLM) ────────────────────────
 
 def test_render_period_narrative_deterministic(wl):
-    """两期快照+平仓事件：叙事块含真实收益率(Modified Dietz)、标的贡献、确定性仓位事件，全来自事实。"""
+    """两期快照+平仓事件：叙事块含真实收益率(已剔现金流)、标的贡献、确定性仓位事件，全来自事实。"""
     _snap(wl, "NAR", "2026-05-31", [("AAPL", 10, 1000.0), ("TSLA", 10, 1000.0)], 2000.0, "n1")
     _snap(wl, "NAR", "2026-06-30", [("AAPL", 10, 1200.0)], 2100.0, "n2")   # TSLA 平仓、AAPL +20%
 
     md = portfolio.render_period_narrative(wl, "NAR")
-    assert "本期业绩（现金流调整）" in md
-    assert "标的贡献归因" in md and "AAPL" in md
-    assert "本期仓位变动" in md and "平仓" in md and "TSLA" in md
-    # 确定性事实必须是真值而非仅标题：AAPL 单价 +20%、等权 50% → 贡献 ≈ +10pct（若收益/贡献算错，标题在但数字错）
-    assert "+10.00pct" in md and "+20.0%" in md
+    assert "这段时间赚了还是亏了" in md
+    assert "涨跌从哪来" in md and "AAPL" in md
+    assert "这期买卖了什么" in md and "平仓" in md and "TSLA" in md
+    # 确定性事实必须是真值而非仅标题：AAPL 单价 +20%、等权 50% → 贡献 ≈ +10%（若收益/贡献算错，标题在但数字错）
+    assert "贡献 +10.00%" in md and "+20.0%" in md
 
 
 def test_linked_modified_dietz_flow_boundary_bucketing():

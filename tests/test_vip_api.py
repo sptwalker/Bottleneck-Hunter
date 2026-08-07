@@ -267,7 +267,7 @@ def test_admin_upload_and_report(client, monkeypatch):
     assert len(items) == 1 and items[0]["underlying_symbol"] == "BE"
     rr2 = client.post("/api/vip/reports/generate?with_ai=false&period=2026-06&account_ref=ACC-1")
     assert rr2.status_code == 200, rr2.text
-    assert "衍生品 / 结构化产品风险摘要" in rr2.json()["report_md"]
+    assert "衍生品 / 结构性产品" in rr2.json()["report_md"]
 
     # 列报告
     reps = client.get("/api/vip/reports?account_ref=ACC-1").json()["reports"]

@@ -542,8 +542,92 @@ def test_derivative_summary_in_report(wl):
                        {"knock_in_pct_initial": 0.5379, "strike_pct_initial": 1.0, "max_upside_pct": 0.5}),
     ]
     out = portfolio.generate_vip_report(wl, period="2026-06", derivative_terms=terms, account_ref="A1")
-    assert "衍生品 / 结构化产品风险摘要" in out["report_md"]
-    assert "MU 累积器" in out["report_md"] and "MLI Booster" in out["report_md"]
+    assert "衍生品 / 结构性产品" in out["report_md"]
+    assert "MU 累积器" in out["report_md"] and "增益票据" in out["report_md"]
+
+
+def test_derivative_indicative_excluded_from_all_read_paths(wl):
+    """(e) 推介稿(is_indicative=1)不得出现在报告/持仓任何读取路径——标记 + 读时过滤。"""
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm, save_derivative_term
+
+    save_derivative_term(wl, DerivativeTerm("equity_accumulator", "MU", "USD", 365,
+                                            {"afp": 625.59, "market_value_usd": 999999.0,
+                                             "maturity": "2099-12-31"}),
+                         source_file_name="Indicative Terms MU.pdf", source_file_hash="h1",
+                         broker="citi", account_ref="A1", lot_key="625.5927:991231",
+                         is_indicative=True)
+    save_derivative_term(wl, DerivativeTerm("equity_accumulator", "ORCL", "USD", 365,
+                                            {"afp": 100.0, "market_value_usd": 12345.0,
+                                             "maturity": "2099-12-31"}),
+                         source_file_name="termsheet_orcl.pdf", source_file_hash="h2",
+                         broker="citi", account_ref="A1", lot_key="100:991231")
+
+    from bottleneck_hunter.vip import derivatives as drv
+    listed = drv.list_derivative_terms(wl, account_ref="A1")
+    assert [t.underlying_symbol for t in listed] == ["ORCL"]
+    acc = drv.list_derivative_terms_all_accounts(wl, account_ref="A1")
+    assert [i["underlying_symbol"] for i in acc] == ["ORCL"]
+    cur = portfolio._current_derivative_rows(wl, "A1")
+    assert [r["underlying_symbol"] for r in cur] == ["ORCL"]
+    assert portfolio._derivative_mtm_total(wl, "A1") == 12345.0  # 推介稿的 999999 不计入 MTM
+
+
+def test_migrate_flag_indicative_backfill(wl):
+    """(e) 历史脏行一次性标记：推介稿(文件名/无成交字段+无lot_key)→1；真单(lot_key)→0 不误杀；幂等。"""
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm, save_derivative_term
+
+    save_derivative_term(wl, DerivativeTerm("equity_fcn", "CMBI", "USD", 60, {"maturity": "2026-09-04"}),
+                         source_file_name="Indicative Terms CMBI.pdf", source_file_hash="h1",
+                         broker="citi", account_ref="A1")
+    save_derivative_term(wl, DerivativeTerm("equity_fcn", "CMBI", "USD", 60, {"maturity": "2026-09-04"}),
+                         source_file_name="CMBI_termsheet.docx", source_file_hash="h2",
+                         broker="cmbi", account_ref="A1", lot_key="XS3372957897:2026-09-04")
+
+    conn = wl._connect()
+    try:
+        wl._migrate_flag_indicative_derivative_terms(conn)
+        flags = {r["source_file_name"]: r["is_indicative"]
+                 for r in conn.execute("SELECT source_file_name, is_indicative FROM vip_derivative_terms").fetchall()}
+        wl._migrate_flag_indicative_derivative_terms(conn)  # 幂等重放
+        flags2 = {r["source_file_name"]: r["is_indicative"]
+                  for r in conn.execute("SELECT source_file_name, is_indicative FROM vip_derivative_terms").fetchall()}
+    finally:
+        conn.close()
+    assert flags["Indicative Terms CMBI.pdf"] == 1
+    assert flags["CMBI_termsheet.docx"] == 0      # 有 lot_key(ISIN:到期) 不误杀
+    assert flags2 == flags                          # 幂等
+
+
+def test_report_anchors_persisted(wl):
+    """(b) 双数据锚点：生成时落 payload_json，报告 HTML 显示双时间戳。"""
+    import json
+
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
+    out = portfolio.generate_vip_report(wl, period="2026-06", account_ref="A1")
+    conn = wl._connect()
+    try:
+        row = conn.execute("SELECT payload_json FROM vip_reports WHERE id=?", (out["report_id"],)).fetchone()
+    finally:
+        conn.close()
+    anchors = json.loads(row["payload_json"])["data_anchors"]
+    assert anchors["holdings_as_of"] == "2026-06-30"
+    assert "market_as_of" in anchors
+    assert "账户数据 <b>2026-06-30</b>" in out["report_md"]
+
+
+def test_report_html_plain_no_jargon(wl):
+    """(d) HTML 图文报告：ECharts 占位 + 通俗措辞 + 去专业术语。"""
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
+    out = portfolio.generate_vip_report(wl, period="2026-06", account_ref="A1")
+    md = out["report_md"]
+    assert "data-chart='holdings-pie'" in md          # ECharts 占位 div
+    assert "<div class='vip-report-cards'>" in md     # HTML 概览卡片
+    assert "vip-report-tbl" in md                     # 持仓明细表
+    assert "Modified Dietz" not in md and "归因" not in md  # 去专业术语
 
 
 

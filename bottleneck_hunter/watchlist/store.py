@@ -237,6 +237,7 @@ class WatchlistStore(
             self._migrate_sim_account_per_account(conn)
             self._migrate_vip_imports_account_ref(conn)
             self._migrate_vip_derivative_terms_account_ref(conn)
+            self._migrate_flag_indicative_derivative_terms(conn)
             self._migrate_vip_projections_lot_key(conn)
             self._migrate_vip_reports_account_ref(conn)
             self._migrate_chat_sessions_account_ref(conn)
@@ -654,6 +655,9 @@ class WatchlistStore(
                 return
             account_ref_expr = "COALESCE(account_ref, '')" if "account_ref" in cols else "''"
             lot_key_expr = "COALESCE(lot_key, '')" if "lot_key" in cols else "''"
+            # is_indicative 是后加列；此重建须带上它，否则古老库(pre-account_ref)重建后丢列 → 后续
+            # save_derivative_term 引用 is_indicative 会 OperationalError。
+            indic_expr = "COALESCE(is_indicative, 0)" if "is_indicative" in cols else "0"
             conn.execute("""
                 CREATE TABLE vip_derivative_terms_new (
                     id TEXT PRIMARY KEY,
@@ -667,6 +671,7 @@ class WatchlistStore(
                     rationale_ref TEXT DEFAULT '',
                     account_ref TEXT DEFAULT '',
                     lot_key TEXT DEFAULT '',
+                    is_indicative INTEGER DEFAULT 0,
                     created_at TEXT NOT NULL,
                     user_id TEXT DEFAULT '',
                     market TEXT DEFAULT 'us_stock',
@@ -677,9 +682,9 @@ class WatchlistStore(
                 f"""
                 INSERT OR IGNORE INTO vip_derivative_terms_new
                 (id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
-                 currency, terms_json, rationale_ref, account_ref, lot_key, created_at, user_id, market)
+                 currency, terms_json, rationale_ref, account_ref, lot_key, is_indicative, created_at, user_id, market)
                 SELECT id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
-                       currency, terms_json, rationale_ref, {account_ref_expr}, {lot_key_expr}, created_at,
+                       currency, terms_json, rationale_ref, {account_ref_expr}, {lot_key_expr}, {indic_expr}, created_at,
                        COALESCE(user_id,''), COALESCE(market,'us_stock')
                   FROM vip_derivative_terms
                 """
@@ -689,6 +694,38 @@ class WatchlistStore(
             logger.info("vip_derivative_terms 已重建为按账户隔离")
         except sqlite3.OperationalError as e:
             logger.warning("vip_derivative_terms 多账户迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_flag_indicative_derivative_terms(self, conn) -> None:
+        """历史脏行一次性标记：把「产品介绍/推介稿」(indicative term sheet，非成交持仓)行 is_indicative=1。
+
+        新上传已在 classify_pdf 处以 product_intro 拦截不入库；本迁移只清历史入库的脏行。
+        # ponytail: 判据是最佳努力启发式——原 PDF 文本未持久化(库里只有 terms_json)，无法复用
+        #   _is_indicative_intro 的 "Indicative Terms" 原文判别，只能用行内可得信号。宁漏勿误杀：
+        #   ①文件名含 indicative(推介稿命名惯例，主信号)；②既无 MTM/名义/成交日、又无 lot_key
+        #   (真月结单必有 MTM；成交单有 trade_date/notional；条款单 docx 有 ISIN→lot_key 非空)。
+        #   标记可逆(错标 UPDATE is_indicative=0)、不 DELETE；精确根治需重传原 PDF 走新 classify 门。
+        """
+        try:
+            if "is_indicative" not in self._table_cols(conn, "vip_derivative_terms"):
+                return
+            conn.execute(
+                """
+                UPDATE vip_derivative_terms SET is_indicative = 1
+                 WHERE COALESCE(is_indicative, 0) = 0
+                   AND (
+                        LOWER(source_file_name) LIKE '%indicative%'
+                     OR (
+                            json_extract(terms_json, '$.market_value_usd') IS NULL
+                        AND json_extract(terms_json, '$.notional')         IS NULL
+                        AND json_extract(terms_json, '$.trade_date')       IS NULL
+                        AND COALESCE(lot_key, '') = ''
+                     )
+                   )
+                """
+            )
+        except sqlite3.OperationalError as e:
+            logger.warning("vip_derivative_terms 推介稿标记迁移失败（可忽略）: %s", e)
 
 
     def _migrate_vip_projections_lot_key(self, conn) -> None:

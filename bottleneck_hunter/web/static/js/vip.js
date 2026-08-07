@@ -1867,13 +1867,37 @@ async function loadReports() {
   const box = document.getElementById('vip-report-list');
   if (!box) return;
   try {
-    const { reports } = await vipGet(`/reports?account_ref=${encodeURIComponent(selectedAccountRef())}`);
+    const { reports, current_anchors } = await vipGet(`/reports?account_ref=${encodeURIComponent(selectedAccountRef())}`);
     if (!reports?.length) { box.innerHTML = '<p class="st-empty-hint">暂无报告</p>'; return; }
-    box.innerHTML = reports.map(r =>
-      `<div class="vip-report-item" data-report-id="${esc(r.id)}" style="padding:8px;border-bottom:1px solid var(--border);cursor:pointer">` +
-      `<div style="font-weight:600">${esc(r.period || r.kind)}</div>` +
-      `<div style="font-size:12px;color:var(--muted)">${esc(r.created_at || '')}</div></div>`).join('');
-    box.querySelectorAll('.vip-report-item').forEach(el => el.addEventListener('click', () => openReport(el.dataset.reportId)));
+    const curH = (current_anchors || {}).holdings_as_of || '';
+    const curM = (current_anchors || {}).market_as_of || '';
+    const now = Date.now();
+    box.innerHTML = reports.map(r => {
+      const h = r.holdings_as_of || '', m = r.market_as_of || '';
+      // 0-1(c)：过期判定 =「有更新数据即过期」——报告所用任一锚点 < 当前最新锚点（ISO 日期串直接比较）
+      const stale = (h && curH && h < curH) || (m && curM && m < curM);
+      // 按钮深浅按「报告所用数据距今天数」：取两个锚点中较早的一个（数据越旧=过期越久）
+      const baseAnchor = (h && m) ? (h < m ? h : m) : (h || m);
+      const days = baseAnchor ? Math.floor((now - Date.parse(baseAnchor)) / 864e5) : 0;
+      // 颜色渐变：蓝(hue 250)→红(hue 25)，L/C 固定只插 hue（复用 tokens.css 蓝/红同 L/C 约定）
+      const hue = 250 - Math.min(Math.max(days / 60, 0), 1) * 225;  // ponytail: 满红 CEIL=60 天，可调校准旋钮
+      const updBtn = stale
+        ? `<button class="btn btn-sm vip-report-upd" data-report-id="${esc(r.id)}" style="background:oklch(0.55 0.15 ${hue});color:#fff">更新报告</button>`
+        : '';
+      return `<div class="vip-report-item" data-report-id="${esc(r.id)}" style="padding:8px;border-bottom:1px solid var(--border);cursor:pointer">` +
+        `<div style="font-weight:600">${esc(r.period || r.kind)}</div>` +
+        `<div style="font-size:12px;color:var(--muted)">${esc(r.created_at || '')}</div>` +
+        `<div style="font-size:12px;color:var(--muted);margin-top:2px">账户 ${esc(h || '—')} · 行情 ${esc(m || '—')}</div>` +
+        (updBtn ? `<div style="margin-top:6px">${updBtn}</div>` : '') + `</div>`;
+    }).join('');
+    box.querySelectorAll('.vip-report-item').forEach(el => el.addEventListener('click', (ev) => {
+      const upd = ev.target.closest('.vip-report-upd');
+      if (upd) { regenReport(); return; }  // 点「更新报告」只重新生成，不开列表项
+      openReport(el.dataset.reportId);
+    }));
+    // 0-1(a)：自动打开最新一份——进页面直接看到报告，无需手动点/重新生成
+    const first = box.querySelector('.vip-report-item');
+    if (first) openReport(first.dataset.reportId);
   } catch (_) { box.innerHTML = '<p class="st-empty-hint">加载失败</p>'; }
 }
 async function openReport(id) {
@@ -1884,7 +1908,49 @@ async function openReport(id) {
     const data = await vipGet(`/reports/${id}`);
     const md = data.report_md || '';
     viewer.innerHTML = window.marked ? window.marked.parse(md) : `<pre style="white-space:pre-wrap">${esc(md)}</pre>`;
+    renderReportCharts(viewer);  // 0-1(d)：扫描报告内的 ECharts 占位 div 渲染图表
   } catch (_) { viewer.innerHTML = '<p class="st-empty-hint">加载失败</p>'; }
+}
+
+// 0-1(d)：报告 HTML 里的图表占位(.vip-report-chart[data-chart][data-series]) → ECharts。
+// 机制：marked 出的 <script> 不执行，故服务端只写占位 div + 内联 JSON，由这里统一渲染。
+function renderReportCharts(root) {
+  if (typeof echarts === 'undefined' || !root) return;
+  root.querySelectorAll('.vip-report-chart').forEach((el, i) => {
+    let data;
+    try { data = JSON.parse(el.dataset.series || '[]'); } catch (_) { return; }
+    if (!data || !data.length) return;
+    el.id = el.id || `vip-rc-${Date.now()}-${i}`;
+    const c = vipChart(el.id);
+    if (!c) return;
+    const kind = el.dataset.chart;
+    if (kind === 'holdings-pie') {
+      c.setOption({
+        tooltip: { trigger: 'item', formatter: p => `${p.name}<br/>市值 $${fmtNum(p.value)}（${fmtNum(p.percent, 1)}%）` },
+        legend: { type: 'scroll', bottom: 0, textStyle: { fontSize: 11 } },
+        series: [{ type: 'pie', radius: ['40%', '68%'], center: ['50%', '44%'], avoidLabelOverlap: true,
+          itemStyle: { borderColor: '#fff', borderWidth: 2 }, label: { show: false }, data }],
+      });
+    } else if (kind === 'value-line') {
+      c.setOption({
+        grid: { top: 30, right: 20, bottom: 30, left: 64 },
+        xAxis: { type: 'category', data: data.map(p => p.name), axisLabel: { fontSize: 11 } },
+        yAxis: { type: 'value', axisLabel: { fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
+        tooltip: { trigger: 'axis', formatter: p => `${p[0].name}<br/>总资产: $${fmtNum(p[0].value)}` },
+        series: [{ type: 'line', data: data.map(p => p.value), smooth: true, symbolSize: 7,
+          lineStyle: { color: '#6366f1', width: 2 }, itemStyle: { color: '#6366f1' },
+          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: '#6366f130' }, { offset: 1, color: '#6366f105' }] } } }],
+      }, true);
+    } else if (kind === 'contrib-bar') {
+      c.setOption({
+        grid: { top: 20, right: 20, bottom: 30, left: 50 },
+        xAxis: { type: 'category', data: data.map(p => p.name), axisLabel: { fontSize: 11 } },
+        yAxis: { type: 'value', axisLabel: { formatter: '{value}%', fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
+        tooltip: { trigger: 'axis', formatter: p => `${p[0].name}<br/>贡献: ${fmtNum(p[0].value, 2)}%` },
+        series: [{ type: 'bar', data: data.map(p => ({ value: p.value, itemStyle: { color: p.value >= 0 ? '#22c55e' : '#ef4444' } })), barMaxWidth: 40 }],
+      });
+    }
+  });
 }
 
 // 复盘对错：已结顾问/荐新建议的 动作/实际涨跌/对错 台账 + 命中率 KPI（顾问级，账户无关）。
@@ -1917,32 +1983,34 @@ async function loadReviewLedger() {
   }
 }
 
+// 0-1(a)(c)：生成/更新报告共用入口。生成成功后重拉列表（新报告排首 → loadReports 自动打开进
+// viewer），修复旧版"生成结果写进 #vip-report 预览块、查看区看不见"的割裂。
+async function regenReport() {
+  if (requireConcreteAccount('reports')) return;
+  clearScopeHint('reports');
+  const btn = document.getElementById('vip-report-btn');
+  if (btn) btn.disabled = true;
+  setStatus('vip-report-status', '生成中…（含 AI 分析约需数十秒）', true);
+  try {
+    const withAi = document.getElementById('vip-with-ai').checked;
+    const ref = selectedAccountRef();
+    const r = await fetch(vipApiUrl(`/reports/generate?with_ai=${withAi}&account_ref=${encodeURIComponent(ref)}`), { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) { setStatus('vip-report-status', '✗ ' + (data.detail || '生成失败'), false); return; }
+    const nUnv = (data.unverified || []).length;
+    setStatus('vip-report-status', nUnv ? `✓ 已生成（${nUnv} 处数字未核到，已标注）` : '✓ 已生成', true);
+    invalidateVipCache({ accountRef: ref, includeImport: false });
+    ensureVipLoaded();
+    await loadReports();
+  } catch (e) {
+    setStatus('vip-report-status', '✗ 生成失败: ' + e.message, false);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function bindReportGen() {
-  document.getElementById('vip-report-btn')?.addEventListener('click', async () => {
-    if (requireConcreteAccount('reports')) return;
-    clearScopeHint('reports');
-    const btn = document.getElementById('vip-report-btn');
-    btn.disabled = true;
-    setStatus('vip-report-status', '生成中…（含 AI 分析约需数十秒）', true);
-    try {
-      const withAi = document.getElementById('vip-with-ai').checked;
-      const ref = selectedAccountRef();
-      const r = await fetch(vipApiUrl(`/reports/generate?with_ai=${withAi}&account_ref=${encodeURIComponent(ref)}`), { method: 'POST' });
-      const data = await r.json();
-      if (!r.ok) { setStatus('vip-report-status', '✗ ' + (data.detail || '生成失败'), false); return; }
-      const box = document.getElementById('vip-report');
-      const md = data.report_md || '';
-      box.innerHTML = window.marked ? window.marked.parse(md) : `<pre style="white-space:pre-wrap">${esc(md)}</pre>`;
-      const nUnv = (data.unverified || []).length;
-      setStatus('vip-report-status', nUnv ? `✓ 已生成（${nUnv} 处数字未核到，已标注）` : '✓ 已生成', true);
-      invalidateVipCache({ accountRef: ref, includeImport: false });
-      ensureVipLoaded();
-    } catch (e) {
-      setStatus('vip-report-status', '✗ 生成失败: ' + e.message, false);
-    } finally {
-      btn.disabled = false;
-    }
-  });
+  document.getElementById('vip-report-btn')?.addEventListener('click', regenReport);
 }
 
 function appendChat(role, text) {

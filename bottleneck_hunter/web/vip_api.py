@@ -846,17 +846,29 @@ async def generate_report(market: str = "us_stock", period: str = "",
 async def list_reports(market: str = "us_stock", limit: int = 20,
                        account_ref: str = "",
                        user: dict = Depends(require_vip_unlocked)):
-    """列出该用户的报告（periodic/alert，不含 import_snapshot）。"""
+    """列出该用户的报告（periodic/alert，不含 import_snapshot）。
+
+    0-1(b)(c)：每条带出生成时落库的数据双锚点(holdings_as_of=账户数据时间 / market_as_of=市场重估时间，
+    payload_json.data_anchors)；current_anchors 为当前最新锚点，前端据此判"有更新数据即过期"。
+    """
     wl = _wl(user, market)
     conn = wl._connect()
     try:
         q, p = wl._filtered(
-            "SELECT id, kind, period, created_at FROM vip_reports "
+            "SELECT id, kind, period, created_at, "
+            "json_extract(payload_json,'$.data_anchors.holdings_as_of') AS holdings_as_of, "
+            "json_extract(payload_json,'$.data_anchors.market_as_of') AS market_as_of "
+            "FROM vip_reports "
             "WHERE kind != 'import_snapshot' AND account_ref = ? ORDER BY created_at DESC LIMIT ?", (account_ref, limit))
         rows = [dict(r) for r in conn.execute(q, p).fetchall()]
     finally:
         conn.close()
-    return {"reports": rows}
+    from bottleneck_hunter.vip.portfolio import _holdings_as_of
+    current_anchors = {
+        "holdings_as_of": _holdings_as_of(wl, account_ref),
+        "market_as_of": wl.latest_projection_date(account_ref) if hasattr(wl, "latest_projection_date") else "",
+    }
+    return {"reports": rows, "current_anchors": current_anchors}
 
 
 @router.get("/reports/{report_id}")

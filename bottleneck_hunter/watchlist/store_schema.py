@@ -611,6 +611,7 @@ CREATE TABLE IF NOT EXISTS vip_derivative_terms (
     rationale_ref     TEXT DEFAULT '',
     account_ref       TEXT DEFAULT '',
     lot_key           TEXT DEFAULT '',   -- 同标的多笔头寸判别键(strike:maturity)，避免野村双 ORCL 折叠
+    is_indicative     INTEGER DEFAULT 0, -- 1=产品介绍/推介稿(非成交持仓)，读路径一律隐藏，不计入持仓/报告
     created_at        TEXT NOT NULL,
     user_id           TEXT DEFAULT '',
     market            TEXT DEFAULT 'us_stock',
@@ -1203,7 +1204,7 @@ MIGRATIONS: list[str] = [
         id TEXT PRIMARY KEY,
         source_file_name TEXT DEFAULT '', source_file_hash TEXT DEFAULT '', broker TEXT DEFAULT '',
         product_family TEXT DEFAULT '', underlying_symbol TEXT DEFAULT '', currency TEXT DEFAULT 'USD',
-        terms_json TEXT DEFAULT '{}', rationale_ref TEXT DEFAULT '',
+        terms_json TEXT DEFAULT '{}', rationale_ref TEXT DEFAULT '', is_indicative INTEGER DEFAULT 0,
         created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
         UNIQUE(user_id, market, source_file_hash, product_family, underlying_symbol)
     )""",
@@ -1315,4 +1316,6 @@ MIGRATIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_vip_recommend_acct ON vip_recommendations(user_id, market, account_ref, created_at DESC)",
     # ── VIP 子账户已用贷款/负债（结单口径，统一美元）：总览与账户视图第四栏「贷款」数据源 ──
     "ALTER TABLE sim_account ADD COLUMN loan_balance REAL DEFAULT 0",
+    # ── VIP 衍生品：产品介绍/推介稿标记（非成交持仓）；读路径一律 is_indicative=0 过滤，不计入持仓/报告 ──
+    "ALTER TABLE vip_derivative_terms ADD COLUMN is_indicative INTEGER DEFAULT 0",
 ]

@@ -772,7 +772,8 @@ def validate_derivative_term(term: DerivativeTerm, *, today: str = "") -> str:
 
 
 def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: str, source_file_hash: str,
-                         broker: str, rationale_ref: str = "", account_ref: str = "", lot_key: str = "") -> str:
+                         broker: str, rationale_ref: str = "", account_ref: str = "", lot_key: str = "",
+                         is_indicative: bool = False) -> str:
     import json
     import uuid
     account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
@@ -791,8 +792,8 @@ def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: st
     if row:
         with wl_store._write_conn() as conn:
             q2, p2 = wl_store._filtered(
-                "UPDATE vip_derivative_terms SET terms_json=?, currency=? WHERE id=?",
-                (json.dumps(term.terms, ensure_ascii=False), term.currency, row["id"]))
+                "UPDATE vip_derivative_terms SET terms_json=?, currency=?, is_indicative=? WHERE id=?",
+                (json.dumps(term.terms, ensure_ascii=False), term.currency, int(is_indicative), row["id"]))
             conn.execute(q2, p2)
         return row["id"]
     did = uuid.uuid4().hex[:12]
@@ -800,10 +801,11 @@ def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: st
         conn.execute(
             f"""INSERT INTO vip_derivative_terms
                (id, source_file_name, source_file_hash, broker, product_family, underlying_symbol,
-                currency, terms_json, rationale_ref, account_ref, lot_key, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
+                currency, terms_json, rationale_ref, account_ref, lot_key, is_indicative, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
             (did, source_file_name, source_file_hash, broker, term.product_family, term.underlying_symbol,
-             term.currency, json.dumps(term.terms, ensure_ascii=False), rationale_ref, account_ref, lot_key, datetime.now().isoformat())
+             term.currency, json.dumps(term.terms, ensure_ascii=False), rationale_ref, account_ref, lot_key,
+             int(is_indicative), datetime.now().isoformat())
             + wl_store._user_insert_params() + wl_store._market_insert_params(),
         )
     return did
@@ -845,7 +847,7 @@ def list_derivative_terms(wl_store, limit: int = 50, account_ref: str = "") -> l
     conn = wl_store._connect()
     try:
         q, p = wl_store._filtered(
-            "SELECT * FROM vip_derivative_terms WHERE account_ref=? ORDER BY created_at DESC LIMIT ?", (account_ref, limit))
+            "SELECT * FROM vip_derivative_terms WHERE account_ref=? AND is_indicative=0 ORDER BY created_at DESC LIMIT ?", (account_ref, limit))
         rows = [dict(r) for r in conn.execute(q, p).fetchall()]
     finally:
         conn.close()
@@ -891,11 +893,11 @@ def list_derivative_terms_all_accounts(wl_store, limit: int = 200, account_ref: 
     conn = wl_store._connect()
     try:
         base = ("SELECT account_ref, product_family, underlying_symbol, currency, terms_json, lot_key, "
-                "source_file_name, created_at, id FROM vip_derivative_terms")
+                "source_file_name, created_at, id FROM vip_derivative_terms WHERE is_indicative=0")
         args: tuple = ()
         if account_ref is not None:
             ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
-            base += " WHERE account_ref=?"
+            base += " AND account_ref=?"
             args = (ref,)
         q, p = wl_store._filtered(base + " ORDER BY created_at ASC, id ASC", args, table="vip_derivative_terms")
         rows = [dict(r) for r in conn.execute(q, p).fetchall()]

@@ -747,4 +747,21 @@
 
 .vip-adv-foot { margin-top: 12px; font-size: 12px; line-height: 1.5; }
 .vip-adv-foot.warn { color: var(--danger); }
+
+/* ── VIP 报告复盘：HTML 图文报告（0-1 报告重构）────────────── */
+.vip-report-meta { font-size: 13px; color: var(--ink); background: var(--panel-bg);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; line-height: 1.7; }
+.vip-report-muted { color: var(--muted); font-size: 12px; }
+.vip-report-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0; }
+.vip-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--surface); }
+.vip-card .k { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.vip-card .v { font-size: 16px; font-weight: 700; color: var(--ink); }
+.vip-report-chart { width: 100%; height: 260px; margin: 12px 0; }
+.vip-report-tbl { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0 16px; }
+.vip-report-tbl th, .vip-report-tbl td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+.vip-report-tbl th { color: var(--muted); font-weight: 600; }
+.vip-report-tbl td.r, .vip-report-tbl th.r { text-align: right; }
+.vip-report-viewer h3 { margin: 18px 0 6px; font-size: 15px; color: var(--ink); }
+.vip-report-viewer p, .vip-report-viewer li { font-size: 13.5px; line-height: 1.8; }
+#vip-report-list .vip-report-item + .vip-report-item { margin-top: 8px; }
 .vip-adv-foot.muted { color: var(--muted); }

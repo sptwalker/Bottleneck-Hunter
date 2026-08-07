@@ -862,7 +862,7 @@ def _current_derivative_rows(wl_store, account_ref: str) -> list[dict]:
     try:
         q, p = wl_store._filtered(
             "SELECT product_family, underlying_symbol, currency, terms_json, MAX(created_at) AS _mx "
-            "FROM vip_derivative_terms WHERE account_ref = ? "
+            "FROM vip_derivative_terms WHERE account_ref = ? AND is_indicative=0 "
             "GROUP BY product_family, underlying_symbol, lot_key ORDER BY _mx DESC",
             (account_ref,), table="vip_derivative_terms")
         rows = [dict(r) for r in conn.execute(q, p).fetchall()]
@@ -1900,32 +1900,69 @@ def build_account_summary(wl_store, *, account_ref: str = "") -> dict:
             "account_ref": account.get("account_ref", account_ref or "")}
 
 
+def _pct_str(v) -> str:
+    """小数 → 百分比文案；None 留空（render_derivative_summary 用，避免裸术语/公式）。"""
+    if v is None:
+        return ""
+    try:
+        return f"{float(v) * 100:.0f}%"
+    except (TypeError, ValueError):
+        return ""
+
+
 def render_derivative_summary(terms: list) -> str:
-    """把已抽条款的结构化产品压成风险摘要 Markdown（供报告附录/风险提示）。"""
+    """把已抽条款的结构化产品压成风险摘要（HTML、通俗措辞；供报告风险提示）。
+
+    仅渲染上游传入的 terms（报告生成前已按 is_indicative=0 过滤，推介稿不进这里）。
+    """
     if not terms:
         return ""
-    L = ["## 衍生品 / 结构化产品风险摘要", ""]
+    import html as _html
+    L = ["<h3>衍生品 / 结构性产品</h3>", ""]
     for t in terms:
-        if t.product_family in ("equity_accumulator", "equity_decumulator"):
-            kind = "累积器" if t.product_family.endswith("accumulator") else "减持器"
-            L.append(f"- **{t.underlying_symbol} {kind}**：AFP {t.terms.get('afp')}, KO {t.terms.get('knock_out_price')}, "
-                     f"DS {t.terms.get('daily_shares')}, Step-up {t.terms.get('step_up_daily_shares')}。"
-                     f"风险在于标的跌破 AFP 时会按 Step-up 股数累积，路径依赖强。")
-        elif t.product_family == "equity_mli_booster":
-            L.append(f"- **{t.underlying_symbol} MLI Booster**：KI={t.terms.get('knock_in_pct_initial', 0)*100:.2f}% 初始价，"
-                     f"Strike={t.terms.get('strike_pct_initial', 0)*100:.0f}% 初始价，上行封顶 {t.terms.get('max_upside_pct', 0)*100:.0f}%。"
-                     f"若触发 KI 且到期低于 Strike，将承受与标的下跌类似的损失。")
+        fam = t.product_family
+        sym = _html.escape(t.underlying_symbol)
+        if fam in ("equity_accumulator", "equity_decumulator"):
+            kind = "累积器" if fam.endswith("accumulator") else "减持器"
+            afp = t.terms.get("afp")
+            ko = t.terms.get("knock_out_price")
+            ds = t.terms.get("daily_shares")
+            su = t.terms.get("step_up_daily_shares")
+            L.append(f"- <b>{sym} {kind}</b>："
+                     f"{f'参考价 {afp}' if afp else ''}{'、' if afp and ko else ''}{f'敲出价 {ko}' if ko else ''}"
+                     f"{'、' if (afp or ko) and ds else ''}{f'每日 {ds} 股' if ds else ''}"
+                     f"{'；跌破参考价后每日接货变为 ' + str(su) + ' 股' if su else ''}。"
+                     f"主要风险：标的跌破参考价后接的股数加倍，越跌越接、亏损放大。")
+        elif fam == "equity_mli_booster":
+            ki, st, mu = t.terms.get("knock_in_pct_initial"), t.terms.get("strike_pct_initial"), t.terms.get("max_upside_pct")
+            L.append(f"- <b>{sym} 增益票据</b>："
+                     f"{f'标的跌到初始价的 {_pct_str(ki)} 以下' if ki else ''}"
+                     f"{'、' if ki and st else ''}{f'且到期未回到 {_pct_str(st)}' if st else ''}"
+                     f"{'，就按标的跌幅一起亏损' if (ki or st) else ''}"
+                     f"{f'；上涨也只封顶赚 {_pct_str(mu)}' if mu else ''}。")
+        elif fam == "equity_fcn":
+            u = t.terms.get("underlying_name") or t.underlying_symbol
+            coup = t.terms.get("coupon_pct") if t.terms.get("coupon_pct") is not None else t.terms.get("coupon_pa_pct")
+            mat = t.terms.get("maturity") or ""
+            L.append(f"- <b>{_html.escape(str(u))} 固定票息票据</b>："
+                     f"{f'每期票息 {_pct_str(coup)}' if coup is not None else '票息以条款为准'}"
+                     f"{f'，{mat} 到期' if mat else ''}。"
+                     f"风险：挂钩的篮子跌进买入保护价后，到期要按篮子跌幅承担亏损。")
+        else:
+            L.append(f"- <b>{sym}</b>（{fam}）：条款见原文件。")
     L.append("")
     return "\n".join(L)
 
 
 def render_period_narrative(wl_store, account_ref: str) -> str:
-    """P3-4 · 确定性本期叙事块（无 LLM）：现金流调整真实收益率 + 标的贡献 Top/Bottom + 确定性仓位事件。
+    """P3-4 · 确定性本期叙事块（无 LLM）：真实收益率 + 标的贡献 Top/Bottom + 仓位事件。
 
-    全部来自结构化事实——收益率过 Modified Dietz(已剔外部现金流)，贡献相邻两期×期初权重(剔买卖污染)，
-    仓位事件走 attribution 确定性 diff。红线：仓位事件是「推断·非确认」备忘录、非因果结论。
-    自包含(内部取 txns/vseries/contribution)，供 generate_vip_report 作为 AI 主观分析之前的事实锚。
+    全部来自结构化事实——收益率已剔外部现金流(转入/转出)，贡献为相邻两期×期初权重，
+    仓位事件是「推断·非确认」备忘录。通俗措辞、无专业术语；同时内嵌 ECharts 占位
+    （价值曲线 / 涨跌贡献），前端 openReport 统一渲染。底层计算不动，只改措辞与 HTML 包裹。
     """
+    import html as _html
+    import json as _json
     from bottleneck_hunter.vip.attribution import _LABEL, detect_position_events
     txns = list_transactions(wl_store, account_ref=account_ref, limit=10000)
     vseries = value_series(wl_store, account_ref=account_ref)
@@ -1933,30 +1970,53 @@ def render_period_narrative(wl_store, account_ref: str) -> str:
     contribution = _contribution(wl_store, account_ref)
     L: list[str] = []
 
+    # 价值曲线图（结单权威净值逐期点，含现金口径；≥2 点才画，单点不画）
+    ser = vseries.get("series") or []
+    pts = [{"name": p.get("as_of_date", ""), "value": p.get("total_equity")}
+           for p in ser if p.get("as_of_date") and p.get("total_equity") is not None]
+    if len(pts) >= 2:
+        L.append("<div class='vip-report-chart' data-chart='value-line' "
+                 f"data-series='{_html.escape(_json.dumps(pts, ensure_ascii=False), quote=True)}'></div>")
+        L.append("")
+
     dr = perf.get("dietz_return_pct")
     if dr is not None:
         ann = perf.get("dietz_annualized_pct")
-        L += ["## 本期业绩（现金流调整）", "",
-              f"- 累计收益率：**{dr:+.2f}%**" + (f"（年化 {ann:+.2f}%）" if ann is not None else ""),
-              f"  - 口径：{perf.get('dietz_basis', '')}"]
-        if perf.get("sharpe") is not None:
-            L.append(f"- 风险调整：Sharpe {perf['sharpe']}｜Sortino {perf.get('sortino')}｜Calmar {perf.get('calmar')}"
-                     f"（{perf.get('risk_note', '')}）")
+        L += ["<h3>这段时间赚了还是亏了</h3>", "",
+              f"- 累计：<b>{dr:+.2f}%</b>" + (f"（折合年化 {ann:+.2f}%）" if ann is not None else "")
+              + "，已经扣掉你中途转入/转出的钱。"]
+        sharpe = perf.get("sharpe")
+        if sharpe is not None:  # 三风险比率压成一句白话；专业口径放 title 备查
+            if sharpe >= 1.0:
+                note = "赚的钱对得起担的风险"
+            elif sharpe >= 0.5:
+                note = "风险和回报总体匹配"
+            elif sharpe >= 0.0:
+                note = "回报一般，没怎么补偿风险"
+            else:
+                note = "风险偏高，这段回报偏弱"
+            title = f"Sharpe {perf['sharpe']} · Sortino {perf.get('sortino')} · Calmar {perf.get('calmar')}"
+            L.append(f"- 风险与回报：<span title='{_html.escape(title)}' style='border-bottom:1px dashed var(--border)'>"
+                     f"{note}</span>（悬停看专业口径）")
         L.append("")
 
     rows = contribution.get("rows") or []
     if rows:
-        def _fmt(r):
-            return (f"{r['symbol']} {r['contribution_pct']:+.2f}pct"
-                    f"(单价{r['price_return_pct']:+.1f}%·权重{r['weight_pct']:.1f}%)")
+        def _plain(r):
+            return (f"<b>{_html.escape(r['symbol'])}</b> 贡献 {r['contribution_pct']:+.2f}%"
+                    f"（这期涨跌 {r['price_return_pct']:+.1f}%、约占仓位 {r['weight_pct']:.1f}%）")
         gainers = [r for r in rows if r["contribution_pct"] > 0][:3]
         losers = [r for r in rows if r["contribution_pct"] < 0][:3]
-        L += [f"## 标的贡献归因（{contribution.get('prev_date', '')}→{contribution.get('cur_date', '')}）", ""]
+        bars = [{"name": r["symbol"], "value": round(r["contribution_pct"], 2)} for r in gainers + losers]
+        if bars:
+            L.append("<div class='vip-report-chart' data-chart='contrib-bar' "
+                     f"data-series='{_html.escape(_json.dumps(bars, ensure_ascii=False), quote=True)}'></div>")
+            L.append("")
+        L += ["<h3>涨跌从哪来</h3>", ""]
         if gainers:
-            L.append("- 贡献最大：" + "；".join(_fmt(r) for r in gainers))
+            L.append("- 这期主要靠这些上涨：" + "；".join(_plain(r) for r in gainers))
         if losers:
-            L.append("- 拖累最大：" + "；".join(_fmt(r) for r in losers))
-        L.append(f"  - 覆盖 {contribution.get('coverage', '')}（相邻两期×期初权重，已剔买卖交割污染，非逐日）")
+            L.append("- 这期主要被这些拖累：" + "；".join(_plain(r) for r in losers))
         L.append("")
 
     dates = _snapshot_dates(wl_store, account_ref, limit=2)
@@ -1967,35 +2027,67 @@ def render_period_narrative(wl_store, account_ref: str) -> str:
                for r in prev_rows]
         events = detect_position_events(old, cur_rows)
         if events:
-            L += ["## 本期仓位变动（确定性·推断非确认）", ""]
+            L += ["<h3>这期买卖了什么</h3>", ""]
             for e in events:
-                L.append(f"- {_LABEL.get(e['event'], e['event'])} **{e['ticker']}**："
-                         f"数量 {e['old_qty']:g}→{e['new_qty']:g}（{e['chg_pct']:+.1f}%）")
+                L.append(f"- {_LABEL.get(e['event'], e['event'])} <b>{_html.escape(e['ticker'])}</b>："
+                         f"数量 {e['old_qty']:g} → {e['new_qty']:g}（{e['chg_pct']:+.1f}%）")
+            L.append("")
+            L.append("> 说明：按前后两期持仓对比推断，不是确认的交易记录。")
             L.append("")
 
     return "\n".join(L).strip()
 
 
 def render_report_md(summary: dict, narrative: str = "", period: str = "", derivatives_md: str = "",
-                     data_as_of: str = "", perf_narrative_md: str = "") -> str:
-    """渲染报告 Markdown（append-lines 风格，仿 chain/report.py）。narrative 已过 number_guard。"""
+                     data_as_of: str = "", market_as_of: str = "", perf_narrative_md: str = "") -> str:
+    """渲染报告（HTML 片段 + ECharts 占位；marked 透传原始 HTML）。narrative 已过 number_guard。
+
+    0-1(b)：data_as_of=账户数据时间(持仓期末)，market_as_of=市场数据时间(最新收盘重估日)。
+    图表机制：占位 div 内联 data-series(JSON)，前端 openReport 扫描 .vip-report-chart 用 ECharts 渲染。
+    """
+    import html as _html
+    import json as _json
     L: list[str] = []
     L.append(f"# 持仓分析报告{f'（{period}）' if period else ''}")
     L.append("")
-    if data_as_of:  # 0-1：持仓数据截至日（结算单期末），与"生成于今天"区分开
-        L.append(f"> 📅 数据截至 **{data_as_of}**（持仓来自该日结算单；市值或按更晚收盘重估，判断请以此为锚）")
+    # 0-1(b)：双数据时间戳——账户数据 vs 市场重估，避免把"今天生成"误当"数据新鲜"
+    if data_as_of or market_as_of:
+        parts = []
+        if data_as_of:
+            parts.append(f"账户数据 <b>{data_as_of}</b>")
+        if market_as_of:
+            parts.append(f"市场行情 <b>{market_as_of}</b>")
+        L.append("<div class='vip-report-meta'>📅 数据时间：" + "、".join(parts) +
+                 "<br><span class='vip-report-muted'>账户数据=最新持仓/结单日；市场行情=最新收盘价重估日。"
+                 "数据日期不是今天，判断别当今天看。</span></div>")
         L.append("")
-    L.append(f"- 组合总权益：**${summary['total_equity']:,.2f}**（统一美元口径）")
-    L.append(f"- 其中可投资现金：**${summary['cash_balance']:,.2f}**")
-    L.append(f"- 持仓数：{summary['n_holdings']} 只")
-    L.append(f"- 前五大集中度：{summary['top5_concentration_pct']}%")
+    # 概览卡片
+    L.append("<div class='vip-report-cards'>"
+             f"<div class='vip-card'><div class='k'>总资产（美元）</div><div class='v'>${summary['total_equity']:,.2f}</div></div>"
+             f"<div class='vip-card'><div class='k'>可用现金</div><div class='v'>${summary['cash_balance']:,.2f}</div></div>"
+             f"<div class='vip-card'><div class='k'>持仓项数</div><div class='v'>{summary['n_holdings']} 项</div></div>"
+             f"<div class='vip-card'><div class='k'>前五大占比</div><div class='v'>{summary['top5_concentration_pct']}%</div></div>"
+             "</div>")
     L.append("")
-    L.append("## 持仓明细")
-    L.append("")
-    L.append("| 代码 | 数量 | 市值(USD) | 占比 |")
-    L.append("|---|---:|---:|---:|")
-    for h in summary["holdings"]:
-        L.append(f"| {h['ticker']} | {h['shares']:,} | ${h['market_value']:,.2f} | {h['weight_pct']}% |")
+    # 持仓占比饼图（ECharts 占位；top8 + 其余归「其他」）
+    hs = summary.get("holdings") or []
+    if hs:
+        pie = [{"name": h["ticker"], "value": round(h["market_value"], 2)} for h in hs]
+        pie.sort(key=lambda x: x["value"], reverse=True)
+        if len(pie) > 8:
+            rest = round(sum(p["value"] for p in pie[8:]), 2)
+            pie = pie[:8] + [{"name": "其他", "value": rest}] if rest > 0 else pie[:8]
+        L.append("<div class='vip-report-chart' data-chart='holdings-pie' "
+                 f"data-series='{_html.escape(_json.dumps(pie, ensure_ascii=False), quote=True)}'></div>")
+        L.append("")
+    # 持仓明细表
+    L.append("<h3>持仓明细</h3>")
+    L.append("<table class='vip-report-tbl'><thead><tr><th>代码</th><th class='r'>数量</th>"
+             "<th class='r'>市值（美元）</th><th class='r'>占比</th></tr></thead><tbody>")
+    for h in hs:
+        L.append(f"<tr><td>{_html.escape(h['ticker'])}</td><td class='r'>{h['shares']:,}</td>"
+                 f"<td class='r'>${h['market_value']:,.2f}</td><td class='r'>{h['weight_pct']}%</td></tr>")
+    L.append("</tbody></table>")
     L.append("")
     if perf_narrative_md:   # P3-4：确定性本期叙事（真实收益率+贡献+仓位事件），置于 AI 主观分析之前作事实锚
         L.append(perf_narrative_md)
@@ -2098,6 +2190,10 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
     summary = build_account_summary(wl_store, account_ref=account_ref)
     facts = json.dumps(summary, ensure_ascii=False, default=str)
 
+    # 0-1(b)：报告数据双锚点——账户数据时间(持仓期末) + 市场数据时间(最新收盘重估日)。
+    # 落 payload_json，读回用 json_extract，不给 vip_reports 加列（零迁移）。
+    data_as_of = _holdings_as_of(wl_store, account_ref)
+    market_as_of = wl_store.latest_projection_date(account_ref) if hasattr(wl_store, "latest_projection_date") else ""
     unverified = []
     if narrative:
         checks = number_guard.verify_numbers(narrative, facts)
@@ -2106,7 +2202,7 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
 
     report_md = render_report_md(summary, narrative, period,
                                  derivatives_md=render_derivative_summary(derivative_terms or []),
-                                 data_as_of=_holdings_as_of(wl_store, account_ref),
+                                 data_as_of=data_as_of, market_as_of=market_as_of,
                                  perf_narrative_md=render_period_narrative(wl_store, account_ref))
     # F1：AI 报告挂"顾问可信度"角标——读回本模型 vip_advisor 历史校准(G5 复盘写入)，透明呈现。
     # 放 number_guard 之后，'0.83x' 不进防伪扫描；纯数据报告(无模型)不挂。
@@ -2120,7 +2216,9 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
             f"""INSERT INTO vip_reports (id, kind, period, report_md, payload_json, account_ref, created_at{wl_store._user_insert_cols()}{wl_store._market_insert_cols()})
                VALUES (?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
             (rid, "periodic", period, report_md,
-             json.dumps(summary, ensure_ascii=False, default=str), account_ref, _now_iso())
+             json.dumps({**summary, "data_anchors": {
+                 "holdings_as_of": data_as_of, "market_as_of": market_as_of,
+                 "generated_at": _now_iso()}}, ensure_ascii=False, default=str), account_ref, _now_iso())
             + wl_store._user_insert_params() + wl_store._market_insert_params(),
         )
 
