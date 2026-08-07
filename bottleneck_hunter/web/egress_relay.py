@@ -20,8 +20,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ── 借道白名单（单一事实源；客户端 import 同一份做出站校验）─────────────
-# 只放「我们代码显式发起 requests/httpx 的新闻/SEC/宏观 URL」的域名（scope-lite v1）。
-BORROW_HOSTS = {"news.google.com", "api.stlouisfed.org"}
+# 只放「我们代码显式发起 requests/httpx 的新闻/SEC/宏观/基本面 URL」的域名（scope-lite v1）。
+BORROW_HOSTS = {"news.google.com", "api.stlouisfed.org", "financialmodelingprep.com"}
 BORROW_SUFFIXES = {"sec.gov"}  # 覆盖 www./data./efts.sec.gov
 
 RELAY_TIMEOUT = 30.0  # 单次借道取数上限（秒）

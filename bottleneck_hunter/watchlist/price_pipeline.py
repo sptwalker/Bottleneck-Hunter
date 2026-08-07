@@ -8,6 +8,7 @@ Uses FetcherManager for auto-failover across data sources:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 from datetime import datetime, timedelta, timezone
@@ -187,6 +188,76 @@ def _fetch_company_info_us(ticker: str) -> dict:
         yf_gate.observe(e)  # 命中 429 则闸门自适应退避
         logger.debug("获取 %s company info 失败: %s", ticker, e)
         return {}
+
+
+# FMP profile 字段 → yfinance 风格键（前端"基本信息"页与 A股/美股共用同一套键）。
+# 缺字段用 .get() 只得空、不抛，FMP 偶尔改名也不会崩。
+_FMP_PROFILE_MAP = {
+    "sector": "sector",
+    "industry": "industry",
+    "longBusinessSummary": "description",
+    "website": "website",
+    "country": "country",
+    "currency": "currency",
+}
+
+
+async def _fetch_company_info_fmp(ticker: str) -> dict:
+    """美股企业基本面走 FMP /stable/profile —— 国内机房直连 Yahoo(.info) 必 429，
+    FMP 经桌面借道白名单(egress_relay，与 FRED 同路)可达，字段比 .info 更全更稳。
+
+    Key 严格按当前用户解析（resolve_data_source_key("fmp")）；该用户未配 FMP → 返 {}，
+    由 _fetch_one 回退 yfinance .info。走共享异步 httpx 客户端(get_http_client 带借道 transport)。
+    ponytail: 单请求即拿全 profile，无需 yf_gate 式逐调用节流；日后吞吐吃紧再加 gate。
+    """
+    from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
+    key = resolve_data_source_key("fmp")
+    if not key:
+        return {}
+    from bottleneck_hunter.watchlist.retry import get_http_client
+    sym = (ticker or "").strip().upper()
+    if not sym:
+        return {}
+    try:
+        client = get_http_client()
+        r = await client.get(
+            f"https://financialmodelingprep.com/stable/profile?symbol={sym}&apikey={key}",
+            timeout=10, headers={"User-Agent": "BottleneckHunter/1.0"})
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("FMP profile(%s) 抓取失败: %s", sym, e)
+        return {}
+    row = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
+    if not row:
+        return {}
+    info: dict = {}
+    for yf_key, fmp_key in _FMP_PROFILE_MAP.items():
+        v = row.get(fmp_key)
+        if v not in (None, "", "-"):
+            info[yf_key] = v
+    # 有偏移/兜底字段的单独处理
+    name = row.get("companyName")
+    if name:
+        info["longName"] = name
+        info["shortName"] = name
+    exch = row.get("exchangeShortName") or row.get("exchange")
+    if exch:
+        info["exchange"] = exch
+    mc = row.get("mktCap") or row.get("marketCap")
+    if mc:
+        info["marketCap"] = mc
+    emp = row.get("fullTimeEmployees")
+    if emp not in (None, "", "-"):
+        with contextlib.suppress(ValueError, TypeError):
+            info["fullTimeEmployees"] = int(str(emp).replace(",", ""))
+    pe = row.get("pe")
+    if pe not in (None, "", "-"):
+        info["trailingPE"] = _safe(pe)
+    ceo = row.get("ceo")
+    if ceo:
+        info["companyOfficers"] = [{"name": ceo, "title": "CEO"}]
+    return info
 
 
 def _fetch_astock_profile(ticker: str) -> dict:
@@ -535,13 +606,30 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market
                         snapshots, company_info = [], {}
 
                 if not company_info and not _profile_fresh(store, ticker):
-                    info_fn = _fetch_astock_profile_fused if market == "a_stock" else _fetch_company_info_us
-                    try:
-                        company_info = await fetch_with_timeout(
-                            asyncio.to_thread(info_fn, ticker), timeout_sec=20)
-                    except asyncio.TimeoutError:
-                        logger.warning("抓取 %s 公司信息超时(20s)，跳过", ticker)
-                        company_info = {}
+                    if market == "a_stock":
+                        try:
+                            company_info = await fetch_with_timeout(
+                                asyncio.to_thread(_fetch_astock_profile_fused, ticker), timeout_sec=20)
+                        except asyncio.TimeoutError:
+                            logger.warning("抓取 %s 公司信息超时(20s)，跳过", ticker)
+                            company_info = {}
+                    else:
+                        # 美股：FMP 优先(借道白名单，国内可达、字段全)，无实质内容再回退 yfinance .info。
+                        # 镜像 macro 的"可靠源优先、Yahoo 只补缺"顺序。
+                        from bottleneck_hunter.watchlist.store_market_data import _profile_has_content
+                        try:
+                            company_info = await asyncio.wait_for(
+                                _fetch_company_info_fmp(ticker), timeout=12)
+                        except Exception as e:  # noqa: BLE001
+                            logger.debug("FMP profile(%s) 异常: %s", ticker, e)
+                            company_info = {}
+                        if not _profile_has_content(company_info):
+                            try:
+                                company_info = await fetch_with_timeout(
+                                    asyncio.to_thread(_fetch_company_info_us, ticker), timeout_sec=20)
+                            except asyncio.TimeoutError:
+                                logger.warning("抓取 %s 公司信息超时(20s)，跳过", ticker)
+                                company_info = {}
                 if cache is not None:
                     cache[ck] = (snapshots, company_info)
 
