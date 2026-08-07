@@ -12,6 +12,23 @@ from bottleneck_hunter.watchlist.store_base import _now_iso
 # keyed 源/按用户 LLM 的表(news/options/earnings)不在此列，仍按各用户隔离。
 SHARED_UID = "__shared__"
 
+# info 是否含"实质内容"——空 dict 或 429/限流下 yfinance .info 返回的"伪成功"字典
+# (仅 trailingPegRatio=None/maxAge 等噪声、无任何身份或财务字段)均视为无内容：只落负缓存
+# stub、绝不 REPLACE 覆盖已有真档案(否则国内机房 429 风暴会把真 sector/行业/简介逐条抹空)。
+# 判据同时覆盖美股身份字段与 A股财务字段——A股在 akshare 挂时可能只有 baostock 财务(无 sector)，
+# 那也是真数据，不能误判为空。
+_PROFILE_CONTENT_KEYS = (
+    "sector", "industry", "longBusinessSummary", "website", "fullTimeEmployees",
+    "trailingPE", "priceToBook", "priceToSalesTrailing12Months",
+    "returnOnEquity", "profitMargins", "marketCap", "trailingEps",
+)
+
+
+def _profile_has_content(info: dict) -> bool:
+    if not info:
+        return False
+    return any(info.get(k) not in (None, "", 0, "-") for k in _PROFILE_CONTENT_KEYS)
+
 
 class _MarketDataMixin:
 
@@ -442,11 +459,11 @@ class _MarketDataMixin:
     def save_company_profile(self, ticker: str, info: dict) -> None:
         """从 yfinance info dict 提取企业基本面并 upsert。
 
-        info 为空（抓取超时/429/无数据）时落一条最小 stub 作负缓存——但仅在
-        无既有行时 INSERT，绝不 REPLACE 覆盖已有真资料（批量管线空刷不伤真数据）。
+        info 无实质内容（空 dict / 抓取超时 / 429 伪成功字典）时落一条最小 stub 作负缓存——
+        但仅在无既有行时 INSERT，绝不 REPLACE 覆盖已有真资料（批量管线空刷或 429 垃圾字典都不伤真数据）。
         有了带 fetched_at 的 stub，on-demand 端点即可按冷却窗跳过重复抓取。
         """
-        if not info:
+        if not _profile_has_content(info):
             with self._write_conn() as conn:
                 conn.execute(
                     """INSERT OR IGNORE INTO company_profiles

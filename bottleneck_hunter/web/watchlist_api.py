@@ -33,6 +33,9 @@ router = APIRouter(tags=["watchlist"])
 # on-demand 概览重拉冷却窗：GLD 等 .info 反复超时/429 的标的，首拉落负缓存 stub(带 fetched_at)后
 # 24h 内不再重拉 → 消除每次打开抽屉都触发的抓取失败洪流。批量调度管线不受此限，仍是正路刷新。
 _PROFILE_REFETCH_COOLDOWN_H = 24
+# 空 stub(429/无数据)专用短冷却：2h 后即允许重试，好让被 429 抹空的档案在 Yahoo 恢复后
+# 经任意一次打开自愈；同时把重试洪流限到每标的每 2h 一次(区别于真档案的 24h 季度级冷却)。
+_PROFILE_EMPTY_RETRY_H = 2
 
 # 欧洲 ISIN 形态：2字母+9位字母数字+1校验位=12位（与 vip.portfolio._ISIN_RE 同源）。
 # 这类场外基金无公开逐日行情/基本面源，yfinance 按 ISIN 检索必然 429 或错配垃圾行情+.info 超时。
@@ -40,7 +43,11 @@ _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 
 
 def _profile_is_stale(profile: dict | None, now: datetime) -> bool:
-    """profile 缺失/无 fetched_at/不可解析/超冷却窗 → True(允许重拉一次)；否则新鲜 → False。"""
+    """profile 缺失/无 fetched_at/不可解析/超冷却窗 → True(允许重拉一次)；否则新鲜 → False。
+
+    冷却窗按内容分档：空档案(sector/industry/description 全空，多为 429 抹空的 stub)只冷却 2h、
+    以便刷新恢复；真档案季度级变动、冷却 24h。仅看时间戳会把新鲜的空 stub 误判为新鲜→永远刷不出。
+    """
     if not profile:
         return True
     ts = (profile.get("fetched_at") or "").strip()
@@ -52,7 +59,9 @@ def _profile_is_stale(profile: dict | None, now: datetime) -> bool:
         return True
     if fetched.tzinfo is None:
         fetched = fetched.replace(tzinfo=timezone.utc)
-    return (now - fetched) > timedelta(hours=_PROFILE_REFETCH_COOLDOWN_H)
+    has_content = bool(profile.get("sector") or profile.get("industry") or profile.get("description"))
+    window = _PROFILE_REFETCH_COOLDOWN_H if has_content else _PROFILE_EMPTY_RETRY_H
+    return (now - fetched) > timedelta(hours=window)
 
 
 def _busy_event():
