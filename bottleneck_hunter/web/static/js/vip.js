@@ -1905,7 +1905,7 @@ async function openReport(id) {
   if (!viewer) return;
   viewer.innerHTML = '加载中…';
   try {
-    const data = await vipGet(`/reports/${id}`);
+    const data = await vipGet(`/reports/${id}?account_ref=${encodeURIComponent(selectedAccountRef())}`);
     const md = data.report_md || '';
     viewer.innerHTML = window.marked ? window.marked.parse(md) : `<pre style="white-space:pre-wrap">${esc(md)}</pre>`;
     renderReportCharts(viewer);  // 0-1(d)：扫描报告内的 ECharts 占位 div 渲染图表
