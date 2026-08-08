@@ -1961,28 +1961,22 @@
 
     <div class="st-tab-pane" id="vip-pane-reports" role="tabpanel">
       <div class="st-card" style="margin-bottom:16px">
-        <div class="st-card-header"><h3>生成顾问报告</h3></div>
-        <div class="st-card-body">
-          <div class="account-form" style="align-items:center;gap:12px;flex-wrap:wrap">
+        <div class="st-card-header" style="gap:12px;flex-wrap:wrap">
+          <h3>报告内容</h3>
+          <div class="account-form" style="align-items:center;gap:12px;flex-wrap:wrap;margin:0">
             <label style="font-size:13px"><input type="checkbox" id="vip-with-ai" checked> 含 AI 顾问团队叙事</label>
             <button class="btn btn-sm btn-primary" id="vip-report-btn">生成报告</button>
             <span class="account-status" id="vip-report-status"></span>
           </div>
-          <div id="vip-report" style="margin-top:16px;line-height:1.7"></div>
+        </div>
+        <div class="st-card-body">
+          <div id="vip-report-viewer" style="line-height:1.7"><p class="st-empty-hint">暂无报告，点击「生成报告」创建</p></div>
         </div>
       </div>
-      <div class="st-perf-grid">
-        <div class="st-card">
-          <div class="st-card-header"><h3>历史报告</h3></div>
-          <div class="st-card-body" id="vip-report-list">
-            <p class="st-empty-hint">暂无报告</p>
-          </div>
-        </div>
-        <div class="st-card">
-          <div class="st-card-header"><h3>报告内容</h3></div>
-          <div class="st-card-body">
-            <div id="vip-report-viewer" style="line-height:1.7"><p class="st-empty-hint">请选择左侧报告</p></div>
-          </div>
+      <div class="st-card">
+        <div class="st-card-header"><h3>历史报告</h3></div>
+        <div class="st-card-body" id="vip-report-list">
+          <p class="st-empty-hint">暂无报告</p>
         </div>
       </div>
     </div>

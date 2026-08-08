@@ -27,17 +27,22 @@
 .vip-primary-tabs-wrap {
   overflow-x: auto;
   margin-bottom: 12px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
+/* 顶部两层菜单：保留窄屏横向滚动能力，但隐藏滚动条（视觉干净）。ponytail: 纯视觉，不影响 wheel/触控滑动 */
 .vip-primary-tabs,
 .vip-sub-tabs {
   overflow-x: auto;
-  scrollbar-width: thin;
+  scrollbar-width: none;          /* Firefox */
+  -ms-overflow-style: none;       /* 旧 Edge/IE */
 }
 
+.vip-primary-tabs-wrap::-webkit-scrollbar,
 .vip-primary-tabs::-webkit-scrollbar,
 .vip-sub-tabs::-webkit-scrollbar {
-  height: 6px;
+  display: none;                  /* Chrome/Safari */
 }
 
 .vip-toolbar {

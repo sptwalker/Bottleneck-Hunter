@@ -110,8 +110,6 @@ function vipAccountLabel(a) {
 }
 function clearVipContext() {
   vipState.sessionId = '';
-  const report = document.getElementById('vip-report');
-  if (report) report.innerHTML = '';
   const viewer = document.getElementById('vip-report-viewer');
   if (viewer) viewer.innerHTML = '';
   const log = document.getElementById('vip-chat-log');
@@ -132,7 +130,7 @@ function requireConcreteAccount(tab) {
   if (!pane) return true;
   pane.querySelectorAll('tbody').forEach(el => { el.innerHTML = ''; });
   pane.querySelectorAll('.st-empty-hint').forEach(el => { el.style.display = 'none'; });
-  const ids = ['vip-report-list', 'vip-report-viewer', 'vip-report', 'vip-chat-log'];
+  const ids = ['vip-report-list', 'vip-report-viewer', 'vip-chat-log'];
   ids.forEach(id => {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '';
