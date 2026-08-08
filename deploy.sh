@@ -13,6 +13,7 @@ cp -r data "data.bak.$(date +%Y%m%d_%H%M%S)"
 ls -dt data.bak.* 2>/dev/null | tail -n +6 | xargs -r rm -rf
 
 echo "==> [2/5] 拉取 main（fast-forward，不覆盖本地改动）"
+OLD_REV=$(git rev-parse HEAD)          # 记录 pull 前 HEAD，结尾据此判断本次是否有改动
 git fetch origin main
 git pull --ff-only origin main
 
@@ -31,5 +32,13 @@ for i in $(seq 1 30); do
 done
 [ "$ok" = "1" ] || { echo "!! 健康检查未过，看日志: docker logs $APP --tail 80"; exit 1; }
 
-echo "==> 部署完成: $(git rev-parse --short HEAD)"
+echo "==> 部署完成: $(git rev-parse --short HEAD)  时间: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+NEW_REV=$(git rev-parse HEAD)
+if [ "$OLD_REV" = "$NEW_REV" ]; then
+  echo "  本次无代码更新（HEAD 未变，仅重建镜像）"
+else
+  n=$(git rev-list --count "$OLD_REV".."$NEW_REV")
+  echo "  本次更新 $n 个提交（$(git rev-parse --short "$OLD_REV") → $(git rev-parse --short "$NEW_REV")）："
+  git --no-pager log --oneline "$OLD_REV".."$NEW_REV"
+fi
 $COMPOSE ps
