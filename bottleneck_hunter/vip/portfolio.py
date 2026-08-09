@@ -1742,12 +1742,22 @@ def value_series(wl_store, *, account_ref: str = "") -> dict:
     # 有则为准(cash-inclusive)；无(仅持仓导出/旧导入未落 total_equity)才回落持仓市值口径(不含现金)，如实标 basis。
     # 结构性产品/衍生品走 vip_derivative_terms、不进 positions，其当期 MTM 已含在权威净值里；纯衍生品账户既无
     # 股票快照又无权威净值时，退回单点当期 MTM 锚点，曲线不空白。ponytail: 持仓多于结单期的日期点被权威净值取代属预期。
-    # ponytail: 反向的半迁移态(最新一期是旧导入未落 total_equity、比已回填的旧期更新)下，末点保持权威净值口径、
-    #           不追加更新的持仓点——补持仓点(不含现金)会重新引入 P2-1 消除的同屏口径分裂，得不偿失；重新导入
-    #           使该期落 total_equity 即自愈。真正需要时的正解是读该期物化头条(sim_account)补回含现金口径,非补持仓和。
+    # 权威净值只覆盖部分期时(常见：仅最新一期落了 total_equity——旧期为迁移前导入，或重导被覆盖护栏挡下走
+    # _guarded_result 未回填 total_equity)：绝不用它整段替换更长的持仓市值历史，否则曲线塌成「1 权威点+1 推算点」
+    # =2 点(正是野村账户所见)。改按期合并：有权威净值的期用权威值(含现金)，缺的期回落持仓市值(诚实降级)，曲线
+    # 保持连续。全期都有权威净值(如招银)则纯权威口径不变。ponytail: 逐日现金/衍生品重估(P2 后续)后混合期也可补含现金。
     if account_ref:
         auth = _import_total_series(wl_store, account_ref)
-        if auth:
+        if auth and pos_series and len(auth) < len(pos_series):
+            auth_by_date = {p["as_of_date"]: p["total_equity"] for p in auth}
+            pos_dates = {p["as_of_date"] for p in pos_series}
+            merged = [{"as_of_date": p["as_of_date"],
+                       "total_equity": auth_by_date.get(p["as_of_date"], p["total_equity"])}
+                      for p in pos_series]
+            merged += [p for p in auth if p["as_of_date"] not in pos_dates]  # 纯衍生品期(无持仓)也并入
+            series = sorted(merged, key=lambda x: x["as_of_date"])
+            basis = "mixed_authoritative_and_positions"
+        elif auth:
             series, basis = auth, "authoritative_total_equity"
         else:
             series = pos_series
@@ -1766,7 +1776,11 @@ def value_series(wl_store, *, account_ref: str = "") -> dict:
         # 故只取推算的股票重估「增量」(proj − 真值底座)，叠加到最近权威净值上——现金/衍生品/融资按最新
         # 结单恒定 carry-forward，末点仍是含现金口径且与头条同源。ponytail: 现金等非股票腿假定期间不变;
         # 待逐日现金/衍生品重估(P2 后续)再细化，推算点本就是虚线待校准态。
-        if basis == "authoritative_total_equity" and account_ref and series:
+        # 混合口径：末点是权威净值(含现金,如野村最新期)同样走增量法；末点是持仓市值(不含现金)则原样叠加已一致。
+        last_is_auth = basis == "authoritative_total_equity" or (
+            basis == "mixed_authoritative_and_positions" and account_ref
+            and series[-1]["as_of_date"] in {p["as_of_date"] for p in _import_total_series(wl_store, account_ref)})
+        if last_is_auth and account_ref and series:
             base_stock = sum(_latest_truth_mv_map(wl_store, account_ref).values())
             proj = {**proj, "total_equity": round(series[-1]["total_equity"] + (proj["total_equity"] - base_stock), 2)}
         series = series + [proj]

@@ -446,6 +446,21 @@ def test_value_series_forward_fills_across_accounts(wl):
     assert by_date == {"2026-04-20": 1000.0, "2026-07-24": 23000.0}  # 7 月 = A2 22000 + A1 前向填充 1000
 
 
+def test_nomura_summary_unreliable_guard():
+    """野村 +17 偏移错列 → 产出不可能的账户级摘要(NAV≤0 / 负债>总资产)。判据须拦下真实坏值、放行正常账户。
+    拦下后 _parse_nomura_summary 会把 NAV/负债/贷款清零 → 下游回落「持仓+现金」算净值、不写幽灵贷款。"""
+    from bottleneck_hunter.vip.ingest import _nomura_summary_unreliable as u
+    # 5 期真实野村坏值（实测 account_summary），均须判不可信
+    assert u(-8984893, 0, 0)
+    assert u(-8760666, 6638865, 15399530)
+    assert u(-8245586, 7012811, 15258397)
+    assert u(-9011526, 0, 15578584)
+    assert u(-9485263, 6250061, 15735325)
+    # 正常账户放行：NAV>0 且 负债≤总资产（含有真实融资的场景）
+    assert not u(1942658.0, 1942658.0, 0.0)
+    assert not u(1942658.0, 2000000.0, 500000.0)
+
+
 def test_value_series_forward_fill_unit():
     """_forward_filled_series 纯函数自检：并集日期 + 各账户前向填充求和。"""
     rows = [
@@ -481,6 +496,43 @@ def test_value_series_derivative_only_account_uses_import_totals(wl):
     assert by["2026-05-31"] == 1020000.0          # 取同期最新一次导入
     assert len(vs["returns"]) == 1                # 两点 → 一段逐期收益率
     assert abs(vs["returns"][0]["pct"] - 2.0) < 0.01  # (1020000-1000000)/1000000
+
+
+def test_value_series_merges_partial_authoritative_with_positions(wl):
+    """回归:部分期有权威净值(仅最新期落 total_equity,旧期迁移前导入未落)——曾整段用权威净值替换
+    更长的持仓市值历史,曲线塌成「1 权威点+1 推算点」=2 点(野村账户症状)。修法:按期合并,有权威用权威、
+    缺的期回落持仓市值,曲线保持连续。断言:多持仓期全保留 + 最新期取权威净值(含现金) + basis 标混合。"""
+    import json
+
+    def stmt(period, mv, ch):
+        from bottleneck_hunter.vip.ingest import BrokerStatement, EquityHolding, ReconResult
+        return BrokerStatement(
+            broker="nomura", period_end=period, content_hash=ch,
+            holdings=[EquityHolding(ticker="AAPL", company="Apple", quantity=10, market_value_usd=mv)],
+            recon=ReconResult(holdings_count=1, holdings_total_usd=mv,
+                              statement_equities_total_usd=mv, delta_usd=0.0, status="ok"))
+
+    # 三期持仓快照（模拟野村本地已有的多期 positions）
+    portfolio.normalize_statement(wl, stmt("2026-04-20", 1000.0, "n-apr"), source_doc_id="d1", account_ref="NOMURA")
+    portfolio.normalize_statement(wl, stmt("2026-06-30", 1200.0, "n-jun"), source_doc_id="d2", account_ref="NOMURA")
+    portfolio.normalize_statement(wl, stmt("2026-07-31", 1500.0, "n-jul"), source_doc_id="d3", account_ref="NOMURA")
+
+    # 仅最新一期落权威净值（含现金 → 高于持仓市值），模拟服务器新导入态
+    with wl._write_conn() as conn:
+        conn.execute(
+            "INSERT INTO vip_imports(id,file_name,file_hash,file_type,detected_kind,status,"
+            "key_metrics_json,account_ref,created_at,user_id,market) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("n1", "n1.pdf", "n1", "pdf", "monthly_statement", "imported",
+             json.dumps({"period_end": "2026-07-31", "total_equity": 5000.0}),
+             "NOMURA", "2026-07-31T00:00:00+00:00", "u1", "us_stock"))
+
+    vs = portfolio.value_series(wl, account_ref="NOMURA")
+    real = [s for s in vs["series"] if not s.get("is_projected")]
+    by = {s["as_of_date"]: s["total_equity"] for s in real}
+    assert vs["basis"] == "mixed_authoritative_and_positions"
+    assert set(by) == {"2026-04-20", "2026-06-30", "2026-07-31"}  # 三期全保留，未塌成 2 点
+    assert by["2026-04-20"] == 1000.0 and by["2026-06-30"] == 1200.0  # 缺权威 → 持仓市值
+    assert by["2026-07-31"] == 5000.0                                # 有权威 → 权威净值(含现金)
 
 
 def test_holdings_as_of_falls_back_to_statement_period_for_derivative_only(wl):

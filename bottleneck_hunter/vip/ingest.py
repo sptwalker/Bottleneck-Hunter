@@ -1352,8 +1352,27 @@ def _parse_nomura_summary(pages: list[str]) -> dict:
         elif line == "Net Asset Value" and i + 17 < len(lines):
             summary["net_asset_value_usd"] = _num(lines[i + 17]) or summary["net_asset_value_usd"]
     # 已用贷款/负债（统一美元，取绝对值——结单里 Total Liabilities 为负数表示）
-    summary["loan_outstanding_usd"] = round(abs(summary["total_liabilities_usd"]), 2)
+    # +17 固定偏移对当前版式不可靠(见 _usd_before_pct)：NAV/负债列常整体错位 → 抽出「NAV≤0」或
+    # 「负债>总资产」这类不可能值(实测野村 NAV=-9.4M、负债=15.7M>总资产 6.25M)。检出即判定整段账户级
+    # 摘要不可信，把 NAV/负债/贷款清成「未知/0」而非输出毒值——下游 importer 见 NAV≤0 回落「持仓+现金」
+    # 算净值，loan=0 则清掉幽灵贷款(重导即自愈已入库的 15.7M 假贷款)。cash/equities/derivatives 走各自
+    # 明细解析(_parse_cash/_parse_nomura_equities/_parse_nomura_derivatives)，不受此保护性清零影响。
+    # ponytail: 拿到可复现的野村版式样本后，改 _parse_nomura_summary 按列锚点取回真实 NAV/负债，再撤此保护。
+    nav = summary["net_asset_value_usd"]
+    gav = summary["gross_asset_value_usd"]
+    liab = abs(summary["total_liabilities_usd"])
+    if _nomura_summary_unreliable(nav, gav, liab):
+        summary["net_asset_value_usd"] = 0.0
+        summary["total_liabilities_usd"] = 0.0
+        summary["loan_outstanding_usd"] = 0.0   # 不可读 → 按未建模处理(0)，而非输出不可能的巨额假贷款
+    else:
+        summary["loan_outstanding_usd"] = round(liab, 2)
     return summary
+
+
+def _nomura_summary_unreliable(nav: float, gav: float, liab: float) -> bool:
+    """野村账户级摘要不可信判据：NAV≤0 或 负债>总资产——真实私行账户均不可能，命中即 +17 偏移错列。"""
+    return nav <= 0 or (gav > 0 and abs(liab) > gav)
 
 
 def _nomura_symbol(company_line: str) -> str:
@@ -1973,6 +1992,11 @@ def demo() -> None:
     # 花旗已用融资抽取：认权威合计行的下一数值，取绝对值；无该行 → 0
     assert _citi_loan_outstanding_usd(["Total Margin Loans Outstanding\n11,435,214.48\nHong Kong"]) == 11435214.48
     assert _citi_loan_outstanding_usd(["no liabilities section here"]) == 0.0
+
+    # 野村账户级摘要不可信判据：实测坏值(NAV=-9.48M / 负债 15.7M>总资产 6.25M)须判不可信；正常账户须放行
+    assert _nomura_summary_unreliable(-9485263.0, 6250061.0, 15735325.0)      # NAV≤0 且 负债>总资产
+    assert _nomura_summary_unreliable(1000.0, 1942658.0, 3000000.0)          # NAV>0 但 负债>总资产
+    assert not _nomura_summary_unreliable(1942658.0, 1942658.0, 0.0)         # 正常账户放行
 
     d = Path(r"C:\Users\walker\Documents\walker\银行文件\花旗月结单")
     files = sorted(d.glob("*.PDF")) if d.exists() else []
