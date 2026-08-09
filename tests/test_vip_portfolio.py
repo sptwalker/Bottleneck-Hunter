@@ -461,6 +461,23 @@ def test_nomura_summary_unreliable_guard():
     assert not u(1942658.0, 2000000.0, 500000.0)
 
 
+def test_calibrate_targets_statement_period_not_today(wl):
+    """校准须对齐结算单期末日(as_of)、而非今天的最新推算。回归野村 7/31 结单在 8/9 导入的真实场景：
+    今天(8/9)的估值不该被拿去比 9 天前的 7/31 结单(跨天涨跌→假异常)，7/31 当天的推算才该被其结单校准。"""
+    from bottleneck_hunter.vip import projection
+    ref = "NOMURA"
+    wl.upsert_projection(account_ref=ref, as_of_date="2026-07-31", ticker="AAPL",
+                         market_value_base=1000.0, status="pending")           # 期末日推算：应被校准
+    wl.upsert_projection(account_ref=ref, as_of_date="2026-08-09", ticker="AAPL",
+                         market_value_base=1300.0, status="pending")           # 今天推算(+30%)：应原样保留
+    res = projection.calibrate_projections(
+        wl, ref, [{"symbol": "AAPL", "market_value_base": 1000.0}], as_of="2026-07-31")
+    assert res["n_calibrated"] == 1 and res["n_flagged"] == 0
+    got = {(p["as_of_date"], p["status"]) for p in wl.list_projections(account_ref=ref)}
+    assert ("2026-07-31", "calibrated") in got   # 期末日当天推算被其结单校准
+    assert ("2026-08-09", "pending") in got       # 今天推算不被 9 天前结单误校准/误标异常
+
+
 def test_value_series_forward_fill_unit():
     """_forward_filled_series 纯函数自检：并集日期 + 各账户前向填充求和。"""
     rows = [

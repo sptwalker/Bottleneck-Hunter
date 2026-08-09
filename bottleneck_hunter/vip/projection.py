@@ -535,7 +535,7 @@ CALIB_FLAG_THRESHOLD = 0.15  # |推算 vs 真值| 超过此比例 → flagged �
 
 def calibrate_projections(wl_store, account_ref: str, real_positions: list[dict],
                           doc_id: str = "", as_of: str = "") -> dict:
-    """新结算单物化后，用真值 positions 校准最近一日 pending 的 stock_mtm 推算。
+    """新结算单物化后，用真值 positions 校准**结算单期末日**(as_of) pending 的 stock_mtm 推算。
 
     对每个标的：diff=(推算市值-真值市值)/真值；|diff|>15% 标 flagged，否则 calibrated。
     仅校准 stock_mtm——衍生品估值需结算单级逐项数据（暂不可靠抽取），留后续。
@@ -549,7 +549,10 @@ def calibrate_projections(wl_store, account_ref: str, real_positions: list[dict]
         if sym:
             real_mv[sym] = real_mv.get(sym, 0.0) + (r.get("market_value_base") or 0.0)
 
-    d = wl_store.latest_projection_date(account_ref)
+    # 校准目标日必须对齐结算单期末日(as_of)，而非今天的最新推算：否则拿今天的估值去比 N 天前的
+    # 结单，跨天正常涨跌被误判偏差>阈值(假异常)，且期末日当天的推算永不被其自身结单校准(恒 pending)。
+    # 无 as_of(理论不至)才回落最新推算日。ponytail: 选期对齐，as_of 为空的历史回退保留。
+    d = (as_of or "").strip() or wl_store.latest_projection_date(account_ref)
     if not d:
         return {"account_ref": account_ref, "n_calibrated": 0, "n_flagged": 0, "n_unmatched": 0}
     pend = wl_store.list_projections(account_ref=account_ref, as_of_date=d, kind="stock_mtm", status="pending")
