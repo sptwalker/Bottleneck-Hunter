@@ -91,10 +91,66 @@ def _build_facts(wl_store, account_ref: str = "") -> tuple[str, dict]:
     return json.dumps(dossier, ensure_ascii=False, default=str), dossier
 
 
+def _candidate_pool_text(wl_store, dossier: dict, account_ref: str = "") -> str:
+    """观察池中「本账户尚未持有」的候选标的（带瓶颈环节/优先级），供顾问「推荐新标的」时有据可依。
+
+    这是本平台的核心信号（产业链瓶颈选股），但此前从不进 chat facts——顾问被问「推荐新投资对象」
+    时手里没有任何候选池，只能空谈。复用 recommend 的候选池引擎（已 for_market 隔离、去已持、命中
+    纲领排除词剔除），不重造。返回空串＝观察池无合适候选，顾问如实说明即可。
+    ponytail: 只给候选宇宙+瓶颈环节+优先级；逐名机构/评级/估值(_chip_context)是更重的扇出，
+              待「候选尽调」需求出现再接——顾问可提示需进一步个股尽调。
+    """
+    from bottleneck_hunter.vip import recommend as _recommend
+    try:
+        entries = wl_store.list_all()
+    except Exception:  # noqa: BLE001
+        entries = []
+    if not entries:
+        return ""
+    held = [h.get("ticker") for h in dossier.get("holdings", [])]
+    mand = _mandate.load_mandate(wl_store, account_ref=account_ref)
+    excl = _recommend._tokenize_exclusions(mand.get("exclusions", ""))
+    cands = _recommend.build_candidate_pool(entries, held, excl).get("candidates") or []
+    if not cands:
+        return ""
+    slim = [_recommend._prompt_candidate(c) for c in cands]
+    return ("【可选新标的候选池（观察池中本账户尚未持有，按系统综合评分优先级排序）】\n"
+            + json.dumps(slim, ensure_ascii=False))
+
+
+def _latest_recommend_text(wl_store, account_ref: str = "") -> str:
+    """带出荐新页面上一份投委会成品建议（精简），供顾问引用「已深思的结论」而非只有原始候选池。
+
+    荐新页(/account/recommend)产出的是 dossier+纲领+L1宏观+候选池经 4-persona 投委会评审后的成品：
+    每标的 action/理由/风险/纲领契合/软仓位 + 组合层建议 + 主席综述。信息量远大于原始候选池，此前从不
+    进 chat facts。复用 recommend.get_latest_recommendations（读表、零 LLM）。
+    诚实标注：这是用户上次点「生成荐新」时的历史快照（可能几天前的宏观/持仓口径），非本次实时研判——
+    带 generated_at 让顾问据此提示时效，不把旧结论当当前建议。无则返回空串（用户从未生成过荐新）。
+    ponytail: 只抽 candidates 的动作/理由/风险/契合/软仓位 + portfolio_note + chair_summary；
+              委员逐条语料(committee)不喂 chat，避免上下文膨胀与 number_guard 误标。
+    """
+    from bottleneck_hunter.vip import recommend as _recommend
+    rec = _recommend.get_latest_recommendations(wl_store, account_ref=account_ref)
+    if not rec or not (rec.get("candidates") or rec.get("portfolio_note")):
+        return ""
+    slim = [{"ticker": c.get("ticker", ""), "action": c.get("action", ""),
+             "reason": c.get("reason", ""), "risk": c.get("risk", ""),
+             "fit": c.get("fit", ""), "suggested_weight": c.get("suggested_weight", "")}
+            for c in (rec.get("candidates") or []) if c.get("ticker")]
+    body = {"generated_at": rec.get("generated_at", ""), "chair_summary": rec.get("chair_summary", ""),
+            "portfolio_note": rec.get("portfolio_note", ""), "candidates": slim}
+    return ("【上一份荐新建议（投委会评审成品，历史快照非实时——引用时须提示其生成时间与时效）】\n"
+            + json.dumps(body, ensure_ascii=False))
+
+
 _PROMPT = """你是私人财务AI顾问。请只依据下面的真实 facts 回答，不得编造金额/占比/股数。
 若用户问到 facts 里没有的数据，请明确说“当前数据中没有该信息”。
 回答要求：简体中文、专业但克制、分点回答，避免空泛。
 下面的「本账户投资纲领」是用户为该账户设定的投资目标与约束，回答涉及建议时须与之一致。
+若用户要求推荐新的投资标的，只能从 facts 内「可选新标的候选池」中挑选（结合瓶颈环节与纲领契合度），
+不得编造候选池以外的标的；池为空或未出现则如实说明观察池暂无合适候选、可先加入观察池跟踪。
+若 facts 含「上一份荐新建议」，可引用其投委会结论作参考，但须说明它是历史快照（点明其 generated_at 生成时间），
+提示如需最新研判请到荐新页重新生成；不得把旧建议当作本次实时结论。
 
 [facts]\n{facts}\n[/facts]
 
@@ -129,6 +185,14 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
         sid = create_chat_session(wl_store, title=question[:40], account_ref=account_ref)
     append_chat_message(wl_store, sid, "user", question, account_ref=account_ref)
     facts_text, dossier = _build_facts(wl_store, account_ref=account_ref)
+    # 荐新信号：观察池「未持有」候选池 + 上一份投委会荐新成品并进 facts，顾问被问「推荐新标的」时有据可依。
+    # 二者互补：候选池＝实时全集兜底；荐新成品＝已深思的历史结论（带 generated_at 供时效提示）。复用 recommend 引擎。
+    pool_text = _candidate_pool_text(wl_store, dossier, account_ref=account_ref)
+    if pool_text:
+        facts_text = facts_text + "\n" + pool_text
+    rec_text = _latest_recommend_text(wl_store, account_ref=account_ref)
+    if rec_text:
+        facts_text = facts_text + "\n" + rec_text
     # 特性二 P1：对话内实时行情立查——现价并进 facts（LLM 可见）+ guard 语料（防误标"未核到"）。
     # 只读、单趟、不写库；失败/无映射票留 skipped，不塞 0。市场从 store 取（现查只做 us_stock）。
     from bottleneck_hunter.vip import live_quote
