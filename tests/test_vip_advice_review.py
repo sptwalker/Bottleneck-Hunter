@@ -56,9 +56,11 @@ def test_review_isolates_sim_vote(wl):
     wl.record_prediction(provider="p", model="m", role_context=VIP_ROLE_CONTEXT,
                          ticker="NVDA", prediction_type=VIP_PT_ADVICE, prediction_value="加仓")
     pdate = wl.list_pending_predictions(role_context=VIP_ROLE_CONTEXT)[0]["prediction_date"]
-    # 造行情：预测日 100 → 最新 110（+10% → 加仓判对）
-    wl.save_snapshots([{"ticker": "NVDA", "date": pdate, "close": 100.0, "market": "us_stock"},
-                       {"ticker": "NVDA", "date": "2099-01-01", "close": 110.0, "market": "us_stock"}])
+    # 造行情：预测日 100 → 第 5 个交易日 110（+10% → 加仓判对）。固定持有期需 ≥6 行凑满 5 日。
+    snaps = [{"ticker": "NVDA", "date": pdate, "close": 100.0, "market": "us_stock"}]
+    snaps += [{"ticker": "NVDA", "date": f"2099-01-{d:02d}", "close": 100.0 + 2 * d, "market": "us_stock"}
+              for d in range(1, 6)]  # 第5个交易日(2099-01-05) close=110
+    wl.save_snapshots(snaps)
     stats = review_pending_advice(wl)
     assert stats["reviewed"] == 1 and stats["correct"] == 1
     # sim 的 vote 仍是 pending（is_correct=-1）

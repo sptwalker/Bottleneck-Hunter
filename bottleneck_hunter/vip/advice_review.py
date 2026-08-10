@@ -18,7 +18,13 @@ logger = logging.getLogger(__name__)
 # 方向判定阈值（ponytail: 校准旋钮，物理世界需 tuning；默认 ±3%）。
 _BAND = 3.0
 
-# 动作 → 期望方向：+1 看涨 / -1 看跌 / 0 横盘。advisory 用 减/持/加，recommend 用 避/关注/建仓。
+# 固定持有期（交易日）：评判视野统一，否则「预测日→结算日最新价」会让视野随结算时点膨胀，
+# 早出的建议视野长、晚出的视野短，命中率把不同时间窗混为一谈不可比。默认 5 个交易日。
+# ponytail: 5 日是校准旋钮，若日后想按周/双周评判改这一处即可。
+_HOLD_DAYS = 5
+
+# 动作 → 期望方向：+1 看涨 / -1 看跌 / 0 中性（持有/关注无明确方向）。
+# advisory 用 减/持/加，recommend 用 避/关注/建仓。
 _DIRECTION = {
     "加仓": 1, "建仓": 1,
     "减仓": -1, "规避": -1,
@@ -27,7 +33,7 @@ _DIRECTION = {
 
 
 def _judge(action: str, chg_pct: float, band: float = _BAND) -> bool | None:
-    """建议方向对不对？涨/跌/横盘 vs 加/减/持。未知动作→None（不结）。"""
+    """建议方向对不对？涨/跌 vs 加/减；持有/关注只要没大幅下跌即算合理。未知动作→None（不结）。"""
     want = _DIRECTION.get((action or "").strip())
     if want is None:
         return None
@@ -35,25 +41,25 @@ def _judge(action: str, chg_pct: float, band: float = _BAND) -> bool | None:
         return chg_pct > band
     if want < 0:
         return chg_pct < -band
-    return abs(chg_pct) <= band
+    # 持有/关注：无明确方向，涨了也是对（持有本就获利），只有大幅下跌（该减仓却没减）才算错。
+    return chg_pct >= -band
 
 
-def _chg_pct(mstore, ticker: str, prediction_date: str) -> float | None:
-    """从共享行情算 prediction_date→最新 的涨跌幅%。任一端缺价→None（跳过，不硬结）。"""
-    rows = mstore.get_snapshots(ticker, days=400)  # DESC by date
-    closes = [(r["date"], r["close"]) for r in rows if r.get("close")]
-    if len(closes) < 2:
+def _chg_pct(mstore, ticker: str, prediction_date: str, hold_days: int = _HOLD_DAYS) -> float | None:
+    """预测日→持有 hold_days 个交易日后的涨跌幅%。持有期未满或缺价→None（保持 pending，不硬结）。"""
+    rows = mstore.get_snapshots(ticker, days=400)
+    closes = sorted((r["date"], r["close"]) for r in rows if r.get("close"))  # ASC by date
+    # 预测日基准：升序里第一条不早于预测日的
+    base_idx = next((i for i, (d, _) in enumerate(closes) if d >= prediction_date), None)
+    if base_idx is None:
         return None
-    latest_close = closes[0][1]  # DESC → 第一条最新
-    # 预测日基准：取 date >= prediction_date 的最早一条（升序里第一条不早于预测日的）
-    base = None
-    for d, c in sorted(closes):
-        if d >= prediction_date:
-            base = c
-            break
+    exit_idx = base_idx + hold_days
+    if exit_idx >= len(closes):
+        return None  # 持有期未满，保持 pending 待下轮再评
+    base = closes[base_idx][1]
     if not base:
         return None
-    return round((latest_close / base - 1) * 100, 2)
+    return round((closes[exit_idx][1] / base - 1) * 100, 2)
 
 
 def review_pending_advice(mstore, *, band: float = _BAND) -> dict:
@@ -144,16 +150,29 @@ if __name__ == "__main__":
     assert VIP_PT_ADVICE != "vote" and VIP_PT_RECOMMEND != "vote"
     assert not VIP_ROLE_CONTEXT.startswith("committee_")
 
-    # _judge 九宫格：方向 × 涨/跌/横盘
+    # _judge：方向 × 涨/跌，加/减仓要求踩对方向
     assert _judge("加仓", 5.0) is True and _judge("加仓", -5.0) is False
     assert _judge("建仓", 5.0) is True and _judge("建仓", 1.0) is False
     assert _judge("减仓", -5.0) is True and _judge("减仓", 5.0) is False
     assert _judge("规避", -5.0) is True and _judge("规避", 0.0) is False
-    assert _judge("持有", 1.0) is True and _judge("持有", 5.0) is False
-    assert _judge("关注", -1.0) is True and _judge("关注", -5.0) is False
+    # 持有/关注：涨了也对（本就获利），只有大幅下跌才算错——不再苛求横盘
+    assert _judge("持有", 5.0) is True and _judge("持有", 1.0) is True
+    assert _judge("持有", -5.0) is False and _judge("持有", -1.0) is True
+    assert _judge("关注", 8.0) is True and _judge("关注", -8.0) is False
     assert _judge("横盘乱写", 5.0) is None  # 未知动作不结
-    # band 边界：恰好 ±band 视为横盘（持有对、加仓错）
-    assert _judge("持有", 3.0) is True and _judge("加仓", 3.0) is False
+    # band 边界：恰好 -band 仍算「没大幅下跌」→ 持有对；加仓恰好 +band 不算涨透→错
+    assert _judge("持有", -3.0) is True and _judge("加仓", 3.0) is False
+
+    # _chg_pct 固定持有期：预测日 +5 交易日的涨跌，持有期未满→None
+    class _MS:
+        def __init__(self, rows): self._rows = rows
+        def get_snapshots(self, t, days=400): return self._rows
+    # 8 天序列，预测日=d0，第 5 交易日(d5) close=110 → +10%
+    days = [{"date": f"2026-07-{d:02d}", "close": c}
+            for d, c in [(1, 100), (2, 101), (3, 102), (4, 103), (5, 104), (6, 110), (7, 111), (8, 112)]]
+    assert _chg_pct(_MS(days), "X", "2026-07-01") == 10.0  # d0=100 → d5=110
+    # 持有期未满：预测日在倒数第 3 天，凑不满 5 个交易日 → None（保持 pending）
+    assert _chg_pct(_MS(days), "X", "2026-07-06") is None
 
     # 二值编码语义自检（与 record_outcome 内 is_correct = 1 if abs(score_delta)<2.0 else 0 对齐）
     assert abs(0.0) < 2.0       # 对 → score_delta=0 → is_correct=1
