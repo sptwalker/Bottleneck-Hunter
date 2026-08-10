@@ -667,6 +667,75 @@ def test_migrate_flag_indicative_backfill(wl):
     assert flags2 == flags                          # 幂等
 
 
+def test_migrate_flags_indicative_with_trade_date(wl):
+    """(b) 根因回归：推介稿常带成交日(trade_date)，旧判据 trade_date IS NULL 会漏标。
+    无 MTM/名义 + 无 lot_key 即推介稿，即便带 trade_date 也须标；真单(有 lot_key)不误杀。"""
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm, save_derivative_term
+
+    save_derivative_term(wl, DerivativeTerm("equity_accumulator", "BE", "USD", 365,
+                                            {"afp": 15.0, "trade_date": "2026-07-28"}),
+                         source_file_name="termsheet-87409992.pdf", source_file_hash="h1",
+                         broker="nomura", account_ref="A1")   # 无 lot_key、无 MTM/名义、带 trade_date
+    save_derivative_term(wl, DerivativeTerm("equity_fcn", "NVDA", "USD", 90,
+                                            {"trade_date": "2026-07-28", "market_value_usd": 500000.0}),
+                         source_file_name="nomura_stmt.pdf", source_file_hash="h2",
+                         broker="nomura", account_ref="A1", lot_key="X:2026-09-04")  # 真单
+
+    conn = wl._connect()
+    try:
+        wl._migrate_flag_indicative_derivative_terms(conn)
+        flags = {r["source_file_name"]: r["is_indicative"]
+                 for r in conn.execute("SELECT source_file_name, is_indicative FROM vip_derivative_terms").fetchall()}
+    finally:
+        conn.close()
+    assert flags["termsheet-87409992.pdf"] == 1    # 带 trade_date 的推介稿仍被标记（旧判据会漏）
+    assert flags["nomura_stmt.pdf"] == 0            # 有 lot_key + MTM 的真单不误杀
+
+
+def test_derivative_facts_surfaced_to_summary_and_report(wl):
+    """(c) 顾问「看得见」衍生品：build_account_summary.derivatives 出敞口/压测/Greeks/barrier；
+    报告含衍生品组合风险测算小节。"""
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm, save_derivative_term
+
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
+    save_derivative_term(wl, DerivativeTerm("equity_accumulator", "MU", "USD", 365,
+                                            {"afp": 100.0, "knock_out_price": 130.0, "daily_shares": 3,
+                                             "step_up_daily_shares": 6, "market_value_usd": 50000.0,
+                                             "maturity": "2099-12-31"}),
+                         source_file_name="mu_stmt.pdf", source_file_hash="hmu",
+                         broker="citi", account_ref="A1", lot_key="100:991231")
+
+    summ = portfolio.build_account_summary(wl, account_ref="A1")
+    d = summ["derivatives"]
+    assert d["derivative_mtm_total"] == 50000.0
+    assert [x["underlying"] for x in d["derivative_exposure"]] == ["MU"]
+    assert "derivative_stress" in d and "net_greeks" in d and "derivative_barriers" in d
+
+    out = portfolio.generate_vip_report(wl, period="2026-06",
+                                        derivative_terms=[
+                                            DerivativeTerm("equity_accumulator", "MU", "USD", 365,
+                                                           {"afp": 100.0, "knock_out_price": 130.0,
+                                                            "daily_shares": 3, "step_up_daily_shares": 6})],
+                                        account_ref="A1")
+    assert "衍生品组合风险测算" in out["report_md"]
+
+
+def test_report_derivative_summary_dedups_same_lot(wl):
+    """(c) 同一笔 FCN 多期月结单不得在报告里重复成多行——按 (family, underlying, lot_key) 去重。"""
+    from bottleneck_hunter.vip.derivatives import DerivativeTerm
+
+    stmt = _stmt()
+    portfolio.normalize_statement(wl, stmt, account_ref="A1")
+    portfolio.materialize_portfolio(wl, account_ref="A1", cash_total_usd=stmt.total_cash_usd)
+    terms = [DerivativeTerm("equity_fcn", "NVDA", "USD", 90,
+                            {"coupon_pct": 0.12, "maturity": "2026-09-04"}, lot_key="XS999:2026-09-04")
+             for _ in range(3)]   # 三份月结单同一笔
+    md = portfolio.render_derivative_summary(terms)
+    assert md.count("固定票息票据") == 1
+
+
 def test_report_anchors_persisted(wl):
     """(b) 双数据锚点：生成时落 payload_json，报告 HTML 显示双时间戳。"""
     import json

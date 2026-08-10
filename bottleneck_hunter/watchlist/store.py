@@ -702,8 +702,9 @@ class WatchlistStore(
         新上传已在 classify_pdf 处以 product_intro 拦截不入库；本迁移只清历史入库的脏行。
         # ponytail: 判据是最佳努力启发式——原 PDF 文本未持久化(库里只有 terms_json)，无法复用
         #   _is_indicative_intro 的 "Indicative Terms" 原文判别，只能用行内可得信号。宁漏勿误杀：
-        #   ①文件名含 indicative(推介稿命名惯例，主信号)；②既无 MTM/名义/成交日、又无 lot_key
-        #   (真月结单必有 MTM；成交单有 trade_date/notional；条款单 docx 有 ISIN→lot_key 非空)。
+        #   ①文件名含 indicative(推介稿命名惯例，主信号)；②既无 MTM/名义、又无 lot_key
+        #   (真月结单必有 MTM；真成交单/条款单——irf/termsheet/docx——均有 lot_key 非空)。
+        #   不用 trade_date：推介稿也常带成交日("28 July 2026")，加该条件会漏标(实测泄漏行皆带 td)。
         #   标记可逆(错标 UPDATE is_indicative=0)、不 DELETE；精确根治需重传原 PDF 走新 classify 门。
         """
         try:
@@ -718,7 +719,6 @@ class WatchlistStore(
                      OR (
                             json_extract(terms_json, '$.market_value_usd') IS NULL
                         AND json_extract(terms_json, '$.notional')         IS NULL
-                        AND json_extract(terms_json, '$.trade_date')       IS NULL
                         AND COALESCE(lot_key, '') = ''
                      )
                    )

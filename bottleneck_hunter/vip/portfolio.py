@@ -861,7 +861,7 @@ def _current_derivative_rows(wl_store, account_ref: str) -> list[dict]:
     conn = wl_store._connect()
     try:
         q, p = wl_store._filtered(
-            "SELECT product_family, underlying_symbol, currency, terms_json, MAX(created_at) AS _mx "
+            "SELECT product_family, underlying_symbol, currency, lot_key, terms_json, MAX(created_at) AS _mx "
             "FROM vip_derivative_terms WHERE account_ref = ? AND is_indicative=0 "
             "GROUP BY product_family, underlying_symbol, lot_key ORDER BY _mx DESC",
             (account_ref,), table="vip_derivative_terms")
@@ -1911,7 +1911,48 @@ def build_account_summary(wl_store, *, account_ref: str = "") -> dict:
             "n_holdings": len(holdings),
             "loan_balance": round(account.get("loan_balance", 0) or 0, 2),
             "holdings": holdings, "top5_concentration_pct": round(top5, 1),
-            "account_ref": account.get("account_ref", account_ref or "")}
+            "account_ref": account.get("account_ref", account_ref or ""),
+            "derivatives": _build_derivative_facts(wl_store, account_ref,
+                                                   sum(h["market_value"] for h in holdings))}
+
+
+def _build_derivative_facts(wl_store, account_ref: str, stock_mv_total: float) -> dict:
+    """结构性产品/衍生品事实块——供 AI 顾问「看见」衍生品并给建议（复用现成引擎，不重算）。
+
+    无衍生品 → 返回 {}（顾问 prompt 据此跳过衍生品段）。压测/Greeks 缺现价/条款时纯引擎
+    诚实剔出并披露覆盖率；FCN 设计上 not_modeled，只出 barrier + 票息/到期事实。
+    """
+    from bottleneck_hunter.vip.projection import derivative_barrier_status
+    rows = _current_derivative_rows(wl_store, account_ref)
+    if not rows:
+        return {}
+    exposure = []
+    for r in rows:
+        t = r.get("terms") or {}
+        fam = r.get("product_family", "")
+        item = {"family": fam, "underlying": r.get("underlying_symbol", ""),
+                "market_value_usd": t.get("market_value_usd")}
+        if fam in ("equity_accumulator", "equity_decumulator"):
+            item |= {"afp": t.get("afp"), "knock_out_price": t.get("knock_out_price")}
+        elif fam == "equity_mli_booster":
+            item |= {"knock_in_pct_initial": t.get("knock_in_pct_initial"),
+                     "strike_pct_initial": t.get("strike_pct_initial"),
+                     "max_upside_pct": t.get("max_upside_pct")}
+        elif fam == "equity_fcn":
+            item |= {"coupon_pct": t.get("coupon_pct") if t.get("coupon_pct") is not None else t.get("coupon_pa_pct"),
+                     "maturity": t.get("maturity") or ""}
+        exposure.append(item)
+    sg = _stress_and_greeks(wl_store, account_ref, stock_mv_total)
+    barriers = [{"symbol": b.get("symbol"), "family": b.get("family"),
+                 "ko_buffer_pct": b.get("ko_buffer_pct"), "ki_buffer_pct": b.get("ki_buffer_pct"),
+                 "knock_out": b.get("knock_out"), "knock_in": b.get("knock_in"),
+                 "note": b.get("note")}
+                for b in derivative_barrier_status(wl_store, account_ref)]
+    return {"derivative_mtm_total": _derivative_mtm_total(wl_store, account_ref),
+            "derivative_exposure": exposure,
+            "derivative_stress": sg.get("stress", {}),
+            "net_greeks": sg.get("greeks", {}),
+            "derivative_barriers": barriers}
 
 
 def _pct_str(v) -> str:
@@ -1924,18 +1965,53 @@ def _pct_str(v) -> str:
         return ""
 
 
-def render_derivative_summary(terms: list) -> str:
+def _barrier_note(bar: dict) -> str:
+    """把 derivative_barrier_status 一项压成一句风险信号文案（HTML）。缺数据留空（诚实降级）。"""
+    if not bar:
+        return ""
+    if bar.get("knock_out"):
+        return "<b>已敲出</b>（合约提前了结/利润封顶）"
+    if bar.get("knock_in"):
+        return "<b>已敲入</b>（本金风险已激活）"
+    ko, ki = bar.get("ko_buffer_pct"), bar.get("ki_buffer_pct")
+    parts = []
+    if ko is not None:
+        warn = "，逼近敲出" if ko < 5 else ""
+        parts.append(f"距敲出 {ko:.1f}%{warn}")
+    if ki is not None:
+        warn = "，逼近敲入本金风险" if ki < 5 else ""
+        parts.append(f"距敲入 {ki:.1f}%{warn}")
+    return "；".join(parts)
+
+
+def render_derivative_summary(terms: list, *, barriers: list | None = None, mtm_by: dict | None = None) -> str:
     """把已抽条款的结构化产品压成风险摘要（HTML、通俗措辞；供报告风险提示）。
 
     仅渲染上游传入的 terms（报告生成前已按 is_indicative=0 过滤，推介稿不进这里）。
+    barriers/mtm_by 给定时，每条追加「当前市值 + 距敲出/敲入缓冲」（缺则跳过，诚实降级）。
+    同一 (family, underlying, lot_key) 只留最新一条——terms 按 created_at DESC，首见即最新；
+    否则多期月结单同一笔 FCN 会重复成多行（招银 NVDA FCN 三份月结单即此症）。
     """
     if not terms:
         return ""
     import html as _html
+    barr_by = {(b.get("family"), b.get("symbol"), b.get("lot_key") or ""): b for b in (barriers or [])}
+    mtm_by = mtm_by or {}
+    seen: set = set()
     L = ["<h3>衍生品 / 结构性产品</h3>", ""]
     for t in terms:
         fam = t.product_family
+        dedup_key = (fam, t.underlying_symbol, getattr(t, "lot_key", "") or "")
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
         sym = _html.escape(t.underlying_symbol)
+        mv = mtm_by.get(dedup_key)
+        note = _barrier_note(barr_by.get(dedup_key))
+        tail = (f"<br><span style=\"color:var(--muted)\">当前市值 ${mv:,.0f}" if mv is not None else "")
+        if note:
+            tail = (tail + "；" if tail else "<br><span style=\"color:var(--muted)\">") + note
+        tail = tail + "</span>" if tail else ""
         if fam in ("equity_accumulator", "equity_decumulator"):
             kind = "累积器" if fam.endswith("accumulator") else "减持器"
             afp = t.terms.get("afp")
@@ -1946,14 +2022,14 @@ def render_derivative_summary(terms: list) -> str:
                      f"{f'参考价 {afp}' if afp else ''}{'、' if afp and ko else ''}{f'敲出价 {ko}' if ko else ''}"
                      f"{'、' if (afp or ko) and ds else ''}{f'每日 {ds} 股' if ds else ''}"
                      f"{'；跌破参考价后每日接货变为 ' + str(su) + ' 股' if su else ''}。"
-                     f"主要风险：标的跌破参考价后接的股数加倍，越跌越接、亏损放大。")
+                     f"主要风险：标的跌破参考价后接的股数加倍，越跌越接、亏损放大。{tail}")
         elif fam == "equity_mli_booster":
             ki, st, mu = t.terms.get("knock_in_pct_initial"), t.terms.get("strike_pct_initial"), t.terms.get("max_upside_pct")
             L.append(f"- <b>{sym} 增益票据</b>："
                      f"{f'标的跌到初始价的 {_pct_str(ki)} 以下' if ki else ''}"
                      f"{'、' if ki and st else ''}{f'且到期未回到 {_pct_str(st)}' if st else ''}"
                      f"{'，就按标的跌幅一起亏损' if (ki or st) else ''}"
-                     f"{f'；上涨也只封顶赚 {_pct_str(mu)}' if mu else ''}。")
+                     f"{f'；上涨也只封顶赚 {_pct_str(mu)}' if mu else ''}。{tail}")
         elif fam == "equity_fcn":
             u = t.terms.get("underlying_name") or t.underlying_symbol
             coup = t.terms.get("coupon_pct") if t.terms.get("coupon_pct") is not None else t.terms.get("coupon_pa_pct")
@@ -1961,9 +2037,9 @@ def render_derivative_summary(terms: list) -> str:
             L.append(f"- <b>{_html.escape(str(u))} 固定票息票据</b>："
                      f"{f'每期票息 {_pct_str(coup)}' if coup is not None else '票息以条款为准'}"
                      f"{f'，{mat} 到期' if mat else ''}。"
-                     f"风险：挂钩的篮子跌进买入保护价后，到期要按篮子跌幅承担亏损。")
+                     f"风险：挂钩的篮子跌进买入保护价后，到期要按篮子跌幅承担亏损。{tail}")
         else:
-            L.append(f"- <b>{sym}</b>（{fam}）：条款见原文件。")
+            L.append(f"- <b>{sym}</b>（{fam}）：条款见原文件。{tail}")
     L.append("")
     return "\n".join(L)
 
@@ -2113,7 +2189,46 @@ def render_report_md(summary: dict, narrative: str = "", period: str = "", deriv
         L.append("")
     if derivatives_md:
         L.append(derivatives_md)
+        stress_md = _render_derivative_stress(summary.get("derivatives") or {})
+        if stress_md:
+            L.append(stress_md)
     return compliance.with_disclaimer("\n".join(L))
+
+
+def _render_derivative_stress(deriv_facts: dict) -> str:
+    """衍生品组合级压测 + 净 Greeks 的确定性 HTML 小节（数据取自 build_account_summary，无新计算）。
+
+    无压测数据（无衍生品/无股票）→ 空串。诚实披露覆盖率（FCN 等 not_modeled 剔出）。
+    """
+    stress = deriv_facts.get("derivative_stress") or {}
+    greeks = deriv_facts.get("net_greeks") or {}
+    scenarios = stress.get("scenarios") or []
+    if not scenarios and not greeks:
+        return ""
+    L = ["<h3>衍生品组合风险测算</h3>", ""]
+    if greeks:
+        nd, ng = greeks.get("net_delta_usd"), greeks.get("net_gamma_usd")
+        cov = greeks.get("coverage") or {}
+        L.append(f"<p>净 Delta <b>${nd:,.0f}</b>／1% 现价变动，净 Gamma（凸性）<b>${ng:,.0f}</b>。"
+                 f"<span style=\"color:var(--muted)\">正=多头方向（现价涨则盈）。"
+                 f"已测算 {cov.get('priced', 0)}/{cov.get('total', 0)} 笔"
+                 f"{'，未建模：' + '、'.join(cov.get('unmodeled') or []) if cov.get('unmodeled') else ''}。</span></p>")
+    if scenarios:
+        L.append("<table class='vip-report-tbl'><thead><tr><th>情景</th>"
+                 "<th class='r'>股票盈亏</th><th class='r'>衍生品盈亏</th>"
+                 "<th class='r'>组合合计</th></tr></thead><tbody>")
+        for s in scenarios:
+            L.append(f"<tr><td>{s.get('name', '')}</td>"
+                     f"<td class='r'>${s.get('stock_pnl', 0):,.0f}</td>"
+                     f"<td class='r'>${s.get('deriv_pnl', 0):,.0f}</td>"
+                     f"<td class='r'>${s.get('total_pnl', 0):,.0f}</td></tr>")
+        L.append("</tbody></table>")
+        cov = stress.get("derivative_coverage") or {}
+        if cov.get("unmodeled"):
+            L.append(f"<p style=\"color:var(--muted)\">注：{('、'.join(cov['unmodeled']))} 未纳入衍生品重放"
+                     f"（FCN 等按设计不建模，其尾部风险另见上方条款）。静态近似。</p>")
+    L.append("")
+    return "\n".join(L)
 
 
 _ADVISOR_PROMPT = """你是一支资深私人财务顾问团队，为高净值客户的真实证券组合出具投资分析意见。
@@ -2134,6 +2249,9 @@ _ADVISOR_PROMPT = """你是一支资深私人财务顾问团队，为高净值�
 
 ## 三、操作建议
 （给出方向性建议：加/减/持/对冲，说明理由；不承诺收益；**须贴合上面「本账户投资纲领」的风险偏好/回撤上限/聚焦方向/排除清单**）
+（若快照含 `derivatives` 字段：须专门就结构性产品/衍生品给出持有/减仓/对冲判断——点名 `derivative_barriers`
+里距敲出/敲入的缓冲（如缓冲<5% 提示利润封顶或本金风险将激活）与 `derivative_stress` 的下行情景尾部损失；
+只依据这些给出的数字，不得杜撰条款或价格）
 
 要求：直接输出上述三段 Markdown，不要额外前言/结语/免责（系统会另加免责声明）。"""
 
@@ -2214,8 +2332,16 @@ def generate_vip_report(wl_store, *, period: str = "", narrative: str = "",
         unverified = [c["token"] for c in checks if c["status"] == "unverified"]
         narrative = number_guard.annotate_unverified(narrative, facts)
 
+    from bottleneck_hunter.vip.projection import derivative_barrier_status
+    mtm_by = {(r["product_family"], r["underlying_symbol"], r.get("lot_key") or ""):
+              (r.get("terms") or {}).get("market_value_usd")
+              for r in _current_derivative_rows(wl_store, account_ref)}
+    derivatives_md = render_derivative_summary(
+        derivative_terms or [],
+        barriers=derivative_barrier_status(wl_store, account_ref),
+        mtm_by={k: v for k, v in mtm_by.items() if v is not None})
     report_md = render_report_md(summary, narrative, period,
-                                 derivatives_md=render_derivative_summary(derivative_terms or []),
+                                 derivatives_md=derivatives_md,
                                  data_as_of=data_as_of, market_as_of=market_as_of,
                                  perf_narrative_md=render_period_narrative(wl_store, account_ref))
     # F1：AI 报告挂"顾问可信度"角标——读回本模型 vip_advisor 历史校准(G5 复盘写入)，透明呈现。
