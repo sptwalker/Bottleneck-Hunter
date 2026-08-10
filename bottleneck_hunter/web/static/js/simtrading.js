@@ -532,8 +532,10 @@ export function initSimTrading() {
   if (marketSel) {
     marketSel.addEventListener('change', (e) => {
       stState.market = e.target.value;
+      // 切换市场：重置全部标签页缓存，只重载当前可见标签页（其余点击时懒加载）
       stState.tabLoaded = {};
-      loadAccountData();
+      stState.tabLoaded[stState.activeTab] = true;
+      loadTabData(stState.activeTab);
     });
   }
 
