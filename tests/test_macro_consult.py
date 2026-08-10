@@ -105,3 +105,22 @@ def test_portfolio_context_watchlist(tmp_path):
     text = mc._snapshot_text(snap)
     assert "用户观察池" in text and "NVDA" in text
     assert "空仓" in text             # positions=[] → 显式"空仓"
+
+
+def test_snapshot_text_provenance_and_positioning():
+    """T0/T2：快照文本带『数据口径』诚实标注(广度=观察池口径) + positioning 非空时渲染定位段。"""
+    market_ctx = {
+        "indices": {}, "macro": {}, "sectors": {}, "news": [], "markets": ["us_stock"],
+        "sentiment": {"vix": {"value": 18}, "stocks_above_sma50": 6, "stocks_total": 18},
+        "positioning": {"options": {"put_call_ratio": 0.9, "coverage": 12, "universe": 18}},
+    }
+    snap = mc._snapshot_entry(market_ctx, None)
+    assert snap["positioning"]["options"]["put_call_ratio"] == 0.9  # 定位字段随快照带出
+    text = mc._snapshot_text(snap)
+    assert "数据口径" in text and "观察池" in text  # 口径诚实标注 + 广度非全市场
+    assert "6/18" in text                           # 广度以观察池口径明示
+    assert "持仓定位" in text and "put_call_ratio" in text  # positioning 渲染
+
+    # positioning 为空(如 A股无期权/13F 源)时不渲染定位段，诚实降级
+    bare = mc._snapshot_entry({**market_ctx, "positioning": {}}, None)
+    assert "持仓定位" not in mc._snapshot_text(bare)

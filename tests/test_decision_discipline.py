@@ -236,3 +236,36 @@ class TestChipContext:
     def test_empty_when_no_data(self, store):
         from bottleneck_hunter.watchlist.decision_engine import _chip_context
         assert _chip_context(store.for_market("us_stock"), "UNKNOWN") == {}
+
+
+# ── 观察池『市场结构/持仓定位』聚合：期权 PCR + 机构 13F 季度增减方向 ──
+
+class TestPositioningSignals:
+    def test_pcr_and_13f_quarter_direction(self, store):
+        from bottleneck_hunter.watchlist.decision_engine import _positioning_signals
+        s = store.for_market("us_stock")
+        # 期权：成交量加权 PCR = sum(put)/sum(call) = (50+150)/(100+100) = 1.0
+        s.save_options([{"ticker": "AAA", "date": "2026-08-09", "total_call_volume": 100, "total_put_volume": 50},
+                        {"ticker": "BBB", "date": "2026-08-09", "total_call_volume": 100, "total_put_volume": 150}])
+        # 13F：共同机构净增减定方向。NVDA 加仓(added)、MU 减仓(trimmed)、TSM 仅一季→排除
+        s.save_institutional_holders("NVDA", [
+            {"holder_name": "Vanguard", "shares": 1000, "date": "2026-06-30"},
+            {"holder_name": "BlackRock", "shares": 500, "date": "2026-06-30"},
+            {"holder_name": "Vanguard", "shares": 800, "date": "2026-03-31"},
+            {"holder_name": "BlackRock", "shares": 500, "date": "2026-03-31"},
+            {"holder_name": "GoneNextQ", "shares": 100, "date": "2026-03-31"}])  # 退榜机构→不计
+        s.save_institutional_holders("MU", [
+            {"holder_name": "Fidelity", "shares": 300, "date": "2026-06-30"},
+            {"holder_name": "Fidelity", "shares": 500, "date": "2026-03-31"}])
+        s.save_institutional_holders("TSM", [
+            {"holder_name": "StateStreet", "shares": 700, "date": "2026-06-30"}])
+
+        out = _positioning_signals(s, ["AAA", "BBB", "NVDA", "MU", "TSM"])
+        assert out["options"]["put_call_ratio"] == 1.0
+        assert out["options"]["coverage"] == 2
+        assert out["institutional"]["quarter_net"] == {"added": 1, "trimmed": 1, "flat": 0}
+        assert out["institutional"]["coverage"] == 2  # TSM(单季) 被排除
+
+    def test_empty_when_no_data(self, store):
+        from bottleneck_hunter.watchlist.decision_engine import _positioning_signals
+        assert _positioning_signals(store.for_market("us_stock"), ["NODATA"]) == {}

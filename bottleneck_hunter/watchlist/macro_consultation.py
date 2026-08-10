@@ -109,6 +109,7 @@ def _snapshot_entry(market_ctx: dict, strategy: dict | None) -> dict:
         "sentiment": market_ctx.get("sentiment", {}),
         "macro": market_ctx.get("macro", {}),
         "sectors": market_ctx.get("sectors", {}),
+        "positioning": market_ctx.get("positioning", {}),  # 期权PCR/机构13F 观察池聚合(美股有/他市空)
         "news": (market_ctx.get("news") or [])[:15],
         "strategy": strat,
     }
@@ -122,13 +123,24 @@ def _snapshot_text(snap: dict) -> str:
                  if m in _SNAPSHOT_MARKET_NOTE), "")
     if note:
         parts.append(f"【{note}】")
+    # 数据口径与时点(诚实标注)：快照生成时刻 + 广度口径 + 各宏观指标自带 date=其数据时点。
+    sent = snap.get("sentiment", {}) or {}
+    breadth = ""
+    if sent.get("stocks_total"):
+        breadth = (f"；广度 stocks_above_sma50={sent.get('stocks_above_sma50')}/"
+                   f"{sent.get('stocks_total')} 为**观察池**口径(非全市场广度)")
+    parts.append(f"【数据口径：快照生成于 {snap.get('ts', '')[:16]}(北京展示另计)；价格为最近收盘；"
+                 f"宏观各指标 date 字段即其数据时点(月频如CPI/PCE会滞后){breadth}】")
     parts += [
         f"大盘指数: {json.dumps(snap.get('indices', {}), ensure_ascii=False)}",
-        f"市场情绪(含VIX): {json.dumps(snap.get('sentiment', {}), ensure_ascii=False)}",
-        f"宏观(利率/汇率等): {json.dumps(snap.get('macro', {}), ensure_ascii=False)}",
+        f"市场情绪(含VIX): {json.dumps(sent, ensure_ascii=False)}",
+        f"宏观(利率/汇率/通胀分项/就业等): {json.dumps(snap.get('macro', {}), ensure_ascii=False)}",
         f"板块表现(观察池聚合): {json.dumps(snap.get('sectors', {}), ensure_ascii=False)}",
-        f"市场近期新闻: {json.dumps(snap.get('news', []), ensure_ascii=False)}",
     ]
+    pos = snap.get("positioning") or {}
+    if pos:
+        parts.append(f"市场结构/持仓定位(观察池聚合·期权PCR+机构13F): {json.dumps(pos, ensure_ascii=False)}")
+    parts.append(f"市场近期新闻: {json.dumps(snap.get('news', []), ensure_ascii=False)}")
     st = snap.get("strategy") or {}
     if st:
         parts.append(f"当前L1策略结论: regime={st.get('regime')} / 风险偏好={st.get('risk_appetite')}"

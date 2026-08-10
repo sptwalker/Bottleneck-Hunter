@@ -1775,6 +1775,11 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
     tickers = by_market.get(market, [])
     active_markets = [market]
 
+    # 观察池聚合的『市场结构/持仓定位』：期权 PCR + 机构 13F 季度增减方向。
+    # 数据早已按 ticker 落库(options_pipeline/institutional_pipeline)但从未聚合进快照——
+    # US 市场特性提示词点名「关键指标：期权 PCR、机构持仓 13F」却拿不到，属『算了没接』的接线缺口。
+    positioning = _positioning_signals(store, tickers)
+
     # 先取真实宏观（含真实大盘指数），保证即使观察池为空 L1 也有真实大盘输入
     try:
         macro = await fetch_macro_data(store, active_markets)
@@ -1807,7 +1812,7 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
 
     if not all_snapshots:
         return {"indices": dict(real_indices), "sectors": {}, "sentiment": dict(macro_sentiment),
-                "macro": macro, "news": [], "markets": active_markets}
+                "macro": macro, "news": [], "markets": active_markets, "positioning": positioning}
 
     avg_change = sum(s.get("change_pct", 0) or 0 for s in all_snapshots) / max(len(all_snapshots), 1)
     avg_rsi = sum(s.get("rsi_14", 50) or 50 for s in all_snapshots) / max(len(all_snapshots), 1)
@@ -1859,7 +1864,64 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
         "macro": macro,
         "news": news_items[:10],
         "markets": active_markets,
+        "positioning": positioning,
     }
+
+
+def _positioning_signals(store: WatchlistStore, tickers: list[str]) -> dict:
+    """观察池聚合的『市场结构/持仓定位』信号：期权 PCR + 机构 13F 季度增减方向。
+
+    数据源均为美股(options_activity/institutional_holders 由 yfinance 落库)：A股/港股 无数据 → 返回空，
+    不污染其宏观口径。任一子项无数据则该键缺省(诚实降级)，绝不编造。
+    ponytail: 逐 ticker 读库(观察池上界 ~60 只、本地 SQLite)，量级足够；真成瓶颈再上批量查询。
+    """
+    out: dict = {}
+
+    # 期权 put/call：取每只最近一条，按成交量加权聚合(代表资金体量，>1 偏空/对冲需求高)
+    tot_call = tot_put = 0
+    pcr_names = 0
+    for t in tickers:
+        opt = store.get_options(t, limit=1)
+        if not opt:
+            continue
+        c = opt[0].get("total_call_volume") or 0
+        p = opt[0].get("total_put_volume") or 0
+        if c or p:
+            tot_call += c
+            tot_put += p
+            pcr_names += 1
+    if pcr_names and tot_call:
+        out["options"] = {"put_call_ratio": round(tot_put / tot_call, 3),
+                          "coverage": pcr_names, "universe": len(tickers)}
+
+    # 13F 机构持仓：对有≥2 个申报季的标的，按『两季共同机构』的净增减股数定方向——
+    # 只看两季都在的机构，规避 yfinance 只给 top-N 持有人导致的进出榜噪声(非真加减仓)。
+    added = trimmed = flat = covered = 0
+    for t in tickers:
+        rows = store.get_institutional_holders(t, limit=200)
+        dates = sorted({r.get("date") for r in rows if r.get("date")}, reverse=True)
+        if len(dates) < 2:
+            continue
+        cur = {r["holder_name"]: (r.get("shares") or 0) for r in rows if r.get("date") == dates[0]}
+        old = {r["holder_name"]: (r.get("shares") or 0) for r in rows if r.get("date") == dates[1]}
+        common = set(cur) & set(old)
+        if not common:
+            continue
+        delta = sum(cur[h] - old[h] for h in common)
+        covered += 1
+        if delta > 0:
+            added += 1
+        elif delta < 0:
+            trimmed += 1
+        else:
+            flat += 1
+    if covered:
+        out["institutional"] = {
+            "quarter_net": {"added": added, "trimmed": trimmed, "flat": flat},
+            "coverage": covered, "universe": len(tickers),
+            "note": "基于两个申报季共同机构的净增减股数(季频/覆盖有限，随季度积累更全)",
+        }
+    return out
 
 
 def _collect_watchlist_signals(store: WatchlistStore, market: str = "us_stock") -> list[dict]:

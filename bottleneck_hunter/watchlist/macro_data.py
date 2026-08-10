@@ -254,7 +254,9 @@ def default_benchmark_ticker(market: str) -> tuple[str, str]:
 # 各市场「专属」宏观指标 key（_FRED_GLOBAL 为全球共享、任何市场都可用，不在此列）。
 # 用于缓存兜底时剔除「他市专属」指标，避免 sp500/北向资金/美国CPI/中国LPR 等串味进另一市场的 L1 宏观口径。
 _MARKET_EXCLUSIVE_KEYS: dict[str, set[str]] = {
-    "us_stock": {"sp500", "nasdaq", "unemployment_rate", "cpi_yoy"},  # cpi_yoy=美国CPI(FRED)
+    "us_stock": {"sp500", "nasdaq", "unemployment_rate", "cpi_yoy",  # cpi_yoy=美国CPI(FRED)
+                 "core_cpi_yoy", "core_services_cpi_yoy", "core_pce_yoy",
+                 "initial_claims", "continued_claims"},
     "a_stock": {"cny_usd", "sse_index", "csi300", "northbound_flow",
                 "cn_cpi_yoy", "cn_m2_yoy", "cn_lpr_1y", "cn_10y_yield", "cn_social_financing"},
     "hk_stock": {"hsi", "hstech"},
@@ -294,10 +296,17 @@ _FRED_GLOBAL = [
     # 黄金：FRED 的 GOLDAMGBD228NLBM 已停更(返回400)，改用 akshare 上海金(见 _fetch_sge_gold)。
 ]
 
-# _FRED_US_DOMESTIC：美国本土数据（失业率/CPI）——仅美股纳入，不灌进 A股/港股主宏观口径。
+# _FRED_US_DOMESTIC：美国本土数据（失业率/CPI/就业边际/通胀分项）——仅美股纳入，不灌进 A股/港股主宏观口径。
+# 通胀分项(核心CPI/核心服务/核心PCE)与就业边际(初请/续请)是 L1 宏观分析师点名要的『确认信号』，
+# 走现成 FRED 管线：cpi 型按 13 月算同比，level 型取最新值+环比绝对变动。新增键须同步进 _MARKET_EXCLUSIVE_KEYS。
 _FRED_US_DOMESTIC = [
     ("unemployment_rate", "UNRATE", "美国失业率(%)", "level"),
     ("cpi_yoy", "CPIAUCSL", "美国CPI同比(%)", "cpi"),
+    ("core_cpi_yoy", "CPILFESL", "美国核心CPI同比(%,除食品能源)", "cpi"),
+    ("core_services_cpi_yoy", "CUSR0000SASLE", "美国核心服务CPI同比(%,除能源服务)", "cpi"),
+    ("core_pce_yoy", "PCEPILFE", "美国核心PCE同比(%,联储首选)", "cpi"),
+    ("initial_claims", "ICSA", "美国初请失业金人数(周,SA)", "level"),
+    ("continued_claims", "CCSA", "美国续请失业金人数(周,SA)", "level"),
 ]
 
 # 美股大盘指数的 FRED 兜底：yfinance(^GSPC/^IXIC)被 Yahoo 限流(429)时用 FRED 补。
