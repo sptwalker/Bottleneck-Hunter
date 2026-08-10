@@ -242,6 +242,7 @@ class WatchlistStore(
             self._migrate_vip_reports_account_ref(conn)
             self._migrate_chat_sessions_account_ref(conn)
             self._migrate_chat_messages_account_ref(conn)
+            self._migrate_experience_cards_widen_scope(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -895,6 +896,48 @@ class WatchlistStore(
             logger.info("chat_messages 已补 account_ref")
         except sqlite3.OperationalError as e:
             logger.warning("chat_messages 多账户迁移失败（可忽略）: %s", e)
+
+
+    def _migrate_experience_cards_widen_scope(self, conn) -> None:
+        """放宽 experience_cards.scope 的 CHECK，纳入 VIP 复盘卡片作用域（vip_portfolio/macro/ticker）。
+
+        旧基表 CHECK(scope IN ('global','sector','ticker')) 会拒绝 VIP 顾问策略复盘卡片入库。
+        列级 CHECK 无法 ALTER，只能重建表。幂等：DDL 已含 'vip_portfolio' 则跳过。卡片可再生，重建低风险。
+        按当前列的交集搬迁，兼容尚未跑全 ALTER 的旧库。
+        """
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='experience_cards'").fetchone()
+            if not row or not row["sql"] or "vip_portfolio" in row["sql"]:
+                return  # 表不存在或已放宽
+            conn.execute("""
+                CREATE TABLE experience_cards_new (
+                    id TEXT PRIMARY KEY,
+                    scope TEXT DEFAULT 'global'
+                        CHECK(scope IN ('global','sector','ticker','vip_portfolio','vip_macro','vip_ticker')),
+                    scope_key TEXT DEFAULT '',
+                    category TEXT DEFAULT 'lesson' CHECK(category IN ('pattern','lesson','rule')),
+                    title TEXT NOT NULL, content TEXT NOT NULL, evidence TEXT DEFAULT '[]',
+                    confidence REAL DEFAULT 0.5, applied_count INTEGER DEFAULT 0,
+                    source_review_id TEXT, created_at TEXT NOT NULL, updated_at TEXT,
+                    user_id TEXT DEFAULT '', win_count INTEGER DEFAULT 0, loss_count INTEGER DEFAULT 0,
+                    last_applied_at TEXT, market TEXT DEFAULT 'us_stock'
+                )
+            """)
+            known = {"id", "scope", "scope_key", "category", "title", "content", "evidence",
+                     "confidence", "applied_count", "source_review_id", "created_at", "updated_at",
+                     "user_id", "win_count", "loss_count", "last_applied_at", "market"}
+            common = [c for c in (self._table_cols(conn, "experience_cards") or []) if c in known]
+            collist = ", ".join(common)
+            conn.execute(f"INSERT INTO experience_cards_new({collist}) SELECT {collist} FROM experience_cards")
+            conn.execute("DROP TABLE experience_cards")
+            conn.execute("ALTER TABLE experience_cards_new RENAME TO experience_cards")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_exp_scope ON experience_cards(scope, scope_key)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_exp_confidence ON experience_cards(confidence DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_experience_market ON experience_cards(market)")
+            logger.info("experience_cards 已重建：scope CHECK 纳入 vip_portfolio/macro/ticker")
+        except sqlite3.OperationalError as e:
+            logger.warning("experience_cards 放宽 scope 重建失败（可忽略）: %s", e)
 
 
     def _parse_json_fields(self, d: dict, dict_fields: tuple = (),

@@ -695,7 +695,8 @@ MIGRATIONS: list[str] = [
     # 8B.4: experience_cards table
     """CREATE TABLE IF NOT EXISTS experience_cards (
         id              TEXT PRIMARY KEY,
-        scope           TEXT DEFAULT 'global' CHECK(scope IN ('global','sector','ticker')),
+        scope           TEXT DEFAULT 'global'
+                            CHECK(scope IN ('global','sector','ticker','vip_portfolio','vip_macro','vip_ticker')),
         scope_key       TEXT DEFAULT '',
         category        TEXT DEFAULT 'lesson' CHECK(category IN ('pattern','lesson','rule')),
         title           TEXT NOT NULL,
@@ -1314,6 +1315,25 @@ MIGRATIONS: list[str] = [
         market       TEXT DEFAULT 'us_stock'
     )""",
     "CREATE INDEX IF NOT EXISTS idx_vip_recommend_acct ON vip_recommendations(user_id, market, account_ref, created_at DESC)",
+    # ── VIP 顾问·反思式策略复盘（Phase 5c）：顾问对自身历史策略阶段性检讨 → 修正 → 沉淀经验卡片。──
+    #    区别于「复盘对错」的个股二值台账：这里是组合层的自我检讨叙事（critique/correction）+ 卡片闭环。
+    #    horizon 预留 portfolio(中周期,本切片)/macro(长)/ticker(短)；卡片走 experience_cards scope='vip_portfolio'。
+    """CREATE TABLE IF NOT EXISTS vip_strategy_reviews (
+        id           TEXT PRIMARY KEY,
+        account_ref  TEXT DEFAULT '',
+        horizon      TEXT DEFAULT 'portfolio',
+        period       TEXT DEFAULT '',
+        critique     TEXT DEFAULT '',
+        correction   TEXT DEFAULT '',
+        result_json  TEXT DEFAULT '{}',
+        provider     TEXT DEFAULT '',
+        model        TEXT DEFAULT '',
+        created_at   TEXT NOT NULL,
+        user_id      TEXT DEFAULT '',
+        market       TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_vip_strategy_review_acct "
+    "ON vip_strategy_reviews(user_id, market, account_ref, horizon, created_at DESC)",
     # ── VIP 子账户已用贷款/负债（结单口径，统一美元）：总览与账户视图第四栏「贷款」数据源 ──
     "ALTER TABLE sim_account ADD COLUMN loan_balance REAL DEFAULT 0",
     # ── VIP 衍生品：产品介绍/推介稿标记（非成交持仓）；读路径一律 is_indicative=0 过滤，不计入持仓/报告 ──

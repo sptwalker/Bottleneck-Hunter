@@ -73,6 +73,9 @@ _DRAFT_PROMPT = """你是一支资深私人财务顾问团队，为高净值客�
 ## 价源覆盖（代码判定，非你臆测）
 {coverage}
 
+## 历史经验教训（往期策略复盘沉淀，供参考勿盲从）
+{experience_cards}
+
 请输出**严格 JSON**（不要 markdown 代码块、不要 JSON 以外任何文字）：
 {{
   "portfolio_diagnosis": "组合层面诊断 2-4 句：集中度/行业暴露/与纲领风险偏好和回撤上限的匹配度",
@@ -96,6 +99,18 @@ def _render_coverage(dossier: dict) -> str:
 
 
 _MACRO_FALLBACK = "暂无最新宏观研判，请按中性稳健处理。"
+
+
+def _render_experience_cards(cards: list[dict]) -> str:
+    """把 vip_portfolio 经验卡片压成 prompt 文本（title/置信度/正文）。空 → 明确降级句。"""
+    if not cards:
+        return "（暂无往期复盘沉淀的经验卡片，按当前数据独立判断。）"
+    lines = []
+    for c in cards:
+        conf = c.get("confidence")
+        tag = f"·置信{round(float(conf) * 100)}%" if conf is not None else ""
+        lines.append(f"- 【{c.get('category', '')}{tag}】{c.get('title', '')}：{c.get('content', '')}")
+    return "\n".join(lines)
 
 
 def format_macro_for_prompt(wl_store) -> str:
@@ -915,10 +930,18 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
     llm, provider, model = models[0]
 
     # ── 1) 草案生成 ──
+    # 回填往期策略复盘沉淀的经验卡片（scope='vip_portfolio'）：闭环的「喂回」侧。逐卡 increment_card_applied，
+    # 记 applied_card_ids 供 strategy_review.score_prior_cards 认定「被注入过」。缺卡/异常降级空文本，绝不带崩。
+    try:
+        prior_cards = wl_store.get_experience_cards(
+            scope="vip_portfolio", scope_key=account_ref, limit=8)
+    except Exception:  # noqa: BLE001
+        prior_cards = []
     prompt = _DRAFT_PROMPT.format(
         dossier=json.dumps(dossier, ensure_ascii=False, default=str),
         mandate=inputs["mandate_text"], macro=inputs["macro_text"],
-        derivatives=inputs["deriv_text"], coverage=inputs["coverage_text"])
+        derivatives=inputs["deriv_text"], coverage=inputs["coverage_text"],
+        experience_cards=_render_experience_cards(prior_cards))
     resp = await llm.ainvoke(prompt)
     draft = _validate_draft(getattr(resp, "content", resp) if not isinstance(resp, str) else resp)
     if not draft["holdings"]:
@@ -972,8 +995,17 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
         "reconciled": reconciled,
         "provider": provider, "model": model,
         "advisor_calibration": advisor_calibration(wl_store, provider, model),  # F1：surfaced 可信度
+        "applied_card_ids": [c["id"] for c in prior_cards if c.get("id")],  # 5c：本轮注入的经验卡片（供 score_prior_cards）
         "disclaimer": compliance.DISCLAIMER_ZH,
     }
+    # 逐卡记一次「被引用」（applied_count+1 / last_applied_at），旁路容错——不影响建议主链路
+    for c in prior_cards:
+        if c.get("id"):
+            try:
+                wl_store.increment_card_applied(c["id"])
+            except Exception:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).debug("VIP 经验卡片 applied 计数失败（不影响建议）", exc_info=True)
     result["verification_receipt"] = verification_receipt(result)  # 0-10：读 unverified/data_as_of/generated_at
     # ── C-1 复盘打点（record_prediction，只写不评）：为 5b 复盘启动数据时钟，并给 VIP 自己的准确率信号。
     #    role_context=vip_advisor 独占桶，与 sim 的 committee_*/vote 物理隔离；旁路容错——打点失败只 debug、

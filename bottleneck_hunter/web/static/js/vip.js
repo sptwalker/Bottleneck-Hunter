@@ -22,7 +22,7 @@ const VIP_ACCOUNT_SUBTABS = [
   { key: 'advisory', label: '顾问决策' },
   { key: 'recommend', label: '荐新' },
   { key: 'reports', label: '报告复盘' },
-  { key: 'review', label: '复盘对错' },
+  { key: 'review', label: '策略复盘' },
   { key: 'chat', label: '咨询解读' },
 ];
 const vipState = {
@@ -548,7 +548,7 @@ function loadTab(tab) {
     case 'advisory': loadAdvisory(); break;
     case 'recommend': loadRecommend(); break;
     case 'reports': loadReports(); break;
-    case 'review': loadReviewLedger(); break;
+    case 'review': loadStrategyReview(); loadReviewLedger(); break;
     case 'chat': break;
     default: break;
   }
@@ -1951,6 +1951,83 @@ function renderReportCharts(root) {
   });
 }
 
+// 组合策略复盘：顾问自省（检讨/市场差距/修正）+ 经验卡片。针对具体账户。
+async function loadStrategyReview() {
+  const body = document.getElementById('vip-strategy-review-body');
+  const cardsEl = document.getElementById('vip-strategy-cards');
+  if (!body) return;
+  if (isAllAccountsSelected()) {
+    body.innerHTML = '<p class="st-empty-hint">策略复盘针对具体账户。请先进入某个子账户，查看/生成其组合策略复盘。</p>';
+    if (cardsEl) cardsEl.innerHTML = '';
+    return;
+  }
+  const ref = selectedAccountRef();
+  try {
+    const [rv, cd] = await Promise.all([
+      vipGet(`/account/strategy-reviews?account_ref=${encodeURIComponent(ref)}&horizon=portfolio&limit=1`),
+      vipGet(`/account/experience-cards?account_ref=${encodeURIComponent(ref)}&limit=20`),
+    ]);
+    renderStrategyReview((rv.reviews || [])[0]);
+    renderVipCards(cd.cards || []);
+  } catch (e) {
+    body.innerHTML = `<p class="st-empty-hint">加载失败：${esc(e.message || e)}</p>`;
+  }
+}
+
+function renderStrategyReview(rev) {
+  const body = document.getElementById('vip-strategy-review-body');
+  if (!body) return;
+  if (!rev) {
+    body.innerHTML = '<p class="st-empty-hint">尚无策略复盘。点「生成复盘」——顾问将检讨历史组合策略、指出与市场表现的差距、给出修正方向，并沉淀经验卡片。</p>';
+    return;
+  }
+  const res = rev.result_json || {};
+  const meta = [];
+  if (rev.period) meta.push(`区间 ${esc(rev.period)}`);
+  if (res.hit_rate_pct != null) meta.push(`命中率 ${fmtNum(res.hit_rate_pct, 1)}%`);
+  if (res.value_change_pct != null) meta.push(`净值 ${res.value_change_pct >= 0 ? '+' : ''}${fmtNum(res.value_change_pct, 1)}%`);
+  body.innerHTML =
+    `<div class="st-exp-meta" style="margin-bottom:8px">${meta.join(' · ') || '组合策略复盘'} · ${esc((rev.created_at || '').slice(0, 10))} · ${esc(rev.model || '')}</div>` +
+    (rev.critique ? `<div style="margin-bottom:8px"><strong>检讨：</strong>${esc(rev.critique)}</div>` : '') +
+    (res.market_reality ? `<div style="margin-bottom:8px"><strong>与市场差距：</strong>${esc(res.market_reality)}</div>` : '') +
+    (rev.correction ? `<div><strong>修正方向：</strong>${esc(rev.correction)}</div>` : '');
+}
+
+function renderVipCards(cards) {
+  const el = document.getElementById('vip-strategy-cards');
+  if (!el) return;
+  if (!cards.length) { el.innerHTML = ''; return; }
+  const catMap = { pattern: '模式', lesson: '教训', rule: '规则' };
+  el.innerHTML = '<h4 style="margin:10px 0 6px">经验卡片（复盘沉淀，回填给顾问）</h4>' + cards.map(c => {
+    const w = c.win_count || 0, l = c.loss_count || 0;
+    const wl = (w || l) ? ` · 胜${w}/负${l}` : '';
+    return `<div class="st-exp-card"><div class="st-exp-title">${esc(c.title || '')}</div>` +
+      `<div class="st-exp-meta">组合 · ${esc(catMap[c.category] || c.category || '')} · 置信度 ${fmtNum((c.confidence || 0) * 100, 0)}%${wl} · 引用 ${c.applied_count || 0} 次</div>` +
+      `<div class="st-exp-content">${esc(c.content || '')}</div></div>`;
+  }).join('');
+}
+
+async function runStrategyReview() {
+  if (isAllAccountsSelected()) {
+    setStatus('vip-strategy-review-status', '请先进入具体子账户，再生成该账户的策略复盘。', false);
+    return;
+  }
+  const ref = selectedAccountRef();
+  const btn = document.getElementById('vip-strategy-review-btn');
+  if (btn) btn.disabled = true;
+  setStatus('vip-strategy-review-status', '复盘中…（顾问自省 + 沉淀经验卡片，约 20-40 秒）', true);
+  try {
+    const r = await fetch(vipApiUrl(`/account/strategy-review?account_ref=${encodeURIComponent(ref)}`), { method: 'POST' });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(explainVipHttpError(r.status, d.detail || '')); }
+    setStatus('vip-strategy-review-status', '✓ 已生成', true);
+    await loadStrategyReview();
+  } catch (e) {
+    setStatus('vip-strategy-review-status', `✗ 生成失败：${e.message}`, false);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // 复盘对错：已结顾问/荐新建议的 动作/实际涨跌/对错 台账 + 命中率 KPI（顾问级，账户无关）。
 // 命中率是 vip_advisor 桶全量（Phase1 不按账户拆），故不要求具体账户。
 async function loadReviewLedger() {
@@ -2009,6 +2086,7 @@ async function regenReport() {
 
 function bindReportGen() {
   document.getElementById('vip-report-btn')?.addEventListener('click', regenReport);
+  document.getElementById('vip-strategy-review-btn')?.addEventListener('click', runStrategyReview);
 }
 
 function appendChat(role, text) {

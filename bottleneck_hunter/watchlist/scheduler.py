@@ -707,6 +707,39 @@ async def job_vip_advice_review(market: str = "us_stock") -> None:
             logger.error("VIP 建议复盘 (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
 
 
+async def job_vip_strategy_review(market: str = "us_stock") -> None:
+    """Phase 5c · VIP 组合策略复盘（月度）：先结上一轮经验卡片胜负，再为每个账户生成反思式复盘。
+
+    单模型「首席复盘官」自我检讨 → 落 vip_strategy_reviews + 沉淀 vip_portfolio 经验卡片（回填 advisory）。
+    advice-only，绝不写 sim_*。跟随 VIP 每用户开关（vip_project 分类）。"""
+    from bottleneck_hunter.vip.strategy_review import (
+        run_portfolio_strategy_review,
+        score_prior_cards,
+    )
+    for uid, store, budget in _iter_users("vip_project"):
+        wl = store.for_market(market)
+        try:
+            accounts = wl.list_vip_accounts(include_hidden_default=False)
+        except Exception as e:  # noqa: BLE001
+            logger.error("VIP 策略复盘取账户失败 (%s/user=%s): %s", market, uid[:8] if uid else "-", e)
+            continue
+        n_ok = 0
+        for acct in accounts or []:
+            ref = (acct.get("account_ref") or "").strip()
+            if not ref:
+                continue
+            try:
+                score_prior_cards(wl, ref)  # 先结上一轮卡片（区间命中率驱动贝叶斯自进化）
+                out = await run_portfolio_strategy_review(wl, ref, user_id=uid, budget=budget)
+                if out.get("review_id"):
+                    n_ok += 1
+            except Exception as e:  # noqa: BLE001
+                logger.error("VIP 策略复盘失败 (%s/user=%s/acct=%s): %s",
+                             market, uid[:8] if uid else "-", ref, e)
+        if n_ok:
+            _oplog(uid, "VIP 策略复盘", market=market, detail=f"{n_ok} 个账户已生成组合策略复盘 + 经验卡片")
+
+
 async def job_institutional_update() -> None:
     """每周全局更新美股机构持仓 & 分析师评级（yfinance 免费，落共享层，只受全局总开关）。"""
     store = _global_store()
@@ -1078,11 +1111,13 @@ _JOB_SPECS = [
     ("us_weekly_strategy",     job_weekly_strategy,     {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly macro strategy (L1+L2)"),
     ("us_auto_review",         job_auto_review,         {"market": "us_stock"}, _TZ_CN        , "daily",    "Auto review unreviewed sells"),
     ("us_vip_advice_review",   job_vip_advice_review,   {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly VIP advice review (再评即结)"),
+    ("us_vip_strategy_review", job_vip_strategy_review, {"market": "us_stock"}, _TZ_CN        , "monthly",  "Monthly VIP strategy review"),
     ("cn_daily_decision",      job_daily_decision,      {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock daily decision (L1-L4+committee)"),
     ("cn_catalyst_scan",       job_catalyst_scan,       {},                     _TZ_CN,         "daily",    "A-stock catalyst scan & expiry"),
     ("cn_weekly_strategy",     job_weekly_strategy,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly macro strategy (L1+L2)"),
     ("cn_auto_review",         job_auto_review,         {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock auto review unreviewed sells"),
     ("cn_vip_advice_review",   job_vip_advice_review,   {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly VIP advice review (再评即结)"),
+    ("cn_vip_strategy_review", job_vip_strategy_review, {"market": "a_stock"},  _TZ_CN,         "monthly",  "A-stock monthly VIP strategy review"),
     ("us_institutional_update", job_institutional_update, {},                   _TZ_CN        , "weekly",   "Weekly institutional holders & analyst ratings"),
     ("us_earnings_update",     job_earnings_update,     {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly earnings update (FMP, incl. consensus)"),
     ("cn_earnings_update",     job_earnings_update,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly earnings update (Tushare)"),
@@ -1132,6 +1167,7 @@ def list_job_categories() -> dict[str, str]:
         "us_catalyst_scan": "catalyst", "cn_catalyst_scan": "catalyst",
         "us_vip_project": "vip_project", "cn_vip_project": "vip_project",
         "us_vip_advice_review": "vip_project", "cn_vip_advice_review": "vip_project",
+        "us_vip_strategy_review": "vip_project", "cn_vip_strategy_review": "vip_project",
         "us_weekly_strategy": "weekly_strategy", "cn_weekly_strategy": "weekly_strategy",
         "us_auto_review": "auto_review", "cn_auto_review": "auto_review",
         "stale_refresh": "daily_decision",  # 情报/策略 LLM 兜底，随自动决策开关
@@ -1156,6 +1192,7 @@ def list_job_labels() -> dict[str, dict]:
         "us_weekly_strategy":  {"label": "美股·每周策略重生成",    "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "北京", "freq": "每周"},
         "us_auto_review":      {"label": "美股·自动复盘",          "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
         "us_vip_advice_review": {"label": "美股·VIP建议复盘",      "desc": "按最新行情再评 VIP 建议，结成准确率信号", "tz": "北京", "freq": "每周"},
+        "us_vip_strategy_review": {"label": "美股·VIP策略复盘",     "desc": "反思组合策略→修正+经验卡片", "tz": "北京", "freq": "每月1号"},
         "us_institutional_update": {"label": "机构持仓 & 分析师评级", "desc": "13F 机构持仓与评级（仅美股）", "tz": "北京", "freq": "每周"},
         "us_earnings_update":  {"label": "美股·财报更新",          "desc": "FMP 财报（含机构一致预期）",   "tz": "北京", "freq": "每周"},
         "cn_earnings_update":  {"label": "A股·财报更新",           "desc": "Tushare 业绩快报/预告",        "tz": "北京", "freq": "每周"},
@@ -1172,6 +1209,7 @@ def list_job_labels() -> dict[str, dict]:
         "cn_weekly_strategy":  {"label": "A股·每周策略重生成",     "desc": "L1 宏观 + L2 组合策略全面重算", "tz": "北京", "freq": "每周"},
         "cn_auto_review":      {"label": "A股·自动复盘",           "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
         "cn_vip_advice_review": {"label": "A股·VIP建议复盘",       "desc": "按最新行情再评 VIP 建议，结成准确率信号", "tz": "北京", "freq": "每周"},
+        "cn_vip_strategy_review": {"label": "A股·VIP策略复盘",      "desc": "反思组合策略→修正+经验卡片", "tz": "北京", "freq": "每月1号"},
         # 新增
         "stale_refresh":       {"label": "陈旧兜底刷新",           "desc": "刷新超过阈值未更新的观察池标的", "tz": "轮询", "freq": "每隔N小时"},
         "resting_limit_poll":  {"label": "挂单撮合轮询",           "desc": "开市时段按限价尝试成交，到期自动取消", "tz": "轮询", "freq": "每小时"},

@@ -1982,6 +1982,19 @@
     </div>
 
     <div class="st-tab-pane" id="vip-pane-review" role="tabpanel">
+      <div class="st-card" style="margin-bottom:16px">
+        <div class="st-card-header" style="gap:12px;flex-wrap:wrap">
+          <h3>组合策略复盘（顾问自省 + 经验卡片）</h3>
+          <div class="account-form" style="align-items:center;gap:12px;flex-wrap:wrap;margin:0">
+            <button class="btn btn-sm btn-primary" id="vip-strategy-review-btn">生成复盘</button>
+            <span class="account-status" id="vip-strategy-review-status"></span>
+          </div>
+        </div>
+        <div class="st-card-body">
+          <div id="vip-strategy-review-body"><p class="st-empty-hint">尚无策略复盘。选择具体账户后点「生成复盘」——顾问将检讨历史组合策略、指出与市场实际表现的差距、给出修正方向，并把教训沉淀成经验卡片回填给自己。</p></div>
+          <div id="vip-strategy-cards" style="margin-top:12px"></div>
+        </div>
+      </div>
       <div class="st-stat-grid st-stat-grid-4" style="margin-bottom:16px">
         <div class="st-stat-card">
           <span class="st-stat-value" id="vip-review-hitrate">--</span>
@@ -2001,7 +2014,7 @@
         </div>
       </div>
       <div class="st-card">
-        <div class="st-card-header"><h3>建议对错台账</h3></div>
+        <div class="st-card-header"><h3>建议对错台账（逐条市场真相·证据层）</h3></div>
         <div class="st-card-body" id="vip-review-ledger">
           <p class="st-empty-hint">加载中…</p>
         </div>

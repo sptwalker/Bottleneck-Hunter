@@ -127,6 +127,52 @@ class _ResearchMixin:
             conn.close()
 
 
+    def create_vip_strategy_review(self, account_ref: str, *, horizon: str = "portfolio",
+                                   period: str = "", critique: str = "", correction: str = "",
+                                   result_json: dict | None = None,
+                                   provider: str = "", model: str = "") -> str:
+        """写入 VIP 顾问·反思式策略复盘一行（组合中周期为主，horizon 预留 macro/ticker）。"""
+        rid = uuid.uuid4().hex[:12]
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO vip_strategy_reviews
+                   (id, account_ref, horizon, period, critique, correction, result_json,
+                    provider, model, created_at{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (rid, account_ref, horizon, period, critique, correction,
+                 json.dumps(result_json or {}, ensure_ascii=False),
+                 provider, model, _now_iso())
+                + self._user_insert_params() + self._market_insert_params(),
+            )
+        return rid
+
+
+    def list_vip_strategy_reviews(self, account_ref: str | None = None, *,
+                                  horizon: str = "portfolio", limit: int = 20) -> list[dict]:
+        conn = self._connect()
+        try:
+            conds = ["horizon = ?"]
+            params: list = [horizon]
+            if account_ref:
+                conds.append("account_ref = ?")
+                params.append(account_ref)
+            params.append(limit)
+            q, p = self._filtered(
+                f"SELECT * FROM vip_strategy_reviews WHERE {' AND '.join(conds)} "
+                "ORDER BY created_at DESC LIMIT ?",
+                tuple(params),
+            )
+            rows = conn.execute(q, p).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                self._parse_json_fields(d, dict_fields=("result_json",))
+                result.append(d)
+            return result
+        finally:
+            conn.close()
+
+
     def get_trades_without_review(self) -> list[dict]:
         conn = self._connect()
         try:

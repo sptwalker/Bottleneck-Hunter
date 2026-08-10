@@ -914,6 +914,42 @@ async def get_account_review_ledger(market: str = "us_stock", limit: int = 200,
     return advice_review.build_review_ledger(_wl(user, market), limit=limit)
 
 
+@router.post("/account/strategy-review")
+async def post_account_strategy_review(market: str = "us_stock", account_ref: str = "",
+                                       user: dict = Depends(require_vip_unlocked)):
+    """Phase 5c · 生成组合中周期策略复盘：顾问反思历史策略 → 检讨/市场差距/修正 + 沉淀经验卡片。只出建议不下单。"""
+    from bottleneck_hunter.vip import strategy_review
+    from bottleneck_hunter.web.oplog import record_operation
+    uid = user["sub"]
+    wl = _wl(user, market)
+    ref = _resolve_ref(wl, account_ref)
+    out = await strategy_review.run_portfolio_strategy_review(wl, ref, user_id=uid)
+    if out.get("error"):
+        raise HTTPException(status_code=400, detail=out["error"])
+    record_operation(uid, "生成组合策略复盘", category="vip_financial",
+                     detail=f"review={out['review_id'][:8]} account={ref}")
+    return out
+
+
+@router.get("/account/strategy-reviews")
+async def get_account_strategy_reviews(market: str = "us_stock", account_ref: str = "",
+                                       horizon: str = "portfolio", limit: int = 20,
+                                       user: dict = Depends(require_vip_unlocked)):
+    """该账户历史策略复盘列表（新→旧，每条含 critique/correction/result_json）。"""
+    wl = _wl(user, market)
+    ref = _resolve_ref(wl, account_ref)
+    return {"reviews": wl.list_vip_strategy_reviews(ref, horizon=horizon, limit=limit)}
+
+
+@router.get("/account/experience-cards")
+async def get_account_experience_cards(market: str = "us_stock", account_ref: str = "", limit: int = 20,
+                                       user: dict = Depends(require_vip_unlocked)):
+    """该账户 VIP 经验卡片（scope='vip_portfolio'，含置信度/胜负计数/引用次数）。与 sim 卡片物理隔离。"""
+    wl = _wl(user, market)
+    ref = _resolve_ref(wl, account_ref)
+    return {"cards": wl.get_experience_cards(scope="vip_portfolio", scope_key=ref, limit=limit)}
+
+
 @router.post("/account/advisory")
 async def post_account_advisory(market: str = "us_stock", account_ref: str = "",
                                 user: dict = Depends(require_vip_unlocked)):
