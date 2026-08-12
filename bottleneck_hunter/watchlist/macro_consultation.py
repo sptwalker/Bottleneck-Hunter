@@ -320,23 +320,53 @@ def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
     raw = prof.get("raw") if isinstance(prof.get("raw"), dict) else {}
     name = prof.get("company_name") or prof.get("name") or ""
 
-    # 财务/估值（照搬 committee.py:517-534 取字段模式）——仅保留非空项
-    val = {
+    def _nz(d: dict) -> dict:  # 仅保留非空项（None/"" 剔除；False/0 保留）
+        return {k: v for k, v in d.items() if v not in (None, "")}
+
+    # 三块基本面对齐分析师所需（raw_json 存 yfinance .info 全量，此处只是把已在库的字段配线出来）。
+    # ① 估值倍数（PE / EV·EBITDA / EV·Revenue …）
+    valuation = _nz({
         "trailing_pe": raw.get("trailingPE"), "forward_pe": raw.get("forwardPE"),
         "price_to_book": raw.get("priceToBook"),
         "price_to_sales": raw.get("priceToSalesTrailing12Months"),
         "ev_to_ebitda": raw.get("enterpriseToEbitda"),
+        "ev_to_revenue": raw.get("enterpriseToRevenue"),
         "peg": raw.get("pegRatio") or raw.get("trailingPegRatio"),
-        "profit_margin": raw.get("profitMargins"), "roe": raw.get("returnOnEquity"),
-        "revenue_growth": raw.get("revenueGrowth"),
-        "current_price": snap.get("close"),
         "market_cap": snap.get("market_cap") or raw.get("marketCap"),
-        "sector": prof.get("sector") or raw.get("sector"),
-        "change_pct": snap.get("change_pct"), "rsi_14": snap.get("rsi_14"),
-    }
-    val = {k: v for k, v in val.items() if v not in (None, "")}
-    if val:
-        parts.append(f"财务/估值/技术: {_json.dumps(val, ensure_ascii=False)}")
+        "enterprise_value": raw.get("enterpriseValue"), "beta": raw.get("beta"),
+    })
+    if valuation:
+        parts.append(f"估值倍数: {_json.dumps(valuation, ensure_ascii=False)}")
+
+    # ② 损益（近12月；yfinance 各 margin/growth 为小数，0.42=42%）
+    income = _nz({
+        "revenue_ttm": raw.get("totalRevenue"), "revenue_growth": raw.get("revenueGrowth"),
+        "net_income": raw.get("netIncomeToCommon"),
+        "gross_margin": raw.get("grossMargins"), "operating_margin": raw.get("operatingMargins"),
+        "ebitda_margin": raw.get("ebitdaMargins"), "profit_margin": raw.get("profitMargins"),
+        "roe": raw.get("returnOnEquity"), "roa": raw.get("returnOnAssets"),
+        "earnings_growth": raw.get("earningsGrowth"),
+    })
+    if income:
+        parts.append(f"损益(近12月,比率为小数): {_json.dumps(income, ensure_ascii=False)}")
+
+    # ③ 现金流与负债结构（经营/自由现金流 + 债务/流动性）
+    balance = _nz({
+        "operating_cashflow": raw.get("operatingCashflow"), "free_cashflow": raw.get("freeCashflow"),
+        "total_cash": raw.get("totalCash"), "total_debt": raw.get("totalDebt"),
+        "debt_to_equity": raw.get("debtToEquity"),
+        "current_ratio": raw.get("currentRatio"), "quick_ratio": raw.get("quickRatio"),
+    })
+    if balance:
+        parts.append(f"现金流与负债: {_json.dumps(balance, ensure_ascii=False)}")
+
+    # ④ 现价/技术
+    tech = _nz({
+        "current_price": snap.get("close"), "change_pct": snap.get("change_pct"),
+        "rsi_14": snap.get("rsi_14"), "sector": prof.get("sector") or raw.get("sector"),
+    })
+    if tech:
+        parts.append(f"现价/技术: {_json.dumps(tech, ensure_ascii=False)}")
 
     # 机构/评级/目标价（decision_engine._chip_context，纯读库）
     try:
@@ -369,6 +399,21 @@ def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
     except Exception:  # noqa: BLE001
         pass
 
+    # 个股期权情绪（per-stock PCR + 成交量；隐含波动率 IV 系统未采集，见末尾诚实声明）
+    try:
+        opts = store.get_options(ticker, limit=1) or []
+        if opts:
+            o = opts[0]
+            slim_o = _nz({
+                "date": o.get("date", ""), "put_call_ratio": o.get("put_call_ratio"),
+                "call_volume": o.get("total_call_volume"), "put_volume": o.get("total_put_volume"),
+                "unusual_volume": bool(o.get("unusual_volume")),
+            })
+            if slim_o.get("put_call_ratio") is not None:
+                parts.append(f"个股期权(PCR/成交量): {_json.dumps(slim_o, ensure_ascii=False)}")
+    except Exception:  # noqa: BLE001
+        pass
+
     # 催化剂（需 entry_id：观察池股才有；持仓不在池则无，如实略过）
     try:
         entry_id = next((e.get("id") for e in store.list_all()
@@ -385,6 +430,10 @@ def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
     if not parts:
         return (f"【聚焦个股：{ticker} — 该股暂无系统采集的深度资料，"
                 f"建议先加入观察池等待抓取；请如实说明数据不足，勿臆造其财务/估值/目标价】")
+    # 结构性缺口：明确告知分析师这些指标系统不采集/不可得，得到确定答复而非反复索要（勿臆造）
+    parts.append("系统当前未采集(如实告知用户,勿臆造数字): 个股隐含波动率(IV)、"
+                 "联邦基金期货/点阵图隐含降息路径、13F机构增减持方向(仅有当期持仓快照,无跨期对比)、"
+                 "多季度损益/现金流原始报表(仅有上表 TTM 汇总口径)")
     header = (f"【聚焦个股深度资料：{ticker}"
               f"{('（' + name + '）') if name else ''} — 数据系统定时采集，"
               f"快照日 {snap.get('date', '未知')}，可能滞后；缺项即系统未采集，勿臆造数字】")
