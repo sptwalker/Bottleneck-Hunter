@@ -260,6 +260,40 @@ async def _fetch_company_info_fmp(ticker: str) -> dict:
     return info
 
 
+async def _fetch_us_deep_financials(ticker: str) -> dict:
+    """美股深度财务（营收/净利/毛利率/ROE/负债率 + 净利同比 + 近5季）走 FMP，复用 FMPProvider。
+
+    FMP /stable/profile 只返回描述性字段+PE/市值，不含损益/现金流/负债；yfinance .info 含之但
+    国内直连必 429。故深度财务单独经 FMP income-statement+ratios 补，并进 raw_json['financials']。
+    单位：营收/净利=亿美元（*_yi 口径），各率=百分比；net_profit_yoy_pct 可验证"净利暴跌"类断言。
+    无 FMP key / 抓取失败 → {}（上层维持既有 profile，绝不覆盖真资料）。
+    """
+    from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
+    key = resolve_data_source_key("fmp")
+    if not key:
+        return {}
+    try:
+        from bottleneck_hunter.data_provider.providers import FMPProvider
+        fin = await asyncio.to_thread(FMPProvider()._fetch_financials_sync, ticker, key)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("FMP 深度财务(%s) 失败: %s", ticker, e)
+        return {}
+    if not fin:
+        return {}
+    qs = fin.get("quarters") or []
+    return {
+        "source": "fmp", "unit": "亿美元/百分比", "report_date": fin.get("report_date", ""),
+        "revenue_yi": fin.get("revenue_yi"), "revenue_yoy_pct": fin.get("revenue_yoy_pct"),
+        "net_profit_yi": fin.get("net_profit_yi"), "net_profit_yoy_pct": fin.get("net_profit_yoy_pct"),
+        "gross_margin_pct": fin.get("gross_margin_pct"), "roe_pct": fin.get("roe_pct"),
+        "debt_to_equity_pct": fin.get("debt_ratio_pct"),
+        "operating_cf_per_share": fin.get("cashflow_per_share"),
+        "quarters": [{"date": q.get("report_date", ""), "revenue_yi": q.get("revenue_yi"),
+                      "net_profit_yi": q.get("net_profit_yi"), "gross_margin_pct": q.get("gross_margin_pct"),
+                      "net_profit_yoy_pct": q.get("net_profit_yoy_pct")} for q in qs[:5]],
+    }
+
+
 def _fetch_astock_profile(ticker: str) -> dict:
     """通过 baostock 获取 A 股基本面，映射成 yfinance 风格 info dict——基本信息页遂能复用
     与美股同一套字段(估值/盈利/财务/成长)。baostock 走独立服务器，东财系(akshare/efinance)
@@ -630,6 +664,18 @@ async def _fetch_one(ticker: str, store: WatchlistStore, days: int = 180, market
                             except asyncio.TimeoutError:
                                 logger.warning("抓取 %s 公司信息超时(20s)，跳过", ticker)
                                 company_info = {}
+                        # 深度财务(损益/现金流/负债)：profile 端点不返回，单独经 FMP 补并进 raw_json['financials']。
+                        # 与本 if 块共用 24h staleness 门控，季度级数据日刷足矣、不打洪流。
+                        try:
+                            deep = await _fetch_us_deep_financials(ticker)
+                            if deep:
+                                company_info = company_info or {}
+                                company_info["financials"] = deep
+                                # 提升一个 content key：descriptive 失败时也不落空 stub，且投委会估值同享
+                                if deep.get("roe_pct") is not None:
+                                    company_info.setdefault("returnOnEquity", round(deep["roe_pct"] / 100, 4))
+                        except Exception as e:  # noqa: BLE001
+                            logger.debug("并入 %s 深度财务失败: %s", ticker, e)
                 if cache is not None:
                     cache[ck] = (snapshots, company_info)
 

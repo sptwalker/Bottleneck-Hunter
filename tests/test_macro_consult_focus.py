@@ -21,7 +21,15 @@ class _FullStore:
                         "operatingMargins": 0.62, "ebitdaMargins": 0.65,
                         "operatingCashflow": 2.8e10, "freeCashflow": 2.5e10,
                         "totalCash": 3.0e10, "totalDebt": 1.0e10, "debtToEquity": 25.0,
-                        "currentRatio": 4.2, "beta": 1.7, "marketCap": 3.2e12}}
+                        "currentRatio": 4.2, "beta": 1.7, "marketCap": 3.2e12,
+                        "financials": {"source": "fmp", "unit": "亿美元/百分比", "report_date": "2026-06-30",
+                                       "revenue_yi": 130.5, "revenue_yoy_pct": 12.3,
+                                       "net_profit_yi": 4.2, "net_profit_yoy_pct": -96.0,
+                                       "gross_margin_pct": 74.8, "roe_pct": 55.1,
+                                       "debt_to_equity_pct": 25.0, "operating_cf_per_share": 3.1,
+                                       "quarters": [{"date": "2026-06-30", "revenue_yi": 130.5,
+                                                     "net_profit_yi": 4.2, "gross_margin_pct": 74.8,
+                                                     "net_profit_yoy_pct": -96.0}]}}}
 
     def get_latest_snapshot(self, t):
         return {"close": 120.5, "market_cap": 3.2e12, "change_pct": 1.8,
@@ -72,6 +80,8 @@ def test_full_block_has_all_sections():
     assert "损益" in block and "30000000000" in block   # net_income（netIncomeToCommon）
     assert "0.75" in block            # gross_margin
     assert "现金流与负债" in block and "debt_to_equity" in block   # 现金流/债务结构
+    assert "深度财务(FMP" in block and "-96.0" in block            # FMP 净利同比(可验证"暴跌96%")
+    assert "近5季趋势" in block                                     # 逐季损益趋势
     assert "个股期权" in block and "0.62" in block                  # per-stock PCR
     assert "160.0" in block or "160" in block   # consensus/target price
     assert "数据中心营收再超预期" in block       # 个股新闻标题

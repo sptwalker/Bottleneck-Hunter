@@ -360,6 +360,24 @@ def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
     if balance:
         parts.append(f"现金流与负债: {_json.dumps(balance, ensure_ascii=False)}")
 
+    # ③b 深度财务·同比·近5季（FMP 采集，raw_json['financials']；营收/净利=亿美元，各率=百分比）。
+    # 国内 .info 必 429 拿不到损益，此块是"净利同比暴跌"类断言的唯一可验证来源。
+    fin = raw.get("financials") if isinstance(raw.get("financials"), dict) else {}
+    if fin:
+        head = _nz({
+            "revenue_yi": fin.get("revenue_yi"), "revenue_yoy_pct": fin.get("revenue_yoy_pct"),
+            "net_profit_yi": fin.get("net_profit_yi"), "net_profit_yoy_pct": fin.get("net_profit_yoy_pct"),
+            "gross_margin_pct": fin.get("gross_margin_pct"), "roe_pct": fin.get("roe_pct"),
+            "debt_to_equity_pct": fin.get("debt_to_equity_pct"),
+            "operating_cf_per_share": fin.get("operating_cf_per_share"),
+            "report_date": fin.get("report_date", ""),
+        })
+        if head:
+            parts.append(f"深度财务(FMP,亿美元/%): {_json.dumps(head, ensure_ascii=False)}")
+        qs = [q for q in (fin.get("quarters") or []) if q.get("date")]
+        if qs:
+            parts.append(f"近5季趋势(营收/净利亿美元,同比%): {_json.dumps(qs[:5], ensure_ascii=False)}")
+
     # ④ 现价/技术
     tech = _nz({
         "current_price": snap.get("close"), "change_pct": snap.get("change_pct"),
@@ -433,7 +451,7 @@ def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
     # 结构性缺口：明确告知分析师这些指标系统不采集/不可得，得到确定答复而非反复索要（勿臆造）
     parts.append("系统当前未采集(如实告知用户,勿臆造数字): 个股隐含波动率(IV)、"
                  "联邦基金期货/点阵图隐含降息路径、13F机构增减持方向(仅有当期持仓快照,无跨期对比)、"
-                 "多季度损益/现金流原始报表(仅有上表 TTM 汇总口径)")
+                 "逐季现金流/资产负债原始报表(有近5季损益趋势+经营现金流每股,无逐季完整报表)")
     header = (f"【聚焦个股深度资料：{ticker}"
               f"{('（' + name + '）') if name else ''} — 数据系统定时采集，"
               f"快照日 {snap.get('date', '未知')}，可能滞后；缺项即系统未采集，勿臆造数字】")
