@@ -2094,21 +2094,25 @@
 .dc-divider-time { font-size: 12.5px; font-weight: 700; color: #fff; letter-spacing: .5px; white-space: nowrap; }
 .dc-divider-data { font-size: 11px; color: rgba(255,255,255,.92); font-variant-numeric: tabular-nums; }
 .dc-consult-footer {
-  display: flex; gap: 8px; padding: 12px 20px; align-items: center;
+  display: flex; flex-direction: column; gap: 8px; padding: 12px 20px;
   border-top: 1px solid var(--border); background: var(--surface);
 }
+.dc-consult-focusbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dc-consult-inputrow { display: flex; align-items: center; gap: 8px; }
 .dc-consult-footer textarea {
-  flex: 1; resize: none; padding: 7px 10px; height: 34px; line-height: 20px;
+  flex: 1; resize: none; padding: 6px 10px; height: 34px; line-height: 20px;
   border: 1px solid var(--border); border-radius: 8px;
-  font-family: inherit; font-size: 13px;
+  font-family: inherit; font-size: 13px; box-sizing: border-box;
 }
-.dc-consult-footer button { flex: none; }
+/* 三类控件统一 34px 高、同垂直基线，杜绝按钮比下拉框/输入框高一截 */
+.dc-consult-footer .btn {
+  flex: none; height: 34px; padding: 0 14px; box-sizing: border-box;
+}
 .dc-consult-footer select {
-  flex: none; max-width: 160px; height: 34px; padding: 0 8px;
+  flex: none; max-width: 180px; height: 34px; padding: 0 8px; box-sizing: border-box;
   border: 1px solid var(--border); border-radius: 8px;
   font-family: inherit; font-size: 12px; background: var(--surface); color: inherit;
 }
-.dc-consult-focusbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; max-width: 340px; }
 .dc-consult-report-status { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .dc-consult-report-status a { color: var(--accent, #2563eb); text-decoration: none; }
 
