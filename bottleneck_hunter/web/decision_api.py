@@ -11,7 +11,7 @@ import json
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -222,6 +222,68 @@ async def macro_consult_history(market: str = "us_stock", user: dict = Depends(g
     store = _user_store(user).for_market(market)
     session = _load_session(store, market)
     return {"session": session, "stale": snapshot_is_stale(store, market, session)}
+
+
+# ── 聚焦个股：用户上传研报 PDF → 抽文本入库，注入焦点块供两位分析师引用 ──
+_MAX_REPORT_PDF_BYTES = 20 * 1024 * 1024   # 20MB
+
+
+@router.post("/macro/consult/upload-report")
+async def upload_focus_report(file: UploadFile = File(...),
+                              ticker: str = Form(...),
+                              market: str = Form("us_stock"),
+                              user: dict = Depends(get_current_user)):
+    """上传聚焦个股的研报 PDF（如 CFRA/投行研报）→ 抽前几页文本入库，随后每轮咨询自动注入焦点块。"""
+    tk = (ticker or "").strip().upper()
+    if not tk:
+        raise HTTPException(status_code=400, detail="缺少 ticker")
+    raw = await file.read()
+    if not raw or raw[:5] != b"%PDF-":
+        raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
+    if len(raw) > _MAX_REPORT_PDF_BYTES:
+        raise HTTPException(status_code=400, detail="文件超过 20MB 上限")
+
+    from bottleneck_hunter.watchlist.macro_consultation import extract_report_text
+    try:
+        text = extract_report_text(raw, pages=6)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("研报 PDF 解析失败")
+        raise HTTPException(status_code=422, detail=f"PDF 解析失败: {e}") from e
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="未能从 PDF 提取到文本（可能是扫描件/纯图片）")
+
+    store = _user_store(user).for_market(market)
+    store.save_focus_report(tk, file.filename or f"{tk}.pdf", text)
+
+    from bottleneck_hunter.web.oplog import record_operation
+    record_operation(user["sub"], "上传聚焦研报", category="decision",
+                     detail=f"{tk} chars={len(text)}")
+    return {"ok": True, "ticker": tk, "filename": file.filename or "", "chars": len(text)}
+
+
+@router.get("/macro/consult/report")
+async def get_focus_report(ticker: str, market: str = "us_stock",
+                           user: dict = Depends(get_current_user)):
+    """查询某聚焦股是否已上传研报（前端据此显示"已导入 X 字/移除"）。"""
+    tk = (ticker or "").strip().upper()
+    if not tk:
+        return {"exists": False}
+    rpt = _user_store(user).for_market(market).get_focus_report(tk)
+    if not rpt:
+        return {"exists": False, "ticker": tk}
+    return {"exists": True, "ticker": tk, "filename": rpt.get("filename", ""),
+            "chars": rpt.get("char_len", 0), "uploaded_at": rpt.get("uploaded_at")}
+
+
+@router.delete("/macro/consult/report")
+async def delete_focus_report(ticker: str, market: str = "us_stock",
+                              user: dict = Depends(get_current_user)):
+    """移除某聚焦股已上传的研报。"""
+    tk = (ticker or "").strip().upper()
+    if not tk:
+        raise HTTPException(status_code=400, detail="缺少 ticker")
+    removed = _user_store(user).for_market(market).delete_focus_report(tk)
+    return {"ok": True, "removed": removed}
 
 
 # ─────────────────────────────────────────────────────────

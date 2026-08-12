@@ -296,6 +296,48 @@ def _portfolio_context(store: WatchlistStore, market: str) -> tuple[list, list]:
     return watchlist, positions
 
 
+_MAX_REPORT_CHARS = 8000
+
+
+def _truncate_report(txt: str, max_chars: int = _MAX_REPORT_CHARS) -> str:
+    txt = (txt or "").strip()
+    if len(txt) > max_chars:
+        txt = txt[:max_chars] + f"\n…(研报较长，已截取前 {max_chars} 字；如需后段请在提问中指明)"
+    return txt
+
+
+def extract_report_text(pdf_source, pages: int = 6) -> str:
+    """PDF(bytes 或 path) → 前几页文本并截断，供上传端点/磁盘读取共用。解析失败抛异常由调用方处理。"""
+    from bottleneck_hunter.vip.derivatives import _read_pdf_text
+    return _truncate_report(_read_pdf_text(pdf_source, pages=pages))
+
+
+def _external_report_text(ticker: str, max_chars: int = _MAX_REPORT_CHARS) -> str:
+    """读取 FOCUS_REPORT_DIR 下 {ticker}.pdf 外部研究报告（如 CFRA/投行研报）文本，注入焦点块。
+
+    复用 vip.derivatives._read_pdf_text 提取前几页。env 未配 / 文件不存在 / 解析失败 → ""，
+    静默降级不影响其余资料。ticker 仅取字母数字点划并限定在配置目录内——读盘是信任边界，防路径穿越。
+    ponytail: 每次调用现抽（9 页 PDF <50ms）；多轮咨询若吃紧再按 (path, mtime) 加 lru_cache。
+    """
+    import os
+    from pathlib import Path
+    base = os.environ.get("FOCUS_REPORT_DIR", "").strip()
+    if not base:
+        return ""
+    tk = "".join(c for c in (ticker or "") if c.isalnum() or c in ".-").upper()
+    if not tk:
+        return ""
+    d = Path(base).resolve()
+    fp = (d / f"{tk}.pdf").resolve()
+    if fp.parent != d or not fp.is_file():   # 解析后必须直属配置目录，杜绝 ../ 逃逸
+        return ""
+    try:
+        return extract_report_text(fp, pages=4)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("读取 %s 外部研报失败: %s", tk, e)
+        return ""
+
+
 def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
     """聚焦个股深度资料块：财务/估值 + 机构评级/目标价 + 个股新闻 + 财报惊喜 + 催化剂。
 
@@ -445,13 +487,30 @@ def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
     except Exception:  # noqa: BLE001
         pass
 
+    # 外部研究报告（如 CFRA/投行研报，逐字注入，非系统采集，明确标注来源与"以报告内日期为准"）：
+    # 优先用户上传（DB，按用户+市场私有）；无则回退 FOCUS_REPORT_DIR 磁盘目录（运维预置）。
+    ext = ""
+    try:
+        rpt = store.get_focus_report(ticker)
+        if rpt and (rpt.get("report_text") or "").strip():
+            ext = rpt["report_text"]
+    except Exception:  # noqa: BLE001
+        pass
+    if not ext:
+        ext = _external_report_text(ticker)
+    if ext:
+        parts.append("外部研究报告(用户提供,如CFRA/投行研报;逐字摘录,以报告内注明日期为准,勿与系统快照日混淆):\n" + ext)
+
     if not parts:
         return (f"【聚焦个股：{ticker} — 该股暂无系统采集的深度资料，"
                 f"建议先加入观察池等待抓取；请如实说明数据不足，勿臆造其财务/估值/目标价】")
     # 结构性缺口：明确告知分析师这些指标系统不采集/不可得，得到确定答复而非反复索要（勿臆造）
-    parts.append("系统当前未采集(如实告知用户,勿臆造数字): 个股隐含波动率(IV)、"
-                 "联邦基金期货/点阵图隐含降息路径、13F机构增减持方向(仅有当期持仓快照,无跨期对比)、"
-                 "逐季现金流/资产负债原始报表(有近5季损益趋势+经营现金流每股,无逐季完整报表)")
+    gap_note = ("系统当前未采集(如实告知用户,勿臆造数字): 个股隐含波动率(IV)、"
+                "联邦基金期货/点阵图隐含降息路径、13F机构增减持方向(仅有当期持仓快照,无跨期对比)、"
+                "逐季现金流/资产负债原始报表(有近5季损益趋势+经营现金流每股,无逐季完整报表)")
+    if ext:
+        gap_note += "。注:上述部分缺口或已见于本次附带的外部研究报告,请优先引用报告内数据并标注其发布日"
+    parts.append(gap_note)
     header = (f"【聚焦个股深度资料：{ticker}"
               f"{('（' + name + '）') if name else ''} — 数据系统定时采集，"
               f"快照日 {snap.get('date', '未知')}，可能滞后；缺项即系统未采集，勿臆造数字】")

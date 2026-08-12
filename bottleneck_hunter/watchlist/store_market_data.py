@@ -514,3 +514,38 @@ class _MarketDataMixin:
         finally:
             conn.close()
 
+    # ── 聚焦个股·外部研究报告（用户上传 PDF 转文本，按用户+市场私有）──────────────
+    # company_profiles 用 SHARED_UID（公共数据）；研报是用户自购/自传，严格 self._user_id 隔离，不共享。
+    def save_focus_report(self, ticker: str, filename: str, text: str) -> None:
+        """upsert 用户为某股上传的研报文本（同股再传即替换）。"""
+        with self._write_conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO focus_reports
+                   (ticker, filename, report_text, char_len, uploaded_at, user_id, market)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (ticker, filename or "", text or "", len(text or ""), _now_iso(),
+                 self._user_id, self._market),
+            )
+
+    def get_focus_report(self, ticker: str) -> dict | None:
+        """取该用户+市场为某股上传的研报（含 report_text/filename/char_len/uploaded_at）；无则 None。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT ticker, filename, report_text, char_len, uploaded_at "
+                "FROM focus_reports WHERE ticker=? AND user_id=? AND market=?",
+                (ticker, self._user_id, self._market),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def delete_focus_report(self, ticker: str) -> bool:
+        """删除该用户+市场为某股上传的研报；返回是否删到行。"""
+        with self._write_conn() as conn:
+            n = conn.execute(
+                "DELETE FROM focus_reports WHERE ticker=? AND user_id=? AND market=?",
+                (ticker, self._user_id, self._market),
+            ).rowcount
+        return bool(n)
+

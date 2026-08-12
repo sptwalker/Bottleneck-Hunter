@@ -2108,6 +2108,9 @@
   border: 1px solid var(--border); border-radius: 8px;
   font-family: inherit; font-size: 12px; background: var(--surface); color: inherit;
 }
+.dc-consult-focusbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; max-width: 340px; }
+.dc-consult-report-status { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.dc-consult-report-status a { color: var(--accent, #2563eb); text-decoration: none; }
 
 /* ── 持仓风格调节面板 ── */
 .dc-style-intro { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 0 0 14px; }

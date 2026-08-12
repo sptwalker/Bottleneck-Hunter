@@ -1151,6 +1151,11 @@ export function initDecision() {
   document.getElementById('dc-consult-input')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendConsult(); }
   });
+  document.getElementById('dc-consult-focus')?.addEventListener('change', refreshFocusReport);
+  document.getElementById('dc-consult-report-btn')?.addEventListener('click', () => {
+    document.getElementById('dc-consult-report-file')?.click();
+  });
+  document.getElementById('dc-consult-report-file')?.addEventListener('change', uploadFocusReport);
 
   const navBtn = document.querySelector('.nav-btn[data-view="trading"]');
   if (navBtn) {
@@ -1821,6 +1826,61 @@ function populateConsultFocus(snap) {
   sel.innerHTML = '<option value="">不聚焦（宏观通盘）</option>'
     + opts.map(o => `<option value="${escDC(o.ticker)}">${o.label}</option>`).join('');
   if (cur && seen.has(cur)) sel.value = cur;   // 快照刷新后保留用户已选
+  refreshFocusReport();
+}
+
+// 焦点股切换/刷新：查该股是否已上传研报，更新上传按钮可用性与状态文案
+async function refreshFocusReport() {
+  const sel = document.getElementById('dc-consult-focus');
+  const btn = document.getElementById('dc-consult-report-btn');
+  const status = document.getElementById('dc-consult-report-status');
+  if (!sel || !btn || !status) return;
+  const tk = sel.value;
+  btn.disabled = !tk;
+  status.innerHTML = '';
+  if (!tk) return;
+  try {
+    const r = await dcFetch(`/macro/consult/report?ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`);
+    if (r && r.exists) {
+      status.innerHTML = `已导入研报 ${r.chars || 0} 字 <a href="#" id="dc-consult-report-del">移除</a>`;
+      document.getElementById('dc-consult-report-del')?.addEventListener('click', (e) => {
+        e.preventDefault(); deleteFocusReport(tk);
+      });
+    }
+  } catch { /* 状态查询失败不阻塞，静默 */ }
+}
+
+// 上传研报 PDF：FormData 走裸 fetch（dcFetch 会设 JSON header，破坏 multipart 边界）；同源 cookie 自动带
+async function uploadFocusReport(e) {
+  const input = e.target;
+  const file = input.files && input.files[0];
+  input.value = '';   // 允许同名文件二次触发 change
+  const tk = document.getElementById('dc-consult-focus')?.value;
+  if (!file || !tk) return;
+  if (file.size > 20 * 1024 * 1024) { toast('文件超过 20MB 上限'); return; }
+  const status = document.getElementById('dc-consult-report-status');
+  if (status) status.textContent = '上传解析中…';
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('ticker', tk);
+  fd.append('market', dcConsult.market);
+  try {
+    const resp = await fetch(`${DC_API}/macro/consult/upload-report`, { method: 'POST', body: fd, credentials: 'same-origin' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    toast(`已导入 ${dcName(tk)} 研报（${data.chars} 字），下轮提问分析师即可引用`);
+  } catch (err) {
+    toast('上传失败：' + err.message);
+  }
+  refreshFocusReport();
+}
+
+async function deleteFocusReport(tk) {
+  try {
+    await dcFetch(`/macro/consult/report?ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`, { method: 'DELETE' });
+    toast('已移除该股研报');
+  } catch (err) { toast('移除失败：' + err.message); }
+  refreshFocusReport();
 }
 
 function _fmtSnapTs(ts) {

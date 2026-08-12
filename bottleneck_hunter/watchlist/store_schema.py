@@ -465,6 +465,17 @@ CREATE TABLE IF NOT EXISTS company_profiles (
     PRIMARY KEY(ticker, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS focus_reports (
+    ticker      TEXT NOT NULL,
+    filename    TEXT DEFAULT '',
+    report_text TEXT DEFAULT '',
+    char_len    INTEGER DEFAULT 0,
+    uploaded_at TEXT,
+    user_id     TEXT DEFAULT '',
+    market      TEXT DEFAULT '',
+    PRIMARY KEY(ticker, user_id, market)
+);
+
 CREATE TABLE IF NOT EXISTS macro_snapshots (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,
