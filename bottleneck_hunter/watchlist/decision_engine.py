@@ -1132,6 +1132,25 @@ def _is_recent_duplicate(action, ticker, recent_map) -> bool:
             return True
     return False
 
+
+# execute_trade 只认这四种真实成交动作（trade_executor.py:128/132）；其余不可成交。
+_EXECUTABLE_ACTIONS = ("buy", "add", "sell", "reduce")
+
+
+def _is_executable_plan(ep: dict) -> bool:
+    """待确认区只收可成交指令：真实买卖动作 + 正股数。
+
+    LLM 有时输出 hold 或漏填 shares（缺省=0），这类计划过 constraint_validator 会 fail-open
+    （缺股数即早返 valid），却在确认执行时被 execute_trade 挡下（缺关键字段）、UI 显示“--股”。
+    生成期就地剔除，不落库污染待确认队列。
+    """
+    try:
+        sh = int(float(ep.get("shares") or 0))
+    except (TypeError, ValueError):
+        sh = 0
+    return ep.get("action") in _EXECUTABLE_ACTIONS and sh > 0
+
+
 def _format_recent_trades(recent_map: dict[str, list[dict]]) -> str:
     """把近期已执行交易 map 格式化为 prompt 文本（L3/L4 复用）。"""
     if not recent_map:
@@ -1479,6 +1498,13 @@ async def run_execution_plans(
                 )
                 blocked += 1
                 logger.info("拦截不合规执行计划 %s: %s", ticker, vres.violations)
+                continue
+
+            if not _is_executable_plan(ep):
+                # hold / 漏填股数的计划过校验会 fail-open 成 valid，落库即“--股”不可执行指令
+                logger.info("跳过不可执行计划 %s: action=%s shares=%s",
+                            ticker, ep.get("action"), ep.get("shares"))
+                skipped += 1
                 continue
 
             plan_id = store.create_execution_plan(
