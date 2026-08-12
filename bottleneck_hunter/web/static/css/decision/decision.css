@@ -2103,6 +2103,11 @@
   font-family: inherit; font-size: 13px;
 }
 .dc-consult-footer button { align-self: flex-end; }
+.dc-consult-footer select {
+  align-self: flex-end; max-width: 160px; padding: 7px 8px;
+  border: 1px solid var(--border); border-radius: 8px;
+  font-family: inherit; font-size: 12px; background: var(--surface); color: inherit;
+}
 
 /* ── 持仓风格调节面板 ── */
 .dc-style-intro { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 0 0 14px; }

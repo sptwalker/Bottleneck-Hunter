@@ -296,6 +296,101 @@ def _portfolio_context(store: WatchlistStore, market: str) -> tuple[list, list]:
     return watchlist, positions
 
 
+def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
+    """聚焦个股深度资料块：财务/估值 + 机构评级/目标价 + 个股新闻 + 财报惊喜 + 催化剂。
+
+    全部读库、零实时抓取，复用现成读取器（committee 的估值取字段模式 + decision_engine._chip_context
+    + store.get_news/get_earnings/get_catalysts_for_entry）。任一子项失败降级为空、绝不带崩。
+    全部子项皆空 → 返回诚实占位，让分析师如实说数据不足，绝不臆造。
+    """
+    import json as _json
+
+    ticker = (ticker or "").strip()
+    if not ticker:
+        return ""
+    parts: list[str] = []
+
+    prof = {}
+    snap = {}
+    try:
+        prof = store.get_company_profile(ticker) or {}
+        snap = store.get_latest_snapshot(ticker) or {}
+    except Exception:  # noqa: BLE001
+        pass
+    raw = prof.get("raw") if isinstance(prof.get("raw"), dict) else {}
+    name = prof.get("company_name") or prof.get("name") or ""
+
+    # 财务/估值（照搬 committee.py:517-534 取字段模式）——仅保留非空项
+    val = {
+        "trailing_pe": raw.get("trailingPE"), "forward_pe": raw.get("forwardPE"),
+        "price_to_book": raw.get("priceToBook"),
+        "price_to_sales": raw.get("priceToSalesTrailing12Months"),
+        "ev_to_ebitda": raw.get("enterpriseToEbitda"),
+        "peg": raw.get("pegRatio") or raw.get("trailingPegRatio"),
+        "profit_margin": raw.get("profitMargins"), "roe": raw.get("returnOnEquity"),
+        "revenue_growth": raw.get("revenueGrowth"),
+        "current_price": snap.get("close"),
+        "market_cap": snap.get("market_cap") or raw.get("marketCap"),
+        "sector": prof.get("sector") or raw.get("sector"),
+        "change_pct": snap.get("change_pct"), "rsi_14": snap.get("rsi_14"),
+    }
+    val = {k: v for k, v in val.items() if v not in (None, "")}
+    if val:
+        parts.append(f"财务/估值/技术: {_json.dumps(val, ensure_ascii=False)}")
+
+    # 机构/评级/目标价（decision_engine._chip_context，纯读库）
+    try:
+        from bottleneck_hunter.watchlist.decision_engine import _chip_context
+        chip = _chip_context(store, ticker)
+        if chip:
+            parts.append(f"机构持仓/分析师评级/一致目标价: {_json.dumps(chip, ensure_ascii=False)}")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 个股新闻（近 8 条，取 date/title/sentiment）
+    try:
+        news = store.get_news(ticker, limit=8) or []
+        slim = [{"date": n.get("date", ""), "title": n.get("title", ""),
+                 "sentiment": n.get("sentiment", "")} for n in news if n.get("title")]
+        if slim:
+            parts.append(f"个股近期新闻: {_json.dumps(slim, ensure_ascii=False)}")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 财报惊喜（近 2 期）
+    try:
+        earn = store.get_earnings(ticker) or []
+        slim_e = [{"report_date": e.get("report_date", ""), "eps_actual": e.get("eps_actual"),
+                   "eps_estimate": e.get("eps_estimate"), "eps_surprise_pct": e.get("eps_surprise_pct"),
+                   "revenue_actual": e.get("revenue_actual")} for e in earn[:2]]
+        slim_e = [e for e in slim_e if any(v not in (None, "") for v in e.values())]
+        if slim_e:
+            parts.append(f"财报惊喜(近2期): {_json.dumps(slim_e, ensure_ascii=False)}")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 催化剂（需 entry_id：观察池股才有；持仓不在池则无，如实略过）
+    try:
+        entry_id = next((e.get("id") for e in store.list_all()
+                         if str(e.get("ticker") or "").upper() == ticker.upper()), None)
+        if entry_id:
+            cats = store.get_catalysts_for_entry(entry_id, active_only=True) or []
+            slim_c = [{"type": c.get("catalyst_type", ""), "desc": c.get("description", ""),
+                       "expected_date": c.get("expected_date", "")} for c in cats[:5]]
+            if slim_c:
+                parts.append(f"活跃催化剂: {_json.dumps(slim_c, ensure_ascii=False)}")
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not parts:
+        return (f"【聚焦个股：{ticker} — 该股暂无系统采集的深度资料，"
+                f"建议先加入观察池等待抓取；请如实说明数据不足，勿臆造其财务/估值/目标价】")
+    header = (f"【聚焦个股深度资料：{ticker}"
+              f"{('（' + name + '）') if name else ''} — 数据系统定时采集，"
+              f"快照日 {snap.get('date', '未知')}，可能滞后；缺项即系统未采集，勿臆造数字】")
+    return header + "\n" + "\n".join(parts)
+
+
 async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, market: str):
     """打开抽屉：陈列 L1 数据快照 + 两位分析师自动流式开场解读（round0）。
 
@@ -368,9 +463,14 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
 
 
 async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
-                         market: str, question: str):
-    """用户提问：round1 两人独立作答 → round2 互评辩论（预算不足时降级）。"""
+                         market: str, question: str, focus_ticker: str = ""):
+    """用户提问：round1 两人独立作答 → round2 互评辩论（预算不足时降级）。
+
+    focus_ticker：可选聚焦个股（观察池/持仓内），置定则把该股深度资料块注入当轮 snapshot，
+    让分析师结合整体环境给出 position-aware 的守/减/加判断。
+    """
     question = (question or "").strip()
+    focus_ticker = (focus_ticker or "").strip()
     if not question:
         yield _sse("error", message="问题为空")
         return
@@ -399,11 +499,17 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
         transcript.append(snap)
         yield _sse("snapshot", **snap)
 
-    # 立即落库用户提问，防止断连丢问题
-    transcript.append({"type": "user", "ts": _now_iso(), "content": question})
+    # 立即落库用户提问，防止断连丢问题（聚焦个股加 [聚焦 X] 前缀，历史回看能看出这轮聊哪只）
+    q_content = f"[聚焦 {focus_ticker}] {question}" if focus_ticker else question
+    transcript.append({"type": "user", "ts": _now_iso(), "content": q_content})
     store.update_meeting_review(record_id, transcript_json=transcript)
 
     snapshot_text = _latest_snapshot_text(transcript)
+    # ponytail: 焦点块只注入当轮 prompt、不落 transcript 快照（焦点是每问一次的即时上下文，非会话常驻）；
+    #           round1/round2 共用此局部变量故两轮都带；跨轮 stream_retry 会丢焦点深度（仅网络容错，
+    #           升级路径＝把 focus_ticker 落进 user 条目、retry 时重建块）。
+    if focus_ticker:
+        snapshot_text += "\n" + _focus_ticker_block(store, focus_ticker)
     ctx_text = _context_for_prompt(transcript)
     active, do_round2, note = _degradation(budget)
     if note:

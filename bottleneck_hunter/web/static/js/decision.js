@@ -1800,6 +1800,27 @@ function renderConsultSnapshot(snap) {
     : '';
   const body = (rows.join('') + newsHtml) || '<div class="dc-snap-row">（暂无数据快照）</div>';
   el.innerHTML = dateBar + body;
+  populateConsultFocus(snap);
+}
+
+// 用快照里的观察池+持仓填充「聚焦个股」选择器（前端已收到这两份，零额外请求；按 ticker 去重、保留当前选中）
+function populateConsultFocus(snap) {
+  const sel = document.getElementById('dc-consult-focus');
+  if (!sel || !snap) return;
+  const seen = new Set();
+  const opts = [];
+  (snap.positions || []).forEach(p => {
+    const t = p && p.ticker; if (!t || seen.has(t)) return; seen.add(t);
+    opts.push({ ticker: t, label: `${dcName(t)}（持仓）` });
+  });
+  (snap.watchlist || []).forEach(w => {
+    const t = w && w.ticker; if (!t || seen.has(t)) return; seen.add(t);
+    opts.push({ ticker: t, label: `${escDC(w.name || dcName(t))}（观察池）` });
+  });
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">不聚焦（宏观通盘）</option>'
+    + opts.map(o => `<option value="${escDC(o.ticker)}">${o.label}</option>`).join('');
+  if (cur && seen.has(cur)) sel.value = cur;   // 快照刷新后保留用户已选
 }
 
 function _fmtSnapTs(ts) {
@@ -2049,11 +2070,12 @@ async function sendConsult() {
   if (!ta) return;
   const q = (ta.value || '').trim();
   if (!q || dcConsult.streaming) return;
-  appendConsultBubble({ type: 'user', content: q });
+  const focus = document.getElementById('dc-consult-focus')?.value || '';
+  appendConsultBubble({ type: 'user', content: focus ? `[聚焦 ${dcName(focus)}] ${q}` : q });
   ta.value = '';
   dcConsult.bubbles = {};   // 每轮重置流式气泡映射
   setConsultSending(true);
-  await consultStream('/macro/consult/ask', { market: dcConsult.market, question: q }, {
+  await consultStream('/macro/consult/ask', { market: dcConsult.market, question: q, focus_ticker: focus }, {
     onEvent: handleConsultEvent,
     onDone: () => setConsultSending(false),
     onError: (e) => { appendConsultBubble({ type: 'system', content: '⚠ ' + e.message }); setConsultSending(false); },

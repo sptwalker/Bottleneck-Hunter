@@ -174,6 +174,7 @@ async def save_portfolio_style(style: PortfolioStyle, market: str = "us_stock",
 class MacroConsultAsk(BaseModel):
     market: str = "us_stock"
     question: str = ""
+    focus_ticker: str = ""   # 可选聚焦个股（观察池/持仓内）：注入该股深度资料做 position-aware 讨论
 
 
 class MacroConsultRetry(BaseModel):
@@ -198,7 +199,8 @@ async def macro_consult_ask(request: Request, req: MacroConsultAsk,
     """用户提问：round1 各自作答 → round2 互评辩论（SSE）。"""
     from bottleneck_hunter.watchlist.macro_consultation import stream_consult
     store = _user_store(user).for_market(req.market)
-    return _sse_response(request, stream_consult(store, _user_budget(user), req.market, req.question))
+    return _sse_response(request, stream_consult(store, _user_budget(user), req.market, req.question,
+                                                 focus_ticker=req.focus_ticker))
 
 
 @router.post("/macro/consult/retry")
