@@ -1829,20 +1829,23 @@ function populateConsultFocus(snap) {
   refreshFocusReport();
 }
 
-// 焦点股切换/刷新：查该股是否已上传研报，更新上传按钮可用性与状态文案
+// 焦点股切换/刷新：查研报是否已上传，更新按钮 title 与状态文案。
+// 不聚焦(tk 空)＝管理「全球宏观背景研报」；聚焦某股＝管理该股研报。两者都可上传（按钮恒可用）。
 async function refreshFocusReport() {
   const sel = document.getElementById('dc-consult-focus');
   const btn = document.getElementById('dc-consult-report-btn');
   const status = document.getElementById('dc-consult-report-status');
   if (!sel || !btn || !status) return;
   const tk = sel.value;
-  btn.disabled = !tk;
+  btn.disabled = false;
+  btn.title = tk ? '为该聚焦个股上传研报 PDF（如 CFRA/投行研报）'
+                 : '上传全球宏观背景研报 PDF（各市场/聚焦均作背景注入两位分析师）';
   status.innerHTML = '';
-  if (!tk) return;
   try {
     const r = await dcFetch(`/macro/consult/report?ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`);
     if (r && r.exists) {
-      status.innerHTML = `已导入研报 ${r.chars || 0} 字 <a href="#" id="dc-consult-report-del">移除</a>`;
+      const lbl = tk ? `已导入研报 ${r.chars || 0} 字` : `已导入宏观背景研报 ${r.chars || 0} 字`;
+      status.innerHTML = `${lbl} <a href="#" id="dc-consult-report-del">移除</a>`;
       document.getElementById('dc-consult-report-del')?.addEventListener('click', (e) => {
         e.preventDefault(); deleteFocusReport(tk);
       });
@@ -1855,8 +1858,8 @@ async function uploadFocusReport(e) {
   const input = e.target;
   const file = input.files && input.files[0];
   input.value = '';   // 允许同名文件二次触发 change
-  const tk = document.getElementById('dc-consult-focus')?.value;
-  if (!file || !tk) return;
+  const tk = document.getElementById('dc-consult-focus')?.value || '';   // 空＝全球宏观背景研报
+  if (!file) return;
   if (file.size > 20 * 1024 * 1024) { toast('文件超过 20MB 上限'); return; }
   const status = document.getElementById('dc-consult-report-status');
   if (status) status.textContent = '上传解析中…';
@@ -1868,7 +1871,8 @@ async function uploadFocusReport(e) {
     const resp = await fetch(`${DC_API}/macro/consult/upload-report`, { method: 'POST', body: fd, credentials: 'same-origin' });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
-    toast(`已导入 ${dcName(tk)} 研报（${data.chars} 字），下轮提问分析师即可引用`);
+    const what = tk ? `${dcName(tk)} 研报` : '全球宏观背景研报';
+    toast(`已导入 ${what}（${data.chars} 字），下轮提问分析师即可引用`);
   } catch (err) {
     toast('上传失败：' + err.message);
   }
@@ -1877,8 +1881,8 @@ async function uploadFocusReport(e) {
 
 async function deleteFocusReport(tk) {
   try {
-    await dcFetch(`/macro/consult/report?ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`, { method: 'DELETE' });
-    toast('已移除该股研报');
+    await dcFetch(`/macro/consult/report?ticker=${encodeURIComponent(tk || '')}&market=${encodeURIComponent(dcConsult.market)}`, { method: 'DELETE' });
+    toast(tk ? '已移除该股研报' : '已移除全球宏观背景研报');
   } catch (err) { toast('移除失败：' + err.message); }
   refreshFocusReport();
 }

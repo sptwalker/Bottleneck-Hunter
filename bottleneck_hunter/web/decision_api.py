@@ -230,20 +230,24 @@ _MAX_REPORT_PDF_BYTES = 20 * 1024 * 1024   # 20MB
 
 @router.post("/macro/consult/upload-report")
 async def upload_focus_report(file: UploadFile = File(...),
-                              ticker: str = Form(...),
+                              ticker: str = Form(""),
                               market: str = Form("us_stock"),
                               user: dict = Depends(get_current_user)):
-    """上传聚焦个股的研报 PDF（如 CFRA/投行研报）→ 抽前几页文本入库，随后每轮咨询自动注入焦点块。"""
+    """上传研报 PDF → 抽前几页文本入库，随后每轮咨询自动注入。
+
+    ticker 非空＝聚焦个股研报（注入该股焦点块，按 user+market 隔离）；
+    ticker 空＝全球宏观背景研报（借哨兵键 + __macro__ 分区，跨市场全局、按 user 隔离，注入两位分析师每轮上下文）。
+    """
+    from bottleneck_hunter.watchlist.macro_consultation import (
+        MACRO_REPORT_KEY, MACRO_REPORT_MARKET, extract_report_text)
     tk = (ticker or "").strip().upper()
-    if not tk:
-        raise HTTPException(status_code=400, detail="缺少 ticker")
+    is_macro = not tk
     raw = await file.read()
     if not raw or raw[:5] != b"%PDF-":
         raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
     if len(raw) > _MAX_REPORT_PDF_BYTES:
         raise HTTPException(status_code=400, detail="文件超过 20MB 上限")
 
-    from bottleneck_hunter.watchlist.macro_consultation import extract_report_text
     try:
         text = extract_report_text(raw, pages=6)
     except Exception as e:  # noqa: BLE001
@@ -252,38 +256,43 @@ async def upload_focus_report(file: UploadFile = File(...),
     if not text.strip():
         raise HTTPException(status_code=422, detail="未能从 PDF 提取到文本（可能是扫描件/纯图片）")
 
-    store = _user_store(user).for_market(market)
-    store.save_focus_report(tk, file.filename or f"{tk}.pdf", text)
+    key = MACRO_REPORT_KEY if is_macro else tk
+    store = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market)
+    store.save_focus_report(key, file.filename or ("宏观背景研报.pdf" if is_macro else f"{tk}.pdf"), text)
 
     from bottleneck_hunter.web.oplog import record_operation
-    record_operation(user["sub"], "上传聚焦研报", category="decision",
-                     detail=f"{tk} chars={len(text)}")
-    return {"ok": True, "ticker": tk, "filename": file.filename or "", "chars": len(text)}
+    record_operation(user["sub"], "上传宏观背景研报" if is_macro else "上传聚焦研报", category="decision",
+                     detail=f"{'MACRO' if is_macro else tk} chars={len(text)}")
+    return {"ok": True, "ticker": "" if is_macro else tk, "macro": is_macro,
+            "filename": file.filename or "", "chars": len(text)}
 
 
 @router.get("/macro/consult/report")
-async def get_focus_report(ticker: str, market: str = "us_stock",
+async def get_focus_report(ticker: str = "", market: str = "us_stock",
                            user: dict = Depends(get_current_user)):
-    """查询某聚焦股是否已上传研报（前端据此显示"已导入 X 字/移除"）。"""
+    """查询是否已上传研报（前端据此显示"已导入 X 字/移除"）。ticker 空＝查全球宏观背景研报。"""
+    from bottleneck_hunter.watchlist.macro_consultation import MACRO_REPORT_KEY, MACRO_REPORT_MARKET
     tk = (ticker or "").strip().upper()
-    if not tk:
-        return {"exists": False}
-    rpt = _user_store(user).for_market(market).get_focus_report(tk)
+    is_macro = not tk
+    key = MACRO_REPORT_KEY if is_macro else tk
+    rpt = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market).get_focus_report(key)
     if not rpt:
-        return {"exists": False, "ticker": tk}
-    return {"exists": True, "ticker": tk, "filename": rpt.get("filename", ""),
-            "chars": rpt.get("char_len", 0), "uploaded_at": rpt.get("uploaded_at")}
+        return {"exists": False, "ticker": "" if is_macro else tk, "macro": is_macro}
+    return {"exists": True, "ticker": "" if is_macro else tk, "macro": is_macro,
+            "filename": rpt.get("filename", ""), "chars": rpt.get("char_len", 0),
+            "uploaded_at": rpt.get("uploaded_at")}
 
 
 @router.delete("/macro/consult/report")
-async def delete_focus_report(ticker: str, market: str = "us_stock",
+async def delete_focus_report(ticker: str = "", market: str = "us_stock",
                               user: dict = Depends(get_current_user)):
-    """移除某聚焦股已上传的研报。"""
+    """移除已上传的研报。ticker 空＝移除全球宏观背景研报。"""
+    from bottleneck_hunter.watchlist.macro_consultation import MACRO_REPORT_KEY, MACRO_REPORT_MARKET
     tk = (ticker or "").strip().upper()
-    if not tk:
-        raise HTTPException(status_code=400, detail="缺少 ticker")
-    removed = _user_store(user).for_market(market).delete_focus_report(tk)
-    return {"ok": True, "removed": removed}
+    is_macro = not tk
+    key = MACRO_REPORT_KEY if is_macro else tk
+    removed = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market).delete_focus_report(key)
+    return {"ok": True, "removed": removed, "macro": is_macro}
 
 
 # ─────────────────────────────────────────────────────────

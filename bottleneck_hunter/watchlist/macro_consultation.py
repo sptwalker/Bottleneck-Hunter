@@ -298,6 +298,11 @@ def _portfolio_context(store: WatchlistStore, market: str) -> tuple[list, list]:
 
 _MAX_REPORT_CHARS = 8000
 
+# 宏观背景研报（全局注入两位分析师）：借 focus_reports 表存一份，跨真实市场(美/A/港)全局、仍按用户隔离。
+# 用固定哨兵 ticker + 固定合成市场分区(for_market 纯克隆重绑、不 normalize)读写同一行；真实 ticker/市场不会撞。
+MACRO_REPORT_KEY = "__MACRO__"
+MACRO_REPORT_MARKET = "__macro__"
+
 
 def _truncate_report(txt: str, max_chars: int = _MAX_REPORT_CHARS) -> str:
     txt = (txt or "").strip()
@@ -336,6 +341,49 @@ def _external_report_text(ticker: str, max_chars: int = _MAX_REPORT_CHARS) -> st
     except Exception as e:  # noqa: BLE001
         logger.debug("读取 %s 外部研报失败: %s", tk, e)
         return ""
+
+
+def _macro_disk_report_text(max_chars: int = _MAX_REPORT_CHARS) -> str:
+    """读取 MACRO_REPORT_DIR(未配则回退 FOCUS_REPORT_DIR)下固定文件 _macro.pdf 的全球宏观背景研报文本。
+
+    文件名固定、无用户可控成分（不像个股按 ticker 拼名），仍 .resolve()+直属目录校验做纵深防护。
+    env 未配 / 文件不存在 / 解析失败 → ""，静默降级。宏观周报多含跨资产表，取前 8 页。
+    """
+    import os
+    from pathlib import Path
+    base = os.environ.get("MACRO_REPORT_DIR", "").strip() or os.environ.get("FOCUS_REPORT_DIR", "").strip()
+    if not base:
+        return ""
+    d = Path(base).resolve()
+    fp = (d / "_macro.pdf").resolve()
+    if fp.parent != d or not fp.is_file():   # 解析后必须直属配置目录，杜绝 ../ 逃逸
+        return ""
+    try:
+        return extract_report_text(fp, pages=8)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("读取全球宏观背景研报失败: %s", e)
+        return ""
+
+
+def _macro_report_block(store: WatchlistStore) -> str:
+    """全球宏观背景研报块：注入两位分析师每轮上下文（聚焦/不聚焦、各市场都带）。
+
+    优先用户上传（DB，focus_reports 借哨兵键 + 固定 __macro__ 分区 → 跨真实市场全局、按用户隔离）；
+    无则回退磁盘 _macro.pdf（运维预置、全员通用）。均无 → ""，静默降级不影响其余快照资料。
+    """
+    txt = ""
+    try:
+        rpt = store.for_market(MACRO_REPORT_MARKET).get_focus_report(MACRO_REPORT_KEY)
+        if rpt and (rpt.get("report_text") or "").strip():
+            txt = rpt["report_text"]
+    except Exception:  # noqa: BLE001
+        pass
+    if not txt:
+        txt = _macro_disk_report_text()
+    if not txt:
+        return ""
+    return ("\n【全球宏观背景研报（用户提供,如投行/机构宏观周报;逐字摘录,以报告内注明日期为准;"
+            "系全球/跨资产背景,对本土为外部驱动参考,勿与本土基本面主线或系统快照日混淆）】\n" + txt)
 
 
 def _focus_ticker_block(store: WatchlistStore, ticker: str) -> str:
@@ -566,6 +614,7 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
     yield _sse("snapshot", **snap)
 
     snapshot_text = _snapshot_text(snap)
+    snapshot_text += _macro_report_block(store)   # 全球宏观背景研报（不聚焦 round0 也带）
     ctx_text = _context_for_prompt(transcript)
     active, _r2, note = _degradation(budget)
     if note:
@@ -632,6 +681,7 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
     store.update_meeting_review(record_id, transcript_json=transcript)
 
     snapshot_text = _latest_snapshot_text(transcript)
+    snapshot_text += _macro_report_block(store)   # 全球宏观背景研报（聚焦/不聚焦都带）
     # ponytail: 焦点块只注入当轮 prompt、不落 transcript 快照（焦点是每问一次的即时上下文，非会话常驻）；
     #           round1/round2 共用此局部变量故两轮都带；跨轮 stream_retry 会丢焦点深度（仅网络容错，
     #           升级路径＝把 focus_ticker 落进 user 条目、retry 时重建块）。
@@ -728,6 +778,7 @@ async def stream_retry(store: WatchlistStore, budget: BudgetTracker | None,
     # 重建上下文：排除失败消息本身（避免"生成失败"文案污染），snapshot/上下文/提问/对方答复按轮复现
     ctx_src = [m for i, m in enumerate(transcript) if i != idx]
     snapshot_text = _latest_snapshot_text(ctx_src)
+    snapshot_text += _macro_report_block(store)   # 全球宏观背景研报（重试也带，保持与原轮一致）
     ctx_text = _context_for_prompt(ctx_src)
     question = ""
     if rnd >= 1:
