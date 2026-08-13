@@ -1845,7 +1845,12 @@ async function refreshFocusReport() {
     const r = await dcFetch(`/macro/consult/report?ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`);
     if (r && r.exists) {
       const lbl = tk ? `已导入研报 ${r.chars || 0} 字` : `已导入宏观背景研报 ${r.chars || 0} 字`;
-      status.innerHTML = `${lbl} <a href="#" id="dc-consult-report-del">移除</a>`;
+      const cnt = r.count || 1;
+      const hist = cnt > 1 ? ` · 共 ${cnt} 份 <a href="#" id="dc-consult-report-hist">往期</a>` : '';
+      status.innerHTML = `${lbl}${hist} <a href="#" id="dc-consult-report-del">移除</a>`;
+      document.getElementById('dc-consult-report-hist')?.addEventListener('click', (e) => {
+        e.preventDefault(); openReportHistory(tk);
+      });
       document.getElementById('dc-consult-report-del')?.addEventListener('click', (e) => {
         e.preventDefault(); deleteFocusReport(tk);
       });
@@ -1884,7 +1889,119 @@ async function deleteFocusReport(tk) {
     await dcFetch(`/macro/consult/report?ticker=${encodeURIComponent(tk || '')}&market=${encodeURIComponent(dcConsult.market)}`, { method: 'DELETE' });
     toast(tk ? '已移除该股研报' : '已移除全球宏观背景研报');
   } catch (err) { toast('移除失败：' + err.message); }
+  _closeReportHistory();
   refreshFocusReport();
+}
+
+/* ── 研报往期历史弹窗 + AI 演变对比（复用 consultStream 流式；样式见 decision.css .dc-rh-*）── */
+function _closeReportHistory() { document.getElementById('dc-rh-overlay')?.remove(); }
+
+async function openReportHistory(tk) {
+  _closeReportHistory();
+  const ov = document.createElement('div');
+  ov.id = 'dc-rh-overlay';
+  ov.className = 'dc-rh-overlay';
+  ov.innerHTML = `
+    <div class="dc-rh-panel" role="dialog" aria-label="往期研报">
+      <div class="dc-rh-head">
+        <h4>🕘 往期研报${tk ? ' · ' + escDC(dcName(tk)) : '（全球宏观背景）'}</h4>
+        <button class="dc-rh-close" title="关闭">&#10005;</button>
+      </div>
+      <div class="dc-rh-list" id="dc-rh-list"><p class="dc-rh-empty">加载中…</p></div>
+      <div class="dc-rh-compare" id="dc-rh-compare" style="display:none">
+        <div class="dc-rh-compare-head"></div>
+        <div class="dc-md md-body" id="dc-rh-compare-body"></div>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener('click', (e) => { if (e.target === ov) _closeReportHistory(); });
+  ov.querySelector('.dc-rh-close').addEventListener('click', _closeReportHistory);
+  await _loadReportHistory(tk);
+}
+
+async function _loadReportHistory(tk) {
+  const list = document.getElementById('dc-rh-list');
+  if (!list) return;
+  try {
+    const r = await dcFetch(`/macro/consult/report/history?ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`);
+    const items = (r && r.items) || [];
+    if (!items.length) { list.innerHTML = '<p class="dc-rh-empty">暂无往期研报</p>'; return; }
+    const newestId = items[0].id;
+    const cmpLatest = items.length >= 2
+      ? `<div class="dc-rh-actions"><button class="btn btn-sm btn-primary" id="dc-rh-cmp-latest">🔀 对比最近两份演变</button></div>` : '';
+    list.innerHTML = cmpLatest + items.map((it, i) => `
+      <div class="dc-rh-card">
+        <div class="dc-rh-card-main">
+          <div class="dc-rh-fn">${i === 0 ? '<span class="dc-rh-latest">最新</span> ' : ''}${escDC(it.filename || '(未命名)')}</div>
+          <div class="dc-rh-meta">${escDC(fmtBJ(it.uploaded_at) || '')} · ${it.char_len || 0} 字</div>
+        </div>
+        <div class="dc-rh-card-ops">
+          <a href="#" class="dc-rh-view" data-id="${it.id}">查看</a>
+          ${i > 0 ? `<a href="#" class="dc-rh-cmp" data-old="${it.id}" data-new="${newestId}">与最新对比</a>` : ''}
+          <a href="#" class="dc-rh-del" data-id="${it.id}">删除</a>
+        </div>
+      </div>`).join('');
+    list.querySelector('#dc-rh-cmp-latest')?.addEventListener('click', () => _runReportCompare(tk, null, null));
+    list.querySelectorAll('.dc-rh-view').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); _viewReportItem(tk, a.dataset.id); }));
+    list.querySelectorAll('.dc-rh-cmp').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); _runReportCompare(tk, a.dataset.old, a.dataset.new); }));
+    list.querySelectorAll('.dc-rh-del').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); _deleteReportItem(tk, a.dataset.id); }));
+  } catch (err) {
+    list.innerHTML = `<p class="dc-rh-empty">加载失败：${escDC(err.message)}</p>`;
+  }
+}
+
+async function _viewReportItem(tk, id) {
+  const box = document.getElementById('dc-rh-compare');
+  const body = document.getElementById('dc-rh-compare-body');
+  const head = box?.querySelector('.dc-rh-compare-head');
+  if (!box || !body) return;
+  box.style.display = '';
+  if (head) head.textContent = '📄 研报全文';
+  body.innerHTML = '<p class="dc-rh-empty">加载中…</p>';
+  try {
+    const r = await dcFetch(`/macro/consult/report/item?report_id=${encodeURIComponent(id)}&ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`);
+    body.innerHTML = mdDC(r.report_text || '（空）');
+  } catch (err) {
+    body.innerHTML = `<p class="dc-rh-empty">加载失败：${escDC(err.message)}</p>`;
+  }
+}
+
+async function _deleteReportItem(tk, id) {
+  if (!await showConfirm('删除这一份研报历史？此操作不可撤销。')) return;
+  try {
+    await dcFetch(`/macro/consult/report/item?report_id=${encodeURIComponent(id)}&ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`, { method: 'DELETE' });
+    toast('已删除该份研报');
+  } catch (err) { toast('删除失败：' + err.message); }
+  await _loadReportHistory(tk);
+  refreshFocusReport();   // 状态栏份数/最新同步
+}
+
+// oldId/newId 均给＝比指定两份；均空＝后端取最新两份。SSE 增量渲染进弹窗 .md-body。
+async function _runReportCompare(tk, oldId, newId) {
+  const box = document.getElementById('dc-rh-compare');
+  const body = document.getElementById('dc-rh-compare-body');
+  const head = box?.querySelector('.dc-rh-compare-head');
+  if (!box || !body) return;
+  box.style.display = '';
+  if (head) head.textContent = '🔀 AI 演变对比生成中…';
+  body.innerHTML = '<p class="dc-rh-empty">分析师对比两期研报中，请稍候…</p>';
+  let q = `?ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`;
+  if (oldId && newId) q += `&old_id=${encodeURIComponent(oldId)}&new_id=${encodeURIComponent(newId)}`;
+  let acc = '';
+  await consultStream(`/macro/consult/report/compare${q}`, null, {
+    onEvent: (d) => {
+      if (d.event === 'start' && head) {
+        const a = d.older_at ? String(d.older_at).slice(0, 10) : '上期';
+        const b = d.newer_at ? String(d.newer_at).slice(0, 10) : '本期';
+        head.textContent = `🔀 AI 演变对比：${a} → ${b}`;
+      } else if (d.event === 'chunk') {
+        acc += d.text || ''; body.innerHTML = mdDC(acc); body.scrollTop = body.scrollHeight;
+      } else if (d.event === 'error') {
+        body.innerHTML = `<p class="dc-rh-err">${escDC(d.message || '生成失败')}</p>`;
+      }
+    },
+    onError: (e) => { body.innerHTML = `<p class="dc-rh-err">${escDC(e.message || '连接失败')}</p>`; },
+  });
 }
 
 function _fmtSnapTs(ts) {

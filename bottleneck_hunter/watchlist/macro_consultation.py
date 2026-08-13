@@ -638,6 +638,78 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
     yield _sse("done", message_count=len(transcript))
 
 
+def _compare_prompt(older: dict, newer: dict, is_macro: bool) -> str:
+    """研报「前后两期演变对比」提示词——单条指令(非人格)，内联；需调优再外置 prompts/*.md。"""
+    subject = "全球宏观背景研报" if is_macro else "个股研报"
+
+    def _fmt(r: dict) -> str:
+        return (f"文件名：{r.get('filename') or '(未命名)'}｜上传时间：{r.get('uploaded_at') or '(未知)'}\n"
+                + _truncate_report(r.get("report_text") or ""))
+
+    return (
+        f"你是资深宏观策略分析师。下面是同一类{subject}的前后两期，请做「演变对比」分析，"
+        "聚焦『叙事怎么变了』，而非复述任一期内容。\n\n"
+        f"【上期（较早）】\n{_fmt(older)}\n\n"
+        f"【本期（较新）】\n{_fmt(newer)}\n\n"
+        "请用中文、条理清晰地输出：\n"
+        "1. **关键叙事变化**：核心判断/主线逻辑从上期到本期发生了什么转变（转向、加强、弱化、反转）。\n"
+        "2. **新增与消退的风险**：本期新提出的风险，以及上期担忧但本期已淡化/移除的风险。\n"
+        "3. **被证伪或强化的判断**：上期的预期在本期被数据/事件证实、证伪或修正的地方。\n"
+        "4. **对当前持仓的含义**：这些变化对仓位/配置方向意味着什么（守/减/加的倾向，并说明理由）。\n\n"
+        "务必分清两期日期、勿把上期观点安到本期头上；若某期信息不足以支撑对比，如实说明，不要臆造。"
+    )
+
+
+async def stream_report_compare(store: WatchlistStore, budget: BudgetTracker | None,
+                                ticker: str = "", market: str = "us_stock",
+                                old_id: int | None = None, new_id: int | None = None):
+    """流式生成两份研报的 AI「演变对比」：ticker 空＝宏观(哨兵键+__macro__分区)，否则个股。
+
+    未指定 id 则取该键最新两份；两份按 uploaded_at 定序(早=上期、晚=本期)，杜绝前端传参把新旧搞反。
+    各份经 get_focus_report_by_id 取全文——内含 user_id+market 归属校验，防越权读他人研报。
+    """
+    ticker = (ticker or "").strip().upper()
+    is_macro = not ticker
+    key = MACRO_REPORT_KEY if is_macro else ticker
+    part = MACRO_REPORT_MARKET if is_macro else market
+    rs = store.for_market(part)
+
+    ids = [new_id, old_id] if (old_id and new_id) else [m["id"] for m in rs.list_focus_reports(key)[:2]]
+    ids = list(dict.fromkeys(i for i in ids if i))  # 去 None/0 并去重：防选同一份自比
+    if len(ids) < 2:
+        yield _sse("error", message="需至少两份研报才能对比（当前不足两份）")
+        return
+    rows = [r for r in (rs.get_focus_report_by_id(i) for i in ids) if r]
+    if len(rows) < 2:
+        yield _sse("error", message="研报不存在或无权访问")
+        return
+    older, newer = sorted(rows, key=lambda r: (r.get("uploaded_at") or "", r.get("id") or 0))
+
+    models = get_models_for_role("L1_macro", with_fallback=True)
+    if not models:
+        yield _sse("error", message="无可用 LLM（请在 AI 配置中为 L1_macro 配置模型）")
+        return
+    llm, provider, model = _analyst_llm(models, 0)
+    prompt = _compare_prompt(older, newer, is_macro)
+
+    yield _sse("start", older=older.get("filename"), newer=newer.get("filename"),
+               older_at=older.get("uploaded_at"), newer_at=newer.get("uploaded_at"))
+    full = ""
+    try:
+        async for tok in _iter_tokens(llm, prompt):
+            full += tok
+            yield _sse("chunk", text=tok)
+    except Exception as e:  # noqa: BLE001
+        from bottleneck_hunter.llm_clients.fallback import classify_reason
+        reason = classify_reason(e)
+        logger.warning("研报演变对比生成失败(%s): %s", reason, e)
+        yield _sse("error", message=f"生成失败：{reason}")
+        return
+    if budget:
+        budget.record(provider, model, len(prompt) // 3, len(full) // 3, "report_compare")
+    yield _sse("done", provider=provider, model=model)
+
+
 async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
                          market: str, question: str, focus_ticker: str = ""):
     """用户提问：round1 两人独立作答 → round2 互评辩论（预算不足时降级）。

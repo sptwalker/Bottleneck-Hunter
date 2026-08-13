@@ -254,6 +254,7 @@ class WatchlistStore(
             self._migrate_chat_messages_account_ref(conn)
             self._migrate_experience_cards_widen_scope(conn)
             self._migrate_experience_cards_fts(conn)
+            self._migrate_focus_reports_history(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -293,6 +294,49 @@ class WatchlistStore(
             logger.info("budget_config 主键已重建为 (key, user_id)，修复跨用户预算覆盖")
         except sqlite3.OperationalError as e:
             logger.warning("budget_config 主键重建失败（可忽略，退回旧行为）: %s", e)
+
+
+    def _migrate_focus_reports_history(self, conn) -> None:
+        """focus_reports 从「每键一行(主键 ticker,user_id,market)」重建为「加自增 id、每键留多份历史」。
+
+        旧 schema 是 INSERT OR REPLACE 覆盖式，只留最新一份、无版本。要环形留存最近 N 份，须先给表
+        加自增 id、去掉三列复合主键(降为非唯一索引)。列级主键无法 ALTER，只能重建表。幂等：已有 id
+        列则跳过。研报是用户自传数据，重建全程搬迁所有旧行(各获新 id)，不能丢。CREATE 会独立自动提交，
+        若上次迁移崩在 DROP/RENAME 之前会残留一张空 _new 孤儿表——故重建前先 DROP 掉它保证可重入，
+        否则重启时 CREATE 撞名报错被 except 静默吞掉、迁移永久卡死；旧行搬迁中途失败随事务回滚不丢数据。
+        """
+        try:
+            info = conn.execute("PRAGMA table_info(focus_reports)").fetchall()
+            if not info:
+                return
+            if any(r["name"] == "id" for r in info):  # 已重建
+                return
+            conn.execute("DROP TABLE IF EXISTS focus_reports_new")  # 清上次崩溃残留的孤儿表，保证可重入
+            conn.execute("""
+                CREATE TABLE focus_reports_new (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker      TEXT NOT NULL,
+                    filename    TEXT DEFAULT '',
+                    report_text TEXT DEFAULT '',
+                    char_len    INTEGER DEFAULT 0,
+                    uploaded_at TEXT,
+                    user_id     TEXT DEFAULT '',
+                    market      TEXT DEFAULT ''
+                )
+            """)
+            conn.execute(
+                "INSERT INTO focus_reports_new"
+                "(ticker, filename, report_text, char_len, uploaded_at, user_id, market) "
+                "SELECT ticker, filename, report_text, char_len, uploaded_at, user_id, market "
+                "FROM focus_reports"
+            )
+            conn.execute("DROP TABLE focus_reports")
+            conn.execute("ALTER TABLE focus_reports_new RENAME TO focus_reports")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_focus_reports_key "
+                         "ON focus_reports(ticker, user_id, market, uploaded_at DESC)")
+            logger.info("focus_reports 已重建：加自增 id、去三列复合主键，支持每键留最近多份历史")
+        except sqlite3.OperationalError as e:
+            logger.warning("focus_reports 历史留存重建失败（可忽略，退回旧行为）: %s", e)
 
 
     def _migrate_watchlist_drop_global_unique(self, conn) -> None:

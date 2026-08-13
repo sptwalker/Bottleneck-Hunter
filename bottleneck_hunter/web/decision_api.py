@@ -270,29 +270,78 @@ async def upload_focus_report(file: UploadFile = File(...),
 @router.get("/macro/consult/report")
 async def get_focus_report(ticker: str = "", market: str = "us_stock",
                            user: dict = Depends(get_current_user)):
-    """查询是否已上传研报（前端据此显示"已导入 X 字/移除"）。ticker 空＝查全球宏观背景研报。"""
+    """查询最新研报 + 历史份数（前端据此显示"已导入 X 字 · 共 N 份 · 往期 · 移除"）。ticker 空＝宏观。"""
     from bottleneck_hunter.watchlist.macro_consultation import MACRO_REPORT_KEY, MACRO_REPORT_MARKET
     tk = (ticker or "").strip().upper()
     is_macro = not tk
     key = MACRO_REPORT_KEY if is_macro else tk
-    rpt = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market).get_focus_report(key)
-    if not rpt:
-        return {"exists": False, "ticker": "" if is_macro else tk, "macro": is_macro}
+    metas = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market).list_focus_reports(key)
+    if not metas:
+        return {"exists": False, "ticker": "" if is_macro else tk, "macro": is_macro, "count": 0}
+    latest = metas[0]
     return {"exists": True, "ticker": "" if is_macro else tk, "macro": is_macro,
-            "filename": rpt.get("filename", ""), "chars": rpt.get("char_len", 0),
-            "uploaded_at": rpt.get("uploaded_at")}
+            "filename": latest.get("filename", ""), "chars": latest.get("char_len", 0),
+            "uploaded_at": latest.get("uploaded_at"), "report_id": latest.get("id"),
+            "count": len(metas)}
 
 
 @router.delete("/macro/consult/report")
 async def delete_focus_report(ticker: str = "", market: str = "us_stock",
                               user: dict = Depends(get_current_user)):
-    """移除已上传的研报。ticker 空＝移除全球宏观背景研报。"""
+    """移除已上传的研报（清空该键全部历史）。ticker 空＝移除全球宏观背景研报。"""
     from bottleneck_hunter.watchlist.macro_consultation import MACRO_REPORT_KEY, MACRO_REPORT_MARKET
     tk = (ticker or "").strip().upper()
     is_macro = not tk
     key = MACRO_REPORT_KEY if is_macro else tk
     removed = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market).delete_focus_report(key)
     return {"ok": True, "removed": removed, "macro": is_macro}
+
+
+@router.get("/macro/consult/report/history")
+async def focus_report_history(ticker: str = "", market: str = "us_stock",
+                               user: dict = Depends(get_current_user)):
+    """列该键最近数份研报元数据（不含正文），供「往期」弹窗。ticker 空＝宏观。"""
+    from bottleneck_hunter.watchlist.macro_consultation import MACRO_REPORT_KEY, MACRO_REPORT_MARKET
+    tk = (ticker or "").strip().upper()
+    is_macro = not tk
+    key = MACRO_REPORT_KEY if is_macro else tk
+    items = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market).list_focus_reports(key)
+    return {"ticker": "" if is_macro else tk, "macro": is_macro, "items": items}
+
+
+@router.get("/macro/consult/report/item")
+async def get_focus_report_item(report_id: int, ticker: str = "", market: str = "us_stock",
+                                user: dict = Depends(get_current_user)):
+    """取单份研报全文（供弹窗查看）。归属校验在 store 层叠 user+market；ticker 空＝宏观分区。"""
+    from bottleneck_hunter.watchlist.macro_consultation import MACRO_REPORT_MARKET
+    is_macro = not (ticker or "").strip()
+    rpt = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market).get_focus_report_by_id(report_id)
+    if not rpt:
+        raise HTTPException(status_code=404, detail="研报不存在或无权访问")
+    return rpt
+
+
+@router.delete("/macro/consult/report/item")
+async def delete_focus_report_item(report_id: int, ticker: str = "", market: str = "us_stock",
+                                   user: dict = Depends(get_current_user)):
+    """删单份研报历史。归属校验在 store 层叠 user+market；ticker 空＝宏观分区。"""
+    from bottleneck_hunter.watchlist.macro_consultation import MACRO_REPORT_MARKET
+    is_macro = not (ticker or "").strip()
+    st = _user_store(user).for_market(MACRO_REPORT_MARKET if is_macro else market)
+    return {"ok": True, "removed": st.delete_focus_report_by_id(report_id)}
+
+
+@router.post("/macro/consult/report/compare")
+async def compare_focus_reports(request: Request, ticker: str = "", market: str = "us_stock",
+                                old_id: int | None = None, new_id: int | None = None,
+                                user: dict = Depends(get_current_user)):
+    """两份研报 AI「演变对比」（SSE 流）。ticker 空＝宏观；不给 id 则比该键最新两份。"""
+    from bottleneck_hunter.watchlist.macro_consultation import stream_report_compare
+    # 只读单模型 consult 流，与 open/ask/retry 兄弟端点一致：不套 refresh_guard。
+    # 前端用 consultStream(不认 refresh_busy)，若套 guard，并发刷新时 busy 事件被丢→弹窗永卡。
+    return _sse_response(request, stream_report_compare(
+        _user_store(user), _user_budget(user),
+        ticker=ticker, market=market, old_id=old_id, new_id=new_id))
 
 
 # ─────────────────────────────────────────────────────────

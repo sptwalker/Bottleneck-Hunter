@@ -12,6 +12,9 @@ from bottleneck_hunter.watchlist.store_base import _now_iso
 # keyed 源/按用户 LLM 的表(news/options/earnings)不在此列，仍按各用户隔离。
 SHARED_UID = "__shared__"
 
+# 研报每键(ticker+user+market)环形留存的最大历史份数：新传追加、超出即挤掉最旧，防表膨胀。
+_FOCUS_HISTORY_KEEP = 6
+
 # info 是否含"实质内容"——空 dict 或 429/限流下 yfinance .info 返回的"伪成功"字典
 # (仅 trailingPegRatio=None/maxAge 等噪声、无任何身份或财务字段)均视为无内容：只落负缓存
 # stub、绝不 REPLACE 覆盖已有真档案(否则国内机房 429 风暴会把真 sector/行业/简介逐条抹空)。
@@ -534,32 +537,84 @@ class _MarketDataMixin:
 
     # ── 聚焦个股·外部研究报告（用户上传 PDF 转文本，按用户+市场私有）──────────────
     # company_profiles 用 SHARED_UID（公共数据）；研报是用户自购/自传，严格 self._user_id 隔离，不共享。
+    # 每键(ticker+user+market)环形留最近 _FOCUS_HISTORY_KEEP 份历史：新传追加、旧的挤出；注入分析师
+    # 仍只取最新一份，历史仅供翻阅/AI 演变对比。
     def save_focus_report(self, ticker: str, filename: str, text: str) -> None:
-        """upsert 用户为某股上传的研报文本（同股再传即替换）。"""
+        """追加一份用户为某股(或宏观槽)上传的研报，并把该键历史修剪到最近 _FOCUS_HISTORY_KEEP 份。"""
         with self._write_conn() as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO focus_reports
+                """INSERT INTO focus_reports
                    (ticker, filename, report_text, char_len, uploaded_at, user_id, market)
                    VALUES (?,?,?,?,?,?,?)""",
                 (ticker, filename or "", text or "", len(text or ""), _now_iso(),
                  self._user_id, self._market),
             )
+            conn.execute(
+                """DELETE FROM focus_reports
+                   WHERE ticker=? AND user_id=? AND market=? AND id NOT IN (
+                       SELECT id FROM focus_reports
+                       WHERE ticker=? AND user_id=? AND market=?
+                       ORDER BY uploaded_at DESC, id DESC LIMIT ?
+                   )""",
+                (ticker, self._user_id, self._market,
+                 ticker, self._user_id, self._market, _FOCUS_HISTORY_KEEP),
+            )
 
     def get_focus_report(self, ticker: str) -> dict | None:
-        """取该用户+市场为某股上传的研报（含 report_text/filename/char_len/uploaded_at）；无则 None。"""
+        """取该用户+市场该键最新一份研报（含 id/report_text/filename/char_len/uploaded_at）；无则 None。
+
+        同秒并列靠 id 二级键定序，保证「最新」确定；注入两处(宏观/个股)零改动经此取最新。
+        """
         conn = self._connect()
         try:
             row = conn.execute(
-                "SELECT ticker, filename, report_text, char_len, uploaded_at "
-                "FROM focus_reports WHERE ticker=? AND user_id=? AND market=?",
+                "SELECT id, ticker, filename, report_text, char_len, uploaded_at "
+                "FROM focus_reports WHERE ticker=? AND user_id=? AND market=? "
+                "ORDER BY uploaded_at DESC, id DESC LIMIT 1",
                 (ticker, self._user_id, self._market),
             ).fetchone()
             return dict(row) if row else None
         finally:
             conn.close()
 
+    def list_focus_reports(self, ticker: str) -> list[dict]:
+        """列该用户+市场该键最近 _FOCUS_HISTORY_KEEP 份研报元数据（不含正文，倒序，最新在前）。"""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, filename, char_len, uploaded_at "
+                "FROM focus_reports WHERE ticker=? AND user_id=? AND market=? "
+                "ORDER BY uploaded_at DESC, id DESC LIMIT ?",
+                (ticker, self._user_id, self._market, _FOCUS_HISTORY_KEEP),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_focus_report_by_id(self, report_id: int) -> dict | None:
+        """按 id 取单份研报全文——id 全局自增，必叠 user_id+market 过滤，杜绝跨用户越权读。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT id, ticker, filename, report_text, char_len, uploaded_at "
+                "FROM focus_reports WHERE id=? AND user_id=? AND market=?",
+                (report_id, self._user_id, self._market),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def delete_focus_report_by_id(self, report_id: int) -> bool:
+        """删单份研报（同样叠 user_id+market 过滤，防越权删）；返回是否删到。"""
+        with self._write_conn() as conn:
+            n = conn.execute(
+                "DELETE FROM focus_reports WHERE id=? AND user_id=? AND market=?",
+                (report_id, self._user_id, self._market),
+            ).rowcount
+        return bool(n)
+
     def delete_focus_report(self, ticker: str) -> bool:
-        """删除该用户+市场为某股上传的研报；返回是否删到行。"""
+        """删除该用户+市场为某股上传的全部研报历史（前端「移除」用）；返回是否删到行。"""
         with self._write_conn() as conn:
             n = conn.execute(
                 "DELETE FROM focus_reports WHERE ticker=? AND user_id=? AND market=?",

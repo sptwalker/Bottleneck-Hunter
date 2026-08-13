@@ -466,14 +466,14 @@ CREATE TABLE IF NOT EXISTS company_profiles (
 );
 
 CREATE TABLE IF NOT EXISTS focus_reports (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker      TEXT NOT NULL,
     filename    TEXT DEFAULT '',
     report_text TEXT DEFAULT '',
     char_len    INTEGER DEFAULT 0,
     uploaded_at TEXT,
     user_id     TEXT DEFAULT '',
-    market      TEXT DEFAULT '',
-    PRIMARY KEY(ticker, user_id, market)
+    market      TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS macro_snapshots (
@@ -674,6 +674,7 @@ CREATE INDEX IF NOT EXISTS idx_options_ticker ON options_activity(ticker, date D
 CREATE INDEX IF NOT EXISTS idx_earnings_ticker ON earnings_reports(ticker, report_date DESC);
 CREATE INDEX IF NOT EXISTS idx_budget_date ON llm_budget(date);
 CREATE INDEX IF NOT EXISTS idx_watchlist_tier ON watchlist(tier, composite_score DESC);
+CREATE INDEX IF NOT EXISTS idx_focus_reports_key ON focus_reports(ticker, user_id, market, uploaded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_uzi_entry ON uzi_analyses(entry_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_uzi_ticker ON uzi_analyses(ticker, analysis_type);
 CREATE INDEX IF NOT EXISTS idx_intelligence_entry ON stock_intelligence(entry_id, created_at DESC);
