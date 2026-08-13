@@ -1366,6 +1366,18 @@
               </label>
               <span class="aic-hint">超过该时长未更新的观察池标的会被兜底刷新（默认 24h）</span>
             </div>
+            <div class="au-threshold-row">
+              <label>消息推送：
+                <select id="au-push-channel" style="width:110px">
+                  <option value="">不推送</option>
+                  <option value="bark">Bark</option>
+                  <option value="serverchan">Server酱</option>
+                  <option value="feishu">飞书</option>
+                </select>
+                <input type="text" id="au-push-webhook" placeholder="https://… webhook 地址" style="width:280px">
+              </label>
+              <span class="aic-hint">自动更新完成/出错时推送一条到你的 IM（选渠道并填对应 webhook；留空不推）</span>
+            </div>
             <div id="au-admin-section" style="display:none">
               <div class="aic-card-header" style="margin-top:16px">
                 <h4>桌面借道（服务器取被墙数据）</h4>

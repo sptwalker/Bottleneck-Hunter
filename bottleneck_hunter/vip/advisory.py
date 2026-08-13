@@ -1007,6 +1007,17 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
                 import logging
                 logging.getLogger(__name__).debug("VIP 经验卡片 applied 计数失败（不影响建议）", exc_info=True)
     result["verification_receipt"] = verification_receipt(result)  # 0-10：读 unverified/data_as_of/generated_at
+    # P0-②：证据溯源——draft prompt 哈希 + 实际模型 + 数据截至日 + 标的，嵌进 result_json 与审计（复盘可辩护，分辨模型幻觉 vs 数据错）
+    from bottleneck_hunter.watchlist.provenance import build_provenance, hash_text
+    _draft_hash = hash_text(_DRAFT_PROMPT)  # VIP draft 是内联模板(非 .md)，直接哈希字符串
+    result["_provenance"] = build_provenance(
+        prompts=[], models=[(provider, model)],
+        data_as_of=result.get("data_as_of", ""),
+        tickers=[h.get("ticker", "") for h in draft["holdings"]],
+        generated_at=result.get("generated_at", ""),
+        extra={"layer": "vip_advisor", "market": getattr(wl_store, "_market", "") or ""},
+        extra_prompt_hashes={"vip_draft": _draft_hash},
+    )
     # ── C-1 复盘打点（record_prediction，只写不评）：为 5b 复盘启动数据时钟，并给 VIP 自己的准确率信号。
     #    role_context=vip_advisor 独占桶，与 sim 的 committee_*/vote 物理隔离；旁路容错——打点失败只 debug、
     #    绝不影响建议主链路（仿 record_model_call 哲学）。记录的是 reconcile 后的最终动作。
@@ -1042,7 +1053,8 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
             AuthStore().create_advice_audit(
                 uid, advice_type="recommendation", advice_ref=aid,
                 source_data_ref={"account_ref": account_ref, "verdict": committee.get("verdict", ""),
-                                 "tickers": [h["ticker"] for h in draft["holdings"]]},
+                                 "tickers": [h["ticker"] for h in draft["holdings"]],
+                                 "prompt_hash": _draft_hash},  # P0-②：审计溯源补 draft prompt 哈希
                 model_provider=provider, model_name=model,
                 disclaimer_version=compliance.DISCLAIMER_VERSION,
                 content_hash=hashlib.sha256(

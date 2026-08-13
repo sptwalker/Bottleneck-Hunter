@@ -33,6 +33,12 @@ from bottleneck_hunter.watchlist.store_schema import (
     CREATE_TABLES as _CREATE_TABLES,
 )
 from bottleneck_hunter.watchlist.store_schema import (
+    EXPERIENCE_CARDS_FTS_TABLE as _EC_FTS_TABLE,
+)
+from bottleneck_hunter.watchlist.store_schema import (
+    EXPERIENCE_CARDS_FTS_TRIGGERS as _EC_FTS_TRIGGERS,
+)
+from bottleneck_hunter.watchlist.store_schema import (
     MIGRATIONS as _MIGRATIONS,
 )
 from bottleneck_hunter.watchlist.store_simtrading import _SimTradingMixin
@@ -112,6 +118,10 @@ class WatchlistStore(
         # - HAVING 且无 GROUP BY：无安全插入点，clause 会追加到 HAVING 之后 → 报错。
         #   （HAVING 前有 GROUP BY 时 clause 正确插入 WHERE 段，安全，不拦截。）
         # - 子查询：字符串定位不可靠；带 table= 别名的 JOIN 由调用方保证，放宽。
+        # - 顶层裸 OR：clause 追加成 ` AND col=?`，SQL 中 AND 优先级高于 OR，会只绑定最后一个 OR 分支
+        #   → 其余 OR 分支跨用户泄露。因零误报的括号平衡检测成本高、全库仅 get_relevant_cards 一处，
+        #   这里【约定】调用方把 OR 组整体括号包裹（见 store_research.get_relevant_cards），不做自动拦截。
+        #   升级路径＝扫描 WHERE..插入点间括号深度、深度0 遇 OR 即 raise（同 UNION/HAVING 的安全失败风格）。
         if " UNION " in upper:
             raise ValueError("_user_filter 不支持 UNION 查询，请手写带 user_id 过滤的 SQL")
         if " HAVING " in upper and " GROUP BY " not in upper:
@@ -243,6 +253,7 @@ class WatchlistStore(
             self._migrate_chat_sessions_account_ref(conn)
             self._migrate_chat_messages_account_ref(conn)
             self._migrate_experience_cards_widen_scope(conn)
+            self._migrate_experience_cards_fts(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -938,6 +949,36 @@ class WatchlistStore(
             logger.info("experience_cards 已重建：scope CHECK 纳入 vip_portfolio/macro/ticker")
         except sqlite3.OperationalError as e:
             logger.warning("experience_cards 放宽 scope 重建失败（可忽略）: %s", e)
+
+
+    def _migrate_experience_cards_fts(self, conn) -> None:
+        """P0-③：给 experience_cards 建 FTS5 外部内容全文索引 + 同步触发器 + 存量回填（幂等）。
+
+        先建虚表：无 fts5 的 sqlite 构建会在此抛 OperationalError → 记 debug 后【整体跳过】，
+        绝不继续建触发器（否则触发器经延迟解析仍建成，之后 INSERT 卡片写不存在的 _fts 表致插入崩）。
+        回填只在虚表【本次首建】(建前不在 sqlite_master)且基表有存量时用 fts5 'rebuild' 重建一次
+        （存量卡片先于触发器存在的情形）；之后触发器保持同步，不再回填。
+        （注：外部内容表 count(*) 读的是内容表行数、非已索引数，故不能用 count 判空，改用「建前是否已存在」。）
+        ponytail: 依赖本方法在 _migrate_experience_cards_widen_scope 之后调用——后者可能重建基表，
+        须先重建完再挂 fts 触发器，避免悬空。widen_scope 是终态幂等（纳入 vip_portfolio 后不再重建），故无二次悬空风险。
+        """
+        try:
+            existed = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experience_cards_fts'").fetchone()
+            conn.execute(_EC_FTS_TABLE)
+        except sqlite3.OperationalError as e:
+            logger.debug("experience_cards FTS5 不可用（sqlite 无 fts5 模块），全文检索降级为 scope 粗筛: %s", e)
+            return
+        try:
+            for trig in _EC_FTS_TRIGGERS:
+                conn.execute(trig)
+            if not existed:  # 虚表首建：把先于触发器存在的存量卡片一次性灌入索引
+                base_n = conn.execute("SELECT count(*) FROM experience_cards").fetchone()[0]
+                if base_n:
+                    conn.execute("INSERT INTO experience_cards_fts(experience_cards_fts) VALUES('rebuild')")
+                    logger.info("experience_cards_fts 存量回填 %d 张卡片（fts5 rebuild）", base_n)
+        except sqlite3.OperationalError as e:
+            logger.warning("experience_cards FTS5 触发器/回填失败（可忽略，检索降级 scope 粗筛）: %s", e)
 
 
     def _parse_json_fields(self, d: dict, dict_fields: tuple = (),

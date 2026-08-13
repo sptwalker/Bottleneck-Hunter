@@ -70,6 +70,35 @@ def record_operation(user_id: str, title: str, *, category: str = "user_action",
         _broadcaster.publish(user_id, rec)
     except Exception as e:  # noqa: BLE001
         logger.debug("record_operation 失败: %s", e)
+    _maybe_push(user_id, category, title, detail, market)
+
+
+# 可推事件类别：调度自动更新 + 失败告警（手动 user_action 不推，避免用户自己的操作把自己刷屏）
+_PUSH_CATEGORIES = {"auto_update", "error"}
+
+
+def _maybe_push(user_id: str, category: str, title: str, detail: str, market: str) -> None:
+    """可推事件(auto_update/error) → 取该用户 IM webhook 异步推送(fire-and-forget)。
+
+    无 webhook/未配渠道/无运行中事件循环(同步上下文) → 静默跳过、零副作用；任何异常吞掉，绝不影响记录主流程。
+    """
+    if category not in _PUSH_CATEGORIES or _store is None:
+        return
+    try:
+        cfg = _store.for_user(user_id).get_auto_update_config()
+        url = (cfg.get("push_webhook_url") or "").strip()
+        channel = (cfg.get("push_channel") or "").strip()
+        if not url or not channel:
+            return
+        loop = asyncio.get_running_loop()   # 无 loop(同步调用/测试) → RuntimeError → 跳过，不阻塞
+    except RuntimeError:
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.debug("推送配置读取失败: %s", e)
+        return
+    from bottleneck_hunter.watchlist.push import push_event
+    body = f"{detail}（{market}）" if market else detail
+    loop.create_task(push_event(url, channel, title, body))
 
 
 # ── 路径 → 白话动作映射（前缀匹配，具体在前）──────────────

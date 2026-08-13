@@ -404,10 +404,28 @@ class _MarketDataMixin:
             return count
 
 
-    def get_institutional_holders(self, ticker: str, limit: int = 50) -> list[dict]:
-        """获取指定 ticker 的机构持仓，按持仓比例降序。"""
+    def get_institutional_holders(self, ticker: str, limit: int = 50,
+                                  latest_only: bool = False) -> list[dict]:
+        """获取指定 ticker 的机构持仓，按持仓比例降序。
+
+        latest_only=True：仅返回最新申报季(date)的持有人——防多期累积后跨季混读/同一机构重复计数
+        （当季 Top/家数场景须用；QoQ 场景保持默认 False 以拿到多季）。
+        """
         conn = self._connect()
         try:
+            if latest_only:
+                # 取该股(隔离后)持仓按 date 新→旧、季内 pct 降序，Python 侧收敛到最新季；
+                # 不用子查询 MAX(date) 以直接复用 _shared_filter 的 user/market 隔离拼接。
+                q, p = self._shared_filter(
+                    "SELECT * FROM institutional_holders WHERE ticker = ? "
+                    "ORDER BY date DESC, pct_held DESC LIMIT ?",
+                    (ticker, limit),
+                )
+                rows = [dict(r) for r in conn.execute(q, p).fetchall()]
+                if rows:
+                    latest = rows[0].get("date")
+                    rows = [r for r in rows if r.get("date") == latest]
+                return rows
             q, p = self._shared_filter(
                 "SELECT * FROM institutional_holders WHERE ticker = ? ORDER BY pct_held DESC LIMIT ?",
                 (ticker, limit),

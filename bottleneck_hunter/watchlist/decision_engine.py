@@ -23,6 +23,7 @@ from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position, get_models_for_role
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.persona import format_persona_for_prompt, get_user_single_cap
+from bottleneck_hunter.watchlist.provenance import build_provenance
 from bottleneck_hunter.watchlist.regime_mapper import format_bounds_for_prompt, get_allocation_bounds
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
@@ -73,6 +74,36 @@ def _load_prompt(name: str) -> str:
 
 def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+# (B) L3 上游新鲜度阈值：L1 宏观/L2 组合是【周度】生成（见模块 docstring + scheduler.job_weekly_strategy；
+# 日常决策只跑 run_macro_check/run_deviation_check，不重生 L1/L2）。故"陈旧"按【周】判，而非计划字面的"今日"
+# ——用"今日"会 6/7 天误杀 L3。8 天＝一个周度周期(7)+1 天宽限：当周计划(0–7d)放行，漏刷一个周期(≥8d)即阻断。
+# ponytail: 纯 age 阈值，跨市场/时区免疫（不做北京日界比较）；升级路径＝带 macro_strategy_id 归属校验辨"L2 建于旧 L1"。
+_STALE_UPSTREAM_DAYS = 8
+
+
+def _upstream_age_days(created_at: str) -> float | None:
+    """created_at(UTC ISO) 距今天数；空/不可解析 → None（视作不可信＝陈旧）。"""
+    if not created_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(created_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+    except (ValueError, TypeError):
+        return None
+
+
+def _decision_provenance(prompts, models, market, layer, tickers=None) -> dict:
+    """给决策产出打 provenance（prompt 哈希 + 实际模型 + 快照日 + 市场/层），嵌进 result_json（零表迁移）。
+
+    复盘时可查「哪个 prompt + 哪个模型 + 哪日数据」生成此判断，分辨模型幻觉 vs 数据错。
+    models 空 = 规则决策（如硬止损，非 LLM）；prompts 空 = 无模板。
+    """
+    return build_provenance(prompts=prompts, models=models, data_as_of=_today(),
+                            tickers=tickers, extra={"market": market, "layer": layer})
 
 
 # ─────────────────────────────────────────────────────────
@@ -398,6 +429,33 @@ def _compute_deviation_drift(store: WatchlistStore, plan_rj: dict, account: dict
     }
 
 
+def _holder_qoq(store: WatchlistStore, ticker: str) -> dict | None:
+    """个股 13F 近两季环比：两季共同机构的净增减方向/幅度 + 增/减仓机构名单。
+
+    只算两季都在的机构（规避 yfinance 只给 top-N 持有人导致的进出榜噪声＝非真加减仓）。
+    <2 申报季 或 无共同机构 → None（诚实降级，不编方向）。默认多季读，故不传 latest_only。
+    """
+    rows = store.get_institutional_holders(ticker, limit=200)
+    dates = sorted({r.get("date") for r in rows if r.get("date")}, reverse=True)
+    if len(dates) < 2:
+        return None
+    cur = {r["holder_name"]: (r.get("shares") or 0) for r in rows if r.get("date") == dates[0]}
+    old = {r["holder_name"]: (r.get("shares") or 0) for r in rows if r.get("date") == dates[1]}
+    common = set(cur) & set(old)
+    if not common:
+        return None
+    deltas = {h: cur[h] - old[h] for h in common}
+    net = sum(deltas.values())
+    added = sorted((h for h in common if deltas[h] > 0), key=lambda h: deltas[h], reverse=True)
+    trimmed = sorted((h for h in common if deltas[h] < 0), key=lambda h: deltas[h])
+    return {
+        "cur_quarter": dates[0], "prev_quarter": dates[1],
+        "direction": "净增持" if net > 0 else "净减持" if net < 0 else "持平",
+        "net_shares": net, "common_holders": len(common),
+        "added_holders": added[:5], "trimmed_holders": trimmed[:5],
+    }
+
+
 def _chip_context(store: WatchlistStore, ticker: str) -> dict:
     """B5: 汇总该股的筹码/估值锚信号——机构持仓 Top + 分析师评级分布 + 一致目标价（读库，零抓取）。
 
@@ -405,11 +463,12 @@ def _chip_context(store: WatchlistStore, ticker: str) -> dict:
     """
     out = {}
     try:
-        holders = store.get_institutional_holders(ticker, limit=5)
+        holders = store.get_institutional_holders(ticker, limit=5, latest_only=True)
         if holders:
             out["top_institutions"] = [{"name": h.get("holder_name", ""),
                                         "pct_held": h.get("pct_held", 0)} for h in holders[:5]]
-            out["institution_count"] = len(store.get_institutional_holders(ticker, limit=50))
+            out["institution_count"] = len(
+                store.get_institutional_holders(ticker, limit=50, latest_only=True))
     except Exception:
         pass
     try:
@@ -429,6 +488,10 @@ def _chip_context(store: WatchlistStore, ticker: str) -> dict:
                 out["target_price_range"] = [min(targets), max(targets)]
     except Exception:
         pass
+    # P1-⑤：个股 13F 近两季环比(方向+增/减仓机构)，自动流向 L3 chip_signals 与宏观咨询焦点块
+    qoq = _holder_qoq(store, ticker)
+    if qoq:
+        out["institutional_qoq"] = qoq
     return out
 
 
@@ -526,6 +589,9 @@ async def run_macro_strategy(
             result = await _llm_json_object(llm, prompt, layer="L1")
             if budget:
                 budget.record(provider, model, 5000, 2000, "macro_strategy")
+        _l1_models = ([tuple(s.split(":", 1)) for s in result.get("_models_used", []) if ":" in s]
+                      or [(provider, model)])  # 交叉验证用实际参与的多模型，否则单模型
+        result["_provenance"] = _decision_provenance(["decision_macro"], _l1_models, market, "L1")
         strategy_id = store.create_macro_strategy(result)
 
         yield _sse("decision_done", layer="L1", strategy_id=strategy_id,
@@ -748,6 +814,10 @@ async def run_strategic_plan(
             result["_clamp_warnings"] = clamp_warnings
             for w in clamp_warnings:
                 yield _sse("decision_warning", layer="L2", message=f"⚠ L2 配置越界已钳制：{w}")
+        _sel = result.get("stock_selection", {})
+        _l2_tk = [h.get("ticker", "") for h in
+                  (_sel.get("core_holdings", []) + _sel.get("tactical_holdings", []))]
+        result["_provenance"] = _decision_provenance(["decision_strategic"], [(provider, model)], market, "L2", _l2_tk)
         plan_id = store.create_strategic_plan(macro["id"], result)
 
         # Phase 20D: 解析并保存三场景估值
@@ -904,6 +974,17 @@ async def run_tactical_plans(
         yield _sse("decision_error", layer="L3", error="无 L1 宏观策略")
         return
 
+    # (B) 上游新鲜度闸：strategic/macro 超 _STALE_UPSTREAM_DAYS 天＝周度刷新漏跑 → 阻断，
+    #     勿据陈旧上游产今日战术（今日 L1/L2 刷新失败时 get_latest_* 会静默取到旧计划）。
+    for _layer, _label, _plan in (("L2", "组合策略", strategic), ("L1", "宏观策略", macro)):
+        _age = _upstream_age_days(_plan.get("created_at", ""))
+        if _age is None or _age > _STALE_UPSTREAM_DAYS:
+            _why = ("创建时间无法解析" if _age is None
+                    else f"已 {_age:.0f} 天未刷新（超 {_STALE_UPSTREAM_DAYS} 天周度阈值）")
+            yield _sse("decision_error", layer="L3",
+                       error=f"上游 {_layer} {_label}{_why}，跳过 L3 避免据陈旧上游产今日战术；请先刷新 L1/L2")
+            return
+
     llm, provider, model = get_llm_for_position(position="L3_tactical")
     if not llm:
         yield _sse("decision_error", layer="L3", error="无可用 LLM")
@@ -983,9 +1064,16 @@ async def run_tactical_plans(
         if selected_tickers:
             entries = [e for e in entries if e["ticker"] in selected_tickers]
             if not entries:
-                logger.warning("L2 选股 %s 未匹配到观察池标的，降级为全量处理",
-                               selected_tickers)
-                entries = store.list_all()
+                logger.warning("L2 选股 %s 未匹配到观察池标的，降级为全量处理", selected_tickers)
+                entries = [e for e in store.list_all()
+                           if normalize_market(e.get("market")) == normalize_market(market)]
+                yield _sse("decision_info", layer="L3", degraded=True,
+                           message=f"⚠️ L2 选股 {sorted(selected_tickers)} 未匹配到本市场观察池标的，"
+                                   "L3 降级为全观察池处理（结果非 L2 精选，请知悉）")
+        else:
+            # (B) 空 L2 选股不再静默全量：如实标注降级信号，让用户知道本轮 L3 未受 L2 约束
+            yield _sse("decision_info", layer="L3", degraded=True,
+                       message="⚠️ L2 未选出任何标的，L3 降级为全观察池处理（结果非 L2 精选，请知悉）")
 
         for entry in entries:
             ticker = entry["ticker"]
@@ -1064,6 +1152,7 @@ async def run_tactical_plans(
                 continue  # 跳过空标的 / 同批次内 LLM 重复返回的标的
             seen_tickers.add(ticker)
             entry_id = entry_map.get(ticker, "")
+            tp["_provenance"] = _decision_provenance(["decision_tactical"], [(provider, model)], market, "L3", [ticker])
             plan_id = store.create_tactical_plan(
                 strategic_plan_id=strategic["id"],
                 entry_id=entry_id,
@@ -1507,6 +1596,8 @@ async def run_execution_plans(
                 skipped += 1
                 continue
 
+            ep["_provenance"] = _decision_provenance(
+                ["decision_execution"], [(provider, model)], market, "L4", [ticker])
             plan_id = store.create_execution_plan(
                 tactical_plan_id=tactical_id,
                 entry_id=entry_id,
@@ -1599,6 +1690,7 @@ async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGene
                     "priority": 1,
                     "reasoning": f"硬止损触发：现价 {close} 已跌破止损位 {stop_price}（自动风控，非 LLM 决策）",
                     "_hard_stop": True,
+                    "_provenance": _decision_provenance([], [], market, "L4", [ticker]),
                 },
             )
             triggered += 1
@@ -1920,24 +2012,16 @@ def _positioning_signals(store: WatchlistStore, tickers: list[str]) -> dict:
         out["options"] = {"put_call_ratio": round(tot_put / tot_call, 3),
                           "coverage": pcr_names, "universe": len(tickers)}
 
-    # 13F 机构持仓：对有≥2 个申报季的标的，按『两季共同机构』的净增减股数定方向——
-    # 只看两季都在的机构，规避 yfinance 只给 top-N 持有人导致的进出榜噪声(非真加减仓)。
+    # 13F 机构持仓：逐票取近两季环比(复用 _holder_qoq 的两季共同机构口径)，聚合成观察池增/减/平家数。
     added = trimmed = flat = covered = 0
     for t in tickers:
-        rows = store.get_institutional_holders(t, limit=200)
-        dates = sorted({r.get("date") for r in rows if r.get("date")}, reverse=True)
-        if len(dates) < 2:
+        qoq = _holder_qoq(store, t)
+        if qoq is None:
             continue
-        cur = {r["holder_name"]: (r.get("shares") or 0) for r in rows if r.get("date") == dates[0]}
-        old = {r["holder_name"]: (r.get("shares") or 0) for r in rows if r.get("date") == dates[1]}
-        common = set(cur) & set(old)
-        if not common:
-            continue
-        delta = sum(cur[h] - old[h] for h in common)
         covered += 1
-        if delta > 0:
+        if qoq["net_shares"] > 0:
             added += 1
-        elif delta < 0:
+        elif qoq["net_shares"] < 0:
             trimmed += 1
         else:
             flat += 1

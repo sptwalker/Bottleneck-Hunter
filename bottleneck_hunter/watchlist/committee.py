@@ -408,6 +408,10 @@ async def _build_consensus(
     return result
 
 
+# (A) 投委会法定人数：真正表决(approve/reject)的委员数低于此值 → 结论不可背书，强制 needs_review 人工复核。
+QUORUM_MIN = 2
+
+
 def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | None = None) -> dict:
     """规则引擎兜底共识——按委员历史权重做**加权表决**。
 
@@ -419,6 +423,7 @@ def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | No
     n_approve = n_reject = 0
     for role, review in reviews.items():
         vote = review.get("vote", "abstain")
+        vote = _VOTE_ALIASES.get(vote, vote)  # 归一化 LLM 复数/verdict 风格票值，防有效赞成被误当弃权漏计 quorum
         try:
             w = float(weights.get(role, 1.0))
         except (TypeError, ValueError):
@@ -451,9 +456,19 @@ def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | No
     else:
         verdict = "rejected"
 
+    # (A) 法定人数闸：真正表决(approve/reject)的委员不足 QUORUM_MIN 时，approved/rejected 皆不可信 → 强制 needs_review。
+    # 堵两类误判：「1 人 approve + 余皆故障 → approve_ratio=1.0 → approved」与「全故障 decisive=0 → 假 rejected」。
+    valid_n = n_approve + n_reject
+    quorum_short = valid_n < QUORUM_MIN
+    if quorum_short:
+        verdict = "needs_review"
+
     approval_rate = round(w_approve / w_all * 100) if w_all > 0 else 0
     weighted = any(abs(v["weight"] - 1.0) > 1e-9 for v in votes.values())
-    note = "（加权规则引擎兜底）" if weighted else "（规则引擎兜底）"
+    if quorum_short:
+        note = f"（⚠️ 有效评审员仅 {valid_n}/{len(reviews)}，多数失败或弃权，结论不可背书，须人工复核）"
+    else:
+        note = "（加权规则引擎兜底）" if weighted else "（规则引擎兜底）"
     tally = (f"加权 赞成 {w_approve:.1f} / 反对 {w_reject:.1f}（{n_approve}赞成/{n_reject}反对）"
              if weighted else f"{n_approve} 票赞成, {n_reject} 票反对")
     return {
@@ -565,7 +580,7 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
 
     # 拥挤度（逆向投资人）← 机构持仓 + 分析师评级分布 + 内部人交易
     try:
-        holders = store.get_institutional_holders(ticker, limit=10) or []
+        holders = store.get_institutional_holders(ticker, limit=10, latest_only=True) or []
         ratings = store.get_analyst_ratings(ticker, limit=30) or []
         rating_dist: dict = {}
         for r in ratings:
@@ -655,7 +670,11 @@ async def run_committee_review(
         logger.warning("投委会组合风险计算失败: %s", e)
         portfolio_risk = {}
 
-    context = {
+    # 市场级基底：跨标的不变的部分（行情/宏观/账户/组合风险）+ 6 项标的级占位。
+    # (C) 每 plan 循环内基于它【浅拷贝】重建 context，勿再对同一 dict 跨标的 .update()——否则某标的
+    #     背景取数失败时会残留上一标的的估值/情绪/拥挤度（串味）。浅拷贝足够：循环内只【整体替换】
+    #     这 6 个顶层键，从不就地改嵌套的 account_status/portfolio_risk（市场级只读）。
+    base_context = {
         "market_context": market_ctx,
         "macro_summary": (macro.get("market_summary", "") if macro
                           else "暂无宏观环境数据"),
@@ -675,6 +694,15 @@ async def run_committee_review(
         "sentiment_data": "暂无市场情绪数据",
         "crowding_data": "暂无持仓集中度数据",
     }
+    # 背景聚合失败时覆盖 6 项占位，让委员看到"本标的背景缺失"而非误用邻标的/含糊的"暂无"
+    _BG_MISSING = {
+        "catalyst_data": [],
+        "sector_trends": "⚠️ 背景聚合失败，本标的无行业趋势数据",
+        "valuation_data": "⚠️ 背景聚合失败，本标的无估值数据",
+        "peer_comparison": "⚠️ 背景聚合失败，本标的无同业对比",
+        "sentiment_data": "⚠️ 背景聚合失败，本标的无情绪数据",
+        "crowding_data": "⚠️ 背景聚合失败，本标的无持仓集中度数据",
+    }
 
     for idx, plan in enumerate(pending_plans, 1):
         plan_id = plan.get("id", "")
@@ -687,11 +715,14 @@ async def run_committee_review(
 
         entry_id = plan.get("entry_id", "")
         # 阶段 1.1：用真实数据填充该标的的背景资料（估值/情绪/拥挤度/同业/催化剂）
+        # (C) 每标的从市场级基底浅拷贝重建，避免跨标的 .update() 残留上一标的背景
+        context = dict(base_context)
         try:
             bg = build_ticker_background(store, ticker, entry_id, market)
             context.update(bg)
         except Exception as e:
             logger.warning("背景资料聚合失败 %s: %s", ticker, e)
+            context.update(_BG_MISSING)  # 显式标注缺失，不沿用上一标的
 
         if budget and not budget.can_spend(estimated_tokens=15000):
             yield _sse("committee_error", ticker=ticker, error="预算不足，跳过后续评审")

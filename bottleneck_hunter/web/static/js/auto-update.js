@@ -38,6 +38,11 @@ function renderAutoUpdate() {
   const thr = document.getElementById('au-stale-threshold');
   if (thr) thr.value = cfg.stale_threshold_hours || '24';
 
+  const pch = document.getElementById('au-push-channel');
+  if (pch) pch.value = cfg.push_channel || '';
+  const pwh = document.getElementById('au-push-webhook');
+  if (pwh) pwh.value = cfg.push_webhook_url || '';
+
   // 各分类开关 + 下次运行时间 + 立即刷新
   const jobsByCat = {};
   jobs.forEach(j => { (jobsByCat[j.category] = jobsByCat[j.category] || []).push(j); });
@@ -119,6 +124,10 @@ function bindAutoUpdate() {
     saveUser({ master_enabled: e.target.checked }));
   document.getElementById('au-stale-threshold')?.addEventListener('change', e =>
     saveUser({ stale_threshold_hours: parseInt(e.target.value) || 24 }));
+  document.getElementById('au-push-channel')?.addEventListener('change', e =>
+    saveUser({ push_channel: e.target.value }));
+  document.getElementById('au-push-webhook')?.addEventListener('change', e =>
+    saveUser({ push_webhook_url: e.target.value.trim() }));
 
   document.getElementById('au-categories')?.addEventListener('change', e => {
     const cb = e.target.closest('.au-cat');

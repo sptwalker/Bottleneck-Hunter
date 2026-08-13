@@ -92,6 +92,8 @@ class AutoUpdatePatch(BaseModel):
     catalyst: bool | None = None
     full_refresh: bool | None = None
     stale_threshold_hours: int | None = Field(None, ge=1, le=720)
+    push_webhook_url: str | None = None
+    push_channel: str | None = None
 
 
 @router.get("/auto-update")
@@ -119,11 +121,21 @@ async def get_auto_update(user: dict = Depends(get_current_user)):
 
 @router.patch("/auto-update")
 async def patch_auto_update(req: AutoUpdatePatch, user: dict = Depends(get_current_user)):
+    from bottleneck_hunter.watchlist.push import PUSH_CHANNELS
     store = _user_store(user)
     updates = req.model_dump(exclude_none=True)
     for key, val in updates.items():
         if key == "stale_threshold_hours":
             store.set_auto_update_config(key, str(int(val)))
+        elif key == "push_webhook_url":
+            u = str(val).strip()
+            # ponytail: 仅校验 http(s) scheme 挡掉 file/gopher/data 等滥用；内网/元数据 IP 未拦=残余盲 SSRF
+            #（webhook 走非白名单直连，egress_relay 只借道 SEC/新闻白名单、不覆盖此处；完整封禁需 DNS+IP
+            # 分类一整套，留升级路径）。空=用户主动清空(允许)。
+            store.set_auto_update_config(key, u if (u == "" or u.startswith(("http://", "https://"))) else "")
+        elif key == "push_channel":
+            v = str(val).strip().lower()
+            store.set_auto_update_config(key, v if v in PUSH_CHANNELS else "")
         elif key in AUTO_UPDATE_DEFAULTS:
             store.set_auto_update_config(key, "1" if val else "0")
     return {"status": "ok", "config": store.get_auto_update_config()}

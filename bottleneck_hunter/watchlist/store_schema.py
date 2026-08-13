@@ -1350,3 +1350,32 @@ MIGRATIONS: list[str] = [
     # ── VIP 衍生品：产品介绍/推介稿标记（非成交持仓）；读路径一律 is_indicative=0 过滤，不计入持仓/报告 ──
     "ALTER TABLE vip_derivative_terms ADD COLUMN is_indicative INTEGER DEFAULT 0",
 ]
+
+
+# ── P0-③ FTS5 全文检索：experience_cards 外部内容(external content)全文索引 + 三触发器同步 ──
+#   tokenize='trigram'：sqlite 内置、无需中文分词器；但 trigram 固有下限＝查询 **≥3 字符**才可命中
+#   （2 字中文关键词如「瓶颈」无法匹配，见 store_research.search_cards 的说明与升级路径）。
+#   *不* 放进 MIGRATIONS 自动循环：无 fts5 的 sqlite 构建会让虚表创建失败，但 3 个触发器经 sqlite
+#   「延迟解析」仍会建成；此后每次 INSERT experience_cards 触发器写不存在的 _fts 表 → 卡片插入直接崩。
+#   故统一由 store._migrate_experience_cards_fts「先建虚表，失败即整体跳过」保证绝不留悬空触发器。
+EXPERIENCE_CARDS_FTS_TABLE = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS experience_cards_fts USING fts5("
+    "title, content, user_id UNINDEXED, market UNINDEXED, "
+    "content='experience_cards', content_rowid='rowid', tokenize='trigram')"
+)
+EXPERIENCE_CARDS_FTS_TRIGGERS = [
+    """CREATE TRIGGER IF NOT EXISTS experience_cards_fts_ai AFTER INSERT ON experience_cards BEGIN
+        INSERT INTO experience_cards_fts(rowid, title, content, user_id, market)
+        VALUES (new.rowid, new.title, new.content, new.user_id, new.market);
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS experience_cards_fts_ad AFTER DELETE ON experience_cards BEGIN
+        INSERT INTO experience_cards_fts(experience_cards_fts, rowid, title, content, user_id, market)
+        VALUES ('delete', old.rowid, old.title, old.content, old.user_id, old.market);
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS experience_cards_fts_au AFTER UPDATE ON experience_cards BEGIN
+        INSERT INTO experience_cards_fts(experience_cards_fts, rowid, title, content, user_id, market)
+        VALUES ('delete', old.rowid, old.title, old.content, old.user_id, old.market);
+        INSERT INTO experience_cards_fts(rowid, title, content, user_id, market)
+        VALUES (new.rowid, new.title, new.content, new.user_id, new.market);
+    END""",
+]

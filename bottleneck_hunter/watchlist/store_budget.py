@@ -22,6 +22,8 @@ AUTO_UPDATE_DEFAULTS: dict[str, str] = {
     "vip_project": "1",       # VIP 每日系统推算（按最新收盘价重估持仓，标注待校准）
     "full_refresh": "1",      # 周期性全量刷新（数据+决策一条龙）
     "stale_threshold_hours": "24",
+    "push_webhook_url": "",    # 单通道 IM 推送 webhook（空=不推送；见 watchlist/push.py）
+    "push_channel": "",        # 推送渠道 bark/serverchan/feishu（空=不推送）
 }
 
 

@@ -8,6 +8,7 @@ import time
 import pandas as pd
 
 from bottleneck_hunter.data_provider.base import BaseFetcher, StandardQuote
+from bottleneck_hunter.data_provider.cleaning import clean_ohlc
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class FetcherManager:
             scheduler.note_call(state.fetcher.name)  # 均衡负载 + 额度阀记账
             try:
                 df = await state.fetcher.fetch_daily(ticker, days)
+                df = clean_ohlc(df, state.fetcher.name, market)  # 单点净化+A股量能单位归一(手)
                 if df is not None and not df.empty:
                     state.record_success()
                     return df

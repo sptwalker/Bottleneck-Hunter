@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -243,11 +244,14 @@ class _ResearchMixin:
                            limit: int = 5) -> list[dict]:
         conn = self._connect()
         try:
+            # 隔离铁律：三个 scope 分支必须整体括号包裹。_filtered 把 `AND user_id=? AND market=?`
+            # 插到 ORDER BY 前，SQL 中 AND 优先级高于 OR——若不包外层括号，过滤只绑定最后一个 OR 分支，
+            # global/ticker 两支将跨用户+跨市场泄露卡片（含全文）进他人 L4 决策 prompt。
             q, p = self._filtered(
                 """SELECT * FROM experience_cards
-                   WHERE (scope = 'global')
-                      OR (scope = 'ticker' AND scope_key = ?)
-                      OR (scope = 'sector' AND scope_key = ?)
+                   WHERE ((scope = 'global')
+                       OR (scope = 'ticker' AND scope_key = ?)
+                       OR (scope = 'sector' AND scope_key = ?))
                    ORDER BY confidence DESC, applied_count DESC
                    LIMIT ?""",
                 (ticker, sector, limit),
@@ -258,9 +262,57 @@ class _ResearchMixin:
                 d = dict(r)
                 self._parse_json_fields(d, list_fields=("evidence",))
                 result.append(d)
-            return result
         finally:
             conn.close()
+        # P0-③ FTS union：正文/标题提及该 ticker/sector 的卡片（scope_key 未必匹配，靠全文命中补齐 scope 粗筛的漏网）。
+        # search_cards 自带无 fts5 降级(返回[])；外再兜一层，确保检索异常绝不拖垮决策取卡（退化为 scope-only）。
+        try:
+            seen = {c["id"] for c in result}
+            for kw in (ticker, sector):
+                if not kw:
+                    continue
+                for c in self.search_cards(kw, limit=limit):
+                    if c["id"] not in seen:
+                        seen.add(c["id"])
+                        result.append(c)
+        except Exception:  # noqa: BLE001
+            pass
+        result.sort(key=lambda c: (c.get("confidence") or 0, c.get("applied_count") or 0), reverse=True)
+        return result[:limit]
+
+
+    def search_cards(self, query: str, *, limit: int = 10) -> list[dict]:
+        """P0-③ 经验卡全文检索（FTS5 trigram）：正文/标题命中，隔离随基表 JOIN 回带，按相关度(rank)排序。
+
+        query 整体作 fts5 短语（转义内部双引号）→ 防用户输入里的特殊字符触发 fts 语法错/注入；
+        trigram 固有下限＝【≥3 字符】方可命中（2 字中文关键词如「瓶颈」匹配不到，升级路径＝换 jieba/icu 分词器）。
+        无 fts5 的 sqlite 构建 / 虚表缺失 → 捕获 OperationalError 返回 []（与 scope 粗筛并存，检索降级不报错）。
+        """
+        q = (query or "").strip()
+        if len(q) < 3:  # trigram <3 字符无有效 3-gram，必空——直接短路省一次查询
+            return []
+        phrase = '"' + q.replace('"', '""') + '"'
+        conn = self._connect()
+        try:
+            sql, params = self._filtered(
+                """SELECT ec.* FROM experience_cards_fts f
+                   JOIN experience_cards ec ON ec.rowid = f.rowid
+                   WHERE experience_cards_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (phrase, limit), table="ec",
+            )
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            self._parse_json_fields(d, list_fields=("evidence",))
+            result.append(d)
+        return result
 
 
     def increment_card_applied(self, card_id: str) -> None:
