@@ -1844,9 +1844,11 @@ async function refreshFocusReport() {
   try {
     const r = await dcFetch(`/macro/consult/report?ticker=${encodeURIComponent(tk)}&market=${encodeURIComponent(dcConsult.market)}`);
     if (r && r.exists) {
-      const lbl = tk ? `已导入研报 ${r.chars || 0} 字` : `已导入宏观背景研报 ${r.chars || 0} 字`;
+      const who = tk ? '本股票' : '市场';
       const cnt = r.count || 1;
-      const hist = cnt > 1 ? ` · 共 ${cnt} 份 <a href="#" id="dc-consult-report-hist">往期</a>` : '';
+      const when = fmtBJ(r.uploaded_at) || '';
+      const lbl = `${who}已上传过 ${cnt} 份研报` + (when ? `，最新上传的研报时间是 ${when}` : '');
+      const hist = cnt > 1 ? ` <a href="#" id="dc-consult-report-hist">往期</a>` : '';
       status.innerHTML = `${lbl}${hist} <a href="#" id="dc-consult-report-del">移除</a>`;
       document.getElementById('dc-consult-report-hist')?.addEventListener('click', (e) => {
         e.preventDefault(); openReportHistory(tk);
