@@ -618,13 +618,58 @@ def _fetch_us_kline(ticker: str, period: str = "1y") -> list[dict]:
     return rows
 
 
-async def fetch_kline(ticker: str, market: str = "us_stock") -> list[dict]:
-    """获取近一年 K 线 OHLCV 数据。优先通过 FetcherManager 自动降级。"""
+def _resample_ohlc(rows: list[dict], period: str) -> list[dict]:
+    """把日线 rows 重采样成 周/月/年 K。period="day" 原样返回。
+
+    每桶聚合：open=首行、close=末行、high=max、low=min、volume=sum、date=桶内最末日。
+    先按 date 升序排序，防数据源乱序致 open/close 取反。日期解析不了的坏行跳过、不带崩整图。
+    """
+    if period == "day" or not rows:
+        return rows
+
+    def _key(d: str):
+        if period == "week":
+            return datetime.fromisoformat(d).isocalendar()[:2]  # (ISO年, ISO周)，规避跨年周边界
+        if period == "month":
+            return d[:7]   # YYYY-MM
+        return d[:4]       # YYYY
+
+    buckets: dict = {}
+    for r in sorted(rows, key=lambda x: str(x.get("date", ""))):
+        d = str(r.get("date", ""))[:10]
+        try:
+            k = _key(d)
+        except ValueError:
+            continue
+        b = buckets.get(k)
+        if b is None:
+            buckets[k] = {"date": r["date"], "open": r["open"], "high": r["high"],
+                          "low": r["low"], "close": r["close"], "volume": int(r.get("volume", 0))}
+        else:
+            b["high"] = max(b["high"], r["high"])
+            b["low"] = min(b["low"], r["low"])
+            b["close"] = r["close"]
+            b["date"] = r["date"]
+            b["volume"] += int(r.get("volume", 0))
+    return list(buckets.values())
+
+
+_KLINE_DAYS = {"day": 365, "week": 730, "month": 1825, "year": 3650}
+_KLINE_YF_PERIOD = {"day": "1y", "week": "2y", "month": "5y", "year": "max"}
+
+
+async def fetch_kline(ticker: str, market: str = "us_stock", period: str = "day") -> list[dict]:
+    """获取 K 线 OHLCV 数据。period=day/week/month/year。
+
+    优先经 FetcherManager 取足够长的日线，再按 period 重采样成周/月/年（源无关的单一路径）。
+    # ponytail: 年K根数随源历史深度而异——A股仅 pytdx 可用时约 3 年(协议~800根/次)、缺则少几根不臆造。
+    """
+    days = _KLINE_DAYS.get(period, 365)
     # 优先通过 FetcherManager（自动降级）
     try:
         from bottleneck_hunter.data_provider import get_fetcher_manager
         mgr = get_fetcher_manager()
-        df = await mgr.fetch_daily(ticker, market, 365)
+        df = await mgr.fetch_daily(ticker, market, days)
         if df is not None and not df.empty and "close" in df.columns:
             rows = []
             for _, r in df.iterrows():
@@ -636,7 +681,7 @@ async def fetch_kline(ticker: str, market: str = "us_stock") -> list[dict]:
                     "close": round(float(r.get("close", 0)), 2),
                     "volume": int(r.get("volume", 0)),
                 })
-            return rows
+            return _resample_ohlc(rows, period)
     except Exception as e:
         logger.debug(f"FetcherManager K线获取失败 ({ticker}): {e}")
 
@@ -646,12 +691,13 @@ async def fetch_kline(ticker: str, market: str = "us_stock") -> list[dict]:
             code = _extract_astock_code(ticker)
             if not code:
                 return []
-            return await asyncio.to_thread(_fetch_astock_kline, code)
+            rows = await asyncio.to_thread(_fetch_astock_kline, code, days)
         else:
             t = ticker.replace(".", "-").strip()  # 美股类别股 BRK.B→BRK-B，勿去后缀
             if not t:
                 return []
-            return await asyncio.to_thread(_fetch_us_kline, t)
+            rows = await asyncio.to_thread(_fetch_us_kline, t, _KLINE_YF_PERIOD.get(period, "1y"))
+        return _resample_ohlc(rows, period)
     except Exception as e:
         logger.warning(f"K线数据获取失败 ({ticker}): {e}")
         return []

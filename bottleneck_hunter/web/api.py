@@ -1328,9 +1328,11 @@ def _build_providers_response(user_id: str = "") -> list[dict]:
 
 
 @router.get("/stock/{ticker}/kline")
-async def stock_kline(ticker: str, market: str = "us_stock", user: dict = Depends(get_current_user)):
+async def stock_kline(ticker: str, market: str = "us_stock", period: str = "day",
+                      user: dict = Depends(get_current_user)):
     from bottleneck_hunter.chain.financial_data import fetch_kline
-    data = await fetch_kline(ticker, market)
+    period = period if period in {"day", "week", "month", "year"} else "day"  # 白名单兜底
+    data = await fetch_kline(ticker, market, period)
     return data
 
 

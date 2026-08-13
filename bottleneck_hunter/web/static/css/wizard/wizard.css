@@ -1749,6 +1749,17 @@
 }
 .kline-overlay-close:hover { color: #fff; }
 #drawer-kline { border-radius: 6px; overflow: hidden; }
+.kline-scale-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.kline-scale-tabs button {
+  padding: 3px 12px; font-size: 12px; cursor: pointer;
+  background: rgba(255,255,255,.04); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 5px; transition: all .15s;
+}
+.kline-scale-tabs button:hover { color: var(--ink); border-color: #00a0e9; }
+.kline-scale-tabs button.active {
+  background: rgba(0,160,233,.15); color: #00a0e9;
+  border-color: #00a0e9; font-weight: 600;
+}
 
 /* ── Phase 3 图表网格 ─── */
 .p3-charts-grid {

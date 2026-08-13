@@ -4,6 +4,9 @@
 
 import { state } from './wizard-state.js';
 
+const KLINE_LABEL = { day: '日K', week: '周K', month: '月K', year: '年K' };
+let _kline = null;  // 当前抽屉 K线上下文 {ticker, market, name, period, cache:Map} — 切周期零重取
+
 /* ── 抽屉 ─────────────────────────────────── */
 export function openDrawer(company) {
   const drawer = document.getElementById('wiz-drawer');
@@ -22,16 +25,18 @@ export function openDrawer(company) {
 
   const klineDom = document.getElementById('drawer-kline');
   if (klineDom && ticker) {
-    klineDom.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px 0">加载K线数据…</p>';
     // 市场以企业自身归属为准，勿依赖 wizard state（从历史加载时未同步 → A股会误用 us_stock 拉空）
     const market = company.supplier?.market || company.market || state.config?.market || 'us_stock';
-    fetch(`/api/stock/${encodeURIComponent(ticker)}/kline?market=${market}`)
-      .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-      .then(data => {
-        if (!data?.length) { klineDom.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px 0">暂无K线数据</p>'; return; }
-        renderKlineChart(klineDom, data, name);
-      })
-      .catch(() => { klineDom.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px 0">K线数据加载失败</p>'; });
+    _kline = { ticker, market, name, period: 'day', cache: new Map() };
+    loadKline();
+    const tabs = document.getElementById('kline-scale-tabs');
+    if (tabs) tabs.addEventListener('click', e => {
+      const btn = e.target.closest('button[data-period]');
+      if (!btn || !_kline || btn.dataset.period === _kline.period) return;
+      _kline.period = btn.dataset.period;
+      tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+      loadKline();
+    });
   }
 }
 
@@ -42,13 +47,37 @@ export function closeDrawer() {
   if (overlay) overlay.remove();
 }
 
-function renderKlineChart(dom, data, title) {
+function loadKline() {
+  const k = _kline;
+  if (!k) return;
+  const dom = document.getElementById('drawer-kline');
+  if (!dom) return;
+  const period = k.period;
+  const key = `${k.ticker}:${k.market}:${period}`;
+  const hint = m => `<p style="color:var(--muted);text-align:center;padding:40px 0">${m}</p>`;
+  if (k.cache.has(key)) { renderKlineChart(dom, k.cache.get(key), k.name, period); return; }
+  dom.innerHTML = hint('加载K线数据…');
+  fetch(`/api/stock/${encodeURIComponent(k.ticker)}/kline?market=${encodeURIComponent(k.market)}&period=${period}`)
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      if (_kline !== k || k.period !== period) return;  // 抽屉已换股/已切别的周期 → 丢弃过期响应
+      if (!data?.length) { dom.innerHTML = hint('暂无K线数据'); return; }
+      k.cache.set(key, data);
+      renderKlineChart(dom, data, k.name, period);
+    })
+    .catch(() => { if (_kline === k && k.period === period) dom.innerHTML = hint('K线数据加载失败'); });
+}
+
+function renderKlineChart(dom, data, title, period = 'day') {
+  const prev = echarts.getInstanceByDom(dom);
+  if (prev) prev.dispose();  // 切周期复用同一 dom，先销毁旧实例防 echarts 实例堆叠
   dom.innerHTML = '';
   const chart = echarts.init(dom);
   const dates = data.map(d => d.date);
   const ohlc = data.map(d => [d.open, d.close, d.low, d.high]);
   const vols = data.map(d => d.volume);
   const colors = data.map(d => d.close >= d.open ? '#26a69a' : '#ef5350');
+  const dzStart = data.length > 120 ? 60 : 0;  // 日线根多只显近段；周/月/年根少则全显
 
   const option = {
     animation: false,
@@ -66,7 +95,7 @@ function renderKlineChart(dom, data, title) {
       { gridIndex: 1, scale: true, splitLine: { show: false }, axisLabel: { show: false } },
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 },
+      { type: 'inside', xAxisIndex: [0, 1], start: dzStart, end: 100 },
       { type: 'slider', xAxisIndex: [0, 1], bottom: 2, height: 14, borderColor: 'transparent', fillerColor: 'rgba(0,160,233,.18)' },
     ],
     series: [
@@ -78,10 +107,10 @@ function renderKlineChart(dom, data, title) {
   };
   chart.setOption(option);
 
-  dom.addEventListener('click', () => openKlineFullscreen(data, title));
+  dom.onclick = () => openKlineFullscreen(data, title, period);  // onclick 替换而非叠加，防多次绑定弹多层
 }
 
-function openKlineFullscreen(data, title) {
+function openKlineFullscreen(data, title, period = 'day') {
   let overlay = document.getElementById('kline-fullscreen');
   if (overlay) overlay.remove();
 
@@ -90,7 +119,7 @@ function openKlineFullscreen(data, title) {
   overlay.className = 'kline-overlay';
   overlay.innerHTML = `
     <div class="kline-overlay-header">
-      <span>${title || ''} 近一年K线</span>
+      <span>${title || ''} ${KLINE_LABEL[period] || 'K线'}</span>
       <button class="kline-overlay-close">&times;</button>
     </div>
     <div id="kline-full-chart" style="flex:1;width:100%"></div>
@@ -126,7 +155,7 @@ function openKlineFullscreen(data, title) {
         { gridIndex: 1, scale: true, splitLine: { show: false }, axisLabel: { show: false } },
       ],
       dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: 30, end: 100 },
+        { type: 'inside', xAxisIndex: [0, 1], start: data.length > 120 ? 30 : 0, end: 100 },
         { type: 'slider', xAxisIndex: [0, 1], bottom: 8, height: 18, borderColor: 'transparent', fillerColor: 'rgba(0,160,233,.25)' },
       ],
       series: [
@@ -209,6 +238,9 @@ function buildDrawerContent(c) {
       }).join('')}
     </div></div>` : ''}
     <div class="drawer-section"><h4>股价走势 <small style="color:var(--muted);font-weight:400">（点击放大）</small></h4>
+      <div id="kline-scale-tabs" class="kline-scale-tabs">
+        <button type="button" data-period="day" class="active">日K</button><button type="button" data-period="week">周K</button><button type="button" data-period="month">月K</button><button type="button" data-period="year">年K</button>
+      </div>
       <div id="drawer-kline" style="height:280px;width:100%;cursor:pointer"></div>
     </div>
     ${c.strengths?.length || c.weaknesses?.length ? `

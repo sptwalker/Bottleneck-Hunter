@@ -17,6 +17,21 @@ from bottleneck_hunter.data_provider.base import safe_float as _safe_float
 logger = logging.getLogger(__name__)
 
 
+def _period_for_days(days: int) -> str:
+    """days → yfinance 档位化 period。历史行情用（周/月/年K 需更长窗口）。
+    # ponytail: yfinance 只吃档位 period 非任意天数，故区间映射即够；需精确区间再改 start/end。
+    现存 caller 只落 6mo(≤180,vip ohlc=90)/1y(≤400,pipeline&日K=365) 两档，口径不变、零回归。"""
+    if days <= 180:
+        return "6mo"
+    if days <= 400:
+        return "1y"
+    if days <= 800:
+        return "2y"
+    if days <= 2000:
+        return "5y"
+    return "max"
+
+
 class YfinanceFetcher(BaseFetcher):
     name = "yfinance"
     priority = 0
@@ -31,7 +46,7 @@ class YfinanceFetcher(BaseFetcher):
             yf_gate.throttle()  # 全局限速：均匀错峰打 Yahoo，避免 429
             try:
                 t = yf.Ticker(ticker)
-                period = "1y" if days > 180 else "6mo"
+                period = _period_for_days(days)
                 df = t.history(period=period)
             except Exception as e:
                 yf_gate.observe(e)
