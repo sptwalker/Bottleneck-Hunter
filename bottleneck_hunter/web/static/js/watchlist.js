@@ -599,8 +599,8 @@ async function loadDrawerTabData(entry, tab) {
   const isOtcFund = isFund && entry._exchangeTraded === false;
   // 需要观察池存储(entry_id)的页签：分析环节无 id 时给友好兜底，不打空端点。
   // 基金的价格页签例外：场外→结算单净值、场内ETF→按ticker直取真行情，均不依赖观察池 id。
-  const needsEntry = ['price', 'news', 'capital', 'intelligence', 'strategy', 'uzi'];
-  if (!entry.id && needsEntry.includes(tab) && !(tab === 'price' && isFund)) {
+  const needsEntry = ['news', 'capital', 'intelligence', 'strategy', 'uzi'];  // price 已按 ticker 直取真行情/结算单,不再强依赖入池
+  if (!entry.id && needsEntry.includes(tab)) {
     const pane = document.getElementById(`wl-tab-${tab}`);
     if (pane) pane.innerHTML = '<div class="wl-empty" style="padding:40px;text-align:center;color:var(--muted)">该企业未加入观察池<br><span style="font-size:12px">加入观察池后可查看实时行情/新闻/资金/情报/策略</span></div>';
     return;
@@ -615,7 +615,8 @@ async function loadDrawerTabData(entry, tab) {
     case 'price':
       if (isOtcFund) await loadNavTab(entry);            // 场外基金：结算单净值走势
       else if (isFund && !entry.id) await loadOhlcTab(entry);  // 场内ETF未入观察池：按ticker直取真行情
-      else await loadPriceTab(entry);                    // 股票/已跟踪：观察池缓存快照
+      else if (isFund) await loadPriceTab(entry);        // 场内ETF已入池：观察池缓存快照(原逻辑保留)
+      else await loadStockKline(entry);                  // 股票：多周期真行情K线(日/周/月/年,按ticker直取)
       break;
     case 'news':
       await loadNewsTab(entry);
@@ -1291,6 +1292,64 @@ function renderInfoKline(dom, data, title) {
   new ResizeObserver(() => chart.resize()).observe(dom);
 }
 
+/* ── 市场K线（多周期：日/周/月/年，按 ticker 直取历史OHLC，未入池也能看真行情）──── */
+let _wlKline = null;  // 当前抽屉市场K线上下文 {ticker, market, period, cache:Map} — 切周期零重取
+
+async function loadStockKline(entry, period = 'day') {
+  const pane = document.getElementById('wl-tab-price');
+  if (!pane) return;
+  const ticker = entry.ticker || '';
+  const market = entry.market || 'us_stock';
+  if (!ticker) { pane.innerHTML = '<div class="wl-empty-hint"><p>缺少股票代码</p><p>无法获取行情K线</p></div>'; return; }
+
+  pane.innerHTML = `
+    <div id="wl-kline-tabs" class="kline-scale-tabs">
+      <button type="button" data-period="day" class="active">日K</button><button type="button" data-period="week">周K</button><button type="button" data-period="month">月K</button><button type="button" data-period="year">年K</button>
+    </div>
+    <div class="wl-price-chart" id="wl-price-chart-container">
+      <div class="skeleton skeleton-text" style="height:200px"></div>
+    </div>
+    <div class="wl-indicators" id="wl-price-indicators"></div>`;
+
+  _wlKline = { ticker, market, period, cache: new Map() };
+  const tabs = document.getElementById('wl-kline-tabs');
+  tabs.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-period]');
+    if (!btn || !_wlKline || btn.dataset.period === _wlKline.period) return;
+    _wlKline.period = btn.dataset.period;
+    tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+    _renderWlKline(entry);
+  });
+  renderIndicators(entry);  // 技术指标依赖观察池 entry：有池显示、无池诚实空缺（与数据源解耦）
+  _renderWlKline(entry);
+}
+
+function _renderWlKline(entry) {
+  const k = _wlKline;
+  if (!k) return;
+  const period = k.period;
+  const key = `${k.ticker}:${k.market}:${period}`;
+  if (k.cache.has(key)) { renderPriceChart(k.cache.get(key)); return; }
+  const url = `/api/stock/${encodeURIComponent(k.ticker)}/kline?market=${encodeURIComponent(k.market)}&period=${period}`;
+  fetch(url)
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      if (_wlKline !== k || k.period !== period) return;  // 抽屉已换股/已切别周期 → 丢弃过期响应
+      if (!Array.isArray(data) || !data.length) {
+        // ponytail: kline 空 + 已入池 → 回退观察池90天快照(降级态无周期切换)；未入池只能友好空态
+        if (entry.id) return loadPriceTab(entry);
+        return renderPriceChart([]);
+      }
+      k.cache.set(key, data);
+      renderPriceChart(data);
+    })
+    .catch(() => {
+      if (_wlKline !== k || k.period !== period) return;
+      if (entry.id) { loadPriceTab(entry); return; }
+      renderPriceChart([]);
+    });
+}
+
 /* ── Price Tab ───────────────────────────────────────── */
 
 async function loadPriceTab(entry) {
@@ -1368,6 +1427,7 @@ function renderPriceChart(snapshots) {
       { scale: true, gridIndex: 0, splitLine: { lineStyle: { type: 'dashed', color: '#eee' } } },
       { scale: true, gridIndex: 1, show: false },
     ],
+    dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: snapshots.length > 120 ? 55 : 0, end: 100 }],
     series: [
       {
         type: 'candlestick',
