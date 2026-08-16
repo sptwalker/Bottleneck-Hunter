@@ -363,9 +363,13 @@ def test_derivatives_scope_all_and_account(client):
     assert abs(overview["total_equity"] - 280000.0) < 1.0
     assert overview["transaction_count"] == 3
     assert abs(overview["dividend_income"] - 100.0) < 0.01
-    assert abs(overview["fee_total"] - 100.0) < 0.01
-    assert abs(overview["net_inflow"] - 600.0) < 0.01
-    assert abs(overview["net_outflow"] - 100.0) < 0.01
+    # ★MEDIUM-4：Citi HK 环球账户导出含港币费(Tencent HK0700)+美元分红/注资——港币 100 费(≈US$12.75)
+    # 绝不再混入 USD headline 当美元费。headline 只给美元切片，港币全额分列 by_currency。
+    assert overview["mixed_currency"] is True and overview["currency"] == "USD"
+    assert overview["fee_total"] == 0.0                    # USD headline 无费(港币费不冒充美元；旧混币值 100)
+    assert abs(overview["net_inflow"] - 600.0) < 0.01      # USD 分红100+注资500
+    assert overview["net_outflow"] == 0.0                  # 唯一流出是港币费，不进 USD headline(旧值 100)
+    assert abs(overview["by_currency"]["HKD"]["fee_total"] - 100.0) < 0.01   # 港币费全额如实分列
     assert overview["realized_pnl"] is None and overview["realized_pnl_available"] is False
 
     tx = client.get("/api/vip/account/transactions?market=us_stock&account_ref=ACC-1&txn_type=dividend")

@@ -375,8 +375,9 @@ def test_trade_confirm_updates_transactions_not_current_holdings(wl):
     overview = portfolio.build_account_overview(wl, account_ref="A1")
     assert overview["transaction_count"] == 3
     assert abs(overview["dividend_income"] - 100.0) < 0.01
-    assert abs(overview["fee_total"] - 100.0) < 0.01
-
+    # ★MEDIUM-4：港币费不混入 USD headline，分列 by_currency（旧混币值 100）
+    assert overview["fee_total"] == 0.0
+    assert abs(overview["by_currency"]["HKD"]["fee_total"] - 100.0) < 0.01
 
 
 def test_account_overview_and_transactions(wl):
@@ -397,9 +398,13 @@ def test_account_overview_and_transactions(wl):
     overview = portfolio.build_account_overview(wl, account_ref="A1")
     assert overview["transaction_count"] == 3
     assert abs(overview["dividend_income"] - 100.0) < 0.01
-    assert abs(overview["fee_total"] - 100.0) < 0.01
-    assert abs(overview["net_inflow"] - 600.0) < 0.01
-    assert abs(overview["net_outflow"] - 100.0) < 0.01
+    # ★MEDIUM-4：混币账户(USD 分红/注资 + HKD 费用)——headline 只给美元切片，港币分列，绝不混加
+    assert overview["mixed_currency"] is True and overview["currencies"] == ["HKD", "USD"]
+    assert overview["fee_total"] == 0.0                    # 港币费不进 USD headline(旧混币值 100)
+    assert abs(overview["net_inflow"] - 600.0) < 0.01      # USD 分红100+注资500
+    assert overview["net_outflow"] == 0.0                  # 港币费 -100 不进 USD headline(旧值 100)
+    assert abs(overview["by_currency"]["HKD"]["fee_total"] - 100.0) < 0.01
+    assert abs(overview["by_currency"]["HKD"]["net_outflow"] - 100.0) < 0.01
     assert overview["realized_pnl"] is None and overview["realized_pnl_available"] is False
 
 

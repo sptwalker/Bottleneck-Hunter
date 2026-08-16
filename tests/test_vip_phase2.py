@@ -134,6 +134,41 @@ def test_overview_totals_negative_when_only_outflow():
     assert t["external_txn_count"] == 2
 
 
+def test_overview_totals_currency_aware_no_silent_mix():
+    """★MEDIUM-4：net_amount 记成交原币，_overview_totals 绝不把港币当美元相加喂分析师。
+    单币种(含缺币种→美元)：headline=该币全额、旧断言不变；多币种：headline 只给美元切片 +
+    mixed_currency 旗标 + by_currency 全额分列，计数跨币汇总。"""
+    # 单币种非美元：headline 就是该币全额、如实标 HKD（不是零、不冒充美元）
+    hkd = [{"txn_type": "buy", "net_amount": -800000.0, "currency": "HKD"},
+           {"txn_type": "sell", "net_amount": 500000.0, "currency": "HKD"}]
+    t = portfolio._overview_totals(hkd)
+    assert t["currency"] == "HKD" and not t.get("mixed_currency")
+    assert t["buy_amount"] == 800000.0 and t["sell_amount"] == 500000.0
+
+    # 多币种：USD 100 买 与 HKD 800000 买绝不相加成 800100
+    mixed = [{"txn_type": "buy", "net_amount": -100.0, "currency": "USD"},
+             {"txn_type": "sell", "net_amount": 60.0, "currency": "USD"},
+             {"txn_type": "buy", "net_amount": -800000.0, "currency": "HKD"},
+             {"txn_type": "dividend", "net_amount": 1000.0, "currency": "HKD"}]
+    t = portfolio._overview_totals(mixed)
+    assert t["mixed_currency"] is True and t["currencies"] == ["HKD", "USD"]
+    assert t["currency"] == "USD"
+    assert t["buy_amount"] == 100.0 and t["buy_amount"] != 800100.0   # headline 只含美元腿，铁证不混币
+    assert t["sell_amount"] == 60.0
+    assert t["by_currency"]["HKD"]["buy_amount"] == 800000.0          # 港币全额如实分列
+    assert t["by_currency"]["HKD"]["dividend_income"] == 1000.0
+    assert t["by_currency"]["USD"]["buy_amount"] == 100.0
+    assert t["transaction_count"] == 4                               # 计数跨币汇总
+
+
+def test_overview_totals_missing_currency_treated_as_usd():
+    """缺 currency 的历史行(旧导入/纯函数调用)按美元入桶→单币种路径，旧断言不破。"""
+    rows = [{"txn_type": "buy", "net_amount": -1000.0}, {"txn_type": "sell", "net_amount": 1200.0}]
+    t = portfolio._overview_totals(rows)
+    assert t["currency"] == "USD" and not t.get("mixed_currency")
+    assert t["buy_amount"] == 1000.0 and t["sell_amount"] == 1200.0
+
+
 def test_perf_summary_basis_reflects_caliber():
     """basis 标注随曲线口径如实切换——含现金/衍生品MTM/持仓市值三态各不相同，绝不混用分母口径。"""
     def caliber(b):

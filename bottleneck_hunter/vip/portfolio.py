@@ -788,51 +788,71 @@ _EXT_OUT = {"withdrawal", "transfer_out"}
 
 
 def _overview_totals(rows: list[dict]) -> dict:
-    totals = {
-        "transaction_count": len(rows),
-        "buy_amount": 0.0,
-        "sell_amount": 0.0,
-        "dividend_income": 0.0,
-        "interest_income": 0.0,
-        "fee_total": 0.0,
-        "net_inflow": 0.0,
-        "net_outflow": 0.0,
-        # P2-2：外部现金流(注资/提取/转入转出)与买卖交割严格分离——TWR/MWR 分母只应剔外部现金流，不应把
-        # 买卖交割额当注资(红线 §3.2)。net_inflow/net_outflow 保留旧「按符号的全额」语义不动(向后兼容/测试锁定)。
-        # 券商是否逐笔列出转账决定覆盖度：花旗逐笔列(deposit/withdrawal/transfer_in)，招银月结单只出 buy/sell →
-        # external_txn_count=0 不等于"无外部现金流"，仅表示该券商未逐笔披露(Phase 3 据此决定能否算精确 TWR/MWR)。
-        "external_inflow": 0.0,
-        "external_outflow": 0.0,
-        "net_external_cashflow": 0.0,
-        "external_txn_count": 0,
-    }
-    _ext_in = _EXT_IN
-    _ext_out = _EXT_OUT
+    """交易流水聚合。★币种感知：net_amount 记在成交原币(transactions.currency)，跨币种直接相加＝
+    拿港币当美元喂分析师（与 compute_realized_pnl_fifo 同一纪律：绝不混币冒充美元）。故按原币分桶——
+    单币种账户(占多数；缺币种/未知→按美元，见 _USD_CCY)行为不变、旧断言全绿；多币种账户 headline
+    只给美元切片并置 mixed_currency 旗标 + by_currency 全额分列，杜绝把混币总额当单一口径喂 LLM。
+    金额字段按币切分；计数(transaction_count/external_txn_count)是纯计数、跨币可相加。
+    # ponytail: 不用 fx_rate 折美元——汇率回填不可信(红线「非美元不冒充美元」)，真实 fx 源到位再加。
+    # P2-2 语义保留：外部现金流(注资/提取/转入转出)与买卖交割严格分离；net_inflow/net_outflow 仍是旧
+    # 「按符号全额」；external_txn_count=0≠无外部现金流(仅券商未逐笔披露，Phase 3 据此判能否算精确 TWR/MWR)。
+    """
+    from bottleneck_hunter.vip.number_guard import _USD_CCY
+
+    def _blank() -> dict:
+        return {"transaction_count": 0, "buy_amount": 0.0, "sell_amount": 0.0,
+                "dividend_income": 0.0, "interest_income": 0.0, "fee_total": 0.0,
+                "net_inflow": 0.0, "net_outflow": 0.0, "external_inflow": 0.0,
+                "external_outflow": 0.0, "net_external_cashflow": 0.0, "external_txn_count": 0}
+
+    by_ccy: dict[str, dict] = {}
     for row in rows:
+        raw = str(row.get("currency") or "").strip()
+        ccy = "USD" if raw.lower() in _USD_CCY else raw.upper()   # ""/usd/未知→美元桶，与防伪器同一集合
+        t = by_ccy.setdefault(ccy, _blank())
+        t["transaction_count"] += 1
         amt = float(row.get("net_amount") or 0.0)
         kind = row.get("txn_type") or ""
         if kind == "buy":
-            totals["buy_amount"] += abs(amt)
+            t["buy_amount"] += abs(amt)
         elif kind == "sell":
-            totals["sell_amount"] += abs(amt)
+            t["sell_amount"] += abs(amt)
         elif kind == "dividend":
-            totals["dividend_income"] += amt
+            t["dividend_income"] += amt
         elif kind == "interest":
-            totals["interest_income"] += amt
+            t["interest_income"] += amt
         elif kind == "fee":
-            totals["fee_total"] += abs(amt)
-        elif kind in _ext_in:
-            totals["external_inflow"] += abs(amt)
-            totals["external_txn_count"] += 1
-        elif kind in _ext_out:
-            totals["external_outflow"] += abs(amt)
-            totals["external_txn_count"] += 1
+            t["fee_total"] += abs(amt)
+        elif kind in _EXT_IN:
+            t["external_inflow"] += abs(amt)
+            t["external_txn_count"] += 1
+        elif kind in _EXT_OUT:
+            t["external_outflow"] += abs(amt)
+            t["external_txn_count"] += 1
         if amt >= 0:
-            totals["net_inflow"] += amt
+            t["net_inflow"] += amt
         else:
-            totals["net_outflow"] += abs(amt)
-    totals["net_external_cashflow"] = totals["external_inflow"] - totals["external_outflow"]
-    return {k: round(v, 2) if isinstance(v, float) else v for k, v in totals.items()}
+            t["net_outflow"] += abs(amt)
+    for t in by_ccy.values():
+        t["net_external_cashflow"] = t["external_inflow"] - t["external_outflow"]
+
+    def _round(d: dict) -> dict:
+        return {k: round(v, 2) if isinstance(v, float) else v for k, v in d.items()}
+
+    currencies = sorted(by_ccy)
+    if len(currencies) <= 1:                                 # 单币种(含缺币种→USD)：headline 即该币全额
+        out = _round(by_ccy[currencies[0]]) if currencies else _round(_blank())
+        out["currency"] = currencies[0] if currencies else "USD"
+        return out
+    # 多币种：headline 只给美元切片(缺→零)，金额只代表美元；计数跨币汇总；非美元全额分列 by_currency。
+    out = _round(by_ccy.get("USD", _blank()))
+    out["currency"] = "USD"
+    out["mixed_currency"] = True
+    out["currencies"] = currencies
+    out["transaction_count"] = sum(t["transaction_count"] for t in by_ccy.values())
+    out["external_txn_count"] = sum(t["external_txn_count"] for t in by_ccy.values())
+    out["by_currency"] = {c: _round(by_ccy[c]) for c in currencies}
+    return out
 
 
 def _external_flows(txns: list[dict]) -> list[dict]:
@@ -1040,7 +1060,7 @@ def _canonical_cost_map(wl_store, account_ref: str) -> dict[str, dict]:
             params.append(selected["doc_id"])
         q, p = wl_store._filtered(
             f"""SELECT i.symbol, p.quantity, p.as_of_date, p.avg_cost, p.cost_basis,
-                      p.unrealized_pnl, p.market_value_base
+                      p.unrealized_pnl, p.market_value_base, p.currency
                FROM positions p JOIN instruments i ON i.id = p.instrument_id
                WHERE {' AND '.join(where)}""",
             tuple(params), table="p")
@@ -1059,10 +1079,12 @@ def _canonical_cost_map(wl_store, account_ref: str) -> dict[str, dict]:
                     upnl = round(mv - cb, 2)   # 成本历史、市值当前：诚实的当前未实现盈亏
                     carried = True
             out[r["symbol"]] = {
-                "avg_cost": round(ac, 4) or None,
-                "cost_basis": round(cb, 2) or None,
+                "avg_cost": round(ac, 4) or None,          # 原币/股（历史兼容；逐仓富化改用美元/股）
+                "cost_basis": round(cb, 2) or None,        # 美元总额
                 "unrealized_pnl": round(upnl, 2) if cb else None,
                 "unrealized_pnl_pct": round((mv - cb) / cb * 100, 2) if cb else None,
+                "quantity": r["quantity"] or 0.0,          # 真实浮点股数（sim.shares 为 INT 会截断零股，如 MU 8.62）
+                "currency": r["currency"] or "USD",        # 原币标注（供 avg_cost 原币口径披露）
                 "as_of_date": r["as_of_date"],
                 "cost_carried_from": prior["as_of_date"] if carried else None,  # 披露口径
             }
@@ -1406,11 +1428,22 @@ def build_account_dossier(wl_store, *, account_ref: str = "") -> dict:
         wl = wl_store.get_by_ticker(h["ticker"]) or {}
         if wl.get("id"):
             join_covered += 1
+        # 逐仓口径统一为「美元/股」：现价与成本同为 USD-per-share，杜绝 AI 把美元总额当每股价、
+        # 或拿原币成本比美元现价（MU「现价877.57/成本980.43/浮亏-10.5%」实为 8.62 股的总市值/总成本基
+        # 被当成每股价、又用两个总额凑出 -10.5% 的臆造根因）。真实浮点股数取规范层 quantity——
+        # sim.shares 为 INT，零股(MU 8.62)会截断致每股价失真。缺成本/股数则诚实留 None，绝不臆造。
+        qty = c.get("quantity") or 0.0
+        cb = c.get("cost_basis")
+        mv = h.get("market_value")   # sim 美元总市值（最鲜，含盘中重估）
         holdings.append({**h,
-                         "avg_cost": c.get("avg_cost"),
-                         "cost_basis": c.get("cost_basis"),
-                         "unrealized_pnl": upnl,
-                         "unrealized_pnl_pct": c.get("unrealized_pnl_pct"),
+                         "shares": qty or h.get("shares"),
+                         "current_price": round(mv / qty, 4) if (mv and qty) else None,   # 美元/股 [修 HIGH-1]
+                         "avg_cost": round(cb / qty, 4) if (cb and qty) else None,          # 美元/股 [修 HIGH-2]
+                         "avg_cost_nominal": c.get("avg_cost"),              # 原币/股（参考，配 currency）
+                         "currency": c.get("currency") or "USD",
+                         "cost_basis": cb,                                                  # 美元总额
+                         "unrealized_pnl": upnl,                                            # 美元
+                         "unrealized_pnl_pct": c.get("unrealized_pnl_pct"),                # 美元口径
                          "is_derivative": False,  # 0-8：股票track（计入总权益）；与 derivative_exposure 的 True 对轨
                          "entry_id": wl.get("id"),
                          "sector": wl.get("sector") or h.get("sector") or "",

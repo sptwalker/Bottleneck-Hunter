@@ -23,4 +23,4 @@ def test_nomura_nav_drives_total_equity(tmp_path):
     assert m["cash_balance"] == stmt.total_cash_usd
     assert m["total_equity"] == stmt.account_summary["net_asset_value_usd"]
     rep = portfolio.generate_vip_report(wl, period="2026-06", account_ref="22704339.001")
-    assert "组合总权益" in rep["report_md"] and "可投资现金" in rep["report_md"]
+    assert "总资产（美元）" in rep["report_md"] and "可用现金" in rep["report_md"]  # 报告卡片现用标签
