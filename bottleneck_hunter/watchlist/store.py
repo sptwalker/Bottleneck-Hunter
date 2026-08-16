@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from pathlib import Path
 
@@ -44,6 +45,25 @@ from bottleneck_hunter.watchlist.store_schema import (
 from bottleneck_hunter.watchlist.store_simtrading import _SimTradingMixin
 from bottleneck_hunter.watchlist.store_vip_projection import _VipProjectionMixin
 from bottleneck_hunter.watchlist.store_watchlist import _WatchlistMixin
+
+# G-5 fail-closed 护栏用：VIP 专属表清单（仅 VIP 写入、行按 user_id 隔离；生产中 user_id 永不为空）。
+# _user_filter 命中其一且 store 未绑定用户(_user_id 空) → 显式报错，而非静默放行不加过滤，
+# 把「未来漏 .for_user()」从静默跨用户泄露变成启动即炸。
+#
+# 【为何只列 VIP 专属表，不含 sim_account/sim_positions】——这两张是决策中心与 VIP 共享表：
+#   决策中心自有模拟盘用 account_ref=''、且约定以空 user_id 作单用户测试身份（大量 test_decision_* 依赖），
+#   而 VIP 侧任何持仓访问都必先经 get_sim_account(非空 ref) → ensure_vip_account 读 vip_accounts（本表已在册），
+#   在解析账户那一步就被拦下，故共享表的越权读被 vip_accounts 这道上游卡点等价覆盖，无需直拦共享表（否则误伤决策中心）。
+#   positions/instruments/transactions 是 VIP 结算单规范化层，全库消费点均在 vip/（无决策中心用法），故直接纳入。
+# 注：financial_documents 在 auth.db(AuthStore) 手写 user_id 过滤、不经本 store，故不在此列。
+# ponytail: 用表名正则兜底检测——零调用点改动即可抓漏绑定；\b 词边界确保 positions 不误命中 sim_positions；
+#   表名 distinctive，误报可忽略，且上层多处 try/except 会把误报安全降级为空结果，绝不反向泄露。
+_VIP_OWNED_TABLE_RE = re.compile(
+    r"\b(?:positions|instruments|transactions|vip_accounts|vip_imports|"
+    r"vip_derivative_terms|vip_advisory|vip_reports|vip_projections|"
+    r"vip_account_log|chat_sessions|chat_messages)\b",
+    re.IGNORECASE,
+)
 
 
 class WatchlistStore(
@@ -109,6 +129,16 @@ class WatchlistStore(
         对于 JOIN 查询，传入 table="w" 等主表别名，生成 w.user_id = ? 避免歧义。
         """
         if not self._user_id:
+            # G-5 fail-closed：未绑定用户的 store 绝不能查询 VIP 专属表。空 user_id 时本函数原本
+            # 「静默放行不加过滤」，一旦有人漏掉 .for_user() 就会跨所有用户读到 VIP 账户数据。
+            # 命中 VIP 专属表即显式报错(安全失败)，把「未来漏绑定」从静默泄露变成启动即炸；
+            # 决策中心共享表(sim_account/sim_positions)不在册——见 _VIP_OWNED_TABLE_RE 上方说明，
+            # 其越权读已由上游 vip_accounts 卡点覆盖，直拦会误伤决策中心单用户测试身份。
+            if _VIP_OWNED_TABLE_RE.search(query):
+                raise ValueError(
+                    "拒绝在未绑定用户的 store 上查询 VIP 专属表(会跨用户泄露 VIP 账户数据)，"
+                    "请先 .for_user(sub) 再查询；命中 SQL: " + " ".join(query.split())[:160]
+                )
             return query, params
         col = f"{table}.user_id" if table else "user_id"
         upper = query.upper()
