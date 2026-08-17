@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BottleneckHunter — AI 产业链瓶颈选股</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=68">
+  <link rel="stylesheet" href="/static/css/style.css?v=69">
   <link rel="stylesheet" href="/static/css/admin.css?v=1">
   <script src="/static/vendor/echarts.min.js"></script>
   <script src="/static/vendor/d3.min.js"></script>
@@ -934,6 +934,17 @@
                               placeholder="如：偏好科技与新能源，排除白酒、地产"></textarea>
                   </div>
                 </details>
+              </div>
+            </div>
+
+            <!-- 决策中心运行统计 -->
+            <div class="dc-card" id="dc-decision-stats">
+              <div class="dc-card-header">
+                <h3>运行统计</h3>
+                <span class="dc-stats-since" id="dc-stats-since"></span>
+              </div>
+              <div class="dc-card-body" id="dc-decision-stats-body">
+                <p class="dc-empty-hint">加载中…</p>
               </div>
             </div>
 
@@ -2388,7 +2399,7 @@
 
 <!-- 推荐配置弹窗已退役（智能调度取代静态推荐冻结）-->
 
-<script type="module" src="/static/js/app.js?v=103"></script>
+<script type="module" src="/static/js/app.js?v=104"></script>
 <script src="/static/js/syslog.js"></script>
 <script>
   window.addEventListener('error', e => {

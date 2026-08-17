@@ -1386,6 +1386,84 @@
   color: oklch(0.65 0.22 25);
 }
 
+/* ── 决策中心运行统计 ─────────────────────────────── */
+
+.dc-stats-since {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dc-stats-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.dc-stat-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 6px;
+  background: oklch(0.55 0.15 250 / 0.06);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.dc-stat-num {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.dc-stat-label {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.dc-stats-block {
+  margin-top: 14px;
+}
+
+.dc-stats-sub {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.dc-stats-chart {
+  width: 100%;
+  height: 132px;
+}
+
+.dc-stats-chart--donut {
+  height: 156px;
+}
+
+.dc-stats-tac {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.dc-stats-tac b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.dc-stats-hint {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 6px 0;
+}
+
 /* ── 模型评分排行 ─────────────────────────────────── */
 
 .dc-model-list {

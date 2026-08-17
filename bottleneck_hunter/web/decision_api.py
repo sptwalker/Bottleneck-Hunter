@@ -892,6 +892,12 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
     }
 
 
+@router.get("/stats")
+async def decision_center_stats(user: dict = Depends(get_current_user)):
+    """决策中心运行统计 —— 跨两市场汇总（不绑定 market），供右侧「运行统计」面板展示。"""
+    return _user_store(user).get_decision_center_stats()
+
+
 @router.get("/scheduler-status")
 async def get_scheduler_status(user: dict = Depends(get_current_user)):
     """返回决策自动调度任务的运行状态"""

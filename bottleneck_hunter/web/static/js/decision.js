@@ -17,6 +17,8 @@ const dcState = {
   catalystView: 'list',
   calendarMonth: null,
   riskChart: null,
+  chartStatsFunnel: null,
+  chartStatsVerdict: null,
   lightErrors: new Set(),   // 本轮决策中失败的模块（保留红灯）
 };
 
@@ -289,6 +291,7 @@ function renderAll(data) {
   loadRiskDashboard();
   loadMeetings();
   loadModelRatings();
+  loadDecisionStats();
   loadPortfolioStyle();
   updateLightsFromData(data);
 }
@@ -2637,6 +2640,113 @@ function renderCommitteeTranscript(transcript) {
   }
 
   return html;
+}
+
+async function loadDecisionStats() {
+  const body = document.getElementById('dc-decision-stats-body');
+  if (!body) return;
+  try {
+    const data = await dcFetch('/stats');   // 跨两市场汇总，无 market 参数
+    renderDecisionStats(data, body);
+  } catch (e) {
+    body.innerHTML = `<p class="dc-empty-hint">加载失败: ${escDC(e.message)}</p>`;
+  }
+}
+
+function renderDecisionStats(s, container) {
+  s = s || {};
+  // 每次重建 innerHTML 会丢弃图表挂载节点，先 dispose 旧实例，否则旧 canvas 泄漏
+  ['chartStatsFunnel', 'chartStatsVerdict'].forEach(k => {
+    if (dcState[k]) { try { dcState[k].dispose(); } catch { /* noop */ } dcState[k] = null; }
+  });
+
+  const funnel = [s.macro_rounds || 0, s.strategic || 0, s.tactical_total || 0, s.execution || 0];
+  const totalActivity = funnel.reduce((a, b) => a + b, 0)
+    + (s.committee_total || 0) + (s.trades || 0) + (s.experiences || 0);
+
+  const sinceEl = document.getElementById('dc-stats-since');
+  if (sinceEl) {
+    if (s.since) {
+      const days = Math.max(1, Math.floor((Date.now() - Date.parse(s.since)) / 86400000) + 1);
+      sinceEl.textContent = `自 ${fmtBJ(s.since, false)} 起 · ${days} 天`;
+    } else {
+      sinceEl.textContent = '';
+    }
+  }
+
+  if (totalActivity === 0) {
+    container.innerHTML = '<p class="dc-empty-hint">暂无运行数据，完成一次「一键日常决策」后将在此汇总</p>';
+    return;
+  }
+
+  const tbm = s.tactical_by_market || {};
+  const us = tbm.us_stock || 0, cn = tbm.a_stock || 0;
+  const ct = s.committee_total || 0;
+  const passRate = ct > 0 ? Math.round((s.committee_approved || 0) / ct * 100) : 0;
+
+  container.innerHTML = `
+    <div class="dc-stats-tiles">
+      <div class="dc-stat-tile"><div class="dc-stat-num">${s.macro_rounds || 0}</div><div class="dc-stat-label">日常决策 / 轮</div></div>
+      <div class="dc-stat-tile"><div class="dc-stat-num">${s.trades || 0}</div><div class="dc-stat-label">市场操作 / 笔</div></div>
+      <div class="dc-stat-tile"><div class="dc-stat-num">${s.experiences || 0}</div><div class="dc-stat-label">复盘经验 / 条</div></div>
+      <div class="dc-stat-tile"><div class="dc-stat-num">${s.catalysts || 0}</div><div class="dc-stat-label">催化剂 / 个</div></div>
+    </div>
+    <div class="dc-stats-block">
+      <div class="dc-stats-sub">决策漏斗 · L1 → L4</div>
+      <div class="dc-stats-chart" id="dc-stats-funnel"></div>
+      <div class="dc-stats-tac">L3 战术分市场 · <b>美股 ${us}</b> · <b>A股 ${cn}</b></div>
+    </div>
+    <div class="dc-stats-block">
+      <div class="dc-stats-sub">投委会审议 ${ct} 次${ct ? ` · 通过率 ${passRate}%` : ''}</div>
+      ${ct ? '<div class="dc-stats-chart dc-stats-chart--donut" id="dc-stats-verdict"></div>'
+           : '<p class="dc-stats-hint">尚未召开审核会议</p>'}
+    </div>`;
+
+  if (typeof echarts === 'undefined') return;
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue('--ink').trim() || '#333';
+  const ok = css.getPropertyValue('--success').trim() || '#3a9d6b';
+  const bad = css.getPropertyValue('--danger').trim() || '#d64545';
+  const gray = css.getPropertyValue('--muted').trim() || '#8a8f98';
+  // 漏斗蓝色渐深阶梯（L1→L4 阶段本身无好坏，用单色阶最清晰）
+  const ramp = ['oklch(0.62 0.15 250)', 'oklch(0.56 0.15 250)', 'oklch(0.5 0.15 250)', 'oklch(0.44 0.15 250)'];
+  const names = ['L1 宏观', 'L2 战略', 'L3 战术', 'L4 执行'];
+
+  const fEl = document.getElementById('dc-stats-funnel');
+  if (fEl) {
+    const chart = echarts.init(fEl);
+    dcState.chartStatsFunnel = chart;
+    chart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: { trigger: 'item', formatter: '{b}: {c}' },
+      series: [{
+        type: 'funnel', min: 0, minSize: '20%', sort: 'descending', gap: 2,
+        left: 8, right: 8, top: 6, bottom: 6,
+        label: { color: ink, fontSize: 11, formatter: '{b}  {c}' },
+        data: funnel.map((v, i) => ({ value: v, name: names[i], itemStyle: { color: ramp[i] } })),
+      }],
+    });
+  }
+
+  const vEl = document.getElementById('dc-stats-verdict');
+  if (vEl) {
+    const chart = echarts.init(vEl);
+    dcState.chartStatsVerdict = chart;
+    chart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+      legend: { bottom: 0, left: 'center', itemWidth: 10, itemHeight: 10, textStyle: { color: ink, fontSize: 11 } },
+      series: [{
+        type: 'pie', radius: ['48%', '72%'], center: ['50%', '42%'],
+        avoidLabelOverlap: false, label: { show: false }, labelLine: { show: false },
+        data: [
+          { value: s.committee_approved || 0, name: '通过', itemStyle: { color: ok } },
+          { value: s.committee_rejected || 0, name: '否决', itemStyle: { color: bad } },
+          { value: s.committee_pending || 0, name: '待议', itemStyle: { color: gray } },
+        ],
+      }],
+    });
+  }
 }
 
 async function loadModelRatings() {

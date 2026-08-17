@@ -51,6 +51,59 @@ class _DecisionMixin:
             conn.close()
 
 
+    def get_decision_center_stats(self) -> dict:
+        """决策中心运行统计 —— 按当前用户、跨两市场汇总（战术计划额外按市场拆分）。
+
+        全程只用 _user_filter（不绑定 market），故 A股/美股合并计数；唯战术计划 GROUP BY market
+        给出「两个市场分别」的拆分。所有涉及的表(macro_strategies/strategic_plans/tactical_plans/
+        execution_plans/committee_consensus/sim_trades/experience_cards/catalyst_tracking)均已具
+        user_id 列，_user_filter 追加 AND user_id=? 保证不串用户；未绑定用户则退化为空过滤(计 0，
+        这些均非 VIP 专属表故不触发 G-5 护栏)。
+        """
+        conn = self._connect()
+        try:
+            def _count(sql: str, params: tuple = ()) -> int:
+                q, p = self._user_filter(sql, params)
+                row = conn.execute(q, p).fetchone()
+                return int(row[0]) if row and row[0] is not None else 0
+
+            # 投委会终裁词表见 committee.py：approved / approved_with_modifications=通过，rejected=否决，
+            # needs_discussion / needs_review=待议(=总数-通过-否决)。
+            committee_total = _count("SELECT COUNT(*) FROM committee_consensus")
+            approved = _count(
+                "SELECT COUNT(*) FROM committee_consensus "
+                "WHERE final_verdict IN ('approved', 'approved_with_modifications')"
+            )
+            rejected = _count("SELECT COUNT(*) FROM committee_consensus WHERE final_verdict = 'rejected'")
+
+            # 战术计划按市场拆分（_user_filter 在 GROUP BY 前插 user_id 过滤）
+            q, p = self._user_filter("SELECT market, COUNT(*) FROM tactical_plans GROUP BY market")
+            tactical_by_market = {(r[0] or "us_stock"): int(r[1]) for r in conn.execute(q, p).fetchall()}
+
+            # 「从有记录可查开始」= 最早一条 L1 宏观(漏斗之首)的创建时间；created_at 为 UTC 可字典序 MIN
+            q, p = self._user_filter("SELECT MIN(created_at) FROM macro_strategies")
+            row = conn.execute(q, p).fetchone()
+            since = row[0] if row and row[0] else None
+
+            return {
+                "since": since,
+                "macro_rounds": _count("SELECT COUNT(*) FROM macro_strategies"),
+                "strategic": _count("SELECT COUNT(*) FROM strategic_plans"),
+                "tactical_total": sum(tactical_by_market.values()),
+                "tactical_by_market": tactical_by_market,
+                "execution": _count("SELECT COUNT(*) FROM execution_plans"),
+                "committee_total": committee_total,
+                "committee_approved": approved,
+                "committee_rejected": rejected,
+                "committee_pending": max(0, committee_total - approved - rejected),
+                "trades": _count("SELECT COUNT(*) FROM sim_trades"),
+                "experiences": _count("SELECT COUNT(*) FROM experience_cards"),
+                "catalysts": _count("SELECT COUNT(*) FROM catalyst_tracking"),
+            }
+        finally:
+            conn.close()
+
+
     def create_macro_strategy(self, result_json: dict) -> str:
         sid = uuid.uuid4().hex[:12]
         conn = self._connect()
