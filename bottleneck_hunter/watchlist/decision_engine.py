@@ -1224,6 +1224,9 @@ def _is_recent_duplicate(action, ticker, recent_map) -> bool:
 
 # execute_trade 只认这四种真实成交动作（trade_executor.py:128/132）；其余不可成交。
 _EXECUTABLE_ACTIONS = ("buy", "add", "sell", "reduce")
+# L4 最小建仓权重：低于此权重的 buy/add 会被代码顶到此仓位（B 兜底），
+# 根除「$1M 账户买 5 股 MU=0.44%」这类 LLM 拍脑袋的零头仓。
+_MIN_BUILD_WEIGHT_PCT = 3.0
 
 
 def _is_executable_plan(ep: dict) -> bool:
@@ -1429,6 +1432,10 @@ async def run_execution_plans(
             validate_execution_plan,
             validate_portfolio_beta,
         )
+        from bottleneck_hunter.watchlist.position_sizing import (
+            PositionSizer,
+            target_shares_for_buy,
+        )
         macro = store.get_latest_macro_strategy()
         macro_rj = (macro or {}).get("result_json", {}) if macro else {}
         risk_appetite = (macro or {}).get("risk_appetite", "")
@@ -1533,6 +1540,53 @@ async def run_execution_plans(
             ep["applied_card_ids"] = applied_card_ids
             ep.setdefault("market", market)
             ep.setdefault("sector", sector_map.get(ticker, ""))
+
+            # ── A+B 确定性定股：用「目标权重×波动率风险×下限兜底」重算 shares，替代 LLM 直觉 ──
+            # 病根：L4 直接采信 LLM 拍脑袋的 shares（$1M 账户买 5 股 MU=0.44%）；position_sizing 空有其名从未接入。
+            # 仅对 buy/add 生效（sell/reduce 由持仓量决定，不动）。下限 3% 顶零头、波动率设风险天花板、
+            # 单股上限沿用已收紧的 constraints、A股按 100 手取整；
+            # 之后的 validate/max_compliant_shares 仍向下钳制现金/板块/beta。
+            if ep.get("action") in ("buy", "add"):
+                _price = float(ep.get("target_price") or ep.get("estimated_price") or 0) or 0.0
+                _equity = float(account.get("total_equity") or account.get("cash_balance") or 0) or 0.0
+                _existing = next((float(p.get("market_value") or 0)
+                                  for p in positions if p.get("ticker") == ticker), 0.0)
+                # LLM 意图权重：优先其自报 after_weight_pct，否则由它提的 shares 反推（=它真实想要的仓位）
+                _impact = ep.get("position_impact") or {}
+                try:
+                    _llm_w = float(_impact.get("after_weight_pct") or 0)
+                except (TypeError, ValueError):
+                    _llm_w = 0.0
+                if _llm_w <= 0 and _price > 0 and _equity > 0:
+                    try:
+                        _llm_w = float(ep.get("shares") or 0) * _price / _equity * 100
+                    except (TypeError, ValueError):
+                        _llm_w = 0.0
+                # 个股年化波动率（近60日快照）；算不出→0，helper 内退化为「只按下限/上限」不设风险帽
+                _vol = 0.0
+                try:
+                    _snaps = store.get_snapshots(ticker, days=60)
+                    _closes = [float(s["close"]) for s in reversed(_snaps or []) if s.get("close") not in (None, "")]
+                    _rets = [_closes[i] / _closes[i - 1] - 1.0 for i in range(1, len(_closes)) if _closes[i - 1] > 0]
+                    _vol = PositionSizer.compute_stock_volatility(_rets)
+                except Exception:
+                    _vol = 0.0
+                _sized = target_shares_for_buy(
+                    price=_price, account_equity=_equity, existing_value=_existing,
+                    llm_weight_pct=_llm_w, floor_pct=_MIN_BUILD_WEIGHT_PCT,
+                    cap_pct=float(constraints.get("max_single_position_pct") or 0),
+                    stock_vol=_vol, market=market,
+                )
+                if _sized <= 0:
+                    # 够不到 3% 下限（加仓已达标 / A股不足一手 / 无价）→ 不开零头仓
+                    logger.info("跳过无法定到 %.0f%% 下限仓位的 %s（已达标/整手/无价）",
+                                _MIN_BUILD_WEIGHT_PCT, ticker)
+                    skipped += 1
+                    continue
+                if _sized != int(float(ep.get("shares") or 0)):
+                    ep["shares"] = _sized
+                    ep["estimated_amount"] = round(_sized * _price, 2)
+                    ep["_auto_sized"] = True
 
             # ── P0.1 前置约束校验 + P2.1 组合 beta 校验 + B1 regime 仓位校验 ──
             def _full_validate(plan_ep):
