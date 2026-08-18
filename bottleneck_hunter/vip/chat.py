@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -143,14 +144,141 @@ def _latest_recommend_text(wl_store, account_ref: str = "") -> str:
             + json.dumps(body, ensure_ascii=False))
 
 
+def _macro_text(wl_store) -> str:
+    """当前 L1 宏观研判并进 facts——用户问「该不该加仓/降现金/换行业」时有宏观锚点。
+
+    复用 advisory.format_macro_for_prompt（缺失/异常已自降级为中性稳健句，绝不带崩），
+    此前 chat 完全不带宏观，advisory/recommend/strategy_review 却都喂。返回值必非空（降级句兜底），
+    故不做空串分支，直接包标题块。
+    """
+    from bottleneck_hunter.vip.advisory import format_macro_for_prompt
+    return ("【当前 L1 宏观研判（系统周度生成，供宏观/加减仓/换行业问题参考）】\n"
+            + format_macro_for_prompt(wl_store))
+
+
+def _experience_text(wl_store, account_ref: str = "") -> str:
+    """往期复盘沉淀的经验卡片（scope='vip_portfolio'）并进 facts——顾问吸取自身历史教训、自我校准。
+
+    复用 advisory 的取数与渲染（get_experience_cards + _render_experience_cards）。无卡/异常→空串
+    （不塞占位，上层不拼）。account_ref 用于 scope_key，与 advisory 回填侧口径一致。
+    """
+    from bottleneck_hunter.vip.advisory import _render_experience_cards
+    try:
+        cards = wl_store.get_experience_cards(scope="vip_portfolio", scope_key=account_ref, limit=8)
+    except Exception:  # noqa: BLE001
+        cards = []
+    if not cards:
+        return ""
+    return ("【往期复盘沉淀的经验卡片（历史教训，避免重蹈）】\n"
+            + _render_experience_cards(cards))
+
+
+def _advisory_ledger_text(wl_store, account_ref: str = "") -> str:
+    """上一份账户诊断建议（精简）+ 顾问历史命中率台账并进 facts。
+
+    用户问「最新账户策略/持仓该减该加」→ 引上一份诊断成品（投委会评审结论，历史快照带 generated_at）；
+    问「你上次让我加的仓对了吗」→ 引命中率台账。两段独立降级，皆无→空串。
+    复用 get_latest_advisory / build_review_ledger（后者只读零 LLM、口径唯一）。
+    ponytail: 诊断只抽逐仓 action/理由 + 现金预算 + 主席综述（照 _latest_recommend_text 抽轻字段，
+              不塞委员逐条语料）；台账只取末 10 行防上下文膨胀，全量在复盘页看。
+    """
+    from bottleneck_hunter.vip.advice_review import build_review_ledger
+    from bottleneck_hunter.vip.advisory import get_latest_advisory
+    parts: list[str] = []
+
+    try:
+        adv = get_latest_advisory(wl_store, account_ref=account_ref)
+    except Exception:  # noqa: BLE001
+        adv = None
+    if adv:
+        holds = [{"ticker": h.get("ticker", ""), "action": h.get("action", ""),
+                  "reason": h.get("reason", ""), "risk": h.get("risk", "")}
+                 for h in (adv.get("holdings") or []) if h.get("ticker")]
+        body = {"generated_at": adv.get("generated_at", ""), "chair_summary": adv.get("chair_summary", ""),
+                "portfolio_diagnosis": adv.get("portfolio_diagnosis", ""), "holdings": holds}
+        parts.append("【上一份账户诊断建议（投委会评审成品·历史快照，引用须提示 generated_at 时效）】\n"
+                     + json.dumps(body, ensure_ascii=False, default=str))
+
+    try:
+        led = build_review_ledger(wl_store)
+    except Exception:  # noqa: BLE001
+        led = None
+    if led and (led.get("kpi") or {}).get("settled"):
+        kpi = led.get("kpi") or {}
+        tail = (led.get("ledger") or [])[:10]
+        body = {"kpi": kpi, "recent": tail}
+        parts.append("【顾问历史命中率与对错台账（回答「上次建议对不对」用）】\n"
+                     + json.dumps(body, ensure_ascii=False, default=str))
+
+    return "\n".join(parts)
+
+
+# 从问题里抽疑似美股代码（1-6 位大写字母，可含点）；用于「用户点名个股 → 查该票研报」。
+# 复用 live_quote 同款正则，但**不与持仓取交集**：研报可能属未持有的观察/候选票；库里无该票研报则自然返回空。
+_TICKER_RE = re.compile(r"\b[A-Z]{1,6}(?:\.[A-Z]{1,2})?\b")
+_STOCK_REPORT_MAX = 3          # 单次问答最多带几只个股研报，防上下文膨胀
+_STOCK_REPORT_CHARS = 4000     # 每只研报截断字符（对齐决策中心个股研报前 4 页量级）
+
+
+def _report_text(wl_store, question: str) -> str:
+    """决策中心上传的研报原文并进 facts：宏观研报全局带 + 问题点名且库里确有研报的个股按需带。
+
+    宏观：复用 macro_consultation._macro_report_block（内部自 .for_market(__macro__)、按用户隔离、
+          含日期声明与缺失降级）。个股：抽问题里点名的 ticker，逐只 get_focus_report（已按 user+market
+          隔离，A股票读不到美股研报），仅命中库里确有研报的票；最多 _STOCK_REPORT_MAX 只、每只截断。
+    注意与 _macro_text 的区别：那是 L1 策略结论(系统产物)，这是研报 PDF 原文(输入原料)，二者互补。
+    ponytail: 只带研报文本本身，不带 _focus_ticker_block 的财务/估值/新闻全套——dossier 已有，避免重复+膨胀。
+    """
+    from bottleneck_hunter.watchlist.macro_consultation import _macro_report_block
+    parts: list[str] = []
+    try:
+        macro = _macro_report_block(wl_store)
+    except Exception:  # noqa: BLE001
+        macro = ""
+    if macro:
+        parts.append(macro)
+
+    # 个股研报：去重、剔除已被宏观占用的语义无关短词由 get_focus_report 命中与否天然过滤（库无该键→None）
+    seen: list[str] = []
+    n_stock = 0
+    for tk in _TICKER_RE.findall((question or "").upper()):
+        if n_stock >= _STOCK_REPORT_MAX:
+            break
+        if tk in seen:
+            continue
+        seen.append(tk)
+        try:
+            rpt = wl_store.get_focus_report(tk)
+        except Exception:  # noqa: BLE001
+            rpt = None
+        body = (rpt or {}).get("report_text") if rpt else ""
+        if body and body.strip():
+            parts.append(f"【{tk} 个股研报（用户上传·逐字摘录，以报告内注明日期为准）】\n"
+                         + body.strip()[:_STOCK_REPORT_CHARS])
+            n_stock += 1
+    return "\n".join(parts)
+
+
 _PROMPT = """你是私人财务AI顾问。请只依据下面的真实 facts 回答，不得编造金额/占比/股数。
 若用户问到 facts 里没有的数据，请明确说“当前数据中没有该信息”。
 回答要求：简体中文、专业但克制、分点回答，避免空泛。
 下面的「本账户投资纲领」是用户为该账户设定的投资目标与约束，回答涉及建议时须与之一致。
+你可围绕用户咨询就以下维度提供参考：
+① 宏观研判——据 facts 内「L1 宏观研判」（市场状态/风险偏好/建议现金比例/板块轮动/风险因子），
+   若 facts 含「全球宏观背景研报」或「个股研报」（用户上传的投行/机构研报原文），可据其逐字观点作答，
+   但须以研报内注明日期为准、勿与系统快照日混淆；用户点名的个股若 facts 无其研报，说明系统暂无该票研报；
+② 账户与持仓策略——据 dossier 逐仓事实 + 「上一份账户诊断建议」（历史快照，引用须点明其 generated_at 时效、非本次实时）；
+③ 主要持仓与观察池候选的战术观点——据 dossier 持仓 + 「可选新标的候选池」；
+④ 衍生品——据 dossier 的 derivative_exposure / derivative_summary / net_greeks / stress_test，
+   可就敲入敲出障碍、杠杆、尾部风险给提示；facts 无相关字段则说明当前无衍生品数据；
+⑤ 银行/券商推介产品分析——facts 内无此类数据；仅当用户在问题中贴出或上传了产品条款时，
+   才按其条款 + 本账户投资纲领 + 现有持仓即席分析（收益结构/隐含风险/与纲领契合/是否与现有持仓重复暴露），
+   并明确声明「以上仅据你所提供的条款、非系统留存数据」；用户未提供条款则说明无法凭空分析。
 若用户要求推荐新的投资标的，只能从 facts 内「可选新标的候选池」中挑选（结合瓶颈环节与纲领契合度），
 不得编造候选池以外的标的；池为空或未出现则如实说明观察池暂无合适候选、可先加入观察池跟踪。
 若 facts 含「上一份荐新建议」，可引用其投委会结论作参考，但须说明它是历史快照（点明其 generated_at 生成时间），
 提示如需最新研判请到荐新页重新生成；不得把旧建议当作本次实时结论。
+引用「命中率台账」时如实呈现胜率，不夸大顾问过往表现。
 
 [facts]\n{facts}\n[/facts]
 
@@ -193,6 +321,20 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
     rec_text = _latest_recommend_text(wl_store, account_ref=account_ref)
     if rec_text:
         facts_text = facts_text + "\n" + rec_text
+    # 补齐 chat 此前独缺、advisory/recommend/strategy_review 都喂的三块背景：宏观锚点 / 账户诊断+命中率台账 / 经验卡片。
+    # 顺序：宏观（背景）→ 账户诊断+台账（结论）→ 经验卡片（教训收尾）。各自已内建缺失降级，空段不拼。
+    report_text = _report_text(wl_store, question)
+    if report_text:
+        facts_text = facts_text + "\n" + report_text
+    macro_text = _macro_text(wl_store)
+    if macro_text:
+        facts_text = facts_text + "\n" + macro_text
+    adv_text = _advisory_ledger_text(wl_store, account_ref=account_ref)
+    if adv_text:
+        facts_text = facts_text + "\n" + adv_text
+    exp_text = _experience_text(wl_store, account_ref=account_ref)
+    if exp_text:
+        facts_text = facts_text + "\n" + exp_text
     # 特性二 P1：对话内实时行情立查——现价并进 facts（LLM 可见）+ guard 语料（防误标"未核到"）。
     # 只读、单趟、不写库；失败/无映射票留 skipped，不塞 0。市场从 store 取（现查只做 us_stock）。
     from bottleneck_hunter.vip import live_quote
@@ -237,3 +379,85 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
                                                       "unverified": unverified, "dossier": dossier,
                                                       "live_quotes": live.get("quotes", []),
                                                       "live_skipped": live.get("skipped", [])}, ensure_ascii=False)}
+
+
+if __name__ == "__main__":
+    # ponytail: 自检 —— 三个背景 helper：有数据→含标题块与关键字段；缺数据/抛异常→空串（不带崩、不塞占位）
+    class _Cur:
+        def __init__(self, row):
+            self._row = row
+        def execute(self, *a, **k):
+            return self
+        def fetchone(self):
+            return self._row
+        def close(self):
+            pass
+
+    class _FakeStore:
+        _market = "us_stock"
+        def __init__(self, *, macro=None, cards=None, adv_row=None, settled=None, stats=None, reports=None):
+            self._macro = macro
+            self._cards = cards
+            self._adv_row = adv_row
+            self._settled = settled or []
+            self._stats = stats or []
+            self._reports = reports or {}
+        def get_latest_macro_strategy(self):
+            if self._macro is None:
+                raise RuntimeError("no macro")
+            return self._macro
+        def get_experience_cards(self, **k):
+            if self._cards == "boom":
+                raise RuntimeError("boom")
+            return self._cards or []
+        def _connect(self):
+            return _Cur(self._adv_row)
+        def _filtered(self, sql, params):
+            return sql, params
+        def list_settled_predictions(self, **k):
+            return self._settled
+        def get_model_accuracy_stats(self, **k):
+            return self._stats
+        def for_market(self, m):
+            return self
+        def get_focus_report(self, tk):
+            body = self._reports.get(tk)
+            return {"report_text": body} if body else None
+
+    # 1) 宏观：有 regime → 标题+regime；缺失(raise)→仍非空(降级句)且含标题（永不空段）
+    t = _macro_text(_FakeStore(macro={"regime": "bull", "risk_appetite": "balanced"}))
+    assert "L1 宏观研判" in t and "bull" in t, t
+    assert "L1 宏观研判" in _macro_text(_FakeStore(macro=None))
+
+    # 2) 经验卡片：有卡→标题+正文；空→""；异常→""
+    t = _experience_text(_FakeStore(cards=[{"title": "别追高", "content": "回撤后再入", "category": "纪律"}]))
+    assert "经验卡片" in t and "别追高" in t, t
+    assert _experience_text(_FakeStore(cards=[])) == ""
+    assert _experience_text(_FakeStore(cards="boom")) == ""
+
+    # 3) 诊断+台账：有诊断+已结台账→两段齐；全缺→""；store 缺方法(异常)→""
+    _adv = {"generated_at": "2026-08-01T00:00:00+00:00", "chair_summary": "整体持有",
+            "portfolio_diagnosis": "集中度偏高",
+            "holdings": [{"ticker": "MU", "action": "减仓", "reason": "估值高", "risk": "周期"}]}
+    _row = {"result_json": json.dumps(_adv, ensure_ascii=False), "created_at": "2026-08-01"}
+    _settled = [{"prediction_date": "2026-07-01", "ticker": "MU", "prediction_value": "加仓",
+                 "prediction_type": "vip_advice", "outcome_value": "chg=+5%", "is_correct": 1}]
+    _stats = [{"role_context": "vip_advisor", "total": 10, "correct": 6, "pending": 2}]
+    t = _advisory_ledger_text(_FakeStore(adv_row=_row, settled=_settled, stats=_stats))
+    assert "账户诊断建议" in t and "MU" in t and "命中率" in t, t
+    assert _advisory_ledger_text(_FakeStore(adv_row=None, settled=[], stats=[])) == ""
+    assert _advisory_ledger_text(object()) == ""  # 缺方法→双段异常降级→空串
+
+    # 4) 研报：宏观全局带 + 问题点名且库有→带；点名但库无→不带；未点名→不带；超上限截断
+    from bottleneck_hunter.watchlist.macro_consultation import MACRO_REPORT_KEY
+    _rs = _FakeStore(reports={MACRO_REPORT_KEY: "宏观周报：软着陆", "NVDA": "英伟达研报正文" * 500, "MU": "美光研报"})
+    t = _report_text(_rs, "NVDA 和 MU 现在能追吗")
+    assert "全球宏观背景研报" in t and "宏观周报" in t, t
+    assert "NVDA 个股研报" in t and "MU 个股研报" in t, t
+    assert len(t) < 200 + _STOCK_REPORT_CHARS * 2 + 2000, "个股研报应按 _STOCK_REPORT_CHARS 截断"
+    # 点名但库无该票研报→不带该段（诚实无中生有）
+    assert "TSLA 个股研报" not in _report_text(_rs, "TSLA 怎么看")
+    # 未点名个股→只有宏观段、无任何个股段
+    assert "个股研报" not in _report_text(_rs, "现在大盘怎么看")
+
+    print("chat 背景 helper 自检通过：宏观兜底 / 经验卡片降级 / 诊断+台账拼装与异常降级 / 研报全局+按需")

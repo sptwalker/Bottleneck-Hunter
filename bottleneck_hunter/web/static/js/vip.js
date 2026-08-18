@@ -2097,7 +2097,7 @@ function appendChat(role, text) {
   div.style.marginBottom = '10px';
   div.innerHTML = `<strong>${who}：</strong>` + (window.marked && role === 'assistant'
     ? window.marked.parse(text || '')
-    : `<pre style="white-space:pre-wrap;display:inline;margin:0">${esc(text)}</pre>`);
+    : `<span style="white-space:pre-wrap">${esc(text)}</span>`);
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
