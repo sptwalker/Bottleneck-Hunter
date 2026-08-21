@@ -1758,6 +1758,84 @@ async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGene
 
 
 
+# 时效门单次扫描的最大标的数（防超大观察池扫描过慢；抽样足以判定数据源是否整体过期）
+MAX_STALE_SCAN = 30
+
+
+async def _ensure_price_freshness(
+    store: WatchlistStore, market: str, halt: dict,
+) -> AsyncGenerator[dict, None]:
+    """决策启动前的数据时效门：核对行情快照是否过期，过期则主动更新，更新失败则请求硬停。
+
+    - 全新鲜 → data_freshness_pass，继续。
+    - 有过期票 → data_refresh_start → 仅对过期票 fetch_price_batch（scheduler 同一原语，落共享快照层）。
+      判定「更新失败」仅看数据源是否响应（返回 error 而非 no_data/ok），不看更新后的日历天数
+      （周一跑决策时周五收盘即最新合法数据，日历过期不算失败，避免周末假告警）。
+    - error 数 > 尝试数一半 → data_refresh_block + 置 halt['stop']=True（调用方硬停，不出任何建议）；
+      否则 data_refresh_done 继续（个别退市/停牌 no_data 只计缺数据、不算失败）。
+    """
+    from bottleneck_hunter.watchlist.quality_gate import validate_data_freshness
+
+    entries = [e for e in store.list_all()
+               if normalize_market(e.get("market")) == normalize_market(market)]
+    if not entries:
+        return
+
+    stale = []
+    for entry in entries[:MAX_STALE_SCAN]:
+        ticker = entry.get("ticker", "")
+        if not ticker:
+            continue
+        snaps = store.get_snapshots(ticker, days=5)
+        if not snaps:
+            stale.append((ticker, "无数据"))
+            continue
+        # get_snapshots 按 date DESC → [0] 为最新一条；用 fetched_at 判「数据管线是否新鲜」
+        latest = snaps[0].get("fetched_at", "")
+        color, days = validate_data_freshness(latest, "market_snapshots")
+        if color != "green":
+            stale.append((ticker, f"{days}天"))
+
+    if not stale:
+        yield _sse("data_freshness_pass", layer="data",
+                   message=f"数据时效核对通过（{min(len(entries), MAX_STALE_SCAN)} 票新鲜）")
+        return
+
+    stale_tickers = [t for t, _ in stale]
+    detail = ", ".join(f"{t}({d})" for t, d in stale[:5]) + ("…" if len(stale) > 5 else "")
+    yield _sse("data_refresh_start", layer="data",
+               message=f"检测到 {len(stale)} 票行情过期（{detail}），启动主动更新…")
+
+    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+    try:
+        results = await fetch_price_batch(stale_tickers, store, market=market)
+    except Exception as e:  # noqa: BLE001
+        logger.error("数据时效门主动更新整体失败 (%s): %s", market, e)
+        halt["stop"] = True
+        yield _sse("data_refresh_block", layer="data",
+                   message=f"⛔ 行情主动更新失败（{e}）——决策已中止。请检查数据源/网络，修复后重跑。")
+        return
+
+    err = [t for t, v in results.items() if isinstance(v, str) and v.startswith("error")]
+    no_data = [t for t, v in results.items() if v == "no_data"]
+    ok = [t for t, v in results.items() if v == "ok"]
+
+    # 仅过半失败才算「更新失败」→ 硬停；个别票失败（退市/停牌代码）只告警、继续
+    if len(err) > len(results) / 2:
+        halt["stop"] = True
+        yield _sse("data_refresh_block", layer="data",
+                   message=(f"⛔ 行情主动更新过半失败（{len(err)}/{len(results)} 票：{', '.join(err[:5])}）"
+                            f"——决策已中止。请检查数据源/网络，修复后重跑。"))
+        return
+
+    msg = f"数据已主动更新：成功 {len(ok)} 票"
+    if err:
+        msg += f"，失败 {len(err)} 票（{', '.join(err[:3])}，个别票不影响，继续）"
+    if no_data:
+        msg += f"，无数据 {len(no_data)} 票"
+    yield _sse("data_refresh_done", layer="data", message=msg)
+
+
 async def run_daily_decision(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
@@ -1772,6 +1850,19 @@ async def run_daily_decision(
     """
     store = store.for_market(market)
     yield _sse("daily_start", scope=scope, market=market, message="开始日常决策流程...")
+
+    # Step -1: 数据时效门 —— 启动即核对行情时效，过期则主动更新；更新过半失败则硬停不出建议。
+    #          仅在消费个股数据的 scope 跑（l1 纯宏观/指数，不依赖逐票快照）。
+    if scope in ("l3l4", "full"):
+        halt: dict = {}
+        try:
+            async for evt in _ensure_price_freshness(store, market, halt):
+                yield evt
+        except Exception as e:  # noqa: BLE001 —— 时效门自身异常不得吞掉决策，降级为告警继续
+            logger.warning("数据时效门异常（降级继续）: %s", e)
+        if halt.get("stop"):
+            yield _sse("daily_done", message="已中止：行情数据源异常，请检查修复后重跑（未输出任何决策建议）")
+            return
 
     # Step 0: 催化剂时效检查
     try:
@@ -1899,6 +1990,17 @@ async def run_full_refresh(
     """全量刷新：重新抓取市场新闻 + 重新生成 L1 + L2 + L3 + L4 + 投委会"""
     store = store.for_market(market)
     yield _sse("refresh_start", message="开始全量决策刷新...")
+
+    # 数据时效门：全量刷新同样先核对+主动更新行情，过半失败则硬停不出建议。
+    halt: dict = {}
+    try:
+        async for evt in _ensure_price_freshness(store, market, halt):
+            yield evt
+    except Exception as e:  # noqa: BLE001
+        logger.warning("全量刷新数据时效门异常（降级继续）: %s", e)
+    if halt.get("stop"):
+        yield _sse("refresh_done", message="已中止：行情数据源异常，请检查修复后重跑（未输出任何决策建议）")
+        return
 
     # 先刷新市场新闻源（拉新 RSS 落库），供 L1 与宏观咨询读到最新新闻
     try:
