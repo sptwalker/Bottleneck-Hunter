@@ -19,7 +19,9 @@ from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bottleneck_hunter.auth.current_user import get_current_user_id
 from bottleneck_hunter.chain.json_utils import extract_json_object
+from bottleneck_hunter.data_provider import ai_tools
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position, get_models_for_role
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.persona import format_persona_for_prompt, get_user_single_cap
@@ -63,6 +65,61 @@ async def _llm_json_object(llm, prompt: str, *, layer: str = "") -> dict:
         resp2 = await asyncio.to_thread(
             lambda: llm.invoke(retry_prompt, max_tokens=_DECISION_MAX_TOKENS).content)
         return extract_json_object(resp2)  # 再失败则向上抛，走各层降级
+
+
+async def _run_data_negotiation(llm, prompt: str, *, market: str, layer: str,
+                                allowed_tickers: list[str]) -> tuple[dict, list[dict]]:
+    """带「数据调用协商环」的决策 LLM 调用：模型缺外部数据时发 [[DATA_REQ]] → DataHub 实时取数回注。
+
+    - 用户 Key 一律经 get_current_user_id() 解析（与调度/Web 注入点同源，绝无全局 Key）。
+    - allowed_tickers 限定可取数范围（本层输入标的 ∪ 市场观察池），越界 ticker 直接拒绝。
+    - 取数失败/无能力 → 模型据现有信息继续，绝不因缺数据中断决策。
+    - 任何异常 fail-open 降级为原始 _llm_json_object（只调一次、无协商、不取数），
+      保证数据调用是增强而非依赖：数据链路挂了，决策照旧。
+    - 返回 (result_dict, fetch_log)；fetch_log 只进 provenance，绝不落进决策产出。
+    """
+    user_id = get_current_user_id()
+
+    async def _ask(p: str) -> str:
+        """协商轮次内的单次 LLM 调用：与 _llm_json_object 同口径（max_tokens + 一次纠偏重试）。"""
+        resp = await asyncio.to_thread(
+            lambda: llm.invoke(p, max_tokens=_DECISION_MAX_TOKENS).content)
+        try:
+            extract_json_object(resp)
+            return resp
+        except ValueError:
+            # 协商轮同样可能被降级模型截断 → 纠偏重试一次，避免拿"残 JSON"去探测 request block
+            retry_prompt = (p + "\n\n【重要】上一次输出无法解析。请**只**返回一个**完整且闭合**的 JSON 对象，"
+                              "不要任何解释文字、不要 markdown 代码围栏、不要在中途截断。")
+            return await asyncio.to_thread(
+                lambda: llm.invoke(retry_prompt, max_tokens=_DECISION_MAX_TOKENS).content)
+
+    try:
+        final, fetch_log, _ = await ai_tools.negotiate(
+            _ask, prompt, market=market, user_id=user_id, allowed_tickers=allowed_tickers)
+        result = extract_json_object(final)  # 最终轮必是决策 JSON；解析失败照样降级
+        return result, fetch_log
+    except Exception as e:  # noqa: BLE001  fail-open：任何异常（含协商环内部错误）都不中断决策
+        logger.warning("L%s 数据协商失败，降级为原始调用: %s", layer, str(e)[:160])
+        return await _llm_json_object(llm, prompt, layer=layer), []
+
+
+def _decision_allowed_tickers(store, market: str, *extra: str) -> list[str]:
+    """本层可取数标的白名单 = 市场观察池 ∪ 各层自有输入，去重、按市场过滤后返回。"""
+    pool: set[str] = set()
+    try:
+        entries = store.list_all() or []
+    except Exception:  # noqa: BLE001  观察池读失败不阻塞协商，退化为层内标的
+        entries = []
+    for e in entries:
+        tk = normalize_ticker((e.get("ticker") or "").strip(), market)
+        if tk:
+            pool.add(tk)
+    for raw in extra:
+        tk = normalize_ticker((raw or "").strip(), market)
+        if tk:
+            pool.add(tk)
+    return sorted(pool)
 
 
 def _load_prompt(name: str) -> str:
@@ -586,7 +643,12 @@ async def run_macro_strategy(
         else:
             yield _sse("decision_progress", layer="L1", step="llm_reasoning",
                        message="L1 LLM 推理中...")
-            result = await _llm_json_object(llm, prompt, layer="L1")
+            allowed_tk = _decision_allowed_tickers(store, market)
+            result, _fetch_log = await _run_data_negotiation(
+                llm, prompt, market=market, layer="1", allowed_tickers=allowed_tk)
+            if _fetch_log:
+                yield _sse("decision_progress", layer="L1", step="data_fetch_round",
+                           message=f"L1 数据补充 {len(_fetch_log)} 条")
             if budget:
                 budget.record(provider, model, 5000, 2000, "macro_strategy")
         _l1_models = ([tuple(s.split(":", 1)) for s in result.get("_models_used", []) if ":" in s]
@@ -802,7 +864,13 @@ async def run_strategic_plan(
         yield _sse("decision_progress", layer="L2", step="llm_reasoning",
                    message="L2 LLM 推理中...")
 
-        result = await _llm_json_object(llm, prompt, layer="L2")
+        _pos_tk = [p.get("ticker", "") for p in (positions or [])]
+        allowed_tk = _decision_allowed_tickers(store, market, *_pos_tk)
+        result, _fetch_log = await _run_data_negotiation(
+            llm, prompt, market=market, layer="2", allowed_tickers=allowed_tk)
+        if _fetch_log:
+            yield _sse("decision_progress", layer="L2", step="data_fetch_round",
+                       message=f"L2 数据补充 {len(_fetch_log)} 条")
 
         if budget:
             budget.record(provider, model, 8000, 3000, "strategic_plan")
@@ -1128,7 +1196,13 @@ async def run_tactical_plans(
         yield _sse("decision_progress", layer="L3", step="llm_reasoning",
                    message="L3 LLM 推理中...")
 
-        result = await _llm_json_object(llm, prompt, layer="L3")
+        _l3_tk = [e.get("ticker", "") for e in entries] + list(held_tickers)
+        allowed_tk = _decision_allowed_tickers(store, market, *_l3_tk)
+        result, _fetch_log = await _run_data_negotiation(
+            llm, prompt, market=market, layer="3", allowed_tickers=allowed_tk)
+        if _fetch_log:
+            yield _sse("decision_progress", layer="L3", step="data_fetch_round",
+                       message=f"L3 数据补充 {len(_fetch_log)} 条")
 
         if budget:
             budget.record(provider, model, 8000, 3000, "tactical_plans")
@@ -1474,7 +1548,13 @@ async def run_execution_plans(
         yield _sse("decision_progress", layer="L4", step="llm_reasoning",
                    message="L4 LLM 推理中...")
 
-        result = await _llm_json_object(llm, prompt, layer="L4")
+        _pos_tk = [p.get("ticker", "") for p in (positions or [])]
+        allowed_tk = _decision_allowed_tickers(store, market, *tickers_in_play, *_pos_tk)
+        result, _fetch_log = await _run_data_negotiation(
+            llm, prompt, market=market, layer="4", allowed_tickers=allowed_tk)
+        if _fetch_log:
+            yield _sse("decision_progress", layer="L4", step="data_fetch_round",
+                       message=f"L4 数据补充 {len(_fetch_log)} 条")
 
         if budget:
             budget.record(provider, model, 5000, 2000, "execution_plans")

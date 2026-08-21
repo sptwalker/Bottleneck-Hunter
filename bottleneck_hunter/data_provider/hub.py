@@ -206,6 +206,24 @@ class DataHub:
             _record(source, capability, market, False, (time.time() - t0) * 1000, 0, str(e))
             raise
 
+    def available_capabilities(self, market: str, user_id: str = "") -> set[str]:
+        """当前市场+当前用户【真可用】的能力集合（口径与 fetch 完全一致）。
+
+        复用 _candidates 的健康/熔断/Key 过滤：某能力有至少一个健康候选才算可用。
+        供 AI 数据能力清单用——清单即承诺，只列这里返回的能力，AI 请求才必然可兑现。
+        quote/daily 走 FetcherManager（不进 _states），恒可用故直接并入。
+        """
+        caps: set[str] = set()
+        all_caps: set[str] = set()
+        for st in self._states.values():
+            all_caps |= st.provider.capabilities()
+        for cap in all_caps:
+            if cap in _MANAGER_CAPS:
+                continue
+            if self._candidates(cap, market, user_id):
+                caps.add(cap)
+        return caps | _MANAGER_CAPS  # quote/daily 恒可用
+
     def get_status(self) -> list[dict]:
         out = []
         for st in sorted(self._states.values(), key=lambda s: s.provider.priority):

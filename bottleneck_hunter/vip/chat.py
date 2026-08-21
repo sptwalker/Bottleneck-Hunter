@@ -12,6 +12,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+from bottleneck_hunter.data_provider import ai_tools
 from bottleneck_hunter.vip import compliance, number_guard, portfolio
 from bottleneck_hunter.vip import mandate as _mandate
 from bottleneck_hunter.watchlist.macro_consultation import _iter_tokens
@@ -260,7 +261,8 @@ def _report_text(wl_store, question: str) -> str:
 
 
 _PROMPT = """你是私人财务AI顾问。请只依据下面的真实 facts 回答，不得编造金额/占比/股数。
-若用户问到 facts 里没有的数据，请明确说“当前数据中没有该信息”。
+若确需 facts 之外的可申请数据，可按下方【可申请的实时数据能力】说明输出数据请求块申请补充，
+系统会实时取数并回注；取数失败或系统无该能力则明说原因、据现有信息继续，绝不编造缺失数据。
 回答要求：简体中文、专业但克制、分点回答，避免空泛。
 下面的「本账户投资纲领」是用户为该账户设定的投资目标与约束，回答涉及建议时须与之一致。
 你可围绕用户咨询就以下维度提供参考：
@@ -337,26 +339,47 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
         facts_text = facts_text + "\n" + exp_text
     # 特性二 P1：对话内实时行情立查——现价并进 facts（LLM 可见）+ guard 语料（防误标"未核到"）。
     # 只读、单趟、不写库；失败/无映射票留 skipped，不塞 0。市场从 store 取（现查只做 us_stock）。
+    market = getattr(wl_store, "_market", "") or "us_stock"
     from bottleneck_hunter.vip import live_quote
     live = await live_quote.fetch_live_quotes(
-        question, dossier.get("holdings") or [],
-        market=getattr(wl_store, "_market", "") or "us_stock", user_id=user_id)
+        question, dossier.get("holdings") or [], market=market, user_id=user_id)
     if live.get("usd_text"):
         facts_text = facts_text + "\n" + live["usd_text"]
     mandate_text = _mandate.format_mandate_for_prompt(wl_store, account_ref=account_ref)
     prompt = _PROMPT.format(facts=facts_text, mandate=mandate_text, question=question)
     # number_guard 白名单语料并入纲领文本：纲领里的收益目标/回撤%是用户设定的合法数字，避免误标"未核到"
     guard_corpus = facts_text + "\n" + mandate_text
+    # AI 主动补数据协商环可查标的范围：本账户持仓 ∪ 观察池全集 ∪ 问题点名个股；越界票 negotiate 内部拒绝。
+    held = [h.get("ticker") for h in (dossier.get("holdings") or []) if h.get("ticker")]
+    try:
+        pool_tk = [e.get("ticker") for e in (wl_store.list_all() or []) if e.get("ticker")]
+    except Exception:  # noqa: BLE001
+        pool_tk = []
+    allowed_tickers = list({*held, *pool_tk, *_TICKER_RE.findall((question or "").upper())})
 
     yield {"event": "session", "data": json.dumps({"session_id": sid}, ensure_ascii=False)}
     yield {"event": "disclaimer", "data": json.dumps({"content": compliance.DISCLAIMER_ZH}, ensure_ascii=False)}
 
     full = ""
     fail_reason = ""
+    fetch_log: list[dict] = []
     try:
-        async for tok in _iter_tokens(llm, prompt):
-            full += tok
-            yield {"event": "chunk", "data": json.dumps({"text": tok}, ensure_ascii=False)}
+        # 模型若在 facts 之外确需数据，发 [[DATA_REQ]] 块 → 系统实时经 DataHub 取数回注 → 至多两轮收敛。
+        # 协商期需完整文本判有无请求块，故非流式收集整段，拿到最终答案再分块吐给前端。
+        # ponytail: 复用已测 negotiate（非流式）+ 分块下发；块检测无位置约束（正则全文匹配）。代价是
+        #   最终答案按块下发而非逐 token 流——若 no-data 路径要逐 token 流，升级为「首块缓冲探测」流式协商。
+        async def _ask(p):
+            buf = ""
+            async for tok in _iter_tokens(llm, p):
+                buf += tok
+            return buf
+        final, fetch_log, data_text = await ai_tools.negotiate(
+            _ask, prompt, market=market, user_id=user_id, allowed_tickers=allowed_tickers)
+        if data_text:  # 补到的合法数字并入 guard 白名单，防被 number_guard 误标"未核到"
+            guard_corpus = guard_corpus + "\n" + data_text
+        full = final
+        for i in range(0, len(final), 120):
+            yield {"event": "chunk", "data": json.dumps({"text": final[i:i + 120]}, ensure_ascii=False)}
     except Exception as e:  # noqa: BLE001
         fail_reason = str(e)[:160]
         msg = f"（该回答生成失败：{fail_reason}）"
@@ -378,7 +401,8 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
     yield {"event": "done", "data": json.dumps({"session_id": sid, "provider": provider, "model": model,
                                                       "unverified": unverified, "dossier": dossier,
                                                       "live_quotes": live.get("quotes", []),
-                                                      "live_skipped": live.get("skipped", [])}, ensure_ascii=False)}
+                                                      "live_skipped": live.get("skipped", []),
+                                                      "data_fetches": fetch_log}, ensure_ascii=False)}
 
 
 if __name__ == "__main__":
