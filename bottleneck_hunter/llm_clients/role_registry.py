@@ -141,6 +141,9 @@ _INIT_ROLES = [
     RoleDefinition("vip_chat", "VIP 咨询顾问", "vip",
                    multi_model=False, max_slots=1, min_context=_HEAVY,
                    capability_weights=_DECISION_WEIGHTS),
+    RoleDefinition("vip_chat_checker", "VIP 咨询检查者", "vip",
+                   multi_model=False, max_slots=1, min_context=_HEAVY,
+                   capability_weights=_DECISION_WEIGHTS),
 ]
 
 for _r in _INIT_ROLES:

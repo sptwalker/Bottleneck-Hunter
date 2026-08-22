@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from bottleneck_hunter.llm_clients.factory import get_models_for_role
+from bottleneck_hunter.vip import fact_check
 from bottleneck_hunter.watchlist.budget import BudgetTracker
 
 # 复用 decision_engine 的工具：_sse 会把 event 名同时写进 data（前端 dcSSE 依赖此约定）
@@ -779,6 +780,26 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
                 round1[a["role"]] = entry["content"]
                 yield _sse("msg_done", role=a["role"], round=1, provider=provider, model=model,
                            failed=entry.get("failed", False), fail_reason=entry.get("fail_reason", ""))
+
+    # 特性二：双分析师交叉核对——各自 round1 文本对系统权威源核对，纠正即提醒用户 + 注入 round2 上下文。
+    # 由权威源裁决幻觉（分析师判分析师不可靠）；peer 辩论留给真正的解读分歧。
+    corrections: list[str] = []
+    for role, ans in round1.items():
+        try:
+            _, items = await fact_check.reconcile_indices(ans, store, market=market)
+        except Exception:  # noqa: BLE001 核对失败不中断咨询
+            items = []
+        bad = [it for it in items if it["verdict"] == "⚠纠正"]
+        if bad:
+            yield _sse("correction", role=role, items=bad)
+            for it in bad:
+                corrections.append(f"{it['label']} 实际 {it['authoritative']}（{it.get('source', '')}），"
+                                   f"模型误报为 {it['llm_value']}")
+    if corrections:
+        snapshot_text += "\n【系统核实·请据此纠正】" + "；".join(corrections)
+
+    # ponytail: 各分析师独立数据源被跳过（同 yfinance = 同数字，翻倍 API 无益）；
+    #           真要源独立 → 接第二家宏观数据 provider 各自取数后再交叉。
 
     # ROUND 2：带入对方 round1 全文，互评辩论
     if do_round2 and len(active) >= 2:

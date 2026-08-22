@@ -12,10 +12,12 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.data_provider import ai_tools
-from bottleneck_hunter.vip import compliance, number_guard, portfolio
+from bottleneck_hunter.vip import compliance, fact_check, number_guard, portfolio
 from bottleneck_hunter.vip import mandate as _mandate
 from bottleneck_hunter.watchlist.macro_consultation import _iter_tokens
+from bottleneck_hunter.watchlist.store_base import _today as _bj_today
 
 
 def _now_iso() -> str:
@@ -157,6 +159,43 @@ def _macro_text(wl_store) -> str:
             + format_macro_for_prompt(wl_store))
 
 
+# 各市场大盘指数键→中文标签（对齐 macro_data.MARKET_INDEX_KEYS）。
+_INDEX_LABELS = {"sp500": "标普500", "nasdaq": "纳指", "sse_index": "上证指数",
+                 "csi300": "沪深300", "hsi": "恒生指数", "hstech": "恒生科技"}
+
+
+def _market_index_text(wl_store) -> str:
+    """带**明确日期**的大盘指数快照并进 facts——根治「指数点位无 as-of → 模型臆造日期/转述漂移」。
+
+    L1 宏观综述是散文、且 format_macro_for_prompt 不注入日期；指数精确点位只散落在综述文字里，
+    模型既不知截至哪天、也易把 7641 讲成 7674。这里直读结构化 macro_snapshots（每条自带 date），
+    把当前市场的大盘指数按「指数 收盘X（涨跌Y%）· 截至YYYY-MM-DD」精确列出：
+      ① 模型有了权威点位与日期锚，不再臆造「昨天=某日」；
+      ② 精确数值同时进 guard_corpus 白名单（facts_text 的一部分），转述漂移会被 number_guard 标出。
+    缺失/异常→空串（不塞占位）。
+    """
+    from bottleneck_hunter.watchlist.macro_data import MARKET_INDEX_KEYS
+    market = getattr(wl_store, "_market", "") or "us_stock"
+    try:
+        snaps = {s["indicator"]: s for s in (wl_store.get_latest_macro_snapshots() or [])}
+    except Exception:  # noqa: BLE001
+        return ""
+    lines = []
+    for key in MARKET_INDEX_KEYS.get(market, ["sp500"]):
+        s = snaps.get(key)
+        if not s or s.get("value") is None:
+            continue
+        chg = s.get("change_pct")
+        chg_txt = f"（涨跌 {chg:+.2f}%）" if isinstance(chg, (int, float)) else ""
+        asof = s.get("date") or ""
+        lines.append(f"- {_INDEX_LABELS.get(key, key)}：收盘 {s['value']}{chg_txt}"
+                     + (f" · 截至 {asof}" if asof else ""))
+    if not lines:
+        return ""
+    return ("【大盘指数快照（权威点位·各行自带截至日期，回答涉及指数须引用其点位与日期、不得臆造）】\n"
+            + "\n".join(lines))
+
+
 def _experience_text(wl_store, account_ref: str = "") -> str:
     """往期复盘沉淀的经验卡片（scope='vip_portfolio'）并进 facts——顾问吸取自身历史教训、自我校准。
 
@@ -260,7 +299,9 @@ def _report_text(wl_store, question: str) -> str:
     return "\n".join(parts)
 
 
-_PROMPT = """你是私人财务AI顾问。请只依据下面的真实 facts 回答，不得编造金额/占比/股数。
+_PROMPT = """你是私人财务AI顾问。今天是北京时间 {today}。回答涉及「昨天/最近/最新」等相对时间时，
+须以该日期为基准推算，并核对所引用数据各自标注的截至日期（as-of），绝不臆造日期或把旧数据当作最新。
+请只依据下面的真实 facts 回答，不得编造金额/占比/股数。
 若确需 facts 之外的可申请数据，可按下方【可申请的实时数据能力】说明输出数据请求块申请补充，
 系统会实时取数并回注；取数失败或系统无该能力则明说原因、据现有信息继续，绝不编造缺失数据。
 回答要求：简体中文、专业但克制、分点回答，避免空泛。
@@ -288,6 +329,54 @@ _PROMPT = """你是私人财务AI顾问。请只依据下面的真实 facts 回�
 
 [question]\n{question}\n[/question]
 """
+
+
+_CHECKER_PROMPT = """你是 VIP 投资咨询的独立审计员。核对下面【回答】中有无【已知事实】不支持的实质性断言。
+只判：收益率/历史业绩、具体事件（财报日/并购/政策）、因果论断、"系统数据显示…"类转述。
+数字点位（指数/股价）系统已另行确定性核对，**勿复核任何数字本身**，只看叙述性断言有无凭据。
+不改写回答，只输出 JSON：{{"overall":"ok"|"caution","issues":[{{"claim":"存疑断言原文","why":"为何缺乏依据"}}]}}
+无问题则 issues 为空数组、overall="ok"。
+
+【已知事实】
+{facts}
+
+【回答】
+{answer}
+"""
+
+
+async def _run_checker(question: str, answer: str, facts: str, *, user_id: str, main_provider: str, budget=None):
+    """特性三：append-only 尽力而为审计——另一 provider 的 LLM 审核回答有无 facts 不支持的断言。
+
+    预算不足/无模型/调用失败 → 返回 None，**绝不阻塞回答**（数字纠正已由确定性原语完成，此处只补语义审计）。
+    """
+    if budget is not None and not budget.can_spend():
+        return None
+    try:
+        from bottleneck_hunter.llm_clients.factory import get_models_for_role
+        models = get_models_for_role("vip_chat_checker", user_id=user_id, with_fallback=True)
+    except Exception:  # noqa: BLE001
+        return None
+    if not models:
+        return None
+    pick = next((m for m in models if m[1] != main_provider), None)  # 独立性：挑异 provider（committee 手法）
+    diversity = pick is not None
+    llm, provider, model = pick or models[0]
+    prompt = _CHECKER_PROMPT.format(facts=facts[:8000], answer=answer[:6000])
+    try:
+        resp = await llm.ainvoke(prompt)
+        raw = getattr(resp, "content", resp) if not isinstance(resp, str) else resp
+        obj = extract_json_object(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    issues = [i for i in (obj.get("issues") or []) if isinstance(i, dict) and i.get("claim")][:5]
+    if budget is not None:
+        try:
+            budget.record(provider, model, len(prompt) // 3, 200, "vip_chat_checker")
+        except Exception:
+            pass
+    return {"overall": "caution" if issues else (obj.get("overall") or "ok"),
+            "issues": issues, "provider": provider, "diversity": diversity}
 
 
 async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: str = "", budget=None, account_ref: str = ""):
@@ -331,6 +420,10 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
     macro_text = _macro_text(wl_store)
     if macro_text:
         facts_text = facts_text + "\n" + macro_text
+    # 带日期的大盘指数快照：给模型权威点位 + as-of 锚，根治「臆造昨天=某日 / 转述点位漂移」。
+    index_text = _market_index_text(wl_store)
+    if index_text:
+        facts_text = facts_text + "\n" + index_text
     adv_text = _advisory_ledger_text(wl_store, account_ref=account_ref)
     if adv_text:
         facts_text = facts_text + "\n" + adv_text
@@ -346,7 +439,7 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
     if live.get("usd_text"):
         facts_text = facts_text + "\n" + live["usd_text"]
     mandate_text = _mandate.format_mandate_for_prompt(wl_store, account_ref=account_ref)
-    prompt = _PROMPT.format(facts=facts_text, mandate=mandate_text, question=question)
+    prompt = _PROMPT.format(facts=facts_text, mandate=mandate_text, question=question, today=_bj_today())
     # number_guard 白名单语料并入纲领文本：纲领里的收益目标/回撤%是用户设定的合法数字，避免误标"未核到"
     guard_corpus = facts_text + "\n" + mandate_text
     # AI 主动补数据协商环可查标的范围：本账户持仓 ∪ 观察池全集 ∪ 问题点名个股；越界票 negotiate 内部拒绝。
@@ -363,6 +456,7 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
     full = ""
     fail_reason = ""
     fetch_log: list[dict] = []
+    cert = {"items": [], "corrected": 0, "certified": 0, "unresolved": 0}
     try:
         # 模型若在 facts 之外确需数据，发 [[DATA_REQ]] 块 → 系统实时经 DataHub 取数回注 → 至多两轮收敛。
         # 协商期需完整文本判有无请求块，故非流式收集整段，拿到最终答案再分块吐给前端。
@@ -377,6 +471,9 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
             _ask, prompt, market=market, user_id=user_id, allowed_tickers=allowed_tickers)
         if data_text:  # 补到的合法数字并入 guard 白名单，防被 number_guard 误标"未核到"
             guard_corpus = guard_corpus + "\n" + data_text
+        # 特性一 P1：事实核对护栏——指数点位/股价对系统权威源核对，就地纠正为真值 + 认证标记（在分块前跑，流出即已纠正）
+        final, cert = await fact_check.reconcile(final, wl_store, market=market, quotes=live.get("quotes") or [])
+        guard_corpus = guard_corpus + "\n" + fact_check.corpus_line(cert)
         full = final
         for i in range(0, len(final), 120):
             yield {"event": "chunk", "data": json.dumps({"text": final[i:i + 120]}, ensure_ascii=False)}
@@ -392,6 +489,10 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
     unverified = [r["token"] for r in number_guard.verify_numbers(full, guard_corpus, fv) if r["status"] == "unverified"]
     final_text = number_guard.annotate_unverified(full, guard_corpus, foreign_values=fv)
     final_text = compliance.with_disclaimer(final_text)
+    # 特性三：独立 LLM 检查者审计语义断言（append-only、异 provider、预算/失败即 None，不阻塞）
+    checker = None
+    if not fail_reason:
+        checker = await _run_checker(question, full, guard_corpus, user_id=user_id, main_provider=provider, budget=budget)
     append_chat_message(wl_store, sid, "assistant", final_text, provider=provider, model=model, fail_reason=fail_reason, account_ref=account_ref)
     if budget is not None:
         try:
@@ -400,6 +501,7 @@ async def stream_vip_chat(wl_store, *, user_id: str, question: str, session_id: 
             pass
     yield {"event": "done", "data": json.dumps({"session_id": sid, "provider": provider, "model": model,
                                                       "unverified": unverified, "dossier": dossier,
+                                                      "certification": cert, "checker": checker,
                                                       "live_quotes": live.get("quotes", []),
                                                       "live_skipped": live.get("skipped", []),
                                                       "data_fetches": fetch_log}, ensure_ascii=False)}
@@ -419,13 +521,16 @@ if __name__ == "__main__":
 
     class _FakeStore:
         _market = "us_stock"
-        def __init__(self, *, macro=None, cards=None, adv_row=None, settled=None, stats=None, reports=None):
+        def __init__(self, *, macro=None, cards=None, adv_row=None, settled=None, stats=None, reports=None, snaps=None):
             self._macro = macro
             self._cards = cards
             self._adv_row = adv_row
             self._settled = settled or []
             self._stats = stats or []
             self._reports = reports or {}
+            self._snaps = snaps or []
+        def get_latest_macro_snapshots(self):
+            return self._snaps
         def get_latest_macro_strategy(self):
             if self._macro is None:
                 raise RuntimeError("no macro")
@@ -452,6 +557,20 @@ if __name__ == "__main__":
     t = _macro_text(_FakeStore(macro={"regime": "bull", "risk_appetite": "balanced"}))
     assert "L1 宏观研判" in t and "bull" in t, t
     assert "L1 宏观研判" in _macro_text(_FakeStore(macro=None))
+
+    # 1b) 大盘指数快照：带日期渲染 + 只取当前市场键；缺数据/异常→空串（根治臆造日期/点位漂移）
+    _snaps = [{"indicator": "nasdaq", "value": 26067.17, "change_pct": -1.0, "date": "2026-08-21"},
+              {"indicator": "sp500", "value": 7641.16, "change_pct": -0.87, "date": "2026-08-21"},
+              {"indicator": "sse_index", "value": 3200.0, "change_pct": 0.5, "date": "2026-08-21"}]  # 他市键须被过滤
+    t = _market_index_text(_FakeStore(snaps=_snaps))
+    assert "纳指" in t and "26067.17" in t and "2026-08-21" in t, t
+    assert "-0.87%" in t and "标普500" in t, t                       # 真实点位与涨跌带日期入 facts+guard
+    assert "上证指数" not in t, t                                     # us_stock 只带 sp500/nasdaq
+    assert _market_index_text(_FakeStore(snaps=[])) == ""            # 无快照→空串
+    class _Boom:
+        _market = "us_stock"
+        def get_latest_macro_snapshots(self): raise RuntimeError("db down")
+    assert _market_index_text(_Boom()) == ""                         # 异常→空串不带崩
 
     # 2) 经验卡片：有卡→标题+正文；空→""；异常→""
     t = _experience_text(_FakeStore(cards=[{"title": "别追高", "content": "回撤后再入", "category": "纪律"}]))

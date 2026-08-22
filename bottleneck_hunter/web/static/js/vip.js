@@ -1577,6 +1577,32 @@ async function runAdvisory(ref) {
   }
 }
 
+// 特性一 P1：关键数值认证回执——指数点位/股价经系统权威源核对，⚠纠正=红/✓认证=绿/未核=灰。复用 .vip-receipt。
+function renderCertification(cert) {
+  const items = (cert && cert.items) || [];
+  if (!items.length) return '';
+  const foot = it => esc([it.as_of, it.source].filter(Boolean).join('·'));
+  const row = it => {
+    if (it.verdict === '⚠纠正')
+      return `<span class="vip-receipt-item bad">⚠ ${esc(it.label)}：模型称 ${esc(it.llm_value)} → 系统核实 ${esc(it.authoritative)}<small>${foot(it)}</small></span>`;
+    if (it.verdict === '✓认证')
+      return `<span class="vip-receipt-item ok">✓ ${esc(it.label)} ${esc(it.authoritative)} 已认证<small>${foot(it)}</small></span>`;
+    return `<span class="vip-receipt-item muted">– ${esc(it.label)} ${esc(it.llm_value)}<small>未核到</small></span>`;
+  };
+  const green = !cert.corrected;
+  return `<div class="vip-receipt ${green ? 'ok' : 'warn'}">` +
+    `<div class="vip-receipt-head">${green ? '✅ 关键数值已核实' : '☑ 关键数值已核实并就地纠正'}</div>` +
+    `<div class="vip-receipt-items">${items.map(row).join('')}</div></div>`;
+}
+
+// 特性三：独立 LLM 检查者语义审计提示——仅在有存疑断言时出现。复用 .vip-adv-foot warn。
+function renderCheckerNote(chk) {
+  if (!chk || !(chk.issues && chk.issues.length)) return '';
+  const lis = chk.issues.map(i => `<li>${esc(i.claim)}${i.why ? ' —— ' + esc(i.why) : ''}</li>`).join('');
+  return `<div class="vip-adv-foot warn">🔎 检查者提示（独立${chk.diversity ? '异源' : ''}审计，仅供参考，未改动上文）：` +
+    `<ul style="margin:4px 0 0 16px">${lis}</ul></div>`;
+}
+
 // 0-10：good-path 绿色核验回执——数字全核+可溯源+新鲜三项皆过时给正向信号；否则展开未过项（不掩盖）
 function renderReceipt(r) {
   if (!r || !(r.checks || []).length) return '';
@@ -2089,7 +2115,7 @@ function bindReportGen() {
   document.getElementById('vip-strategy-review-btn')?.addEventListener('click', runStrategyReview);
 }
 
-function appendChat(role, text) {
+function appendChat(role, text, extraHtml = '') {
   const log = document.getElementById('vip-chat-log');
   if (!log) return;
   const who = role === 'user' ? '你' : '顾问';
@@ -2097,7 +2123,7 @@ function appendChat(role, text) {
   div.style.marginBottom = '10px';
   div.innerHTML = `<strong>${who}：</strong>` + (window.marked && role === 'assistant'
     ? window.marked.parse(text || '')
-    : `<span style="white-space:pre-wrap">${esc(text)}</span>`);
+    : `<span style="white-space:pre-wrap">${esc(text)}</span>`) + (extraHtml || '');
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
@@ -2113,6 +2139,7 @@ async function sendChat() {
   appendChat('user', q);
   input.value = '';
   let aiBox = '';
+  let doneData = null;
   try {
     const resp = await fetch('/api/vip/chat', {
       method: 'POST',
@@ -2137,11 +2164,12 @@ async function sendChat() {
         if (curEvent === 'error') throw new Error(data.message || '咨询失败');
         if (curEvent === 'session' && data.session_id) vipState.sessionId = data.session_id;
         else if (curEvent === 'chunk' && data.text) aiBox += data.text;
-        else if (curEvent === 'done' && data.session_id) vipState.sessionId = data.session_id;
+        else if (curEvent === 'done') { doneData = data; if (data.session_id) vipState.sessionId = data.session_id; }
         curEvent = '';
       }
     }
-    appendChat('assistant', aiBox);
+    appendChat('assistant', aiBox,
+      renderCertification(doneData && doneData.certification) + renderCheckerNote(doneData && doneData.checker));
     setStatus('vip-chat-status', '✓ 已回复', true);
   } catch (e) {
     setStatus('vip-chat-status', '✗ ' + e.message, false);

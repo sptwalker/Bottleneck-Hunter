@@ -2072,6 +2072,13 @@ function handleConsultEvent(data) {
     return;
   }
   if (evt === 'system') { appendConsultBubble({ type: 'system', content: data.content }); return; }
+  if (evt === 'correction') {  // 特性二：系统权威源核出某分析师点位幻觉 → 系统气泡提醒
+    const items = data.items || [];
+    if (!items.length) return;
+    const lines = items.map(it => `${it.label} 实际 ${it.authoritative}（${it.source || '系统核实'}），模型误报为 ${it.llm_value}`);
+    appendConsultBubble({ type: 'system', content: '⚠ 系统核实（该分析师数据存在幻觉，已纠正并注入下一轮）：\n' + lines.join('\n') });
+    return;
+  }
   if (evt === 'error') { appendConsultBubble({ type: 'system', content: '⚠ ' + (data.message || '出错') }); return; }
   if (evt === 'chunk') {
     const key = `${data.role}-${data.round}`;
