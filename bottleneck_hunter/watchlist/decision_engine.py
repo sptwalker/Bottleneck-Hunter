@@ -2148,7 +2148,8 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
                 continue
             macro[row["indicator"]] = {"value": row["value"],
                                        "change_pct": row.get("change_pct", 0.0) or 0.0,
-                                       "label": row["indicator"]}
+                                       "label": row["indicator"],
+                                       "as_of": row.get("date")}
 
     # 真实大盘指数（区别于 VIX/汇率等宏观指标）
     real_indices = {k: macro[k] for k in MARKET_INDEX_KEYS.get(market, ["sp500"]) if k in macro}

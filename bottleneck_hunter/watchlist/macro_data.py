@@ -34,7 +34,11 @@ def _fetch_yf_quote(symbol: str) -> dict | None:
     latest = closes[-1]
     prev = closes[-2] if len(closes) >= 2 else latest
     change = ((latest - prev) / prev * 100) if prev else 0.0
-    return {"value": round(latest, 4), "change_pct": round(change, 2)}
+    # as_of = 该值所属交易日（日线 bar 的日期），非取数 wall-clock。周末/节假日取到的是上一交易日收盘，
+    # 其 as_of 即那天——据此落库/标注，根治「周五收盘被打上周六日期→模型臆造日期」。
+    idx = hist.index[-1]
+    as_of = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+    return {"value": round(latest, 4), "change_pct": round(change, 2), "as_of": as_of}
 
 
 @with_retry(max_retries=2, base_delay=1.0)
@@ -227,10 +231,11 @@ async def fetch_market_indices(store: WatchlistStore, market: str = "us_stock") 
         except Exception as e:  # noqa: BLE001
             logger.debug("指数 %s 获取失败: %s", key, e)
         if data:
-            store.save_macro_snapshot(key, today, data["value"], now_iso,
+            store.save_macro_snapshot(key, data.get("as_of") or today, data["value"], now_iso,
                                       change_pct=data.get("change_pct", 0.0))
             return {"key": key, "label": label, "value": data["value"],
-                    "change_pct": data.get("change_pct", 0.0), "stale": False, "fetched_at": now_iso}
+                    "change_pct": data.get("change_pct", 0.0), "stale": False,
+                    "fetched_at": now_iso, "as_of": data.get("as_of") or today}
         row = cached.get(key)  # 实时取不到 → 最近快照兜底
         if row:
             return {"key": key, "label": label, "value": row["value"],
@@ -410,9 +415,11 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
     # 当日不变，重复抓取纯浪费。label_by_key(各市场专属 yfinance 指标)是「本市场今日已跑」的可靠探针：
     # 他市场的 run 不会采到本市场专属指标 → issubset 不成立 → 照常抓，不会误短路。
     # 命中后 emit 须剔除他市专属 key(foreign_indicator_keys)，与库空兜底同源，防跨市场串味。
+    # 探针用 fetched_at(取数wall-clock)非 date(交易日)：现按真实 as_of 落库，周末收盘 date=周五≠today，
+    # 用 date 探针会漏判致每次狂刷 Yahoo；fetched_at 恒为取数当日，正确反映「今日是否已跑」。
     label_by_key = {key: label for key, _sym, label in indicators}
     today_rows = {r["indicator"]: r for r in store.get_latest_macro_snapshots()
-                  if r.get("date") == today}
+                  if (r.get("fetched_at") or "")[:10] == today}
     if today_rows and set(label_by_key).issubset(today_rows):
         foreign = foreign_indicator_keys(markets)
         for ind, row in today_rows.items():
@@ -422,6 +429,7 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
                 "value": row["value"],
                 "change_pct": row.get("change_pct", 0.0) or 0.0,
                 "label": label_by_key.get(ind, ind),
+                "as_of": row.get("date"),   # 真实交易日，供下游 as-of 标注（防日期臆造）
             }
         return results
 
@@ -432,7 +440,7 @@ async def fetch_macro_data(store: WatchlistStore, markets: list[str] | None = No
             data = await asyncio.to_thread(_fetch_yf_quote, symbol)
             if data:
                 results[key] = {**data, "label": label}
-                store.save_macro_snapshot(key, today, data["value"], now_iso,
+                store.save_macro_snapshot(key, data.get("as_of") or today, data["value"], now_iso,
                                           change_pct=data.get("change_pct", 0.0))
         except Exception as e:
             logger.warning("宏观指标 %s 采集失败: %s", key, e)

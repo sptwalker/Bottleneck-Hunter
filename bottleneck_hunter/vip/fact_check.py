@@ -82,32 +82,25 @@ def extract_index_mentions(text: str, keys: set[str]) -> list[tuple[str, str, st
     return out
 
 
-async def _resolve_index(snaps: dict, key: str, llm_value: float) -> tuple[float, str, str] | None:
-    """库内优先→可疑时实时补拉一次。返回 (权威值, 截至日期, 来源) 或 None（无从核实）。
+async def _resolve_index(snaps: dict, key: str) -> tuple[float, str, str] | None:
+    """权威值 = 库内最新快照（已按真实交易日 as_of 落库，即官方收盘）。返回 (值, 截至日期, 来源) 或 None。
 
-    可疑 = 无库内值 / 库内快照过期（date < 北京今日）/ 与 LLM 值超容差。补拉成功即权威并顺手落库
-    （下轮 _market_index_text 也受益）；补拉失败回落库内值。
+    **不做「过期/不符→实时补拉」**：行情最新收盘几乎永远不是今日(周末/节假日/开盘前)，用「date<今日=过期」
+    触发盘中实时补拉，会用移动的盘中价去否决正确的收盘价、造成假纠正并污染库(实测纳指正确收盘被改成盘中值)。
+    库内快照本就是权威收盘(收盘归收盘由 macro_data 按 as_of 落库保证)。仅当**全无库内值**时兜底实时拉一次。
     """
     row = snaps.get(key) or {}
     v_snap = row.get("value")
-    date_snap = row.get("date") or ""
-    suspicious = (
-        v_snap is None
-        or (date_snap and date_snap < _bj_today())
-        or (v_snap and _rel_diff(llm_value, v_snap) > _INDEX_TOL)
-    )
-    if suspicious:
-        code = macro_data._INDEX_CODE_MAP.get(key, (None, None))[0]
-        live = None
-        if code:
-            try:
-                live = await asyncio.to_thread(macro_data._fetch_yf_quote, code)
-            except Exception:  # noqa: BLE001  补拉失败不崩，回落库内值
-                live = None
-        if live and live.get("value") is not None:
-            return float(live["value"]), _bj_today(), "yfinance实时"
     if v_snap is not None:
-        return float(v_snap), (date_snap or "库内"), "库内快照"
+        return float(v_snap), (row.get("date") or "库内"), "库内快照"
+    code = macro_data._INDEX_CODE_MAP.get(key, (None, None))[0]  # 无任何库内收盘 → 兜底实时补拉一次
+    if code:
+        try:
+            live = await asyncio.to_thread(macro_data._fetch_yf_quote, code)
+        except Exception:  # noqa: BLE001  补拉失败不崩
+            live = None
+        if live and live.get("value") is not None:
+            return float(live["value"]), (live.get("as_of") or _bj_today()), "yfinance实时"
     return None
 
 
@@ -138,7 +131,7 @@ async def reconcile_indices(text: str, wl_store, *, market: str, certify: bool =
         if llm_v is None:
             continue
         if key not in resolved:
-            resolved[key] = await _resolve_index(snaps, key, llm_v)
+            resolved[key] = await _resolve_index(snaps, key)
             r = resolved[key]
             if r and r[2] == "yfinance实时":   # 补拉到的新值落库（每键一次）
                 _save_live(wl_store, key, r[0])
@@ -242,11 +235,11 @@ if __name__ == "__main__":  # assert 自检（fake store + monkeypatch 补拉，
     assert len(ms) == 1 and ms[0][2] == "7674.37", ms
     assert all(m[2] not in ("30", "3", "26") for m in ms), ms
 
-    # 2. 就地纠正：库内 7641.16、LLM 说 7674.37（超容差）→ 补拉失败回落库内 → 改写为真值
-    _set_live(lambda code: None)
+    # 2. 就地纠正：库内 7641.16(权威收盘)、LLM 说 7674.37（超容差）→ 改写为库内真值（不补拉）
+    _set_live(lambda code: {"value": 99999.0})   # 若误触发补拉必被 99999 污染 → 断言即失败
     st = _Store([{"indicator": "sp500", "value": 7641.16, "date": _bj_today()}])
     txt, cert = asyncio.run(reconcile("大盘：标普500收于7674.37，走强。", st, market="us_stock"))
-    assert "7641.16 ⚠系统核实" in txt and "7674.37" not in txt, txt
+    assert "7641.16 ⚠系统核实" in txt and "7674.37" not in txt and "99999" not in txt, txt
     assert cert["items"][0]["verdict"] == "⚠纠正" and cert["corrected"] == 1, cert
 
     # 3. 容差内 → ✓认证、不改写数字（仅补 ✓）
@@ -260,13 +253,21 @@ if __name__ == "__main__":  # assert 自检（fake store + monkeypatch 补拉，
     txt, cert = asyncio.run(reconcile("标普500 7674.37。", st, market="us_stock"))
     assert txt == "标普500 7674.37。" and cert["items"][0]["verdict"] == "？未核", (txt, cert)
 
-    # 5. 可疑补拉（库内过期）→ 实时值权威 + 落库 + 据其纠正
-    _set_live(lambda code: {"value": 7641.16, "change_pct": 0.4})
-    st = _Store([{"indicator": "sp500", "value": 7000.0, "date": "2020-01-01"}])  # 过期
+    # 5. 兜底补拉（**全无库内值**才触发）→ 实时值权威 + 落库
+    _set_live(lambda code: {"value": 7641.16, "change_pct": 0.4, "as_of": "2026-08-21"})
+    st = _Store([])   # 全无库内
     txt, cert = asyncio.run(reconcile("标普500 7000。", st, market="us_stock"))
     assert "7641.16 ⚠系统核实" in txt, txt
     assert ("sp500", 7641.16) in st.saved, st.saved            # 补拉值已落库
     assert cert["items"][0]["source"] == "yfinance实时", cert
+
+    # 5b. 回归护栏：库内快照 date<今日(周末/节假日常态)、分析师引用与之相符 → ✓认证，
+    #     绝不因『过期』触发补拉、绝不用盘中价假纠正正确收盘（此前 bug：纳指正确收盘被改成盘中值）。
+    _set_live(lambda code: {"value": 99999.0})
+    st = _Store([{"indicator": "sp500", "value": 7641.16, "date": "2020-01-01"}])
+    txt, cert = asyncio.run(reconcile("标普500 7641.16。", st, market="us_stock"))
+    assert "7641.16 ✓" in txt and "99999" not in txt, txt
+    assert cert["items"][0]["verdict"] == "✓认证" and not st.saved, (cert, st.saved)
 
     # 6. 市场隔离：a_stock 下不核 sp500 提及
     txt, cert = asyncio.run(reconcile("标普500 7674.37。", _Store([]), market="a_stock"))

@@ -116,6 +116,29 @@ def _snapshot_entry(market_ctx: dict, strategy: dict | None) -> dict:
     }
 
 
+def _fmt_indices(indices: dict) -> str:
+    """把大盘指数渲染成带 as-of 的显式行，根治「裸数字无日期→模型臆造『某日收盘』」。
+
+    每条：`标普500 7641.16（涨跌 -0.87%·截至 2026-08-21）`。as_of 来自数据自带交易日(_fetch_yf_quote
+    的日线 bar 日期或库内 date)，非取数 wall-clock；缺 as_of 才回落「时点未知」并显式提示不得臆造。
+    """
+    if not indices:
+        return "（暂无大盘指数）"
+    out = []
+    for _k, v in indices.items():
+        if not isinstance(v, dict):
+            out.append(f"{_k}: {v}")
+            continue
+        label = v.get("label") or _k
+        val = v.get("value")
+        chg = v.get("change_pct")
+        chg_txt = f"·涨跌 {chg:+.2f}%" if isinstance(chg, (int, float)) else ""
+        asof = v.get("as_of")
+        asof_txt = f"·截至 {asof}" if asof else "·时点未知(勿臆造日期)"
+        out.append(f"{label} {val}（{chg_txt}{asof_txt}）")
+    return "；".join(out)
+
+
 def _snapshot_text(snap: dict) -> str:
     """把 snapshot 渲染成喂给 LLM 的紧凑文本。"""
     import json
@@ -124,16 +147,17 @@ def _snapshot_text(snap: dict) -> str:
                  if m in _SNAPSHOT_MARKET_NOTE), "")
     if note:
         parts.append(f"【{note}】")
-    # 数据口径与时点(诚实标注)：快照生成时刻 + 广度口径 + 各宏观指标自带 date=其数据时点。
+    # 数据口径与时点(诚实标注)：快照生成时刻 + 广度口径 + 各数据自带 as-of 交易日。
     sent = snap.get("sentiment", {}) or {}
     breadth = ""
     if sent.get("stocks_total"):
         breadth = (f"；广度 stocks_above_sma50={sent.get('stocks_above_sma50')}/"
                    f"{sent.get('stocks_total')} 为**观察池**口径(非全市场广度)")
-    parts.append(f"【数据口径：快照生成于 {snap.get('ts', '')[:16]}(北京展示另计)；价格为最近收盘；"
+    parts.append(f"【数据口径：快照生成于 {snap.get('ts', '')[:16]}(北京展示另计)；大盘指数各行自带『截至』"
+                 f"交易日(即该点位所属收盘日，可能非今日)，涉及指数须引用其点位与截至日、严禁臆造日期；"
                  f"宏观各指标 date 字段即其数据时点(月频如CPI/PCE会滞后){breadth}】")
     parts += [
-        f"大盘指数: {json.dumps(snap.get('indices', {}), ensure_ascii=False)}",
+        f"大盘指数: {_fmt_indices(snap.get('indices', {}))}",
         f"市场情绪(含VIX): {json.dumps(sent, ensure_ascii=False)}",
         f"宏观(利率/汇率/通胀分项/就业等): {json.dumps(snap.get('macro', {}), ensure_ascii=False)}",
         f"板块表现(观察池聚合): {json.dumps(snap.get('sectors', {}), ensure_ascii=False)}",

@@ -66,14 +66,25 @@ def test_multi_span_rewrite_back_to_front(no_live):
     assert cert["corrected"] == 2
 
 
-def test_live_topup_on_stale(monkeypatch):
-    # 库内过期 → 实时补拉一次成为权威 + 落库
-    monkeypatch.setattr(macro_data, "_fetch_yf_quote", lambda code: {"value": 7641.16, "change_pct": 0.4})
-    st = _Store([{"indicator": "sp500", "value": 7000.0, "date": "2020-01-01"}])
+def test_live_topup_only_when_no_snapshot(monkeypatch):
+    # 兜底补拉**仅当全无库内值**才触发 → 实时值权威 + 落库
+    monkeypatch.setattr(macro_data, "_fetch_yf_quote",
+                        lambda code: {"value": 7641.16, "change_pct": 0.4, "as_of": "2026-08-21"})
+    st = _Store([])   # 全无库内
     txt, cert = _run(fact_check.reconcile("标普500 7000。", st, market="us_stock"))
     assert "7641.16 ⚠系统核实" in txt
     assert ("sp500", 7641.16) in st.saved
     assert cert["items"][0]["source"] == "yfinance实时"
+
+
+def test_stale_snapshot_never_topsup(monkeypatch):
+    # 回归：库内快照 date<今日(周末/节假日常态)、分析师引用相符 → ✓认证；
+    # 绝不因『过期』触发盘中补拉、绝不用盘中价把正确收盘假纠正（此前 bug 的确定性护栏）。
+    monkeypatch.setattr(macro_data, "_fetch_yf_quote", lambda code: {"value": 99999.0})
+    st = _Store([{"indicator": "sp500", "value": 7641.16, "date": "2020-01-01"}])
+    txt, cert = _run(fact_check.reconcile("标普500 7641.16。", st, market="us_stock"))
+    assert "7641.16 ✓" in txt and "99999" not in txt
+    assert cert["items"][0]["verdict"] == "✓认证" and not st.saved
 
 
 def test_market_isolation():
