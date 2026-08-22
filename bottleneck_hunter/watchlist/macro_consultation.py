@@ -813,6 +813,9 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
             _, items = await fact_check.reconcile_indices(ans, store, market=market)
         except Exception:  # noqa: BLE001 核对失败不中断咨询
             items = []
+        good = [it for it in items if it["verdict"] == "✓认证"]
+        if good:  # 系统确认标记：分析师点位与权威源相符 → 回传前端打 ✓（此前只报纠错，认证无声=看不到确认标记）
+            yield _sse("certification", role=role, items=good)
         bad = [it for it in items if it["verdict"] == "⚠纠正"]
         if bad:
             yield _sse("correction", role=role, items=bad)

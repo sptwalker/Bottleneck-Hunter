@@ -2072,6 +2072,13 @@ function handleConsultEvent(data) {
     return;
   }
   if (evt === 'system') { appendConsultBubble({ type: 'system', content: data.content }); return; }
+  if (evt === 'certification') {  // 系统确认标记：分析师点位经权威源核实一致 → ✓
+    const items = (data.items || []).filter(it => it.verdict === '✓认证');
+    if (!items.length) return;
+    const parts = items.map(it => `${it.label} ${it.authoritative}${it.as_of ? '（截至 ' + it.as_of + '·' + (it.source || '系统') + '）' : ''}`);
+    appendConsultBubble({ type: 'system', content: '✓ 系统已核实（与权威数据源一致）：' + parts.join('、') });
+    return;
+  }
   if (evt === 'correction') {  // 特性二：系统权威源核出某分析师点位幻觉 → 系统气泡提醒
     const items = data.items || [];
     if (!items.length) return;
