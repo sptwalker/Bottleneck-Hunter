@@ -136,7 +136,7 @@ if market == A_STOCK and code:
 
 ---
 
-### Phase 4 — 催化剂事实锚点（G4）🟡
+### Phase 4 — 催化剂事实锚点（G4）🟡 **[已评估，按 YAGNI 暂缓]**
 
 给 [catalyst.py](../bottleneck_hunter/chain/catalyst.py) / [catalyst_monitor.py](../bottleneck_hunter/watchlist/catalyst_monitor.py) 的 LLM `expected_date` 兜真实来源：
 
@@ -145,6 +145,17 @@ if market == A_STOCK and code:
 - **不改评分权重**，只把「事实事件」加进 prompt 上下文 + 在 event 上标 `source="efinance_report_date"` 供下游区分事实/推测。
 
 **验证**：断言对有预约披露日的标的，catalyst events 中出现 source 标记为事实的条目。
+
+#### 2026-08-25 暂缓评估
+催化剂当前是 100% LLM 生成（无下游校验/回填）。注入真实财报披露日需：
+1. 在 3 个 CatalystAnalyzer 构造点（legacy/phases/reverse）注入全市场报表日历
+2. 解析/过滤到单只票的已排定日期
+3. 修改 prompt 注入该信息
+4. LLM 仍可能编造其他日期（财报只是 5 类催化剂之一）
+
+**改动面 > 边际收益**：catalyst 无真实事件校验闭环，单点日期注入不构成质变。
+**按 YAGNI 暂缓**：待 catalyst 本身有事实回填/验证机制后再引入 efinance 作锚点。
+当前 P1-P3 已填 4 个真实缺口（机构/资金/板块），优先让其在生产证明价值。
 
 ---
 
@@ -157,15 +168,15 @@ akshare 同花顺财务已较全（[financial_data.py](../bottleneck_hunter/chai
 
 ## 4. 优先级与工作量
 
-| Phase | 缺口 | 优先级 | 预估改动 | 一句话价值 |
-|---|---|---|---|---|
-| P1 | A股机构/股东 | 🔴 最高 | 1 新文件 + 5 处接线 | 唯一「完全空白+恒空兜底」，让 A股 25% 机构维度复活 |
-| P2 | A股主力资金流 | 🔴 高 | 1 provider + hub 加能力 + 1 fallback | 替换已失效 akshare 资金口径 |
-| P3 | 板块标签校验 | 🟡 中 | supplier_search 内 ~10 行 | LLM 自报行业 → 东财官方分类 |
-| P4 | 催化剂锚点 | 🟡 中 | catalyst 输入注入 | 给 LLM 编的 expected_date 兜真实来源 |
-| P5 | 财务冗余 | ⚪ 低 | — | 暂不建（YAGNI） |
+| Phase | 缺口 | 优先级 | 预估改动 | 一句话价值 | 状态 |
+|---|---|---|---|---|---|
+| P1 | A股机构/股东 | 🔴 最高 | 1 新文件 + 5 处接线 | 唯一「完全空白+恒空兜底」，让 A股 25% 机构维度复活 | ✅ 已完成 (5b30dd0) |
+| P2 | A股主力资金流 | 🔴 高 | 1 provider + hub 加能力 + 1 fallback | 替换已失效 akshare 资金口径 | ✅ 已完成 (5b30dd0) |
+| P3 | 板块标签校验 | 🟡 中 | supplier_search 内 ~10 行 | LLM 自报行业 → 东财官方分类 | ✅ 已完成 (07e6c48) |
+| P4 | 催化剂锚点 | 🟡 中 | catalyst 输入注入 | 给 LLM 编的 expected_date 兜真实来源 | ⏸️ 已评估暂缓 (改动面 > 边际收益) |
+| P5 | 财务冗余 | ⚪ 低 | — | 暂不建（YAGNI） | ⏸️ 不建 |
 
-**建议先做 P1+P2**（两个 🔴，共用同一套 provider 脚手架，一次 PR 可交付），P3/P4 视效果再排。
+**实际交付 P1+P2+P3**（两个 🔴 + 一个 🟡，3 commits），P4 按 YAGNI 暂缓（待 catalyst 本身有事实验证闭环后再引入），P5 不建。
 
 ## 5. 统一收尾约定
 - 每个 provider 留一个 `demo()`/`__main__` 自检（真拉一只 A股 + 断网优雅降级两条断言）。
