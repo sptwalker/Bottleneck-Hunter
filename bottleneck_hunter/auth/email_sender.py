@@ -148,3 +148,131 @@ def send_test_email(to_email: str, config: dict) -> tuple[bool, str]:
     except Exception as e:
         logger.warning("SMTP 测试邮件发送失败: %s", e)
         return False, str(e)
+
+
+# ─────────────────────────── IMAP 收信（管理员专用银行邮件转发管道） ───────────────────────────
+# 镜像上面 SMTP 三件套：配置 DB 优先→env 兜底、connectivity 测试、拉 UNSEEN。stdlib imaplib，零新依赖。
+
+def resolve_imap_config(store=None) -> dict:
+    """解析生效的 IMAP 配置。store 的 system_config 设了 imap_host 则整组用 DB，否则用环境变量。
+
+    返回 {host, port, user, password, use_ssl, pdf_password, source}。
+    """
+    def _ssl(v: str) -> bool:
+        return str(v).strip().lower() in ("1", "true", "yes")
+
+    if store is not None and (store.get_config("imap_host", "") or "").strip():
+        password = ""
+        enc = store.get_config("imap_password_enc", "")
+        if enc:
+            try:
+                password = decrypt(enc)
+            except Exception:
+                logger.warning("IMAP 密码解密失败", exc_info=True)
+        pdf_pwd = ""
+        pdf_enc = store.get_config("imap_pdf_password_enc", "")
+        if pdf_enc:
+            try:
+                pdf_pwd = decrypt(pdf_enc)
+            except Exception:
+                logger.warning("默认 PDF 密码解密失败", exc_info=True)
+        return {
+            "host": store.get_config("imap_host", "").strip(),
+            "port": int(store.get_config("imap_port", "993") or "993"),
+            "user": store.get_config("imap_user", "").strip(),
+            "password": password,
+            "use_ssl": _ssl(store.get_config("imap_use_ssl", "true")),
+            "pdf_password": pdf_pwd,
+            "source": "db",
+        }
+    return {
+        "host": os.getenv("IMAP_HOST", "").strip(),
+        "port": int(os.getenv("IMAP_PORT", "993") or "993"),
+        "user": os.getenv("IMAP_USER", "").strip(),
+        "password": os.getenv("IMAP_PASSWORD", ""),
+        "use_ssl": _ssl(os.getenv("IMAP_USE_SSL", "true")),
+        "pdf_password": os.getenv("IMAP_PDF_PASSWORD", ""),
+        "source": "env",
+    }
+
+
+def imap_configured(config: dict | None = None) -> bool:
+    cfg = config if config is not None else resolve_imap_config()
+    return bool(cfg.get("host"))
+
+
+def _imap_connect(config: dict):
+    """建连并 login，返回 imaplib 连接对象。调用方负责 logout。"""
+    import imaplib
+
+    host = config["host"]
+    port = int(config.get("port") or 993)
+    if config.get("use_ssl", True):
+        conn = imaplib.IMAP4_SSL(host, port)
+    else:
+        conn = imaplib.IMAP4(host, port)
+    user = config.get("user", "")
+    if user:
+        conn.login(user, config.get("password", ""))
+    return conn
+
+
+def test_imap_connection(config: dict) -> tuple[bool, str]:
+    """连接+login+select INBOX 试探，返回 (成功?, 错误信息)。供后台"测试连接"。"""
+    if not imap_configured(config):
+        return False, "IMAP 未配置（缺少服务器地址）"
+    conn = None
+    try:
+        conn = _imap_connect(config)
+        typ, _ = conn.select("INBOX", readonly=True)
+        if typ != "OK":
+            return False, "无法选择 INBOX 文件夹"
+        return True, ""
+    except Exception as e:
+        logger.warning("IMAP 测试连接失败: %s", e)
+        return False, str(e)
+    finally:
+        if conn is not None:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+
+
+def fetch_unseen(config: dict, mark_seen: bool = True) -> list:
+    """拉 INBOX 中 UNSEEN 邮件，返回解析后的 email.message.Message 列表。
+
+    mark_seen=True 时处理后按 UID 打 \\Seen（幂等由上层 msgid 去重兜底，这里只避免重复拉取）。
+    imaplib 是阻塞 IO，调用方需 asyncio.to_thread 包裹。
+    """
+    import email as email_mod
+
+    conn = None
+    out: list = []
+    try:
+        conn = _imap_connect(config)
+        conn.select("INBOX")
+        typ, data = conn.search(None, "UNSEEN")
+        if typ != "OK" or not data or not data[0]:
+            return out
+        uids = data[0].split()
+        for uid in uids:
+            typ, msg_data = conn.fetch(uid, "(RFC822)")
+            if typ != "OK" or not msg_data or not msg_data[0]:
+                continue
+            raw = msg_data[0][1]
+            msg = email_mod.message_from_bytes(raw)
+            out.append(msg)
+            if mark_seen:
+                try:
+                    conn.store(uid, "+FLAGS", "\\Seen")
+                except Exception:
+                    logger.warning("标记邮件 %s 已读失败", uid, exc_info=True)
+        return out
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+                conn.logout()
+            except Exception:
+                pass

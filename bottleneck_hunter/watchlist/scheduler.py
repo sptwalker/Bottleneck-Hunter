@@ -1096,6 +1096,25 @@ async def job_poll_resting_orders() -> None:
             logger.error("挂单轮询 (user=%s) failed: %s", uid[:8] if uid else "global", e)
 
 
+async def job_poll_imap() -> None:
+    """系统级：拉取转发到系统收件箱的银行邮件，解读附件/正文并入库（管理员专用）。"""
+    if not _wl_store:
+        return
+    from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+    if not is_global_enabled(_auth_store):
+        logger.info("自动更新全局总开关关闭，跳过邮件轮询")
+        return
+    import asyncio as _asyncio
+
+    from bottleneck_hunter.auth.email_sender import imap_configured, resolve_imap_config
+    if not imap_configured(resolve_imap_config(_auth_store)):
+        return  # 运行时闸：未配 IMAP 则空转不报错
+    from bottleneck_hunter.vip.mail_ingest import poll_inbox
+    counts = await _asyncio.to_thread(poll_inbox, _wl_store, _auth_store)  # imaplib 阻塞→to_thread
+    if counts.get("processed") or counts.get("rejected") or counts.get("errors"):
+        logger.info("邮件轮询: %s", counts)
+
+
 _JOB_SPECS = [
     ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US pre-market price update"),
     ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US post-market price update"),
@@ -1126,6 +1145,7 @@ _JOB_SPECS = [
     ("model_capability_refresh", job_model_capability_refresh, {},               _TZ_CN        , "monthly",  "Monthly AI model capability re-test (刷新能力分)"),
     ("stale_refresh",          job_stale_refresh,       {},                     None,           "interval", "Stale watchlist refresh (safety net)"),
     ("resting_limit_poll",     job_poll_resting_orders, {},                     None,           "interval", "Resting limit-order fill poll"),
+    ("mail_ingest_poll",       job_poll_imap,           {},                     None,           "interval", "Forwarded bank-email ingest poll"),
     ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_CN        , "weekly",   "US full refresh (data+decision)"),
     ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
 ]
@@ -1172,6 +1192,7 @@ def list_job_categories() -> dict[str, str]:
         "us_auto_review": "auto_review", "cn_auto_review": "auto_review",
         "stale_refresh": "daily_decision",  # 情报/策略 LLM 兜底，随自动决策开关
         "resting_limit_poll": "daily_decision",  # 挂单撮合，随自动决策开关
+        "mail_ingest_poll": "",  # 系统级银行邮件轮询，仅受管理员全局总开关
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
         "model_capability_refresh": "",
@@ -1213,6 +1234,7 @@ def list_job_labels() -> dict[str, dict]:
         # 新增
         "stale_refresh":       {"label": "陈旧兜底刷新",           "desc": "刷新超过阈值未更新的观察池标的", "tz": "轮询", "freq": "每隔N小时"},
         "resting_limit_poll":  {"label": "挂单撮合轮询",           "desc": "开市时段按限价尝试成交，到期自动取消", "tz": "轮询", "freq": "每小时"},
+        "mail_ingest_poll":    {"label": "银行邮件自动解读",       "desc": "拉取转发邮件，附件入库+正文进待确认队列", "tz": "轮询", "freq": "每小时"},
         "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
     }

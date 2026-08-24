@@ -618,3 +618,95 @@ class _SimTradingMixin:
         return out
 
 
+    # ── 转发银行邮件解读管道（管理员专用）──────────────────────────────────
+    # 说明：解读记录/待确认队列跨多个 VIP 用户，管理员端需汇总查看 → 读用「全局无过滤」查询；
+    #      写走本 store 的用户/市场 scope（poll 时对每封邮件 .for_user(vip) 后调用）。
+    def find_mail_log_by_msgid(self, msgid: str) -> dict | None:
+        """邮件级去重：msgid 全局 UNIQUE，跨用户查一行。"""
+        if not (msgid or "").strip():
+            return None
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM mail_ingest_log WHERE msgid=?", (msgid,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def create_mail_ingest_log(self, *, msgid: str, sender: str, summary: str = "", n_body_txn: int = 0,
+                               attachments: list | None = None, status: str = "processed", reason: str = "") -> str:
+        import json
+        iid = uuid.uuid4().hex[:12]
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO mail_ingest_log
+                   (id, msgid, sender, summary, n_body_txn, attachments_json, status, reason, created_at
+                    {self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (iid, msgid, sender, summary, int(n_body_txn),
+                 json.dumps(attachments or [], ensure_ascii=False), status, reason, _now_iso())
+                + self._user_insert_params() + self._market_insert_params(),
+            )
+        return iid
+
+    def list_mail_ingest_log(self, limit: int = 100) -> list[dict]:
+        """管理员端全局汇总（跨 VIP 用户），最新在前。"""
+        import json
+        conn = self._connect()
+        try:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM mail_ingest_log ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()]
+        finally:
+            conn.close()
+        for r in rows:
+            r["attachments"] = json.loads(r.pop("attachments_json", "") or "[]")
+        return rows
+
+    def create_pending_txn(self, *, msgid: str, account_ref: str, txn: dict) -> str:
+        import json
+        iid = uuid.uuid4().hex[:12]
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO vip_mail_confirm_pending
+                   (id, msgid, account_ref, txn_json, status, created_at
+                    {self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (iid, msgid, account_ref, json.dumps(txn, ensure_ascii=False), "pending", _now_iso())
+                + self._user_insert_params() + self._market_insert_params(),
+            )
+        return iid
+
+    def list_pending_txns(self, status: str = "pending", limit: int = 200) -> list[dict]:
+        """管理员端全局汇总待确认交易（跨 VIP 用户）。status='' 表示全部状态。"""
+        import json
+        conn = self._connect()
+        try:
+            if status:
+                sql = "SELECT * FROM vip_mail_confirm_pending WHERE status=? ORDER BY created_at DESC LIMIT ?"
+                rows = [dict(r) for r in conn.execute(sql, (status, limit)).fetchall()]
+            else:
+                sql = "SELECT * FROM vip_mail_confirm_pending ORDER BY created_at DESC LIMIT ?"
+                rows = [dict(r) for r in conn.execute(sql, (limit,)).fetchall()]
+        finally:
+            conn.close()
+        for r in rows:
+            r["txn"] = json.loads(r.pop("txn_json", "") or "{}")
+        return rows
+
+    def get_pending_txn(self, pending_id: str) -> dict | None:
+        import json
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM vip_mail_confirm_pending WHERE id=?", (pending_id,)).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        d = dict(row)
+        d["txn"] = json.loads(d.pop("txn_json", "") or "{}")
+        return d
+
+    def mark_pending(self, pending_id: str, status: str) -> None:
+        with self._write_conn() as conn:
+            conn.execute("UPDATE vip_mail_confirm_pending SET status=? WHERE id=?", (status, pending_id))
+
+

@@ -5,6 +5,12 @@ import { showConfirm } from './utils/confirm.js';
 import { toast } from './utils/toast.js';
 import { fmtBJ } from './wizard-state.js';
 
+function escapeHtml(value) {
+  const div = document.createElement('div');
+  div.textContent = value == null ? '' : String(value);
+  return div.innerHTML;
+}
+
 let _currentTab = 'users';
 
 // 用户表：缓存 + 排序状态；邀请码：缓存（供"只看可用"过滤）
@@ -491,6 +497,15 @@ async function loadConfig() {
     if (smtpSave && !smtpSave._bound) { smtpSave._bound = true; smtpSave.addEventListener('click', saveSmtpConfig); }
     const smtpTest = document.getElementById('admin-smtp-test');
     if (smtpTest && !smtpTest._bound) { smtpTest._bound = true; smtpTest.addEventListener('click', testSmtp); }
+
+    // IMAP 收信配置
+    await loadImapConfig();
+    const bind = (id, fn) => { const el = document.getElementById(id); if (el && !el._bound) { el._bound = true; el.addEventListener('click', fn); } };
+    bind('admin-imap-save', saveImapConfig);
+    bind('admin-imap-test', testImap);
+    bind('admin-imap-poll', pollImapNow);
+    await loadMailPending();
+    await loadMailLog();
   } catch (err) {
     console.error('加载配置失败:', err);
   }
@@ -554,6 +569,134 @@ async function testSmtp() {
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     setCfgStatus(status, data.message || '测试邮件已发送', true);
   } catch (err) { setCfgStatus(status, `测试失败: ${err.message}`, false); }
+}
+
+// ── IMAP 银行邮件自动解读 ─────────────────────────────
+async function loadImapConfig() {
+  try {
+    const res = await fetch('/api/admin/imap-config');
+    if (!res.ok) return;
+    const c = await res.json();
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    set('admin-imap-host', c.host || '');
+    set('admin-imap-port', c.port || 993);
+    set('admin-imap-user', c.user || '');
+    const ssl = document.getElementById('admin-imap-ssl');
+    if (ssl) ssl.checked = c.use_ssl !== false;
+    const pw = document.getElementById('admin-imap-password');
+    if (pw) pw.placeholder = c.password_set ? '已设置（留空保持不变）' : '未设置';
+    const pdf = document.getElementById('admin-imap-pdfpw');
+    if (pdf) pdf.placeholder = c.pdf_password_set ? '已设置（留空保持不变）' : '未设置';
+    const src = document.getElementById('admin-imap-source');
+    if (src) {
+      src.textContent = c.configured
+        ? (c.source === 'db' ? '当前使用：后台配置' : '当前使用：环境变量 (.env) 兜底')
+        : '⚠ 尚未配置 IMAP，邮件轮询空转';
+    }
+  } catch (err) { console.error('加载 IMAP 配置失败:', err); }
+}
+
+async function saveImapConfig() {
+  const status = document.getElementById('admin-imap-status');
+  const body = {
+    host: document.getElementById('admin-imap-host')?.value.trim() || '',
+    port: parseInt(document.getElementById('admin-imap-port')?.value || '993'),
+    user: document.getElementById('admin-imap-user')?.value.trim() || '',
+    use_ssl: document.getElementById('admin-imap-ssl')?.checked ?? true,
+  };
+  const pw = document.getElementById('admin-imap-password')?.value || '';
+  if (pw) body.password = pw;
+  const pdf = document.getElementById('admin-imap-pdfpw')?.value || '';
+  if (pdf) body.pdf_password = pdf;
+  try {
+    const res = await fetch('/api/admin/imap-config', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!res.ok) { let d = `HTTP ${res.status}`; try { d = (await res.json()).detail || d; } catch { /* */ } throw new Error(d); }
+    const pwEl = document.getElementById('admin-imap-password'); if (pwEl) pwEl.value = '';
+    const pdfEl = document.getElementById('admin-imap-pdfpw'); if (pdfEl) pdfEl.value = '';
+    setCfgStatus(status, '已保存', true);
+    loadImapConfig();
+  } catch (err) { setCfgStatus(status, `保存失败: ${err.message}`, false); }
+}
+
+async function testImap() {
+  const status = document.getElementById('admin-imap-status');
+  setCfgStatus(status, '连接中…', true);
+  try {
+    const res = await fetch('/api/admin/imap-test', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    setCfgStatus(status, data.message || 'IMAP 连接正常', true);
+  } catch (err) { setCfgStatus(status, `连接失败: ${err.message}`, false); }
+}
+
+async function pollImapNow() {
+  const status = document.getElementById('admin-imap-status');
+  setCfgStatus(status, '轮询中…', true);
+  try {
+    const res = await fetch('/api/admin/imap-poll-now', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    setCfgStatus(status, `完成：处理 ${data.processed} / 拦截 ${data.rejected} / 错误 ${data.errors}`, true);
+    loadMailPending();
+    loadMailLog();
+  } catch (err) { setCfgStatus(status, `轮询失败: ${err.message}`, false); }
+}
+
+async function loadMailPending() {
+  const box = document.getElementById('admin-mail-pending');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/admin/mail-pending?status=pending');
+    if (!res.ok) { box.textContent = '加载失败'; return; }
+    const items = (await res.json()).items || [];
+    if (!items.length) { box.textContent = '（无待确认交易）'; return; }
+    box.innerHTML = items.map((p) => {
+      const t = p.txn || {};
+      const desc = `${t.txn_type || '?'} ${t.ticker || ''} ${t.quantity || ''}@${t.price || ''} ${t.currency || ''} ${t.trade_date || '(缺日期)'}`;
+      return `<div style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border,#333)">
+        <span style="flex:1">${escapeHtml(desc)}</span>
+        <button class="btn btn-primary btn-sm" data-mailconfirm="${p.id}">确认</button>
+        <button class="btn btn-sm" data-mailreject="${p.id}">拒绝</button>
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-mailconfirm]').forEach((b) =>
+      b.addEventListener('click', () => confirmPending(b.getAttribute('data-mailconfirm'), true)));
+    box.querySelectorAll('[data-mailreject]').forEach((b) =>
+      b.addEventListener('click', () => confirmPending(b.getAttribute('data-mailreject'), false)));
+  } catch (err) { box.textContent = `加载失败: ${err.message}`; }
+}
+
+async function confirmPending(pendingId, approve) {
+  try {
+    const res = await fetch('/api/admin/mail-pending/confirm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pending_id: pendingId, approve }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    loadMailPending();
+  } catch (err) { alert(`操作失败: ${err.message}`); }
+}
+
+async function loadMailLog() {
+  const box = document.getElementById('admin-mail-log');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/admin/mail-ingest-log?limit=50');
+    if (!res.ok) { box.textContent = '加载失败'; return; }
+    const items = (await res.json()).items || [];
+    if (!items.length) { box.textContent = '（暂无解读记录）'; return; }
+    box.innerHTML = items.map((r) => {
+      const atts = (r.attachments || []).map((a) => `${a.file_name}:${a.status}`).join(', ');
+      const tag = r.status === 'rejected' ? '🚫' : (r.status === 'error' ? '⚠' : '✓');
+      return `<div style="padding:4px 0;border-bottom:1px solid var(--border,#333)">
+        <div>${tag} <b>${escapeHtml(r.sender || '?')}</b> — ${escapeHtml(r.summary || '')}</div>
+        <div style="opacity:.7;font-size:.85em">正文 ${r.n_body_txn || 0} 笔 · 附件 [${escapeHtml(atts)}] · ${escapeHtml(r.created_at ? fmtBJ(r.created_at) : '')}</div>
+      </div>`;
+    }).join('');
+  } catch (err) { box.textContent = `加载失败: ${err.message}`; }
 }
 
 function setCfgStatus(el, msg, ok) {

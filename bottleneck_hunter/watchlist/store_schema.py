@@ -645,6 +645,33 @@ CREATE TABLE IF NOT EXISTS vip_imports (
     market          TEXT DEFAULT 'us_stock',
     UNIQUE(user_id, market, account_ref, file_hash)
 );
+-- 转发银行邮件解读记录（管理员专用收信管道）：一封邮件一条，msgid 邮件级幂等
+CREATE TABLE IF NOT EXISTS mail_ingest_log (
+    id               TEXT PRIMARY KEY,
+    msgid            TEXT NOT NULL UNIQUE,     -- 邮件 Message-Id，重复投递跳过
+    sender           TEXT DEFAULT '',
+    summary          TEXT DEFAULT '',          -- 正文 LLM 摘要（脱敏）
+    n_body_txn       INTEGER DEFAULT 0,        -- 正文抽出的交易笔数（进待确认队列）
+    attachments_json TEXT DEFAULT '[]',        -- [{file_name,status,detected_kind,summary}]
+    status           TEXT NOT NULL DEFAULT 'processed'
+                     CHECK(status IN ('processed','rejected','error')),
+    reason           TEXT DEFAULT '',          -- rejected/error 原因（如 unknown_sender）
+    created_at       TEXT NOT NULL,
+    user_id          TEXT DEFAULT '',
+    market           TEXT DEFAULT 'us_stock'
+);
+-- 正文 LLM 抽取的交易待确认队列：管理员确认后才写账户
+CREATE TABLE IF NOT EXISTS vip_mail_confirm_pending (
+    id          TEXT PRIMARY KEY,
+    msgid       TEXT DEFAULT '',
+    account_ref TEXT DEFAULT '',
+    txn_json    TEXT NOT NULL DEFAULT '{}',    -- 单笔 StatementTransaction 序列化
+    status      TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','confirmed','rejected')),
+    created_at  TEXT NOT NULL,
+    user_id     TEXT DEFAULT '',
+    market      TEXT DEFAULT 'us_stock'
+);
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id TEXT PRIMARY KEY, title TEXT DEFAULT '', summary TEXT DEFAULT '',
     summarized_upto TEXT DEFAULT '', msg_count INTEGER DEFAULT 0,
@@ -1350,6 +1377,34 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE sim_account ADD COLUMN loan_balance REAL DEFAULT 0",
     # ── VIP 衍生品：产品介绍/推介稿标记（非成交持仓）；读路径一律 is_indicative=0 过滤，不计入持仓/报告 ──
     "ALTER TABLE vip_derivative_terms ADD COLUMN is_indicative INTEGER DEFAULT 0",
+    # ── 转发银行邮件解读管道（管理员专用）：解读记录 + 正文交易待确认队列 ──
+    """CREATE TABLE IF NOT EXISTS mail_ingest_log (
+        id               TEXT PRIMARY KEY,
+        msgid            TEXT NOT NULL UNIQUE,
+        sender           TEXT DEFAULT '',
+        summary          TEXT DEFAULT '',
+        n_body_txn       INTEGER DEFAULT 0,
+        attachments_json TEXT DEFAULT '[]',
+        status           TEXT NOT NULL DEFAULT 'processed'
+                         CHECK(status IN ('processed','rejected','error')),
+        reason           TEXT DEFAULT '',
+        created_at       TEXT NOT NULL,
+        user_id          TEXT DEFAULT '',
+        market           TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_mail_ingest_created ON mail_ingest_log(user_id, market, created_at DESC)",
+    """CREATE TABLE IF NOT EXISTS vip_mail_confirm_pending (
+        id          TEXT PRIMARY KEY,
+        msgid       TEXT DEFAULT '',
+        account_ref TEXT DEFAULT '',
+        txn_json    TEXT NOT NULL DEFAULT '{}',
+        status      TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','confirmed','rejected')),
+        created_at  TEXT NOT NULL,
+        user_id     TEXT DEFAULT '',
+        market      TEXT DEFAULT 'us_stock'
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_mail_pending_status ON vip_mail_confirm_pending(user_id, market, status, created_at DESC)",
 ]
 
 

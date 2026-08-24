@@ -2232,6 +2232,53 @@
           </div>
         </div>
 
+        <div class="admin-config-group">
+          <h4>银行邮件自动解读 (IMAP)</h4>
+          <div class="field-hint" style="margin-bottom:8px">VIP 用户把银行交易/结单邮件转发到系统收件箱，系统定期拉取：附件自动入库，正文抽取的交易先进待确认队列由管理员确认。仅认已注册 VIP 邮箱的发件人。</div>
+          <div class="field-hint" id="admin-imap-source" style="margin-bottom:8px"></div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">IMAP 服务器<small>如 imap.qq.com</small></div>
+            <input type="text" class="admin-config-input" id="admin-imap-host" placeholder="imap.example.com">
+          </div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">端口<small>SSL 默认 993</small></div>
+            <input type="number" class="admin-config-input" id="admin-imap-port" value="993" min="1" max="65535">
+          </div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">账号<small>收件箱登录名/邮箱</small></div>
+            <input type="text" class="admin-config-input" id="admin-imap-user" placeholder="inbox@example.com" autocomplete="off">
+          </div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">密码/授权码<small>留空则保持原密码</small></div>
+            <input type="password" class="admin-config-input" id="admin-imap-password" placeholder="••••••" autocomplete="new-password">
+          </div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">默认 PDF 密码<small>加密结单/条款单的解密密码，留空保持原值</small></div>
+            <input type="password" class="admin-config-input" id="admin-imap-pdfpw" placeholder="••••••" autocomplete="new-password">
+          </div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">启用 SSL<small>993 端口需开启</small></div>
+            <label class="admin-toggle">
+              <input type="checkbox" id="admin-imap-ssl" checked>
+              <span class="admin-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="admin-cfg-actions">
+            <button class="btn btn-primary btn-sm" id="admin-imap-save">保存 IMAP</button>
+            <button class="btn btn-sm" id="admin-imap-test">测试连接</button>
+            <button class="btn btn-sm" id="admin-imap-poll">立即轮询</button>
+            <span class="admin-cfg-status" id="admin-imap-status"></span>
+          </div>
+          <div style="margin-top:14px">
+            <div class="admin-config-label" style="margin-bottom:6px">待确认交易（正文抽取，需管理员确认后入账户）</div>
+            <div id="admin-mail-pending" class="field-hint">加载中…</div>
+          </div>
+          <div style="margin-top:14px">
+            <div class="admin-config-label" style="margin-bottom:6px">邮件解读记录</div>
+            <div id="admin-mail-log" class="field-hint">加载中…</div>
+          </div>
+        </div>
+
         <div class="admin-cfg-actions">
           <button class="btn btn-primary btn-sm" id="admin-cfg-save">保存配置</button>
           <span class="admin-cfg-status" id="admin-cfg-status"></span>

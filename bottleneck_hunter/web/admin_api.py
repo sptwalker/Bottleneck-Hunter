@@ -101,6 +101,20 @@ class SmtpTestRequest(BaseModel):
     to_email: str = Field(..., min_length=5, max_length=128)
 
 
+class UpdateImapConfigRequest(BaseModel):
+    host: str | None = Field(default=None, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    user: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, max_length=512)      # 空/省略=保持原密码
+    use_ssl: bool | None = None
+    pdf_password: str | None = Field(default=None, max_length=512)   # 默认 PDF 解密密码；空/省略=保持原值
+
+
+class ConfirmPendingRequest(BaseModel):
+    pending_id: str = Field(..., min_length=1, max_length=64)
+    approve: bool = True  # True=确认入账户；False=拒绝
+
+
 # ── 用户管理 ──────────────────────────────────────────
 
 @router.get("/users")
@@ -506,6 +520,125 @@ async def test_smtp(req: SmtpTestRequest, user: dict = Depends(_require_admin)):
     if not ok:
         raise HTTPException(status_code=502, detail=f"测试邮件发送失败：{err}")
     return {"ok": True, "message": f"测试邮件已发送至 {req.to_email}"}
+
+
+# ── IMAP 收信 & 银行邮件自动解读（管理员专用）─────────────────
+
+@router.get("/imap-config")
+async def get_imap_config(user: dict = Depends(_require_admin)):
+    """返回当前 IMAP 配置（不含密码明文，仅提示是否已设置及来源）。"""
+    from bottleneck_hunter.auth.email_sender import resolve_imap_config
+    cfg = resolve_imap_config(_auth())
+    return {
+        "host": cfg["host"], "port": cfg["port"], "user": cfg["user"],
+        "use_ssl": cfg["use_ssl"],
+        "password_set": bool(cfg["password"]),
+        "pdf_password_set": bool(cfg["pdf_password"]),
+        "configured": bool(cfg["host"]),
+        "source": cfg["source"],
+    }
+
+
+@router.patch("/imap-config")
+async def update_imap_config(req: UpdateImapConfigRequest, user: dict = Depends(_require_admin)):
+    """保存 IMAP 配置到 system_config，密码 AES 加密。密码字段留空则保持原值。"""
+    from bottleneck_hunter.auth.crypto import encrypt
+    store = _auth()
+    if req.host is not None:
+        store.set_config("imap_host", req.host.strip())
+    if req.port is not None:
+        store.set_config("imap_port", str(req.port))
+    if req.user is not None:
+        store.set_config("imap_user", req.user.strip())
+    if req.use_ssl is not None:
+        store.set_config("imap_use_ssl", "true" if req.use_ssl else "false")
+    if req.password:
+        store.set_config("imap_password_enc", encrypt(req.password))
+    if req.pdf_password:
+        store.set_config("imap_pdf_password_enc", encrypt(req.pdf_password))
+    return await get_imap_config(user)
+
+
+@router.post("/imap-test")
+async def test_imap(user: dict = Depends(_require_admin)):
+    """用当前生效的 IMAP 配置连接+登录+选择 INBOX，验证连通性。"""
+    from bottleneck_hunter.auth.email_sender import resolve_imap_config, test_imap_connection
+    cfg = resolve_imap_config(_auth())
+    ok, err = await asyncio.to_thread(test_imap_connection, cfg)
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"IMAP 连接失败：{err}")
+    return {"ok": True, "message": "IMAP 连接正常"}
+
+
+@router.post("/imap-poll-now")
+async def imap_poll_now(user: dict = Depends(_require_admin)):
+    """手动触发一次收件箱轮询（附件入库 + 正文进待确认队列）。"""
+    if _wl_store is None:
+        raise HTTPException(status_code=500, detail="WatchlistStore not initialized")
+    from bottleneck_hunter.auth.email_sender import imap_configured, resolve_imap_config
+    if not imap_configured(resolve_imap_config(_auth())):
+        raise HTTPException(status_code=400, detail="IMAP 未配置，请先填写并保存服务器地址")
+    from bottleneck_hunter.vip.mail_ingest import poll_inbox
+    counts = await asyncio.to_thread(poll_inbox, _wl_store, _auth())
+    return {"ok": True, **counts}
+
+
+@router.get("/mail-ingest-log")
+async def mail_ingest_log(limit: int = 100, user: dict = Depends(_require_admin)):
+    """列邮件解读记录（跨 VIP 用户全局汇总）。"""
+    if _wl_store is None:
+        return {"items": []}
+    return {"items": _wl_store.list_mail_ingest_log(limit=min(limit, 500))}
+
+
+@router.get("/mail-pending")
+async def mail_pending(status: str = "pending", user: dict = Depends(_require_admin)):
+    """列正文抽取的待确认交易（跨 VIP 用户）。status='' 表示全部状态。"""
+    if _wl_store is None:
+        return {"items": []}
+    return {"items": _wl_store.list_pending_txns(status=status)}
+
+
+@router.post("/mail-pending/confirm")
+async def confirm_pending(req: ConfirmPendingRequest, user: dict = Depends(_require_admin)):
+    """确认/拒绝一笔待确认交易。确认时合成单笔 BrokerStatement 走 normalize_statement 幂等入账户。"""
+    if _wl_store is None:
+        raise HTTPException(status_code=500, detail="WatchlistStore not initialized")
+    row = _wl_store.get_pending_txn(req.pending_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="待确认记录不存在")
+    if row.get("status") != "pending":
+        raise HTTPException(status_code=409, detail=f"该记录已处理（{row.get('status')}）")
+
+    if not req.approve:
+        _wl_store.mark_pending(req.pending_id, "rejected")
+        return {"ok": True, "status": "rejected"}
+
+    # 归属：落到该待确认记录所属 VIP 用户的规范层（不是管理员）
+    vip_id = row.get("user_id", "") or ""
+    market = row.get("market", "us_stock") or "us_stock"
+    txn = row.get("txn", {}) or {}
+    if not txn.get("txn_type") or not txn.get("trade_date"):
+        raise HTTPException(status_code=422, detail="缺少 txn_type 或 trade_date，请先在源邮件补全再确认")
+
+    from bottleneck_hunter.vip.ingest import BrokerStatement, ReconResult, StatementTransaction
+    from bottleneck_hunter.vip.portfolio import normalize_statement
+    stmt_txn = StatementTransaction(
+        ticker=txn.get("ticker", ""), txn_type=txn["txn_type"], trade_date=txn["trade_date"],
+        quantity=float(txn.get("quantity") or 0), price=float(txn.get("price") or 0),
+        currency=txn.get("currency", "USD"), description=txn.get("description", ""),
+        external_id=txn.get("external_id", "") or f"mailpending:{req.pending_id}",
+        account_ref=row.get("account_ref", "") or "",
+    )
+    stmt = BrokerStatement(
+        broker="mail", content_hash=f"mailpending:{req.pending_id}", transactions=[stmt_txn],
+        recon=ReconResult(holdings_count=0, holdings_total_usd=0.0,
+                          statement_equities_total_usd=None, delta_usd=None, status="no_statement_total"),
+    )
+    wl = _wl_store.for_user(vip_id).for_market(market)
+    result = normalize_statement(wl, stmt, source_doc_id="", account_ref=stmt_txn.account_ref)
+    _wl_store.mark_pending(req.pending_id, "confirmed")
+    return {"ok": True, "status": "confirmed", "n_transactions": result.get("n_transactions", 0)}
 
 
 # ── 服务器环境测试（临时诊断：探测境外/境内站点连通性 + 代理状态）──────────
