@@ -606,6 +606,17 @@ class SupplierSearcher:
         if skipped:
             await self._emit(f"  [{bottleneck.node_name}] 行情验证过滤掉 {skipped} 家无效候选")
 
+        # A股板块标签校验：用东财官方板块覆盖 LLM 自报 sector（概念/行业混合取首个非指数成分）
+        if validated:
+            from bottleneck_hunter.data_provider.efinance_astock import fetch_astock_belong_board
+            sem = asyncio.Semaphore(5)
+            async def _verify_one(s: SupplierInfo):
+                async with sem:
+                    board = await fetch_astock_belong_board(s.ticker)
+                    if board:
+                        s.sector = board  # 覆盖 LLM 自报，用东财官方分类
+            await asyncio.gather(*[_verify_one(s) for s in validated], return_exceptions=True)
+
         return self._apply_cap_filter(validated, bottleneck.node_name)
 
     # ----- US-stock validation -----------------------------------------------
