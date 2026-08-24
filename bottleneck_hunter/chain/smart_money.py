@@ -42,29 +42,39 @@ def _track_astock(code_6: str) -> SmartMoneySignal:
     details: list[str] = []
     score = 5.0
 
-    # 1) 资金流向 — stock_individual_fund_flow
+    # 1) 资金流向 — efinance 东财主力净流入优先（akshare 口径 2024 后不稳），失败回退 akshare
+    total_flow = None
     try:
-        df = ak.stock_individual_fund_flow(stock=code_6, market="sh" if code_6.startswith("6") else "sz")
-        if df is not None and not df.empty:
-            recent = df.head(5)
-            flow_col = [c for c in recent.columns if "主力净流入" in c and "净额" in c]
-            if flow_col:
-                total_flow = sum(_safe_float(v, 1e-4) or 0 for v in recent[flow_col[0]])
-                signal.fund_flow_net = round(total_flow, 2)
-                if total_flow > 500:
-                    score += 1.5
-                    details.append(f"近5日主力净流入{total_flow:.0f}万")
-                elif total_flow > 0:
-                    score += 0.5
-                    details.append("近5日主力小幅净流入")
-                elif total_flow < -500:
-                    score -= 1.5
-                    details.append(f"近5日主力净流出{abs(total_flow):.0f}万")
-                elif total_flow < 0:
-                    score -= 0.5
-                    details.append("近5日主力小幅净流出")
+        from bottleneck_hunter.data_provider.efinance_astock import _fetch_history_bill_sync
+        mf = _fetch_history_bill_sync(code_6, days=5)
+        if mf is not None:
+            total_flow = mf["main_net_wan"]
     except Exception as e:
-        logger.debug(f"资金流向获取失败 ({code_6}): {e}")
+        logger.debug(f"efinance 资金流获取失败 ({code_6}): {e}")
+    if total_flow is None:
+        try:
+            df = ak.stock_individual_fund_flow(stock=code_6, market="sh" if code_6.startswith("6") else "sz")
+            if df is not None and not df.empty:
+                recent = df.head(5)
+                flow_col = [c for c in recent.columns if "主力净流入" in c and "净额" in c]
+                if flow_col:
+                    total_flow = sum(_safe_float(v, 1e-4) or 0 for v in recent[flow_col[0]])
+        except Exception as e:
+            logger.debug(f"资金流向获取失败 ({code_6}): {e}")
+    if total_flow is not None:
+        signal.fund_flow_net = round(total_flow, 2)
+        if total_flow > 500:
+            score += 1.5
+            details.append(f"近5日主力净流入{total_flow:.0f}万")
+        elif total_flow > 0:
+            score += 0.5
+            details.append("近5日主力小幅净流入")
+        elif total_flow < -500:
+            score -= 1.5
+            details.append(f"近5日主力净流出{abs(total_flow):.0f}万")
+        elif total_flow < 0:
+            score -= 0.5
+            details.append("近5日主力小幅净流出")
 
     # 2) 融资融券余额
     try:

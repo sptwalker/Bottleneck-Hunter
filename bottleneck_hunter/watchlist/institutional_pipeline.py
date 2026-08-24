@@ -1,6 +1,7 @@
-"""机构持仓 & 分析师评级数据管道 — 通过 yfinance 获取美股数据。
+"""机构持仓 & 分析师评级数据管道。
 
-仅支持美股（yfinance 覆盖范围）。A 股暂不支持。
+- 美股：yfinance（13F 机构持仓 + 分析师评级）。
+- A股：efinance（东财十大流通股东，免费无 Key），落同一 institutional_holders 共享表。
 """
 
 from __future__ import annotations
@@ -139,6 +140,39 @@ async def fetch_institutional_holders(
         except Exception as e:
             logger.error("机构持仓管道错误 %s: %s", ticker, e)
             return f"error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# A股机构持仓（efinance 十大流通股东，免费无 Key，落同一共享表）
+# ---------------------------------------------------------------------------
+
+async def fetch_astock_holders(ticker: str, store: WatchlistStore) -> str:
+    """异步获取单个 A股 ticker 的十大流通股东并保存。Returns "ok"/"cached"/"no_data"/"error:..."。"""
+    async with _get_sem():
+        try:
+            if _holders_fresh(store, ticker):
+                return "cached"  # 季度级数据，近 30 天已抓则跳过（同 13F 冷却）
+            from bottleneck_hunter.data_provider.efinance_astock import fetch_astock_holders as _ef_holders
+            from bottleneck_hunter.data_provider.hub import CAP_INSTITUTIONAL, get_hub
+            async with get_hub().track("efinance", CAP_INSTITUTIONAL, "a_stock") as _sink:
+                holders = await _ef_holders(ticker)
+                if holders:
+                    store.save_institutional_holders(ticker, holders)
+                    logger.info("A股股东保存成功: %s (%d 条)", ticker, len(holders))
+                    _sink["rows"] = len(holders)
+                    return "ok"
+                return "no_data"
+        except Exception as e:  # noqa: BLE001
+            logger.error("A股股东管道错误 %s: %s", ticker, e)
+            return f"error: {e}"
+
+
+async def fetch_astock_holders_batch(tickers: list[str], store: WatchlistStore) -> dict[str, str]:
+    """批量获取 A股十大流通股东。返回 {ticker: status}。"""
+    if not tickers:
+        return {}
+    tasks = {t: asyncio.create_task(fetch_astock_holders(t, store)) for t in tickers}
+    return {t: await task for t, task in tasks.items()}
 
 
 # ---------------------------------------------------------------------------

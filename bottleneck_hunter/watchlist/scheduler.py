@@ -485,24 +485,28 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
         else:
             yield _sse("step_done", step="notice", message="无 A 股标的，跳过公告")
 
-    if (pipeline is None or pipeline == "institutional") and _do_us:
+    if pipeline is None or pipeline == "institutional":
         yield _sse("step_start", step="institutional", message="正在获取机构持仓与分析师评级...")
-        us_tickers = by_market.get("us_stock", [])
-        if us_tickers:
+        us_tickers = by_market.get("us_stock", []) if _do_us else []
+        a_tickers = by_market.get("a_stock", []) if _do_cn else []
+        if us_tickers or a_tickers:
             from bottleneck_hunter.watchlist.institutional_pipeline import (
                 fetch_analyst_batch,
+                fetch_astock_holders_batch,
                 fetch_institutional_batch,
             )
             inst_result = await fetch_institutional_batch(us_tickers, store)
             analyst_result = await fetch_analyst_batch(us_tickers, store)
+            a_result = await fetch_astock_holders_batch(a_tickers, store)
             ok_inst = sum(1 for v in inst_result.values() if v == "ok")
             ok_analyst = sum(1 for v in analyst_result.values() if v == "ok")
-            yield _sse(
-                "step_done", step="institutional",
-                message=f"机构持仓 {ok_inst}/{len(inst_result)}, 分析师评级 {ok_analyst}/{len(analyst_result)}"
-            )
+            ok_a = sum(1 for v in a_result.values() if v == "ok")
+            msg = f"美股机构 {ok_inst}/{len(inst_result)}, 评级 {ok_analyst}/{len(analyst_result)}"
+            if a_tickers:
+                msg += f", A股股东 {ok_a}/{len(a_result)}"
+            yield _sse("step_done", step="institutional", message=msg)
         else:
-            yield _sse("step_done", step="institutional", message="无美股标的，跳过机构持仓")
+            yield _sse("step_done", step="institutional", message="无标的，跳过机构持仓")
 
     yield _sse("refresh_done", pipeline=pipeline or "all")
 
@@ -741,35 +745,44 @@ async def job_vip_strategy_review(market: str = "us_stock") -> None:
 
 
 async def job_institutional_update() -> None:
-    """每周全局更新美股机构持仓 & 分析师评级（yfinance 免费，落共享层，只受全局总开关）。"""
+    """每周全局更新机构持仓 & 分析师评级（美股 yfinance 13F+评级 / A股 efinance 十大股东，均免费落共享层，只受全局总开关）。"""
     store = _global_store()
     if store is None:
         return
-    us_tickers = store.get_tickers_by_market().get("us_stock", [])  # 全体并集
-    if not us_tickers:
+    by_market = store.get_tickers_by_market()
+    us_tickers = by_market.get("us_stock", [])   # 全体并集
+    a_tickers = by_market.get("a_stock", [])
+    if not us_tickers and not a_tickers:
         return
-    logger.info("Institutional update (global) starting for %d tickers(并集)", len(us_tickers))
-    store.update_pipeline_status("institutional", last_status="running", stocks_total=len(us_tickers))
+    logger.info("Institutional update (global) starting: us=%d a=%d (并集)", len(us_tickers), len(a_tickers))
+    store.update_pipeline_status("institutional", last_status="running",
+                                 stocks_total=len(us_tickers) + len(a_tickers))
     try:
         from bottleneck_hunter.watchlist.institutional_pipeline import (
             fetch_analyst_batch,
+            fetch_astock_holders_batch,
             fetch_institutional_batch,
         )
         inst_results = await fetch_institutional_batch(us_tickers, store)
         analyst_results = await fetch_analyst_batch(us_tickers, store)
+        a_results = await fetch_astock_holders_batch(a_tickers, store)  # A股 efinance 股东
         ok_inst = sum(1 for v in inst_results.values() if v == "ok")
         ok_analyst = sum(1 for v in analyst_results.values() if v == "ok")
-        total = len(us_tickers)
-        fail_count = total - max(ok_inst, ok_analyst)
-        status = "success" if fail_count == 0 else ("partial" if (ok_inst + ok_analyst) > 0 else "error")
+        ok_a = sum(1 for v in a_results.values() if v == "ok")
+        total = len(us_tickers) + len(a_tickers)
+        ok_total = ok_inst + ok_a
+        fail_count = total - max(ok_total, ok_analyst)
+        status = "success" if fail_count == 0 else ("partial" if (ok_total + ok_analyst) > 0 else "error")
         store.update_pipeline_status(
             "institutional",
             last_run_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             last_status=status,
-            last_error=(f"inst: {ok_inst}/{total}, analyst: {ok_analyst}/{total}" if fail_count else ""),
-            stocks_processed=max(ok_inst, ok_analyst), stocks_total=total,
+            last_error=(f"us_inst: {ok_inst}/{len(us_tickers)}, analyst: {ok_analyst}/{len(us_tickers)}, "
+                        f"a_holders: {ok_a}/{len(a_tickers)}" if fail_count else ""),
+            stocks_processed=max(ok_total, ok_analyst), stocks_total=total,
         )
-        logger.info("Institutional update (global) done: inst %d/%d, analyst %d/%d", ok_inst, total, ok_analyst, total)
+        logger.info("Institutional update (global) done: us_inst %d/%d, analyst %d/%d, a_holders %d/%d",
+                    ok_inst, len(us_tickers), ok_analyst, len(us_tickers), ok_a, len(a_tickers))
     except Exception as e:
         store.update_pipeline_status("institutional", last_status="error", last_error=str(e))
         logger.error("Institutional update (global) failed: %s", e)
@@ -1214,7 +1227,7 @@ def list_job_labels() -> dict[str, dict]:
         "us_auto_review":      {"label": "美股·自动复盘",          "desc": "卖出复盘 + 机会成本 + 偏好学习", "tz": "北京", "freq": "工作日"},
         "us_vip_advice_review": {"label": "美股·VIP建议复盘",      "desc": "按最新行情再评 VIP 建议，结成准确率信号", "tz": "北京", "freq": "每周"},
         "us_vip_strategy_review": {"label": "美股·VIP策略复盘",     "desc": "反思组合策略→修正+经验卡片", "tz": "北京", "freq": "每月1号"},
-        "us_institutional_update": {"label": "机构持仓 & 分析师评级", "desc": "13F 机构持仓与评级（仅美股）", "tz": "北京", "freq": "每周"},
+        "us_institutional_update": {"label": "机构持仓 & 分析师评级", "desc": "美股 13F 机构持仓与评级 + A股十大股东", "tz": "北京", "freq": "每周"},
         "us_earnings_update":  {"label": "美股·财报更新",          "desc": "FMP 财报（含机构一致预期）",   "tz": "北京", "freq": "每周"},
         "cn_earnings_update":  {"label": "A股·财报更新",           "desc": "Tushare 业绩快报/预告",        "tz": "北京", "freq": "每周"},
         "datasource_report":   {"label": "数据源健康巡检",        "desc": "付费源连通探测 + 用量汇总",     "tz": "北京", "freq": "每日"},
