@@ -1,6 +1,7 @@
 """机构持仓 & 分析师评级数据管道。
 
-- 美股：yfinance（13F 机构持仓 + 分析师评级）。
+- 美股机构持仓：FMP 优先（有 Key 的用户上下文，多季 per-holder → 喂活 committee/QoQ），yfinance 兜底。
+- 美股分析师评级：yfinance。
 - A股：efinance（东财十大流通股东，免费无 Key），落同一 institutional_holders 共享表。
 """
 
@@ -49,8 +50,67 @@ def _holders_fresh(store: WatchlistStore, ticker: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 机构持仓
+# 机构持仓（FMP 优先，多季 per-holder → 喂活 QoQ；yfinance 兜底）
 # ---------------------------------------------------------------------------
+
+_FMP_STABLE = "https://financialmodelingprep.com/stable"
+
+
+def _fmp_recent_quarters(n: int = 2) -> list[tuple[int, int]]:
+    """返回近 n 个「已披露」的 13F 财季 (year, quarter)，新→旧。
+
+    13F 申报截止在季末后约 45 天，故当前季通常尚未披露——从「上一个季末」起回溯。
+    """
+    now = datetime.now(timezone.utc)
+    # 退到上一个完整季度（q = 当前季 - 1），再往前数
+    q = (now.month - 1) // 3  # 0..3；当前季序号-1 即「上一完整季」的 0-based
+    y = now.year
+    if q == 0:
+        q, y = 4, y - 1
+    out: list[tuple[int, int]] = []
+    for _ in range(n):
+        out.append((y, q))
+        q -= 1
+        if q == 0:
+            q, y = 4, y - 1
+    return out
+
+
+def _fetch_institutional_holders_fmp_sync(ticker: str, key: str) -> list[dict]:
+    """FMP per-holder 机构持仓：抓近 2 个财季，落成与 yfinance 同形 holder dict（多季共存喂 QoQ）。
+
+    映射：investorName→holder_name / sharesNumber→shares / marketValue→value /
+    ownershipPercent→pct_held（FMP 已是百分比口径，勿用 weight=组合权重）/ date→date。
+    """
+    from bottleneck_hunter.data_provider.providers import _get_json_soft
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    holders: list[dict] = []
+    seen_dates: set[str] = set()
+    for year, quarter in _fmp_recent_quarters(2):
+        url = (f"{_FMP_STABLE}/institutional-ownership/extract-analytics/holder"
+               f"?symbol={ticker}&year={year}&quarter={quarter}&page=0&apikey={key}")
+        rows = _get_json_soft(url)  # 402/403/429→None（付费/限流软失败，退 yfinance）
+        if not isinstance(rows, list) or not rows:
+            continue
+        for row in rows:
+            name = str(row.get("investorName", "") or "").strip()
+            if not name:
+                continue
+            date_reported = str(row.get("date", "") or "")[:10]
+            seen_dates.add(date_reported)
+            holders.append({
+                "holder_name": name,
+                "shares": int(row.get("sharesNumber") or 0),
+                "value": float(row.get("marketValue") or 0.0),
+                "pct_held": round(float(row.get("ownershipPercent") or 0.0), 4),
+                "date": date_reported,
+                "fetched_at": now_iso,
+            })
+    # ponytail: 只有拿到 ≥2 个季度才算解锁 QoQ；单季或空则返回，让上层退回 yfinance（更稳的当前季）
+    if len(seen_dates) < 2:
+        return []
+    return holders
+
 
 def _fetch_institutional_holders_sync(ticker: str) -> list[dict]:
     """同步获取机构持仓数据（在线程池中运行）。"""
@@ -126,7 +186,22 @@ async def fetch_institutional_holders(
         try:
             if _holders_fresh(store, ticker):
                 return "cached"  # 13F 季度级数据近 30 天已抓，跳过重拉
+            from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
             from bottleneck_hunter.data_provider.hub import CAP_INSTITUTIONAL, get_hub
+            # FMP 优先：仅当「当前用户上下文」配了 fmp key 才走
+            # （全局周更 job 无用户上下文 → key="" → 退 yfinance，不回归）
+            fmp_key = resolve_data_source_key("fmp")
+            if fmp_key:
+                async with get_hub().track("fmp", CAP_INSTITUTIONAL, "us_stock") as _sink:
+                    holders = await asyncio.to_thread(
+                        _fetch_institutional_holders_fmp_sync, ticker, fmp_key
+                    )
+                    if holders:
+                        store.save_institutional_holders(ticker, holders)
+                        logger.info("FMP 机构持仓保存成功: %s (%d 条/多季)", ticker, len(holders))
+                        _sink["rows"] = len(holders)
+                        return "ok"
+                    # FMP 无多季数据（付费档软失败/单季）→ 落回 yfinance 当前季
             async with get_hub().track("yfinance", CAP_INSTITUTIONAL, "us_stock") as _sink:
                 holders = await asyncio.to_thread(
                     _fetch_institutional_holders_sync, ticker
@@ -313,3 +388,59 @@ async def fetch_analyst_batch(
     for ticker, task in tasks.items():
         results[ticker] = await task
     return results
+
+
+# ---------------------------------------------------------------------------
+# 自检（离线，无网络/LLM）：验证 FMP 解析 + 字段映射 + 单季降级
+# ---------------------------------------------------------------------------
+
+def demo() -> None:
+    import bottleneck_hunter.data_provider.providers as prov
+
+    # ① 近 2 财季推算：新→旧、皆为已披露的完整季（q∈1..4），无重复
+    qs = _fmp_recent_quarters(2)
+    assert len(qs) == 2 and all(1 <= q <= 4 for _, q in qs) and qs[0] != qs[1], qs
+
+    # 两季合成 payload（键对齐推算出的季度）；ownershipPercent 是持股比例，weight 是组合权重(勿混)
+    two_q = {
+        qs[0]: [{"investorName": "VANGUARD", "sharesNumber": 1000, "marketValue": 5e5,
+                 "ownershipPercent": 8.12, "weight": 3.3, "date": "2025-03-31"}],
+        qs[1]: [{"investorName": "BLACKROCK", "sharesNumber": 900, "marketValue": 4e5,
+                 "ownershipPercent": 7.50, "weight": 3.1, "date": "2024-12-31"},
+                {"investorName": "", "sharesNumber": 5, "date": "2024-12-31"}],  # 空名跳过
+    }
+
+    def _fake_soft_factory(payloads):
+        import re
+
+        def _fake(url, headers=None):
+            y = int(re.search(r"year=(\d+)", url).group(1))
+            q = int(re.search(r"quarter=(\d+)", url).group(1))
+            return payloads.get((y, q))
+        return _fake
+
+    orig_soft = prov._get_json_soft
+    try:
+        # ② FMP 解析：两季 → 2 条有效持有人（空名跳过），映射 ownershipPercent→pct_held，不落 weight
+        prov._get_json_soft = _fake_soft_factory(two_q)
+        rows = _fetch_institutional_holders_fmp_sync("TEST", "k")
+        assert len(rows) == 2, rows
+        assert rows[0]["holder_name"] == "VANGUARD" and rows[0]["pct_held"] == 8.12, rows[0]
+        assert "weight" not in rows[0], "不得落 weight（组合权重≠持股比例）"
+        assert {r["date"] for r in rows} == {"2025-03-31", "2024-12-31"}, rows
+
+        # ③ 单季降级：只有最新季有数据 → 返回空（让上层退回 yfinance 当前季）
+        prov._get_json_soft = _fake_soft_factory({qs[0]: two_q[qs[0]]})
+        assert _fetch_institutional_holders_fmp_sync("TEST", "k") == [], "单季应降级为空"
+
+        # ④ 全空/付费软失败 → 空（不抛）
+        prov._get_json_soft = _fake_soft_factory({})
+        assert _fetch_institutional_holders_fmp_sync("TEST", "k") == [], "无数据应为空"
+    finally:
+        prov._get_json_soft = orig_soft
+
+    print("institutional_pipeline demo OK: FMP 多季解析 / 映射 ownershipPercent / 单季降级 全通过")
+
+
+if __name__ == "__main__":
+    demo()
