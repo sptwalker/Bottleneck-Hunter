@@ -485,7 +485,10 @@ async def run_manual_refresh(pipeline: str | None = None, user_store: WatchlistS
         else:
             yield _sse("step_done", step="notice", message="无 A 股标的，跳过公告")
 
-    if pipeline is None or pipeline == "institutional":
+    # P0: 全量手刷(pipeline=None)不再扇出机构/评级——它们是季度级(13F)/周级(评级)数据，
+    # 却是 yfinance 最易 429 的两个接口。几十票×2接口齐发把自己限流(09:00 尖峰根因)。
+    # 交给周更 job_institutional_update(全局并集、错峰)。仅显式 pipeline=="institutional" 才手动强刷。
+    if pipeline == "institutional":
         yield _sse("step_start", step="institutional", message="正在获取机构持仓与分析师评级...")
         us_tickers = by_market.get("us_stock", []) if _do_us else []
         a_tickers = by_market.get("a_stock", []) if _do_cn else []
@@ -983,6 +986,14 @@ async def job_stale_refresh() -> None:
             stale = store.get_stale_tickers(max_age_hours=threshold)
             if not stale:
                 continue
+            # P2: 每 tick 限量，把大批积压摊到全天多个 interval tick，避免停机/日更漏跑后
+            # 几十上百票在一个 tick 齐发撞 Yahoo。处理过的变新鲜，下个 tick 自动轮到剩下的。
+            # 旋钮 STALE_REFRESH_MAX_PER_TICK（默认 25，interval 6h → 100 票约 1 天匀速排空）。
+            import os as _os
+            _cap = int(_os.environ.get("STALE_REFRESH_MAX_PER_TICK", "25") or 25)
+            if len(stale) > _cap:
+                logger.info("Stale refresh (%s): %d 个积压，本 tick 限处理 %d，余下顺延", label, len(stale), _cap)
+                stale = stale[:_cap]
             logger.info("Stale refresh (%s): %d 个标的超过 %dh 未更新", label, len(stale), threshold)
             # 按市场分组刷价
             by_market: dict[str, list[str]] = {}

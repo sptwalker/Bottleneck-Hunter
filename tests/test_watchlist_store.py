@@ -258,6 +258,41 @@ class TestUpcomingCatalysts:
 
 
 # ═════════════════════════════════════════════════════════
+# get_stale_tickers 排序契约（P2 限量刷新不饿死尾部的正确性根基）
+# ═════════════════════════════════════════════════════════
+
+class TestStaleTickersOrdering:
+    def _snap(self, ticker, fetched_at, date="2025-06-01"):
+        return {"ticker": ticker, "date": date, "close": 1.0, "open": 1.0,
+                "high": 1.0, "low": 1.0, "volume": 1, "fetched_at": fetched_at}
+
+    def test_stale_tickers_oldest_first_nulls_first(self, store):
+        """P2 契约：陈旧票按 last_fetched 升序（NULL/从未抓取最先），确保 cap[:N] 优先处理最旧的。"""
+        store.add(_make_entry("OLD", market="us_stock"))     # 最旧
+        store.add(_make_entry("MID", market="us_stock"))     # 次旧
+        store.add(_make_entry("NEW", market="us_stock"))     # 相对新（仍陈旧）
+        store.add(_make_entry("NEVER", market="us_stock"))   # 从未抓取 → fetched_at NULL
+        # 三个都远超默认 48h 阈值，但彼此相对新旧不同
+        store.save_snapshots([
+            self._snap("OLD", "2020-01-01T00:00:00"),
+            self._snap("MID", "2021-01-01T00:00:00"),
+            self._snap("NEW", "2022-01-01T00:00:00"),
+        ])
+        stale = store.get_stale_tickers(max_age_hours=48, include_never_fetched=True)
+        order = [r["ticker"] for r in stale]
+        assert order == ["NEVER", "OLD", "MID", "NEW"], order
+
+    def test_stale_tickers_exclude_never_fetched(self, store):
+        """include_never_fetched=False：从未抓取的不算陈旧（0 小时而非超阈），仍保持旧→新。"""
+        store.add(_make_entry("OLD", market="us_stock"))
+        store.add(_make_entry("NEVER", market="us_stock"))
+        store.save_snapshots([self._snap("OLD", "2020-01-01T00:00:00")])
+        stale = store.get_stale_tickers(max_age_hours=48, include_never_fetched=False)
+        order = [r["ticker"] for r in stale]
+        assert order == ["OLD"], order
+
+
+# ═════════════════════════════════════════════════════════
 # 分市场独立限额（美股/A股各自一份上限）
 # ═════════════════════════════════════════════════════════
 

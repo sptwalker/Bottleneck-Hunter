@@ -21,10 +21,15 @@ _SEM: asyncio.Semaphore | None = None
 
 
 def _get_sem() -> asyncio.Semaphore:
-    """延迟创建信号量，避免在导入时绑定事件循环。"""
+    """延迟创建信号量，避免在导入时绑定事件循环。
+
+    P1: 并发降到 1——机构/评级默认走 yfinance，而 yf_gate 本就全局串行化，
+    并发>1 只让请求同时到达再排队撞 429（09:00 尖峰根因）。串行喂给 gate 最稳。
+    FMP 有 Key 用户虽不撞 Yahoo，但机构数据季度级、不差这点并发，统一串行更简单。
+    """
     global _SEM
     if _SEM is None:
-        _SEM = asyncio.Semaphore(5)
+        _SEM = asyncio.Semaphore(1)
     return _SEM
 
 

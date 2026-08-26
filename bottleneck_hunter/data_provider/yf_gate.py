@@ -11,7 +11,7 @@
 **自适应**：`observe(err)` 反馈每次调用结果——撞到 429/限流就把间隔翻倍退避（上限 YF_MAX_INTERVAL），
 连续成功再按 0.9 缓降回 YF_MIN_INTERVAL。这样限流一冒头就自动降速，风头过了自动提速。
 
-调参（环境变量，均为秒）：YF_MIN_INTERVAL 默认 1.5、YF_MAX_INTERVAL 默认 30。
+调参（环境变量，均为秒）：YF_MIN_INTERVAL 默认 3.0、YF_MAX_INTERVAL 默认 30。
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import os
 import threading
 import time
 
-_MIN = float(os.environ.get("YF_MIN_INTERVAL", "1.5"))
+_MIN = float(os.environ.get("YF_MIN_INTERVAL", "3.0"))
 _MAX = float(os.environ.get("YF_MAX_INTERVAL", "30"))
 
 _lock = threading.Lock()

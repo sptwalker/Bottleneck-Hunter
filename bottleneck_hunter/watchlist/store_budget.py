@@ -280,6 +280,7 @@ class _BudgetMixin:
                 WHERE w.is_active = 1
                 GROUP BY w.ticker
                 HAVING {null_clause}datetime(last_fetched) < datetime('now', ?)
+                ORDER BY last_fetched ASC
                 """,
                 (f"-{max_age_hours} hours",),
                 table="w",
