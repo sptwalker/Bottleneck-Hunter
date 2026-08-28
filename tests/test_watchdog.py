@@ -92,11 +92,29 @@ class TestReport:
     def test_report_mentions_all_sections(self):
         txt = sch._build_watchdog_report(
             overdue=["us_weekly_strategy"], caught_up=["us_weekly_strategy"],
-            still_failed=[], stale_biz=["us_stock/abcd L2陈旧(20d)→重生并补决策"])
-        assert "超期" in txt and "补跑" in txt and "陈旧" in txt
+            still_failed=[], stale_biz=["us_stock/abcd L2陈旧(20d)→重生并补决策"],
+            stale_vip=["us_stock/abcd/ACC-1 推算停在2026-08-20(9d)"])
+        assert "超期" in txt and "补跑" in txt and "陈旧" in txt and "VIP推算" in txt
 
     def test_report_empty_is_normal(self):
         assert sch._build_watchdog_report([], [], [], []) == "巡检正常"
+
+
+# ── VIP 推算陈旧判定 ───────────────────────────────────────
+class TestVipProjAge:
+    def test_age_absorbs_weekend_but_catches_stuck(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc)   # 周一
+        # 周五推算、周一巡检：日历差 3 天 ≤4，不算陈旧
+        assert sch._vip_proj_age_days("2026-08-21", now) == 3
+        assert sch._vip_proj_age_days("2026-08-21", now) <= sch._VIP_PROJ_STALE_DAYS
+        # 停在 10 天前：明显卡住
+        assert sch._vip_proj_age_days("2026-08-14", now) == 10
+        assert sch._vip_proj_age_days("2026-08-14", now) > sch._VIP_PROJ_STALE_DAYS
+
+    def test_unparseable_is_none(self):
+        assert sch._vip_proj_age_days("") is None
+        assert sch._vip_proj_age_days("not-a-date") is None
 
 
 if __name__ == "__main__":

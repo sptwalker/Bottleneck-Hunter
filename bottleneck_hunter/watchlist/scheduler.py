@@ -1279,7 +1279,59 @@ async def _probe_business_staleness() -> list[str]:
     return findings
 
 
-def _build_watchdog_report(overdue, caught_up, still_failed, stale_biz) -> str:
+_VIP_PROJ_STALE_DAYS = 4   # VIP 推算日历天数落后阈值：吸收周末 + A股傍晚跑的1天偏移，>4天=真卡住
+
+
+def _vip_proj_age_days(as_of_date: str, now=None) -> int | None:
+    """VIP 推算 as_of_date（北京日期口径）距北京今天的日历天数；无法解析返回 None。"""
+    from datetime import date
+    try:
+        y, m, d = (int(x) for x in str(as_of_date).split("-"))
+        proj = date(y, m, d)
+    except (ValueError, TypeError):
+        return None
+    today = (now or datetime.now(_TZ_CN)).date()
+    return (today - proj).days
+
+
+async def _probe_vip_projection_staleness(now=None) -> list[str]:
+    """治本探针（VIP）：抓「job_vip_project 心跳成功但推算未推进」的假成功。
+
+    逐 vip_project 门控用户×市场×可见账户读 latest_projection_date，超 _VIP_PROJ_STALE_DAYS 天
+    即判卡住（如逐日重估全被缺价/非美元静默跳过、成本回写没跑等）。检测阶段只读，命中的市场在
+    检测完成后统一 _run_job_now 补跑一次（含补价，与定时同逻辑），使推算当日推进，不再静默停摆。
+    从未推算过的账户（无美元持仓/空账户，latest 为空）非陈旧，跳过。
+    """
+    findings: list[str] = []
+    stale_markets: set[str] = set()
+    for uid, store, _budget in _iter_users("vip_project"):
+        for market in ("us_stock", "a_stock"):
+            try:
+                wl = store.for_market(market)
+                for acct in wl.list_vip_accounts(include_hidden_default=False):
+                    ref = (acct.get("account_ref") or "").strip()
+                    if not ref:
+                        continue
+                    d = wl.latest_projection_date(ref)
+                    if not d:
+                        continue   # 从未推算：非陈旧，跳过
+                    age = _vip_proj_age_days(d, now)
+                    if age is not None and age > _VIP_PROJ_STALE_DAYS:
+                        stale_markets.add(market)
+                        findings.append(f"{market}/{uid[:8] or 'global'}/{ref} 推算停在{d}({age}d)")
+            except Exception as e:  # noqa: BLE001
+                logger.error("守卫VIP推算探针 %s/%s 失败: %s", market, uid[:8] if uid else "global", e)
+    for market in sorted(stale_markets):
+        job_id = "us_vip_project" if market == "us_stock" else "cn_vip_project"
+        try:
+            await _run_job_now(job_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error("守卫VIP推算补跑 %s 失败: %s", job_id, e)
+            findings.append(f"{market} VIP推算补跑失败:{str(e)[:60]}")
+    return findings
+
+
+def _build_watchdog_report(overdue, caught_up, still_failed, stale_biz, stale_vip=None) -> str:
     """把巡检结果拼成一行白话总结（进操作日志 + IM 推送）。"""
     parts = []
     if overdue:
@@ -1291,6 +1343,8 @@ def _build_watchdog_report(overdue, caught_up, still_failed, stale_biz) -> str:
         parts.append(f"{len(still_failed)} 项补跑仍失败（{'; '.join(still_failed[:3])}）")
     if stale_biz:
         parts.append(f"修复 {len(stale_biz)} 项组合策略陈旧（{', '.join(stale_biz[:4])}）")
+    if stale_vip:
+        parts.append(f"修复 {len(stale_vip)} 项VIP推算陈旧（{', '.join(stale_vip[:4])}）")
     return "；".join(parts) or "巡检正常"
 
 
@@ -1299,7 +1353,8 @@ async def job_system_watchdog() -> None:
 
     抓两类静默失败：
     ① 调度器漏跑（心跳超期/interrupted）——服务停机/misfire → 补跑对应 job。
-    ② 心跳成功但产出陈旧（假成功）——如周更漏跑致 L2 卡住 → 逐用户强制重生 L1/L2 + 当日补决策。
+    ② 心跳成功但产出陈旧（假成功）——如周更漏跑致 L2 卡住 → 逐用户强制重生 L1/L2 + 当日补决策；
+       或 VIP 每日推算静默停摆（缺价/非美元全跳过、成本未回写）→ 补跑 job_vip_project。
     """
     if not _wl_store:
         return
@@ -1323,12 +1378,13 @@ async def job_system_watchdog() -> None:
             still_failed.append(f"{job_id}:{str(e)[:80]}")
 
     stale_biz = await _probe_business_staleness()
+    stale_vip = await _probe_vip_projection_staleness()
 
-    if not overdue and not stale_biz:
+    if not overdue and not stale_biz and not stale_vip:
         logger.info("系统守卫巡检：全部周期任务心跳正常")
         return
 
-    summary = _build_watchdog_report(overdue, caught_up, still_failed, stale_biz)
+    summary = _build_watchdog_report(overdue, caught_up, still_failed, stale_biz, stale_vip)
     logger.warning("系统守卫巡检: %s", summary)
     # 报告进每个活跃用户的操作日志（rare：仅有问题时才写）+ 经 _maybe_push 推给配了 webhook 的用户。
     for uid, _s, _b in _get_active_user_stores(None):
