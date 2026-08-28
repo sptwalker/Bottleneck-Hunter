@@ -98,6 +98,42 @@ def _global_store() -> WatchlistStore | None:
     return _wl_store  # unbound：get_tickers_by_market 返回全体并集；save/read 走共享桶
 
 
+def _stamp_heartbeat(job_id: str, *, status: str, note: str = "") -> None:
+    """给一次 job 触发盖心跳章到 pipeline_status['job:<id>']（全局单例表）。失败不影响 job。
+
+    last_run_at 只在 success/error（job 确已执行完）时更新——running 中途不刷，
+    避免长任务/崩溃把「最近成功时刻」污染成「最近启动时刻」。守卫据此判超期/失败。
+    """
+    if not _wl_store:
+        return
+    try:
+        fields: dict = {"last_status": status}
+        if status != "running":
+            fields["last_run_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        fields["last_error"] = note[:200] if note else ""
+        _wl_store.update_pipeline_status(f"job:{job_id}", **fields)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _wrap_job_heartbeat(job_id: str, func):
+    """把 job 包一层心跳盖章（单点覆盖所有已注册 job）：跑前 running、成功 success、异常 error 后重抛。
+
+    这是守卫据以发现「调度器漏跑」的唯一数据源——无需逐 job 改。
+    """
+    async def _hb_wrapped(**kw):
+        _stamp_heartbeat(job_id, status="running")
+        try:
+            result = await func(**kw)
+        except Exception as e:  # noqa: BLE001
+            _stamp_heartbeat(job_id, status="error", note=str(e))
+            raise
+        _stamp_heartbeat(job_id, status="success")
+        return result
+    _hb_wrapped.__name__ = getattr(func, "__name__", "job")
+    return _hb_wrapped
+
+
 def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
     """Create and configure scheduler. Returns the scheduler or None if APScheduler not installed."""
     global _scheduler, _wl_store, _budget, _auth_store
@@ -125,7 +161,7 @@ def init_scheduler(store: WatchlistStore, auth_store=None) -> object | None:
     for spec in _JOB_SPECS:
         job_id, func, kw, _tz, _kind, name = spec
         _scheduler.add_job(
-            func, _make_trigger(spec, schedule),
+            _wrap_job_heartbeat(job_id, func), _make_trigger(spec, schedule),
             id=job_id, name=name, kwargs=(kw or None),
             replace_existing=True, max_instances=1, coalesce=True,
         )
@@ -1139,6 +1175,169 @@ async def job_poll_imap() -> None:
         logger.info("邮件轮询: %s", counts)
 
 
+# ---------------------------------------------------------------------------
+# System watchdog：每日巡检所有周期任务是否静默失败 + 主动补跑 + 报告
+# ---------------------------------------------------------------------------
+
+# 各 kind 判「明显超期」的阈值（小时）。刻意宽松：只抓多天真空（用户要的是「明显的错误时间间隔」），
+# 不做交易日历精算——阈值已清掉周末/正常周期的自然间隔，零误报。
+# ponytail: 纯阈值判定；升级路径＝按真实交易日历精算 expected_run 以抓 1 天级漏跑。
+_OVERDUE_HOURS = {
+    "daily":    84,        # mon-fri：清掉周五→周一自然 ~3 天间隔（84>72），只抓 ≥~4 天真空
+    "everyday": 48,        # 含周末，2 天没跑即超期
+    "weekly":   9 * 24,    # 名义 7 天 + 2 天宽限（漏一个周六 → 次周一二即抓）
+    "monthly":  40 * 24,   # 名义 30 天 + 宽限
+}
+# 心跳状态异常（除超期外也应补跑）：上次执行报错，或被启动复位为 interrupted（崩溃中断）。
+_UNHEALTHY_STATUSES = {"error", "interrupted"}
+
+
+def _overdue_threshold_hours(kind: str, interval_hours) -> float:
+    if kind == "interval":
+        return max(3.0, 3.0 * float(interval_hours or 6))   # 轮询：3×周期没跑＝调度器可能死了
+    return float(_OVERDUE_HOURS.get(kind, 48))
+
+
+def _is_overdue(kind: str, last_run_at, interval_hours=6, now=None) -> bool:
+    """据心跳 last_run_at 判某 job 是否明显超期。无心跳/不可解析＝从未跑过＝超期。"""
+    now = now or datetime.now(timezone.utc)
+    if not last_run_at:
+        return True
+    try:
+        dt = datetime.fromisoformat(str(last_run_at))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return True
+    age_h = (now - dt).total_seconds() / 3600
+    return age_h > _overdue_threshold_hours(kind, interval_hours)
+
+
+def _scan_overdue(schedule: dict, hb: dict, now=None) -> list[str]:
+    """纯函数：据心跳表挑出超期/状态异常的 job_id（不含 system_watchdog 自身）。守卫与测试共用。"""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for spec in _JOB_SPECS:
+        job_id, _f, _kw, _tz, kind, _n = spec
+        if job_id == "system_watchdog":
+            continue
+        row = hb.get(f"job:{job_id}") or {}
+        interval_h = (schedule.get(job_id, {}) or {}).get("interval_hours", 6)
+        if _is_overdue(kind, row.get("last_run_at"), interval_h, now) \
+                or str(row.get("last_status", "")) in _UNHEALTHY_STATUSES:
+            out.append(job_id)
+    return out
+
+
+async def _run_job_now(job_id: str) -> None:
+    """按 job_id 立即补跑一次（复用心跳 wrapper，再盖一次章）。补跑只对超期 job 发起，
+    与正在跑的排期天然不叠（超期＝近期没跑）。ponytail: 无硬互斥锁，靠「超期才补」规避并发。"""
+    spec = next((s for s in _JOB_SPECS if s[0] == job_id), None)
+    if not spec:
+        return
+    func, kw = spec[1], spec[2] or {}
+    await _wrap_job_heartbeat(job_id, func)(**(kw or {}))
+
+
+async def _probe_business_staleness() -> list[str]:
+    """治本探针：抓「心跳成功但产出陈旧」——周更漏跑致 L2 卡住这类假成功心跳看不到的空转。
+
+    逐 weekly_strategy 门控用户，检查每市场 L2 组合策略是否超 _STALE_UPSTREAM_DAYS 天。
+    陈旧则强制重生 L1→L2，并（若该用户开了日常决策）当日补跑 L1→L4，使执行操作同日恢复，
+    不再静默卡到下一个周六。预算/分类开关均尊重。
+    """
+    from bottleneck_hunter.watchlist.decision_engine import (
+        _STALE_UPSTREAM_DAYS,
+        _upstream_age_days,
+        run_daily_decision,
+        run_macro_strategy,
+        run_strategic_plan,
+    )
+    findings: list[str] = []
+    for uid, store, budget in _iter_users("weekly_strategy"):
+        for market in ("us_stock", "a_stock"):
+            try:
+                s = store.for_market(market)
+                strat = s.get_latest_strategic_plan()
+                if not strat:
+                    continue   # 该市场从未生成过 L2：非陈旧（交给 weekly 补跑），跳过
+                l2_age = _upstream_age_days(strat.get("created_at", ""))
+                if l2_age is not None and l2_age <= _STALE_UPSTREAM_DAYS:
+                    continue   # L2 够新
+                if not budget.can_spend():
+                    findings.append(f"{market}/{uid[:8] or 'global'} L2陈旧但预算不足未重生")
+                    continue
+                age_txt = "?" if l2_age is None else f"{l2_age:.0f}d"
+                findings.append(f"{market}/{uid[:8] or 'global'} L2陈旧({age_txt})→重生并补决策")
+                await _drain_sse(run_macro_strategy(s, budget, market=market))
+                await _drain_sse(run_strategic_plan(s, budget, market=market, force=True))
+                if store.is_auto_update_enabled("daily_decision"):
+                    await _drain_sse(run_daily_decision(s, budget, scope="full", market=market))
+            except Exception as e:  # noqa: BLE001
+                logger.error("守卫业务探针 %s/%s 失败: %s", market, uid[:8] if uid else "global", e)
+                findings.append(f"{market}/{uid[:8] or 'global'} 解套失败:{str(e)[:60]}")
+    return findings
+
+
+def _build_watchdog_report(overdue, caught_up, still_failed, stale_biz) -> str:
+    """把巡检结果拼成一行白话总结（进操作日志 + IM 推送）。"""
+    parts = []
+    if overdue:
+        tail = "…" if len(overdue) > 6 else ""
+        parts.append(f"发现 {len(overdue)} 项周期任务超期/异常（{', '.join(overdue[:6])}{tail}）")
+    if caught_up:
+        parts.append(f"已自动补跑 {len(caught_up)} 项")
+    if still_failed:
+        parts.append(f"{len(still_failed)} 项补跑仍失败（{'; '.join(still_failed[:3])}）")
+    if stale_biz:
+        parts.append(f"修复 {len(stale_biz)} 项组合策略陈旧（{', '.join(stale_biz[:4])}）")
+    return "；".join(parts) or "巡检正常"
+
+
+async def job_system_watchdog() -> None:
+    """系统级每日守卫：巡检所有周期任务心跳，超期/失败者主动补跑，产出陈旧则强制解套，记报告。
+
+    抓两类静默失败：
+    ① 调度器漏跑（心跳超期/interrupted）——服务停机/misfire → 补跑对应 job。
+    ② 心跳成功但产出陈旧（假成功）——如周更漏跑致 L2 卡住 → 逐用户强制重生 L1/L2 + 当日补决策。
+    """
+    if not _wl_store:
+        return
+    from bottleneck_hunter.watchlist.schedule_config import get_global_schedule, is_global_enabled
+    if not is_global_enabled(_auth_store):
+        logger.info("全局总开关关闭，跳过系统守卫巡检")
+        return
+
+    schedule = get_global_schedule(_auth_store)
+    hb = {r["pipeline_name"]: r for r in _wl_store.get_pipeline_statuses()
+          if str(r.get("pipeline_name", "")).startswith("job:")}
+
+    overdue = _scan_overdue(schedule, hb)
+    caught_up, still_failed = [], []
+    for job_id in overdue:
+        try:
+            await _run_job_now(job_id)
+            caught_up.append(job_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error("守卫补跑 %s 失败: %s", job_id, e)
+            still_failed.append(f"{job_id}:{str(e)[:80]}")
+
+    stale_biz = await _probe_business_staleness()
+
+    if not overdue and not stale_biz:
+        logger.info("系统守卫巡检：全部周期任务心跳正常")
+        return
+
+    summary = _build_watchdog_report(overdue, caught_up, still_failed, stale_biz)
+    logger.warning("系统守卫巡检: %s", summary)
+    # 报告进每个活跃用户的操作日志（rare：仅有问题时才写）+ 经 _maybe_push 推给配了 webhook 的用户。
+    for uid, _s, _b in _get_active_user_stores(None):
+        if still_failed:
+            _oplog(uid, "系统守卫巡检", error=summary)
+        else:
+            _oplog(uid, "系统守卫巡检", detail=summary, result="success")
+
+
 _JOB_SPECS = [
     ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US pre-market price update"),
     ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US post-market price update"),
@@ -1172,6 +1371,7 @@ _JOB_SPECS = [
     ("mail_ingest_poll",       job_poll_imap,           {},                     None,           "interval", "Forwarded bank-email ingest poll"),
     ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_CN        , "weekly",   "US full refresh (data+decision)"),
     ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
+    ("system_watchdog",        job_system_watchdog,     {},                     _TZ_CN,         "everyday", "System watchdog (silent-failure guard)"),
 ]
 
 
@@ -1220,6 +1420,7 @@ def list_job_categories() -> dict[str, str]:
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
         "model_capability_refresh": "",
+        "system_watchdog": "",  # 系统级守卫，仅受管理员全局总开关
     }
 
 
@@ -1261,5 +1462,6 @@ def list_job_labels() -> dict[str, dict]:
         "mail_ingest_poll":    {"label": "银行邮件自动解读",       "desc": "拉取转发邮件，附件入库+正文进待确认队列", "tz": "轮询", "freq": "每小时"},
         "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
+        "system_watchdog":     {"label": "系统守卫巡检",           "desc": "每日巡检周期任务是否静默失败，超期即主动补跑并报告", "tz": "北京", "freq": "每日"},
     }
 
