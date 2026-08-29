@@ -10,8 +10,10 @@ const DC_API = '/api/decision';
 
 const dcState = {
   overview: null,
-  loading: false,
+  loading: false,           // 跑批互斥锁：runDaily/runFullRefresh/scanCatalysts 专用，loadOverview 绝不碰它
+  overviewLoading: false,   // loadOverview 自身的 inflight 标志（与跑批锁解耦）
   market: 'us_stock',
+  marketEpoch: 0,   // 市场切换版本纪元：每次切换自增，异步加载归来校验它以丢弃过期响应（消灭竞态）
   chartAlloc: null,
   chartEquity: null,
   catalystView: 'list',
@@ -25,7 +27,7 @@ const dcState = {
 /* ── L1 宏观咨询抽屉 ─────────────────────────────── */
 const CONSULT_ROLES = { macro_market: '🌐 宏观市场分析师', industry_trend: '🏭 产业动向分析师' };
 const CONSULT_ROUND = { 0: '开场', 1: '', 2: '· 辩论' };
-const dcConsult = { market: null, streaming: false, bubbles: {} };
+const dcConsult = { market: null, streaming: false, bubbles: {}, open: false, abort: null };
 
 /* ── 面板信号灯 ─────────────────────────────────────── */
 
@@ -264,16 +266,23 @@ function setProgress(pct, text) {
 /* ── 数据加载 ─────────────────────────────────────── */
 
 async function loadOverview() {
-  if (dcState.loading) return;
-  dcState.loading = true;
+  // 纪元守卫：捕获本次加载对应的市场版本；切换会自增 marketEpoch，
+  // 归来后若已过期则丢弃响应，避免慢的旧市场响应覆盖新市场（切换竞态）。
+  // 用独立的 overviewLoading 标志，绝不复用 dcState.loading——后者是 runDaily/
+  // runFullRefresh/scanCatalysts 的跑批互斥锁，切市场触发的 /overview 若清它，
+  // 会在分钟级跑批仍流式进行时提前解锁，导致可并发重复跑批（烧钱/重复落库）。
+  const epoch = dcState.marketEpoch;
+  dcState.overviewLoading = true;
   try {
     const data = await dcFetch(`/overview?market=${encodeURIComponent(dcState.market)}`);
+    if (epoch !== dcState.marketEpoch) return;   // 市场已切走，本次响应作废
     dcState.overview = data;
     renderAll(data);
   } catch (e) {
     console.error('Failed to load decision overview:', e);
+  } finally {
+    if (epoch === dcState.marketEpoch) dcState.overviewLoading = false;
   }
-  dcState.loading = false;
 }
 
 function renderAll(data) {
@@ -1095,15 +1104,10 @@ export function initDecision() {
     });
   });
 
-  // 市场切换
+  // 市场切换：统一走 switchMarket 编排（作废在途请求 + 拆除分析师上下文 + 按新市场重载）
   const marketSel = document.getElementById('dc-market-select');
   if (marketSel) {
-    marketSel.addEventListener('change', (e) => {
-      dcState.market = e.target.value;
-      dcState.overview = null;
-      closeConsultDrawer();   // 抽屉绑定打开时的市场，切换市场即关闭
-      loadOverview();  // renderAll 会按当前视图刷新催化剂(含日历)，且此时 overview 已含公司名
-    });
+    marketSel.addEventListener('change', (e) => { switchMarket(e.target.value); });
   }
 
   // 催化剂视图切换
@@ -1581,11 +1585,16 @@ function marketLabel(m) { return m === 'a_stock' ? 'A股' : m === 'hk_stock' ? '
 
 // 无进度条副作用、无重试的 SSE 读取（对会创建消息的流更安全，避免断连重发重复生成）
 async function consultStream(path, body, { onEvent, onDone, onError } = {}) {
+  // 可中断：句柄挂到 dcConsult.abort，市场切换时 abortConsultStream() 掐断在途流，
+  // 防旧市场分析师回答写进新市场上下文（跨市场串台）。
+  const ctrl = new AbortController();
+  dcConsult.abort = ctrl;
   try {
     const res = await fetch(`${DC_API}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : null,
+      signal: ctrl.signal,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -1608,8 +1617,17 @@ async function consultStream(path, body, { onEvent, onDone, onError } = {}) {
     }
     if (onDone) onDone();
   } catch (e) {
+    if (e && e.name === 'AbortError') return;   // 主动中断（切市场）非错误，静默
     if (onError) onError(e); else console.error('consult SSE error:', e);
+  } finally {
+    if (dcConsult.abort === ctrl) dcConsult.abort = null;
   }
+}
+
+// 中断在途宏观咨询流（市场切换时调用），并复位发送态。
+function abortConsultStream() {
+  if (dcConsult.abort) { try { dcConsult.abort.abort(); } catch {} dcConsult.abort = null; }
+  if (dcConsult.streaming) setConsultSending(false);
 }
 
 function setConsultSending(on) {
@@ -1705,7 +1723,10 @@ async function retryConsult(role, round, div) {
 // 时效分割抬头：自动更新跨天时插入，标注日期/时间 + 即时核心市场数据，便于识别历史信息时间
 function _consultDividerEl(snap) {
   const div = document.createElement('div');
-  div.className = 'dc-consult-divider';
+  // 按市场着色：美股蓝底红边 / A股红底黄边，肉眼即可辨历史属于哪个市场
+  const mktCls = dcState.market === 'a_stock' ? 'dc-divider-cn'
+    : dcState.market === 'us_stock' ? 'dc-divider-us' : '';
+  div.className = 'dc-consult-divider' + (mktCls ? ' ' + mktCls : '');
   const when = fmtBJ(snap.ts) || _fmtSnapTs(snap.ts);
   // 即时核心市场数据：从 indices/sentiment/macro 精简取几项（名称+值+涨跌）
   const pick = [];
@@ -2115,25 +2136,46 @@ function _todayHasOpening(transcript) {
   return transcript.some(m => m.type === 'analyst' && m.round === 0 && (m.ts || '') >= lastSnapTs);
 }
 
-async function openConsultDrawer() {
-  const drawer = document.getElementById('dc-consult-drawer');
-  if (!drawer) return;
-  dcConsult.market = dcState.market;
+// 拆除 AI分析师咨询上下文（市场切换 / 重开抽屉时调用）：清空对话与快照 DOM、
+// 复位分割线基准(lastMsgTs/lastSnapTs)、气泡索引、市场标签与研报状态栏。
+// 后端按 market 独立存 session，故这里只需拆除视图，重载时按新市场从后端取回。
+function resetConsultContext() {
   dcConsult.bubbles = {};
   dcConsult.lastSnapTs = '';
   dcConsult.lastMsgTs = 0;
-  drawer.style.display = '';
-  const mkLabel = document.getElementById('dc-consult-market');
-  if (mkLabel) mkLabel.textContent = '· ' + marketLabel(dcConsult.market);
   const log = document.getElementById('dc-consult-log');
   const snapEl = document.getElementById('dc-consult-snapshot');
   if (log) log.innerHTML = '';
+  if (snapEl) snapEl.innerHTML = '';
+  const mkLabel = document.getElementById('dc-consult-market');
+  if (mkLabel) mkLabel.textContent = '';
+  const rptStatus = document.getElementById('dc-consult-report-status');
+  if (rptStatus) rptStatus.textContent = '';
+  // 聚焦个股下拉按旧市场 watchlist/持仓填充，切换后归为占位；重载时 populateConsultFocus 会按新市场重填。
+  const focusSel = document.getElementById('dc-consult-focus');
+  if (focusSel) focusSel.innerHTML = '<option value="">不聚焦（宏观通盘）</option>';
+}
+
+async function openConsultDrawer() {
+  const drawer = document.getElementById('dc-consult-drawer');
+  if (!drawer) return;
+  dcConsult.open = true;
+  dcConsult.market = dcState.market;
+  // 纪元守卫：快速连续切换时，捕获本次打开对应的市场版本；历史/开场响应归来后
+  // 若市场已切走则整体放弃，杜绝错市场的历史对话渲染进当前视图（跨市场混淆）。
+  const epoch = dcState.marketEpoch;
+  resetConsultContext();   // 先彻底拆除上一市场残留，再按当前市场重载
+  drawer.style.display = '';
+  const mkLabel = document.getElementById('dc-consult-market');
+  if (mkLabel) mkLabel.textContent = '· ' + marketLabel(dcConsult.market);
+  const snapEl = document.getElementById('dc-consult-snapshot');
   if (snapEl) snapEl.innerHTML = '<div class="dc-snap-row">加载中…</div>';
 
   let transcript = null;
   let newsStale = false;
   try {
     const resp = await dcFetch(`/macro/consult/history?market=${encodeURIComponent(dcConsult.market)}`);
+    if (epoch !== dcState.marketEpoch) return;   // 市场已切走，放弃渲染旧市场历史
     const session = resp.session;
     newsStale = !!resp.stale;
     if (session && Array.isArray(session.transcript_json) && session.transcript_json.length) {
@@ -2143,6 +2185,7 @@ async function openConsultDrawer() {
       renderConsultLog(transcript);
     }
   } catch (e) { /* 无历史，继续走 open 生成 */ }
+  if (epoch !== dcState.marketEpoch) return;   // fetch 后再校验：切走则不触发 open 生成
 
   // 当日已有开场且无更新新闻 → 历史已展示，不再调用 open（省重复烧钱）；
   // 有更新新闻（如全量刷新/定时扫描后）→ 重开生成最新快照。
@@ -2161,8 +2204,27 @@ async function openConsultDrawer() {
 }
 
 function closeConsultDrawer() {
+  dcConsult.open = false;
   const d = document.getElementById('dc-consult-drawer');
   if (d) d.style.display = 'none';
+}
+
+// 统一市场切换编排：作废在途请求 → 拆除分析师上下文 → 按新市场从后端重载。
+// 三症状（决策层停留、分析师不同步、跨市场串台）同源，集中此处一次修复。
+async function switchMarket(newMarket) {
+  dcState.market = newMarket;
+  dcState.marketEpoch += 1;      // 作废所有在途的旧市场加载（loadOverview 纪元守卫据此丢弃）
+  dcState.overview = null;
+  abortConsultStream();          // 掐断在途宏观咨询流，防旧市场回答串入新市场
+  if (dcConsult.open) {
+    // 抽屉开着：按新市场重载（openConsultDrawer 内部先 resetConsultContext）。
+    // 不 await：其内部含流式生成，不应阻塞下面决策层的重载。
+    openConsultDrawer();
+  } else {
+    resetConsultContext();       // 抽屉关着也拆除，下次打开不残留旧市场
+    closeConsultDrawer();
+  }
+  await loadOverview();
 }
 
 /* ── 实时操作日志抽屉 ───────────────────────────────────── */
@@ -2855,3 +2917,12 @@ async function runCalibration() {
     btn.textContent = '校准';
   }, 2000);
 }
+
+// 测试专用导出：暴露市场切换编排内部件供 Node 自检驱动。生产代码不引用，零副作用。
+// ponytail: 仅为可测性开的读写句柄，非公共 API。
+export const __test__ = {
+  dcState, dcConsult,
+  loadOverview, resetConsultContext, abortConsultStream, switchMarket,
+  consultStream, setConsultSending, openConsultDrawer, closeConsultDrawer,
+  _consultDividerEl,
+};

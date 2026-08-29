@@ -2171,6 +2171,15 @@
 }
 .dc-divider-time { font-size: 12.5px; font-weight: 700; color: #fff; letter-spacing: .5px; white-space: nowrap; }
 .dc-divider-data { font-size: 11px; color: rgba(255,255,255,.92); font-variant-numeric: tabular-nums; }
+/* 市场配色：美股蓝底红边 / A股红底黄边，切换后分割线跟随市场变色，杜绝跨市场误读 */
+.dc-consult-divider.dc-divider-us {
+  background: #2f6fd6;                             /* 蓝底 */
+  border: 2px solid #e23b3b;                       /* 红边 */
+}
+.dc-consult-divider.dc-divider-cn {
+  background: #d63b3b;                             /* 红底 */
+  border: 2px solid #f2c018;                       /* 黄边 */
+}
 .dc-consult-footer {
   display: flex; flex-direction: column; gap: 8px; padding: 12px 20px;
   border-top: 1px solid var(--border); background: var(--surface);
