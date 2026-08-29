@@ -58,7 +58,7 @@ def _create_manager() -> FetcherManager:
     except ImportError:
         logger.info("baostock 未安装，跳过")
 
-    # 美股：yfinance (priority=0) > akshare_us (1, 国内可达兜底) > finnhub (2, 需密钥)
+    # 美股：yfinance (priority=0) > akshare_us (1, 国内可达兜底) > finnhub (2, 需密钥) > alphavantage (3, 应急)
     try:
         from bottleneck_hunter.data_provider.fetchers.yfinance_fetcher import YfinanceFetcher
         manager.register(YfinanceFetcher())
@@ -80,5 +80,14 @@ def _create_manager() -> FetcherManager:
         manager.register(FinnhubFetcher())
     else:
         logger.info("finnhub 未安装，跳过")
+
+    # 美股最后一层应急兜底：alphavantage (priority=3)。走独立基础设施(www.alphavantage.co)，
+    # 与 Yahoo/新浪/finnhub 互不相关，前三层同时熔断时接管。免费档极紧(~25/日)，
+    # 复用数据源目录已有 Key、只用 requests(无需 _installed 探测)，scheduler 额度阀已防打爆。
+    try:
+        from bottleneck_hunter.data_provider.fetchers.alphavantage_fetcher import AlphaVantageFetcher
+        manager.register(AlphaVantageFetcher())
+    except ImportError:
+        logger.info("alphavantage fetcher 导入失败，跳过美股应急兜底")
 
     return manager
