@@ -155,6 +155,19 @@ def _probe_fred(key: str, base_url: str = "") -> tuple[bool, str]:
     return False, _clip(str(data.get("error_message") or "响应异常"))
 
 
+def _probe_gangtise(key: str, base_url: str = "") -> tuple[bool, str]:
+    """Gangtise：ak/sk 换 token 试连。复用双字段——base_url 存 ak(accessKey)，key 存 sk(secretKey)。"""
+    ak, sk = base_url.strip(), key.strip()
+    if not ak or not sk:
+        return False, "请同时填写 AccessKey(ak) 与 SecretKey(sk)"
+    from bottleneck_hunter.data_provider.gangtise_client import GangtiseError, _login
+    try:
+        _login(ak, sk)
+        return True, "连通成功（Gangtise token 已获取）"
+    except GangtiseError as e:
+        return False, _clip(f"认证失败：{e}")
+
+
 def _probe_custom(key: str, base_url: str = "") -> tuple[bool, str]:
     """自定义源：GET 用户填写的探测 URL（{KEY} 占位符替换为实际 Key）。"""
     if not base_url:
@@ -200,6 +213,11 @@ DATA_SOURCE_CATALOG: list[dict] = [
      "site": "https://fred.stlouisfed.org/docs/api/api_key.html",
      "note": "宏观经济数据：联邦基金利率/CPI通胀/失业率/10年美债（免费，供 L1 宏观决策）",
      "testable": True, "probe": _probe_fred},
+    {"id": "gangtise", "name": "Gangtise 投研", "env": "",
+     "site": "https://openapi.gangtise.com",
+     "note": "A股基本面：利润表 + 券商一致预期（EPS/PE）。ak/sk 双字段，admin 配置，可选全局共享",
+     "testable": True, "probe": _probe_gangtise, "dual_field": True,
+     "field_labels": {"base_url": "AccessKey (ak)", "key": "SecretKey (sk)"}},
     {"id": "custom", "name": "自定义数据源", "env": "",
      "site": "", "note": "填写完整探测 URL（用 {KEY} 作 API Key 占位符）+ API Key",
      "testable": True, "probe": _probe_custom},
@@ -256,3 +274,71 @@ def resolve_data_source_key(source_id: str, user_id: str = "") -> str:
     except Exception as e:  # noqa: BLE001
         logger.debug("resolve_data_source_key(%s) DB 读取失败: %s", source_id, e)
     return ""
+
+
+# ── Gangtise 投研凭据解析（对「绝无全局 key」铁律的受控例外）──────────
+#
+# ponytail: 全系统唯一「显式授权的全局共享 key」例外。铁律是 Key 严格按用户隔离
+#   （resolve_data_source_key 绝不借他人 key、绝不读 env）。Gangtise 的 ak/sk 是 admin
+#   自己在 DB 里的 AES 加密配置，全局共享由 admin 在后台【主动开启】、可审计，非代码默认、
+#   非静默全局 key。边界：仅 source_id="gangtise" 一个源走此路径；仍绝不读 os.environ。
+#   ak 存 data_source_keys.base_url，sk 存 encrypted_key（复用现成双字段，不新增表）。
+
+GANGTISE_ENABLED_KEY = "gangtise_enabled"          # 总开关：关=provider 不进候选
+GANGTISE_SHARED_KEY = "gangtise_global_shared"     # 全局共享：开=全体复用 admin key
+GANGTISE_SOURCE_ID = "gangtise"
+
+
+def _config_on(auth_store, key: str) -> bool:
+    return str(auth_store.get_config(key, "0")).lower() in ("1", "true")
+
+
+def _gangtise_use_admin_key(enabled: bool, uid: str, admin_sub: str, shared: bool) -> bool:
+    """纯分支判定（可单测，不碰 DB）：请求者是否应解析到 admin 的 gangtise key。
+
+    总开关关 / 无 admin → 否；请求者是 admin 本人（独享）或全局共享已开（全体）→ 是。
+    """
+    if not enabled or not admin_sub:
+        return False
+    return uid == admin_sub or shared
+
+
+def resolve_gangtise_credentials(user_id: str = "") -> tuple[str, str] | None:
+    """解析 Gangtise (ak, sk)——受控的显式授权共享，无则返回 None（走下个 provider）。"""
+    from bottleneck_hunter.auth.crypto import decrypt
+    from bottleneck_hunter.auth.current_user import get_current_user_id
+    from bottleneck_hunter.auth.store import AuthStore
+    uid = user_id or get_current_user_id()
+    try:
+        store = AuthStore()
+        enabled = _config_on(store, GANGTISE_ENABLED_KEY)
+        admin_sub = ""
+        for u in store.list_users():
+            if getattr(u, "role", "") == "admin":
+                admin_sub = u.id
+                break
+        if not _gangtise_use_admin_key(enabled, uid, admin_sub, _config_on(store, GANGTISE_SHARED_KEY)):
+            return None
+        ak = store.get_data_source_base_url(admin_sub, GANGTISE_SOURCE_ID)
+        enc = store.get_data_source_key_encrypted(admin_sub, GANGTISE_SOURCE_ID)
+        if ak and enc:
+            return ak, decrypt(enc)
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("resolve_gangtise_credentials 失败: %s", e)
+        return None
+
+
+def _demo() -> None:
+    """自检：Gangtise 凭据分支判定三分支（admin独享 / 共享开全体 / 普通用户未开共享）。"""
+    U = _gangtise_use_admin_key
+    assert U(True, "admin1", "admin1", False) is True    # admin 本人独享
+    assert U(True, "user9", "admin1", True) is True      # 全局共享开 → 普通用户也可用
+    assert U(True, "user9", "admin1", False) is False    # 未开共享 → 普通用户无 key
+    assert U(False, "admin1", "admin1", True) is False   # 总开关关 → 谁都没有
+    assert U(True, "user9", "", True) is False           # 无 admin → None
+    print("data_source_catalog gangtise demo: OK")
+
+
+if __name__ == "__main__":
+    _demo()

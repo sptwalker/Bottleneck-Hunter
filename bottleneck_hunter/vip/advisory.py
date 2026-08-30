@@ -17,6 +17,8 @@ import re
 import uuid
 from datetime import date, datetime, timezone
 
+import asyncio
+
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.vip import compliance, derivatives, number_guard, portfolio
 from bottleneck_hunter.vip import mandate as _mandate
@@ -76,6 +78,9 @@ _DRAFT_PROMPT = """你是一支资深私人财务顾问团队，为高净值客�
 ## 历史经验教训（往期策略复盘沉淀，供参考勿盲从）
 {experience_cards}
 
+## 外部证据（各持仓近期券商研报 + 知识库片段，作建议的可引依据；"暂无"即无召回，勿臆造）
+{evidence}
+
 请输出**严格 JSON**（不要 markdown 代码块、不要 JSON 以外任何文字）：
 {{
   "portfolio_diagnosis": "组合层面诊断 2-4 句：集中度/行业暴露/与纲领风险偏好和回撤上限的匹配度",
@@ -111,6 +116,28 @@ def _render_experience_cards(cards: list[dict]) -> str:
         tag = f"·置信{round(float(conf) * 100)}%" if conf is not None else ""
         lines.append(f"- 【{c.get('category', '')}{tag}】{c.get('title', '')}：{c.get('content', '')}")
     return "\n".join(lines)
+
+
+async def gather_holdings_evidence(wl_store, holdings: list[dict], *, max_tickers: int = 8) -> str:
+    """为逐仓建议召回各持仓的研报 + KB 证据（复用 chain.evidence.gather_evidence，走 hub 凭据/熔断）。
+
+    §9.2 顾问建议增据：VIP 建议此前纯模型判断，此处附各标的真实券商研报摘要 + KB 片段，令建议有据可引。
+    全 best-effort：无凭据/未开/异常 → "暂无"，与未接入前逐字节一致，绝不阻断建议主链路。
+    max_tickers 上限控 prompt 体量与网络往返（持仓多时取前 N，按 dossier 顺序＝权重降序）。
+    """
+    from bottleneck_hunter.chain.evidence import gather_evidence
+    market = getattr(wl_store, "_market", "") or "us_stock"
+    tickers = [h.get("ticker", "").strip() for h in (holdings or []) if h.get("ticker")][:max_tickers]
+    if not tickers:
+        return "暂无持仓，无需外部证据。"
+    async def _one(tk: str) -> str:
+        try:
+            ev = await gather_evidence(tk, market, f"{tk} 风险 竞争 瓶颈")
+        except Exception:  # noqa: BLE001
+            ev = ""
+        return f"### {tk}\n{ev}" if ev else f"### {tk}\n（暂无研报/知识库召回）"
+    blocks = await asyncio.gather(*[_one(t) for t in tickers])
+    return "\n\n".join(blocks)
 
 
 def format_macro_for_prompt(wl_store) -> str:
@@ -937,11 +964,14 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
             scope="vip_portfolio", scope_key=account_ref, limit=8)
     except Exception:  # noqa: BLE001
         prior_cards = []
+    # §9.2 顾问建议增据：逐仓研报 + KB 证据（best-effort，无凭据/未开 → "暂无"，不阻断）。
+    evidence_text = await gather_holdings_evidence(wl_store, dossier.get("holdings", []))
     prompt = _DRAFT_PROMPT.format(
         dossier=json.dumps(dossier, ensure_ascii=False, default=str),
         mandate=inputs["mandate_text"], macro=inputs["macro_text"],
         derivatives=inputs["deriv_text"], coverage=inputs["coverage_text"],
-        experience_cards=_render_experience_cards(prior_cards))
+        experience_cards=_render_experience_cards(prior_cards),
+        evidence=evidence_text)
     resp = await llm.ainvoke(prompt)
     draft = _validate_draft(getattr(resp, "content", resp) if not isinstance(resp, str) else resp)
     if not draft["holdings"]:

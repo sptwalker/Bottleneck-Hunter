@@ -25,6 +25,10 @@
 
 {execution_plan}
 
+## 券商研报观点（预读材料）
+
+{research_evidence}
+
 ## 个股催化剂数据
 
 {catalyst_data}

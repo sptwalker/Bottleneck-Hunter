@@ -53,6 +53,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "stale_refresh":          {"interval_hours": 6},
     "resting_limit_poll":     {"interval_hours": 1},   # 挂单撮合轮询（开市时段每小时）
     "mail_ingest_poll":       {"interval_hours": 1},   # 转发银行邮件轮询（每小时）
+    "gangtise_catalyst":      {"interval_hours": 24},  # Gangtise 财报日历/公告催化剂补给（每日一次）
     "us_full_refresh":        {"day_of_week": "sun", "hour": 7, "minute": 0},
     "cn_full_refresh":        {"day_of_week": "sun", "hour": 8, "minute": 0},
     "system_watchdog":        {"hour": 7, "minute": 45},   # 每日含周末：巡检所有周期任务是否超期（与 07:30 数据巡检错峰）

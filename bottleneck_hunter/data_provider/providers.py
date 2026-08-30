@@ -15,8 +15,13 @@ from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_sou
 from bottleneck_hunter.data_provider.hub import (
     CAP_EARNINGS,
     CAP_FINANCIALS,
+    CAP_KB,
+    CAP_MACRO_EDB,
+    CAP_NARRATIVE,
     CAP_NEWS,
     CAP_OPTIONS,
+    CAP_RESEARCH,
+    CAP_SCREEN,
 )
 
 logger = logging.getLogger(__name__)
@@ -643,8 +648,259 @@ class YfinanceOptionsProvider:
         return await asyncio.to_thread(_analyze_options_chain, ticker)
 
 
+def _map_gangtise_financials(fin: dict, forecast: dict | None, market: str = "a_stock") -> dict:
+    """纯映射（可单测，不碰网络）：Gangtise 利润表行 + 一致预期 → 规范 CAP_FINANCIALS dict。
+
+    金额 元→亿（1e-8）。A股利润表无 grossProfit 字段，毛利率 =(营收-营业成本)/营收 自算
+    （比率与金额刻度无关，故即便 1e-8 假设有偏毛利率仍准）。美股同接口同刻度，币种记 USD。
+    ponytail: 金额刻度按「原始=元/美元本币」假设，真实连通后若量级不符，唯一校准点是此处 1e-8。
+    """
+    row = fin["rows"][0]
+    # 实测 A股利润表字段为缩写：opRev(营业收入) opCost(营业成本) netProfit/netProfitAttrParent(净利) basicEPS
+    # 毛利率须用「营业收入-营业成本」；营业总成本(totalOpCost)含税金/费用是营业利润口径，不能拿来算毛利率。
+    rev = _f(row.get("opRev") or row.get("totalOpRev"), 1e-8)
+    cost = _f(row.get("opCost"), 1e-8)
+    net = _f(row.get("netProfitAttrParent") or row.get("netProfit"), 1e-8)
+    gm = round((rev - cost) / rev * 100, 2) if (rev and cost is not None) else None
+    cons_eps = cons_pe = None
+    if forecast and forecast.get("forecasts"):
+        f0 = forecast["forecasts"][0]  # 最近发布日、最近预测年
+        cons_eps = _f(f0.get("eps"))
+        cons_pe = _f(f0.get("pe"))  # 券商前瞻 PE = 一致预期
+    return {
+        "data_source": "gangtise",
+        "currency": "USD" if market == "us_stock" else "CNY",  # 金额币种（revenue_yi/net_profit_yi 亿本币）
+        "report_date": fin.get("report_date", ""),
+        "revenue_yi": rev,
+        "revenue_yoy_pct": None,   # ponytail: 累计口径同比需拉多期，起步留空；接多期后用 _quarters_yoy
+        "net_profit_yi": net,
+        "net_profit_yoy_pct": None,
+        "gross_margin_pct": gm,
+        "roe_pct": None,           # 一致预期 roe 是前瞻值，语义≠实际 roe_pct，不混入
+        "debt_ratio_pct": None,
+        "cashflow_per_share": None,
+        "consensus_eps": cons_eps,
+        "consensus_pe": cons_pe,
+        "analyst_rating": None,
+        "analyst_report_count": None,
+        "quarters": [],
+    }
+
+
+class GangtiseProvider:
+    """Gangtise 投研 — A股基本面（CAP_FINANCIALS）+ 全市场 EDB 宏观（CAP_MACRO_EDB）。
+
+    单 provider 多能力：hub 按 name 建 _states，故 gangtise 的所有域挂同一 name="gangtise"，
+    按 capability 分市场（supports 里区分）。凭据统一走 resolve_gangtise_credentials。
+    priority=0：带券商一致预期 + EDB 官方口径，质量高于免费兜底。
+    - CAP_FINANCIALS：仅 a_stock（_sec_code 只做 A股 6位直通；港美股码制留待第二市场）。
+    - CAP_MACRO_EDB：a_stock+us_stock（按 market 取一组 EDB 指标，ticker 位忽略——与经典
+      「按 ticker 取一条」的唯一形态差异，见 hub.py CAP_MACRO_EDB 注释）。
+    ponytail: 不认领 CAP_EARNINGS——A股 earnings 实际值已由 akshare(priority1) 供给；一致预期
+      已并入 financials 的 consensus_eps/pe。补 A股 earnings 一致预期的上升路径：拆 CAP_EARNINGS
+      merge 而非单源覆盖，再放开这里。
+    """
+    name = "gangtise"
+    priority = 0
+
+    def capabilities(self) -> set[str]:
+        return {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB}
+
+    def markets(self) -> set[str]:
+        return {"a_stock", "us_stock"}
+
+    def supports(self, capability: str, market: str) -> bool:
+        if capability == CAP_FINANCIALS:
+            return market in ("a_stock", "us_stock")   # A股 6位直通；美股经 securities/search 解析 .O/.N
+        if capability in (CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB):
+            return market in ("a_stock", "us_stock")    # 研报覆盖 A/H/US/中概；KB 与市场无关但按 market 门控
+        return False
+
+    async def fetch(self, capability, ticker, market, user_id="") -> dict | None:
+        from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+        if capability not in (CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB):
+            return None
+        creds = resolve_gangtise_credentials(user_id)
+        if not creds:
+            return None
+        ak, sk = creds
+        if capability == CAP_MACRO_EDB:
+            from bottleneck_hunter.data_provider.gangtise_edb_indicators import indicators_for_market
+            ids = [v[0] for v in indicators_for_market(market).values()]
+            if not ids:
+                return None
+            return await asyncio.to_thread(self._fetch_edb_sync, ak, sk, ids, market)
+        if capability == CAP_RESEARCH:
+            return await asyncio.to_thread(self._fetch_research_sync, ak, sk, ticker, market)
+        if capability == CAP_KB:
+            return await asyncio.to_thread(self._fetch_kb_sync, ak, sk, ticker)
+        return await asyncio.to_thread(self._fetch_sync, ak, sk, ticker, market)
+
+    def _fetch_research_sync(self, ak, sk, ticker, market) -> dict | None:
+        """券商研报证据：近 180 日该标的深度/业绩点评研报（按发布日降序，取前 5）。
+
+        美股走外资 foreign-report、A股走中资 broker-report。llm_tag 先筛深度/点评；
+        若无（长尾标的无深度研报）则退回不加标签取全部，避免空手。
+        """
+        from datetime import date, timedelta
+
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        today = date.today()
+        start = (today - timedelta(days=180)).strftime("%Y-%m-%d")
+        end = today.strftime("%Y-%m-%d")
+        foreign = market == "us_stock"
+        code = gc._resolve_gts_code(ak, sk, ticker, market)
+        reports = gc.fetch_research(ak, sk, securities=[code], start=start, end=end,
+                                    foreign=foreign, llm_tag_list=["inDepth", "earningsReview"])
+        if not reports:
+            reports = gc.fetch_research(ak, sk, securities=[code], start=start, end=end, foreign=foreign)
+        if not reports:
+            return None
+        reports.sort(key=lambda r: r.get("publish_date", ""), reverse=True)
+        return {"reports": reports[:5]}
+
+    def _fetch_kb_sync(self, ak, sk, query) -> dict | None:
+        """知识库 RAG：以 ticker 槽承载的语义 query 检索片段（取回 6 片段）。"""
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        snips = gc.fetch_kb(ak, sk, str(query or ""), top=6)
+        return {"snippets": snips} if snips else None
+
+    def _fetch_edb_sync(self, ak, sk, ids, market) -> dict | None:
+        from datetime import date, timedelta
+
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        today = date.today()
+        # 取近 400 天覆盖月频序列至少 2 个非空点（算 change_pct）
+        raw = gc.fetch_edb(ak, sk, ids,
+                           (today - timedelta(days=400)).strftime("%Y-%m-%d"),
+                           today.strftime("%Y-%m-%d"))
+        return _map_gangtise_edb(raw, market) or None
+
+    def _fetch_sync(self, ak: str, sk: str, ticker: str, market: str) -> dict | None:
+        from datetime import date, timedelta
+
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        fin = gc.fetch_financials(ak, sk, ticker, market)
+        if not fin or not fin.get("rows"):
+            return None
+        forecast = None
+        if market == "a_stock":   # 一致预期接口 A股-only（美股返 120001）→ 美股 consensus 留空
+            try:  # 一致预期软失败：拿不到不阻断财务主体
+                today = date.today()
+                forecast = gc.fetch_earnings_forecast(
+                    ak, sk, ticker, market,
+                    (today - timedelta(days=30)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Gangtise 一致预期获取失败 (%s): %s", ticker, e)
+        return _map_gangtise_financials(fin, forecast, market)
+
+
+def _map_gangtise_edb(raw: dict, market: str) -> dict:
+    """纯映射（可单测）：EDB getData 原始 {id:{latest,prev,date}} → 规范宏观 dict。
+
+    key 用语义名（us_cpi_yoy 等），值经 transform 归一（index100→同比%）。change_pct=最新−前值
+    （宏观读数如 CPI/利率/PMI 的「变动」就是百分点差，与 macro_data 的 level 型口径一致）。
+    """
+    from bottleneck_hunter.data_provider.gangtise_edb_indicators import (
+        apply_transform,
+        indicators_for_market,
+    )
+    out: dict[str, dict] = {}
+    for key, (fid, label, _scope, transform) in indicators_for_market(market).items():
+        rec = raw.get(fid)
+        if not rec or rec.get("latest") is None:
+            continue
+        value = apply_transform(rec["latest"], transform)
+        prev = rec.get("prev")
+        change = round(value - apply_transform(prev, transform), 2) if prev is not None else 0.0
+        out[key] = {"value": value, "change_pct": change, "label": label, "as_of": rec.get("date")}
+    return out
+
+
+class GangtiseNarrativeProvider:
+    """Gangtise AI 研报叙事（一页通）——CAP_NARRATIVE，chain/VIP 报告增强段落。
+
+    单独 provider name（不挂 "gangtise"）：agent 调用重、有轮询，失败不应连累核心财务熔断。
+    ticker 槽 = 证券码；固定取「一页通(one-pager)」这一同步 agent（最富信息，实测含目标价/机构观点）。
+    ponytail: 只接一页通；投资逻辑/同业对比/财报点评(异步600s轮询)按 §10 默认关，
+      需要时在 gangtise_client 补子路径 + 这里加 agent_type 分派。
+    """
+    name = "gangtise_narrative"
+    priority = 0
+
+    def capabilities(self) -> set[str]:
+        return {CAP_NARRATIVE}
+
+    def markets(self) -> set[str]:
+        return {"a_stock", "us_stock"}
+
+    def supports(self, capability: str, market: str) -> bool:
+        return capability == CAP_NARRATIVE and market in self.markets()
+
+    async def fetch(self, capability, ticker, market, user_id="") -> dict | None:
+        from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+        if capability != CAP_NARRATIVE or not (ticker or "").strip():
+            return None
+        creds = resolve_gangtise_credentials(user_id)
+        if not creds:
+            return None
+        ak, sk = creds
+        return await asyncio.to_thread(self._fetch_sync, ak, sk, ticker, market)
+
+    def _fetch_sync(self, ak, sk, ticker, market) -> dict | None:
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        code = gc._resolve_gts_code(ak, sk, ticker, market)
+        content = gc.fetch_narrative(ak, sk, "one-pager", code)
+        return {"agent_type": "one-pager", "content": content} if content else None
+
+
+class GangtiseScreenProvider:
+    """Gangtise 指标选股（A股）——CAP_SCREEN，供应商检索前置漏斗。
+
+    ticker 槽 = 瓶颈环节关键词 → 中信一级板块 sectorId（curated 小表）。在该板块内以「主营业务
+    包含关键词」粗筛出候选代码，缩小 chain 深挖集。只做过滤不排序（screener 语义）。
+    ponytail: 板块解析用 curated 小表，主营包含做零日期参数过滤（pty_main_bus 无 tradeDate 依赖，
+      规避「最近交易日」查 K 线的脆弱性）。上升路径：口语条件(ROE>15&市值>500亿) 需接 skill
+      三段式 universe/indicator 解析补 qte_mkt_cptl+tradeDate 等参，别在此堆硬编码。
+    """
+    name = "gangtise_screen"
+    priority = 0
+
+    def capabilities(self) -> set[str]:
+        return {CAP_SCREEN}
+
+    def markets(self) -> set[str]:
+        return {"a_stock"}   # 板块体系目前 A股（§10 硬边界）
+
+    def supports(self, capability: str, market: str) -> bool:
+        return capability == CAP_SCREEN and market == "a_stock"
+
+    async def fetch(self, capability, ticker, market, user_id="") -> dict | None:
+        from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+        from bottleneck_hunter.data_provider.gangtise_sector_ids import sector_id_for
+        if capability != CAP_SCREEN or market != "a_stock":
+            return None
+        kw = (ticker or "").strip()
+        sid = sector_id_for(kw)
+        if not sid:   # 未收录板块 → 降级（上游仍有 LLM/产业链/akshare 源）
+            return None
+        creds = resolve_gangtise_credentials(user_id)
+        if not creds:
+            return None
+        ak, sk = creds
+        return await asyncio.to_thread(self._fetch_sync, ak, sk, sid, kw)
+
+    def _fetch_sync(self, ak, sk, sector_id, keyword) -> dict | None:
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        # 主营业务包含瓶颈关键词：零日期参数、确定性过滤（indicatorList 不可空、expression 必填）
+        cands = gc.screen(
+            ak, sk, universe=[sector_id], expression=f"F1 contains '{keyword}'",
+            indicator_list=[{"field": "F1", "indicatorCode": "pty_main_bus", "parameters": []}])
+        return {"candidates": cands} if cands else None
+
+
 def _to_ts_code(ticker: str) -> str:
-    """A股 ticker → Tushare ts_code。'600000'→'600000.SH'，'000001'→'000001.SZ'，北交所→.BJ；已带后缀则原样。"""
+    """A股 ticker → Tushare ts_code. '600000'→'600000.SH','000001'→'000001.SZ',北交所→.BJ;已带后缀则原样。"""
     t = ticker.strip().upper()
     if "." in t:
         return t
@@ -659,7 +915,71 @@ def _to_ts_code(ticker: str) -> str:
 
 def build_providers() -> list:
     return [
+        GangtiseProvider(),
+        GangtiseNarrativeProvider(), GangtiseScreenProvider(),
         FMPProvider(), FinnhubProvider(), TushareProvider(), AkshareEarningsProvider(),
         AlphaVantageProvider(), TiingoProvider(), PolygonProvider(),
         YfinanceOptionsProvider(),
     ]
+
+
+def _demo() -> None:
+    """自检：Gangtise 利润表+一致预期 → 规范 dict 的纯映射（元→亿、自算毛利率、consensus 并入）。"""
+    fin = {"report_date": "2025-03-31", "rows": [{
+        "endDate": "2025-03-31",
+        "opRev": 10_000_000_000,   # 100 亿
+        "opCost": 6_000_000_000,   # 60 亿 → 毛利率 40%
+        "netProfitAttrParent": 2_000_000_000,  # 20 亿
+        "basicEPS": 1.5}]}
+    forecast = {"forecasts": [{"forecastYear": "2025", "eps": 6.2, "pe": 18.5}]}
+    d = _map_gangtise_financials(fin, forecast)
+    assert d["data_source"] == "gangtise"
+    assert d["revenue_yi"] == 100.0, d["revenue_yi"]
+    assert d["net_profit_yi"] == 20.0, d["net_profit_yi"]
+    assert d["gross_margin_pct"] == 40.0, d["gross_margin_pct"]
+    assert d["consensus_eps"] == 6.2 and d["consensus_pe"] == 18.5, d
+    assert d["report_date"] == "2025-03-31"
+    assert d["currency"] == "CNY", d["currency"]
+    # 美股：同刻度、币种 USD、一致预期留空（接口 A股-only）
+    du = _map_gangtise_financials(fin, None, "us_stock")
+    assert du["currency"] == "USD" and du["consensus_eps"] is None, du
+    # 无一致预期 → consensus 留空，主体仍在
+    d2 = _map_gangtise_financials(fin, None)
+    assert d2["consensus_eps"] is None and d2["revenue_yi"] == 100.0
+    # 回落 netProfit（无归母科目时）
+    fin2 = {"report_date": "", "rows": [{"opRev": 1e8, "opCost": 6e7, "netProfit": 3e7}]}
+    d3 = _map_gangtise_financials(fin2, None)
+    assert d3["net_profit_yi"] == 0.3, d3["net_profit_yi"]
+    # EDB 映射：identity 原值 + index100 变换 + change_pct=最新−前值
+    raw = {
+        "M00012461": {"latest": 3.5, "prev": 4.2, "date": "20260630"},   # 美CPI identity
+        "M00000002": {"latest": 99.9, "prev": 100.3, "date": "20260731"},  # 中CPI index100
+    }
+    us = _map_gangtise_edb(raw, "us_stock")
+    assert us["us_cpi_yoy"] == {"value": 3.5, "change_pct": -0.7,
+                                "label": "美国CPI同比(%)", "as_of": "20260630"}, us
+    cn = _map_gangtise_edb(raw, "a_stock")
+    assert cn["cn_cpi_yoy"]["value"] == -0.1, cn   # 99.9-100
+    assert cn["cn_cpi_yoy"]["change_pct"] == -0.4, cn  # (99.9-100)-(100.3-100)=-0.1-0.3
+    assert "us_cpi_yoy" not in cn and "cn_cpi_yoy" not in us  # 市场隔离
+    assert _map_gangtise_edb({}, "us_stock") == {}  # 空原始 → 空
+    # 能力声明自洽（防 CAP_RESEARCH/CAP_KB 未导入导致运行时 NameError）
+    p = GangtiseProvider()
+    assert p.capabilities() == {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB}, p.capabilities()
+    assert p.supports(CAP_RESEARCH, "us_stock") and p.supports(CAP_KB, "a_stock")
+    assert not p.supports(CAP_RESEARCH, "hk_stock")
+    # 叙事 provider：A/US 都支持，只认 CAP_NARRATIVE
+    n = GangtiseNarrativeProvider()
+    assert n.capabilities() == {CAP_NARRATIVE}
+    assert n.supports(CAP_NARRATIVE, "a_stock") and n.supports(CAP_NARRATIVE, "us_stock")
+    assert not n.supports(CAP_NARRATIVE, "hk_stock") and not n.supports(CAP_SCREEN, "a_stock")
+    # 选股 provider：仅 A股（§10 板块体系 A股-only）
+    s = GangtiseScreenProvider()
+    assert s.capabilities() == {CAP_SCREEN}
+    assert s.supports(CAP_SCREEN, "a_stock")
+    assert not s.supports(CAP_SCREEN, "us_stock") and not s.supports(CAP_NARRATIVE, "a_stock")
+    print("providers gangtise demo: OK")
+
+
+if __name__ == "__main__":
+    _demo()

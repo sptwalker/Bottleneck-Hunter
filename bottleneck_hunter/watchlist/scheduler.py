@@ -228,8 +228,52 @@ def _oplog(uid: str, title: str, *, market: str = "", detail: str = "已完成",
         pass
 
 
+# A股基准 yfinance 码 → Gangtise kline 码（实测仅 A股指数可取）。
+# US/HK 基准 Gangtise kline 一律 400（硬边界，见 §10），不列入，故永不走 Gangtise 兜底。
+_GTS_BENCHMARK_CODE: dict[str, str] = {"000300.SS": "000300.SH"}
+
+
+def _gangtise_benchmark_backfill(store: WatchlistStore, market: str, bench_code: str) -> int:
+    """yfinance/akshare 取不到基准时的 Gangtise 兜底（同步，requests 阻塞 → 调用方 to_thread）。
+
+    仅 A股基准可行（实测 Gangtise kline 支持 A股指数 000300.SH，US/HK 指数/ETF 全 400）。
+    取近 ~4y 日收盘，落 market_snapshots，ticker 用 yfinance 码(bench_code) 以对齐下游
+    get_snapshots / _rebase_benchmark / _portfolio_risk_summary 的查询键。凭据走受控全局 key。
+    """
+    gts_code = _GTS_BENCHMARK_CODE.get(bench_code)
+    if not gts_code:
+        return 0  # US/HK 基准无 Gangtise 源，诚实缺省
+    from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+    creds = resolve_gangtise_credentials("")  # admin 双开关授权；缺则 None → 不兜底
+    if not creds:
+        return 0
+    ak, sk = creds
+    from bottleneck_hunter.data_provider.gangtise_client import GangtiseError, fetch_quote_history
+    end = datetime.now(_TZ_CN).date()
+    start = end.replace(year=end.year - 4)
+    try:
+        series = fetch_quote_history(ak, sk, [gts_code], start.isoformat(), end.isoformat()).get(gts_code, [])
+    except GangtiseError as e:
+        logger.warning("Gangtise 基准兜底(%s) 失败: %s", gts_code, e)
+        return 0
+    if not series:
+        return 0
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    prev = None
+    snaps = []
+    for d, close in series:  # fetch_quote_history 已按表内顺序（升序）返回
+        change_pct = round((close - prev) / prev * 100, 2) if prev else 0.0
+        snaps.append({"ticker": bench_code, "date": d, "close": close,
+                      "change_pct": change_pct, "market": market, "fetched_at": now_iso})
+        prev = close
+    n = store.save_snapshots(snaps)
+    logger.info("Gangtise 基准兜底 %s→%s 落库 %d 条", gts_code, bench_code, n)
+    return n
+
+
 async def job_price_update(market: str = "us_stock") -> dict[str, str]:
     """全局拉取全体用户观察池并集的价格（客观免费数据，落共享层，只受全局总开关控制）。"""
+    import asyncio
     from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
 
     store = _global_store()
@@ -246,6 +290,11 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
         bench_code, _bench_label = default_benchmark_ticker(market)
         if bench_code:
             await fetch_price_batch([bench_code], store, days=1000, market=market)
+            # 生产机房 yfinance/akshare 被墙时基准桶为空 → VIP/L2 portfolio_beta 恒 0、净值无基准对照。
+            # 实测：Gangtise kline 能供 A股指数(000300.SH 真实收盘)，但 US/HK 指数与 ETF 一律 400（硬边界，
+            # 见 §10）。故仅 A股走 Gangtise 兜底；落库仍用 yfinance 码(bench_code)以对齐下游 get_snapshots。
+            if not store.get_snapshots(bench_code, days=5):
+                await asyncio.to_thread(_gangtise_benchmark_backfill, store, market, bench_code)
     except Exception as e:  # noqa: BLE001
         logger.warning("基准指数抓取失败 (%s): %s", market, e)
 
@@ -652,6 +701,122 @@ async def job_catalyst_scan() -> None:
         except Exception as e:
             logger.error("Catalyst scan (user=%s) failed: %s", uid[:8] if uid else "global", e)
             _oplog(uid, "催化剂扫描", error=str(e))
+
+
+def _gangtise_catalyst_meta(cat_row: dict, ann_row: dict) -> tuple:
+    """把日历/公告条目映射成 create_catalyst 的字段（催化剂类型/影响/方向/源类）。二选一传，另一 {}。"""
+    if cat_row:
+        c = cat_row.get("category", "")
+        title = cat_row.get("title") or {
+            "performanceForecast": "业绩预告", "performanceExpress": "业绩快报",
+            "performanceAnnouncement": "定期报告",
+        }.get(c, "财报事件")
+        return (title, "earnings", cat_row.get("publish_date") or None, "earnings")
+    title = ann_row.get("title") or ann_row.get("primary_category") or "公司公告"
+    return (title[:120], "event", ann_row.get("publish_date") or None, "corporate")
+
+
+def _gangtise_catalyst_run() -> dict:
+    """系统级 worker（同步，内部 requests 阻塞）：用 Gangtise 财报日历 + 公告为观察池全量标的补催化剂。
+
+    抄 job_macro_update 的 _wl_store/_auth_store 直连写法。取数走受控全局 key（admin 授权），
+    落库按标的所属用户/市场 for_user(uid).for_market(market)。按 securityCode+expected_date+type 幂等。
+    """
+    from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+    if not _wl_store or not is_global_enabled(_auth_store):
+        return {"created": 0, "skipped": "disabled"}
+
+    from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+    from bottleneck_hunter.data_provider.gangtise_client import (
+        GangtiseError,
+        fetch_announcements,
+        fetch_performance_calendar,
+    )
+    creds = resolve_gangtise_credentials("")  # 受控全局：admin 双开关授权（缺则 None → 不跑）
+    if not creds:
+        return {"created": 0, "skipped": "no_gangtise_key"}
+    ak, sk = creds
+
+    today = datetime.now(_TZ_CN).date()
+    cal_end = (today + timedelta(days=45)).isoformat()      # 未来 45 日财报日历
+    ann_start = (today - timedelta(days=30)).isoformat()    # 近 30 日公告
+    today_s, ann_end = today.isoformat(), today.isoformat()
+
+    user_ids = _auth_store.list_active_user_ids() if _auth_store else [""]
+    created = 0
+    for uid in (user_ids or [""]):
+        for market in ("a_stock", "us_stock"):
+            store = _wl_store.for_user(uid).for_market(market) if uid else _wl_store.for_market(market)
+            try:
+                entries = store.list_all()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("gangtise catalyst: list_all(%s/%s) 失败: %s", uid[:8] if uid else "-", market, e)
+                continue
+            if not entries:
+                continue
+            code_to_entry = {}  # securityCode → (entry_id, ticker)
+            from bottleneck_hunter.data_provider.gangtise_client import _sec_code
+            for e in entries:
+                code_to_entry[_sec_code(e["ticker"], market)] = (e["id"], e["ticker"])
+
+            # ① 财报日历（一次批量拉本市场全部观察标的）
+            try:
+                cal = fetch_performance_calendar(ak, sk, [market], today_s, cal_end,
+                                                 securities=list(code_to_entry.keys()))
+            except GangtiseError as ex:
+                logger.warning("gangtise 日历取数失败(%s): %s", market, ex)
+                cal = []
+            for row in cal:
+                for code in (row.get("security_codes") or []):
+                    hit = code_to_entry.get(str(code).upper())
+                    if not hit:
+                        continue
+                    created += _upsert_catalyst(store, hit[0], hit[1], _gangtise_catalyst_meta(row, {}))
+
+            # ② 公告（逐标的，A股毫秒时间戳/美股字符串时间戳）
+            for code, (entry_id, ticker) in code_to_entry.items():
+                try:
+                    anns = fetch_announcements(ak, sk, market, ticker, ann_start, ann_end)
+                except GangtiseError as ex:
+                    logger.debug("gangtise 公告取数失败(%s/%s): %s", market, ticker, ex)
+                    continue
+                for row in anns[:10]:  # 每标的至多取近 10 条，避免催化剂表被公告淹没
+                    created += _upsert_catalyst(store, entry_id, ticker, _gangtise_catalyst_meta({}, row))
+
+    if created:
+        logger.info("Gangtise 催化剂补给完成：新增 %d 条", created)
+    return {"created": created}
+
+
+async def job_gangtise_catalyst() -> None:
+    """系统级 job：Gangtise 财报日历+公告催化剂补给。requests 阻塞 → to_thread。"""
+    import asyncio as _asyncio
+    if not _wl_store:
+        return
+    from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+    if not is_global_enabled(_auth_store):
+        logger.info("自动更新全局总开关关闭，跳过 Gangtise 催化剂补给")
+        return
+    await _asyncio.to_thread(_gangtise_catalyst_run)
+
+
+def _upsert_catalyst(store, entry_id: str, ticker: str, meta: tuple) -> int:
+    """按 (title, expected_date, type) 幂等落一条 Gangtise 催化剂；已存在返回 0，新建返回 1。"""
+    title, ctype, expected_date, source_cat = meta
+    if not title:
+        return 0
+    existing = store.get_catalysts_for_entry(entry_id, active_only=True)
+    for c in existing:  # 幂等：同标的下 同标题+同预期日+同类型 视为同一催化剂
+        if c.get("title") == title and (c.get("expected_date") or None) == expected_date \
+                and c.get("catalyst_type") == ctype:
+            return 0
+    store.create_catalyst(
+        entry_id=entry_id, ticker=ticker, title=title, catalyst_type=ctype,
+        description="来源：Gangtise", expected_date=expected_date,
+        impact_level="medium", confidence=6, source_category=source_cat,
+        impact_color="yellow", direction="neutral",
+    )
+    return 1
 
 
 async def job_weekly_strategy(market: str = "us_stock") -> None:
@@ -1425,6 +1590,7 @@ _JOB_SPECS = [
     ("stale_refresh",          job_stale_refresh,       {},                     None,           "interval", "Stale watchlist refresh (safety net)"),
     ("resting_limit_poll",     job_poll_resting_orders, {},                     None,           "interval", "Resting limit-order fill poll"),
     ("mail_ingest_poll",       job_poll_imap,           {},                     None,           "interval", "Forwarded bank-email ingest poll"),
+    ("gangtise_catalyst",      job_gangtise_catalyst,   {},                     None,           "interval", "Gangtise calendar/announcement catalyst feed"),
     ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_CN        , "weekly",   "US full refresh (data+decision)"),
     ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
     ("system_watchdog",        job_system_watchdog,     {},                     _TZ_CN,         "everyday", "System watchdog (silent-failure guard)"),
@@ -1473,6 +1639,7 @@ def list_job_categories() -> dict[str, str]:
         "stale_refresh": "daily_decision",  # 情报/策略 LLM 兜底，随自动决策开关
         "resting_limit_poll": "daily_decision",  # 挂单撮合，随自动决策开关
         "mail_ingest_poll": "",  # 系统级银行邮件轮询，仅受管理员全局总开关
+        "gangtise_catalyst": "",  # 系统级 Gangtise 催化剂补给，仅受管理员全局总开关
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
         "model_capability_refresh": "",
@@ -1516,6 +1683,7 @@ def list_job_labels() -> dict[str, dict]:
         "stale_refresh":       {"label": "陈旧兜底刷新",           "desc": "刷新超过阈值未更新的观察池标的", "tz": "轮询", "freq": "每隔N小时"},
         "resting_limit_poll":  {"label": "挂单撮合轮询",           "desc": "开市时段按限价尝试成交，到期自动取消", "tz": "轮询", "freq": "每小时"},
         "mail_ingest_poll":    {"label": "银行邮件自动解读",       "desc": "拉取转发邮件，附件入库+正文进待确认队列", "tz": "轮询", "freq": "每小时"},
+        "gangtise_catalyst":   {"label": "Gangtise 催化剂补给",    "desc": "财报日历+公告 → 观察池标的催化剂（幂等）", "tz": "轮询", "freq": "每日"},
         "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "system_watchdog":     {"label": "系统守卫巡检",           "desc": "每日巡检周期任务是否静默失败，超期即主动补跑并报告", "tz": "北京", "freq": "每日"},

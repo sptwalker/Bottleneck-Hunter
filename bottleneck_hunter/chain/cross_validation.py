@@ -49,7 +49,7 @@ def _load_prompt(name: str) -> str:
     raise FileNotFoundError(f"Prompt file not found: {path}")
 
 
-def _build_financial_prompt(sc: SupplierScorecard, lang_note: str) -> str:
+def _build_financial_prompt(sc: SupplierScorecard, lang_note: str, evidence: str = "") -> str:
     s = sc.supplier
     return f"""{lang_note}
 
@@ -64,11 +64,11 @@ def _build_financial_prompt(sc: SupplierScorecard, lang_note: str) -> str:
 - 财务健康评分: {sc.financial_health}/10
 - 估值评分: {sc.valuation}/10
 - 综合评分: {sc.overall_score}/10
-
+{_evidence_block(evidence)}
 请基于上述财务信息独立评估。"""
 
 
-def _build_chain_prompt(sc: SupplierScorecard, lang_note: str) -> str:
+def _build_chain_prompt(sc: SupplierScorecard, lang_note: str, evidence: str = "") -> str:
     s = sc.supplier
     return f"""{lang_note}
 
@@ -85,11 +85,11 @@ def _build_chain_prompt(sc: SupplierScorecard, lang_note: str) -> str:
 - 产能状况评分: {sc.capacity_status}/10
 - 优势: {', '.join(sc.strengths)}
 - 风险: {', '.join(sc.weaknesses)}
-
+{_evidence_block(evidence)}
 请基于上述产业链信息独立评估。"""
 
 
-def _build_sentiment_prompt(sc: SupplierScorecard, lang_note: str) -> str:
+def _build_sentiment_prompt(sc: SupplierScorecard, lang_note: str, evidence: str = "") -> str:
     s = sc.supplier
     return f"""{lang_note}
 
@@ -104,11 +104,12 @@ def _build_sentiment_prompt(sc: SupplierScorecard, lang_note: str) -> str:
 - 综合评分: {sc.overall_score}/10
 - 优势: {', '.join(sc.strengths)}
 - 风险: {', '.join(sc.weaknesses)}
-
+{_evidence_block(evidence)}
 请基于上述市场信号和你对该公司的了解独立评估。"""
 
 
-def _build_blind_prompt(sc: SupplierScorecard, lang_note: str) -> str:
+def _build_blind_prompt(sc: SupplierScorecard, lang_note: str, evidence: str = "") -> str:
+    # 盲测视角是对照组：故意不喂外部证据，保持「纯凭已有知识」的独立判断。
     s = sc.supplier
     return f"""{lang_note}
 
@@ -118,6 +119,11 @@ def _build_blind_prompt(sc: SupplierScorecard, lang_note: str) -> str:
 - 市场: {s.market}
 
 请仅基于你对该公司和行业的已有知识独立评估其投资价值。"""
+
+
+def _evidence_block(evidence: str) -> str:
+    """研报/KB 证据块（有则前置换行分隔，无则空——builder 输出与未接入前逐字节一致）。"""
+    return f"\n{evidence}\n" if evidence else ""
 
 
 PERSPECTIVE_BUILDERS = {
@@ -174,6 +180,17 @@ class CrossValidator:
         lang_note = "请用中文回答" if self.language == "zh" else "Answer in English"
         perspectives = self._assign_perspectives(len(llms))
 
+        # 一次召回该标的外部证据（研报+KB），供 financial/chain/sentiment 三视角共用（blind 除外）。
+        # 无 Gangtise 凭据 / 召回失败 → 空串，各 builder 行为与未接入前逐字节一致。
+        from bottleneck_hunter.chain.evidence import gather_evidence
+        s = scorecard.supplier
+        kb_query = f"{s.name} {s.sector} 风险 竞争 瓶颈".strip()
+        try:
+            evidence = await gather_evidence(s.ticker, s.market, kb_query)
+        except Exception:  # noqa: BLE001
+            logger.exception("交叉验证证据召回失败，按无证据处理")
+            evidence = ""
+
         async def _validate_one(
             name: str, llm: BaseChatModel, perspective: str
         ) -> ModelValidation:
@@ -181,7 +198,7 @@ class CrossValidator:
                 perspective, self._perspective_prompts.get("financial", "")
             )
             builder = PERSPECTIVE_BUILDERS.get(perspective, _build_financial_prompt)
-            user_prompt = builder(scorecard, lang_note)
+            user_prompt = builder(scorecard, lang_note, evidence)
 
             try:
                 # 超时/切换归 FallbackChatModel 内部；全部候选超时才抛（下方 except 捕获，按中性处理）。

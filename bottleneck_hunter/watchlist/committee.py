@@ -211,6 +211,7 @@ async def _review_single(
         "sentiment_data": context.get("sentiment_data", "暂无市场情绪数据"),
         "crowding_data": context.get("crowding_data", "暂无持仓集中度数据"),
         "portfolio_risk": context.get("portfolio_risk", "暂无组合风险数据"),
+        "research_evidence": context.get("research_evidence", "暂无券商研报"),
     }
 
     prompt = prompt_template
@@ -723,6 +724,16 @@ async def run_committee_review(
         except Exception as e:
             logger.warning("背景资料聚合失败 %s: %s", ticker, e)
             context.update(_BG_MISSING)  # 显式标注缺失，不沿用上一标的
+
+        # 券商研报预读材料（委员投票有据）：一次召回，4 委员共用。无 Gangtise 凭据→空文本，
+        # 与未接入前逐字节一致。注：研报接口无评级/目标价字段，此处只附研报摘要（诚实标注）。
+        try:
+            from bottleneck_hunter.chain.evidence import gather_evidence
+            ev = await gather_evidence(ticker, market, f"{ticker} 风险 竞争")
+            context["research_evidence"] = ev or "暂无券商研报"
+        except Exception as e:  # noqa: BLE001
+            logger.debug("委员研报召回失败 %s: %s", ticker, e)
+            context["research_evidence"] = "暂无券商研报"
 
         if budget and not budget.can_spend(estimated_tokens=15000):
             yield _sse("committee_error", ticker=ticker, error="预算不足，跳过后续评审")

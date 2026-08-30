@@ -367,7 +367,13 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
             cross_validations=validations,
             top_picks=top_picks,
         )
-        report = generate_report(screening_result, config.language)
+        # AI 一页通叙事（§6.1 增强段落）——默认关，opt-in 才取（agent 调用重、有轮询）
+        extra = ""
+        if getattr(config, "include_narrative", False) and top_picks:
+            # ponytail: 只给首个 top pick 附一页通；要逐仓全附再在此循环，成本自负
+            from bottleneck_hunter.chain.evidence import gather_narrative
+            extra = await gather_narrative(top_picks[0], getattr(config, "market", "") or "a_stock")
+        report = generate_report(screening_result, config.language, extra)
         from bottleneck_hunter.dataflows.store import OUTPUT_DIR as output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")

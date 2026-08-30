@@ -24,6 +24,7 @@ from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.data_provider.hub import (
     CAP_DAILY,
     CAP_EARNINGS,
+    CAP_FINANCIALS,
     CAP_INSIDER,
     CAP_INSTITUTIONAL,
     CAP_NEWS,
@@ -52,6 +53,7 @@ _CAP_LABELS: dict[str, dict] = {
     CAP_QUOTE: {"label": "实时行情", "returns": "现价/涨跌%/币种"},
     CAP_DAILY: {"label": "日线历史", "returns": "近一段日线 K 线"},
     CAP_EARNINGS: {"label": "财报日期与业绩", "returns": "报告期/EPS 实际与预期/营收/指引"},
+    CAP_FINANCIALS: {"label": "财务报表", "returns": "营收/净利(亿)/毛利率/券商一致预期 EPS·PE"},
     CAP_NEWS: {"label": "公司新闻", "returns": "近期标题/情绪"},
     CAP_SEC: {"label": "SEC/公告", "returns": "近期备案/公告摘要"},
     CAP_INSTITUTIONAL: {"label": "机构持仓(13F)", "returns": "季度增减方向/持有机构"},

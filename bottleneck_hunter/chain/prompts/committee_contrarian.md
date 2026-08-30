@@ -25,6 +25,10 @@
 
 {execution_plan}
 
+## 券商研报观点（预读材料）
+
+{research_evidence}
+
 ## 市场情绪数据
 
 {sentiment_data}

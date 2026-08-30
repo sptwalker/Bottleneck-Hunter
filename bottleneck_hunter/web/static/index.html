@@ -2279,6 +2279,38 @@
           </div>
         </div>
 
+        <div class="admin-config-group">
+          <h4>Gangtise 投研数据源</h4>
+          <div class="field-hint" style="margin-bottom:8px">接入 Gangtise 券商级基本面（三大报表 + 一致预期）与催化剂事件。由管理员配置一对 AccessKey / SecretKey。<b>接入</b>打开后仅管理员自己可用；<b>全局共享</b>打开后<b>所有用户</b>的取数都消耗管理员这对 Key 的云端付费额度（默认关闭）。</div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">AccessKey (ak)<small>明文存储，可回显</small></div>
+            <input type="text" class="admin-config-input" id="admin-gts-ak" placeholder="AccessKey" autocomplete="off">
+          </div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">SecretKey (sk)<small>加密存储，留空保持原值</small></div>
+            <input type="password" class="admin-config-input" id="admin-gts-sk" placeholder="••••••" autocomplete="new-password">
+          </div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">接入<small>关=不进候选，等于未装</small></div>
+            <label class="admin-toggle">
+              <input type="checkbox" id="admin-gts-enabled">
+              <span class="admin-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="admin-config-row">
+            <div class="admin-config-label">全局共享<small>开=全体复用管理员 Key 消耗额度</small></div>
+            <label class="admin-toggle">
+              <input type="checkbox" id="admin-gts-shared">
+              <span class="admin-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="admin-cfg-actions">
+            <button class="btn btn-primary btn-sm" id="admin-gts-save">保存 Gangtise</button>
+            <button class="btn btn-sm" id="admin-gts-test">测试连接</button>
+            <span class="admin-cfg-status" id="admin-gts-status"></span>
+          </div>
+        </div>
+
         <div class="admin-cfg-actions">
           <button class="btn btn-primary btn-sm" id="admin-cfg-save">保存配置</button>
           <span class="admin-cfg-status" id="admin-cfg-status"></span>

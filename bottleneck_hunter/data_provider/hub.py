@@ -34,6 +34,16 @@ CAP_OPTIONS = "options"
 CAP_INSIDER = "insider"
 CAP_NOTICE = "notice"
 CAP_SMARTMONEY = "smartmoney"
+# ── Gangtise 六域扩展能力（见 GANGTISE_INTEGRATION_MASTER_PLAN §3）──
+# 语义差异：这些非「按 ticker 取一条」——EDB 传 indicator/market 段、calendar/announce 传市场段、
+# research/kb 传关键词。fetch 签名仍是 (capability, ticker, market, user_id)，ticker 位载多态参数。
+CAP_MACRO_EDB = "macro_edb"     # EDB 宏观指标（L1）
+CAP_CALENDAR = "calendar"       # 财报日历/业绩预告快报（催化剂）
+CAP_ANNOUNCE = "announcement"   # 上市公司公告（催化剂+尽调）
+CAP_RESEARCH = "research"       # 券商研报（中/外资，证据层）
+CAP_KB = "kb"                   # 知识库 RAG 检索
+CAP_NARRATIVE = "narrative"     # AI 研报叙事（agent）
+CAP_SCREEN = "screen"           # 指标选股
 
 _MANAGER_CAPS = {CAP_QUOTE, CAP_DAILY}  # 这两个委托 FetcherManager，不建 hub 层熔断
 
@@ -116,7 +126,9 @@ class DataHub:
         from bottleneck_hunter.data_provider import scheduler
         from bottleneck_hunter.data_provider.data_source_catalog import (
             _CATALOG_BY_ID,
+            GANGTISE_SOURCE_ID,
             resolve_data_source_key,
+            resolve_gangtise_credentials,
         )
         healthy = {}
         for st in self._states.values():
@@ -124,8 +136,13 @@ class DataHub:
             if not p.supports(capability, market) or st.is_circuit_open:
                 continue
             # keyed 源（在数据源目录里）无 key → 不进候选（零网络、零记账）；免费源(akshare/yfinance)恒可用
-            if p.name in _CATALOG_BY_ID and not resolve_data_source_key(p.name, user_id):
-                continue
+            if p.name in _CATALOG_BY_ID:
+                # gangtise 凭据走受控共享解析（admin key + 双开关），非 per-user key，须单独判可用
+                if p.name == GANGTISE_SOURCE_ID:
+                    if not resolve_gangtise_credentials(user_id):
+                        continue
+                elif not resolve_data_source_key(p.name, user_id):
+                    continue
             healthy[p.name] = st
         pairs = [(name, scheduler.cap_prio(st.provider, capability)) for name, st in healthy.items()]
         return [healthy[name] for name in scheduler.order(pairs)]

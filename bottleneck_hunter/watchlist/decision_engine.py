@@ -2121,6 +2121,34 @@ async def run_full_refresh(
 # 数据收集辅助
 # ─────────────────────────────────────────────────────────
 
+async def _inject_edb_macro(store: WatchlistStore, market: str, macro: dict) -> None:
+    """把 Gangtise EDB 官方宏观并入 macro 段并落 macro_snapshot。就地改 macro，凭据缺/未开则空操作。
+
+    EDB 官方口径（如中国官方 PMI、社融同比）优先级高于 yfinance/FRED 兜底，故**覆盖同 key**。
+    落库用 EDB 的真实 as_of 日期，供下游 as-of 标注（防日期臆造）。
+    """
+    try:
+        from bottleneck_hunter.data_provider.hub import CAP_MACRO_EDB, get_hub
+        edb = await get_hub().fetch(CAP_MACRO_EDB, "", market)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("EDB 宏观注入失败: %s", e)
+        return
+    if not edb:
+        return
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for key, v in edb.items():
+        as_of = v.get("as_of") or ""
+        if len(as_of) == 8 and as_of.isdigit():   # EDB yyyymmdd → yyyy-mm-dd（与表内其它源一致）
+            as_of = f"{as_of[:4]}-{as_of[4:6]}-{as_of[6:]}"
+            v["as_of"] = as_of
+        macro[key] = v  # EDB 官方口径覆盖兜底
+        try:
+            store.save_macro_snapshot(key, as_of or now_iso[:10], v["value"], now_iso,
+                                      change_pct=v.get("change_pct", 0.0))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("EDB 宏观落库失败 %s: %s", key, e)
+
+
 async def _collect_market_context(store: WatchlistStore, market: str = "us_stock") -> dict:
     """收集市场宏观数据：真实大盘指数 + 观察池广度聚合，并附带市场类型列表。"""
     from bottleneck_hunter.watchlist.macro_data import MARKET_INDEX_KEYS, fetch_macro_data
@@ -2150,6 +2178,10 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
                                        "change_pct": row.get("change_pct", 0.0) or 0.0,
                                        "label": row["indicator"],
                                        "as_of": row.get("date")}
+
+    # Gangtise EDB 官方宏观（CPI/PPI/利率/PMI/社融）注入 L1——填补 macro 段本土/官方口径薄弱。
+    # 走 hub（享受凭据双开关 + 熔断）；无凭据/未开则空返回，静默跳过不影响既有 macro。
+    await _inject_edb_macro(store, market, macro)
 
     # 真实大盘指数（区别于 VIX/汇率等宏观指标）
     real_indices = {k: macro[k] for k in MARKET_INDEX_KEYS.get(market, ["sp500"]) if k in macro}

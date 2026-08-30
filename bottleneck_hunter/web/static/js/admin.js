@@ -506,6 +506,11 @@ async function loadConfig() {
     bind('admin-imap-poll', pollImapNow);
     await loadMailPending();
     await loadMailLog();
+
+    // Gangtise 投研数据源
+    await loadGangtiseConfig();
+    bind('admin-gts-save', saveGangtiseConfig);
+    bind('admin-gts-test', testGangtise);
   } catch (err) {
     console.error('加载配置失败:', err);
   }
@@ -568,6 +573,51 @@ async function testSmtp() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     setCfgStatus(status, data.message || '测试邮件已发送', true);
+  } catch (err) { setCfgStatus(status, `测试失败: ${err.message}`, false); }
+}
+
+// ── Gangtise 投研数据源 ───────────────────────────────
+
+async function loadGangtiseConfig() {
+  try {
+    const res = await fetch('/api/admin/gangtise-config');
+    if (!res.ok) return;
+    const c = await res.json();
+    const ak = document.getElementById('admin-gts-ak'); if (ak) ak.value = c.ak || '';
+    const sk = document.getElementById('admin-gts-sk'); if (sk) sk.placeholder = c.sk_set ? '已设置（留空保持不变）' : '未设置';
+    const en = document.getElementById('admin-gts-enabled'); if (en) en.checked = !!c.enabled;
+    const sh = document.getElementById('admin-gts-shared'); if (sh) sh.checked = !!c.global_shared;
+  } catch (err) { console.error('加载 Gangtise 配置失败:', err); }
+}
+
+async function saveGangtiseConfig() {
+  const status = document.getElementById('admin-gts-status');
+  const body = {
+    ak: document.getElementById('admin-gts-ak')?.value.trim() || '',
+    enabled: document.getElementById('admin-gts-enabled')?.checked ?? false,
+    global_shared: document.getElementById('admin-gts-shared')?.checked ?? false,
+  };
+  const sk = document.getElementById('admin-gts-sk')?.value || '';
+  if (sk) body.sk = sk;  // 空则不改
+  try {
+    const res = await fetch('/api/admin/gangtise-config', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!res.ok) { let d = `HTTP ${res.status}`; try { d = (await res.json()).detail || d; } catch { /* */ } throw new Error(d); }
+    const skEl = document.getElementById('admin-gts-sk'); if (skEl) skEl.value = '';
+    setCfgStatus(status, '已保存', true);
+    loadGangtiseConfig();
+  } catch (err) { setCfgStatus(status, `保存失败: ${err.message}`, false); }
+}
+
+async function testGangtise() {
+  const status = document.getElementById('admin-gts-status');
+  setCfgStatus(status, '连接中…', true);
+  try {
+    const res = await fetch('/api/admin/gangtise-test', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    setCfgStatus(status, data.message || '连接正常', true);
   } catch (err) { setCfgStatus(status, `测试失败: ${err.message}`, false); }
 }
 

@@ -397,13 +397,36 @@ class SupplierSearcher:
                 return []
             return self._extract_chain_candidates(bottleneck, chain_graph)
 
-        llm_results, akshare_results, chain_results = await asyncio.gather(
-            _llm_source(), _akshare_source(), _chain_source(),
+        async def _gangtise_source():
+            # §6.2 指标选股前置漏斗：仅 A股，板块内「主营含瓶颈词」粗筛（curated 板块表）
+            if self._is_us or self._is_all:
+                return []
+            kw = (keywords[0] if keywords else bottleneck.node_name) or ""
+            try:
+                from bottleneck_hunter.data_provider.hub import CAP_SCREEN, get_hub
+                r = await get_hub().fetch(CAP_SCREEN, kw, "a_stock", "")
+            except Exception:
+                logger.exception("Gangtise 选股异常")
+                return []
+            out: list[SupplierInfo] = []
+            for c in (r or {}).get("candidates") or []:
+                code6 = (c.get("code") or "").split(".")[0].strip()
+                if not code6.isdigit():
+                    continue
+                out.append(SupplierInfo(
+                    name=c.get("name") or code6, ticker=_code_to_ticker(code6),
+                    market=self.market, sector=bottleneck.node_name,
+                    description=f"Gangtise 指标选股：{bottleneck.node_name} 板块主营含「{kw}」",
+                    source="gangtise"))
+            return out
+
+        llm_results, akshare_results, chain_results, gangtise_results = await asyncio.gather(
+            _llm_source(), _akshare_source(), _chain_source(), _gangtise_source(),
         )
 
-        # --- 按 ticker 去重合并（LLM 优先 > chain > akshare）---
+        # --- 按 ticker 去重合并（LLM 优先 > chain > gangtise > akshare）---
         merged: dict[str, SupplierInfo] = {}
-        source_stats = {"llm": 0, "chain": 0, "akshare": 0}
+        source_stats = {"llm": 0, "chain": 0, "gangtise": 0, "akshare": 0}
 
         for supplier in llm_results:
             if supplier.ticker not in merged:
@@ -414,6 +437,11 @@ class SupplierSearcher:
             if supplier.ticker not in merged:
                 merged[supplier.ticker] = supplier
                 source_stats["chain"] += 1
+
+        for supplier in gangtise_results:
+            if supplier.ticker not in merged:
+                merged[supplier.ticker] = supplier
+                source_stats["gangtise"] += 1
 
         for supplier in akshare_results:
             if supplier.ticker not in merged:
@@ -428,6 +456,8 @@ class SupplierSearcher:
             parts.append(f"LLM {source_stats['llm']} 家")
         if source_stats["chain"]:
             parts.append(f"产业链 {source_stats['chain']} 家")
+        if source_stats["gangtise"]:
+            parts.append(f"选股 {source_stats['gangtise']} 家")
         if source_stats["akshare"]:
             parts.append(f"板块 {source_stats['akshare']} 家")
 

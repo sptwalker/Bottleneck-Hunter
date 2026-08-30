@@ -115,6 +115,13 @@ class ConfirmPendingRequest(BaseModel):
     approve: bool = True  # True=确认入账户；False=拒绝
 
 
+class UpdateGangtiseConfigRequest(BaseModel):
+    ak: str | None = Field(default=None, max_length=255)             # AccessKey，明文存 base_url
+    sk: str | None = Field(default=None, max_length=512)             # SecretKey，空/省略=保持原值
+    enabled: bool | None = None                                      # 总开关（接入）
+    global_shared: bool | None = None                                # 全局共享（全体复用 admin key）
+
+
 # ── 用户管理 ──────────────────────────────────────────
 
 @router.get("/users")
@@ -639,6 +646,79 @@ async def confirm_pending(req: ConfirmPendingRequest, user: dict = Depends(_requ
     result = normalize_statement(wl, stmt, source_doc_id="", account_ref=stmt_txn.account_ref)
     _wl_store.mark_pending(req.pending_id, "confirmed")
     return {"ok": True, "status": "confirmed", "n_transactions": result.get("n_transactions", 0)}
+
+
+# ── Gangtise 投研数据源（admin 配置 ak/sk + 双开关：接入 / 全局共享）──────────
+
+def _gangtise_admin_sub() -> str:
+    """当前 admin 用户 id（ak/sk 存 admin 名下）。无 admin → 空串。"""
+    for u in _auth().list_users():
+        if getattr(u, "role", "") == "admin":
+            return u.id
+    return ""
+
+
+@router.get("/gangtise-config")
+async def get_gangtise_config(user: dict = Depends(_require_admin)):
+    """返回 Gangtise 配置：ak 明文回显、sk 仅提示是否已设置、两开关状态。"""
+    from bottleneck_hunter.data_provider.data_source_catalog import (
+        GANGTISE_ENABLED_KEY, GANGTISE_SHARED_KEY, GANGTISE_SOURCE_ID, _config_on,
+    )
+    store = _auth()
+    admin_sub = _gangtise_admin_sub()
+    ak = store.get_data_source_base_url(admin_sub, GANGTISE_SOURCE_ID) if admin_sub else ""
+    enc = store.get_data_source_key_encrypted(admin_sub, GANGTISE_SOURCE_ID) if admin_sub else ""
+    return {
+        "ak": ak or "",
+        "sk_set": bool(enc),
+        "enabled": _config_on(store, GANGTISE_ENABLED_KEY),
+        "global_shared": _config_on(store, GANGTISE_SHARED_KEY),
+        "configured": bool(ak and enc),
+    }
+
+
+@router.patch("/gangtise-config")
+async def update_gangtise_config(req: UpdateGangtiseConfigRequest, user: dict = Depends(_require_admin)):
+    """保存 ak/sk（sk AES 加密）+ 两开关。sk 留空=保持原值；ak 单改不动 sk。"""
+    from bottleneck_hunter.auth.crypto import encrypt
+    from bottleneck_hunter.data_provider.data_source_catalog import (
+        GANGTISE_ENABLED_KEY, GANGTISE_SHARED_KEY, GANGTISE_SOURCE_ID,
+    )
+    store = _auth()
+    admin_sub = _gangtise_admin_sub()
+    if not admin_sub:
+        raise HTTPException(status_code=500, detail="系统无 admin 用户，无法存储 Gangtise 凭据")
+    # save_data_source_key 覆盖式写 base_url+encrypted_key，须先读旧值再合并（ak 单改不清空 sk）
+    if req.ak is not None or req.sk:
+        old_ak = store.get_data_source_base_url(admin_sub, GANGTISE_SOURCE_ID) or ""
+        old_enc = store.get_data_source_key_encrypted(admin_sub, GANGTISE_SOURCE_ID) or ""
+        new_ak = req.ak.strip() if req.ak is not None else old_ak
+        new_enc = encrypt(req.sk) if req.sk else old_enc
+        hint = f"sk:***{req.sk[-4:]}" if req.sk else "sk:(unchanged)"
+        store.save_data_source_key(admin_sub, GANGTISE_SOURCE_ID, new_ak, new_enc, hint)
+    if req.enabled is not None:
+        store.set_config(GANGTISE_ENABLED_KEY, "1" if req.enabled else "0")
+    if req.global_shared is not None:
+        store.set_config(GANGTISE_SHARED_KEY, "1" if req.global_shared else "0")
+    return await get_gangtise_config(user)
+
+
+@router.post("/gangtise-test")
+async def test_gangtise(user: dict = Depends(_require_admin)):
+    """用已保存的 ak/sk 换取 token 验证连通（不打业务接口，只测认证）。"""
+    from bottleneck_hunter.data_provider.data_source_catalog import GANGTISE_SOURCE_ID, probe_source
+    from bottleneck_hunter.auth.crypto import decrypt
+    store = _auth()
+    admin_sub = _gangtise_admin_sub()
+    ak = store.get_data_source_base_url(admin_sub, GANGTISE_SOURCE_ID) if admin_sub else ""
+    enc = store.get_data_source_key_encrypted(admin_sub, GANGTISE_SOURCE_ID) if admin_sub else ""
+    if not ak or not enc:
+        raise HTTPException(status_code=400, detail="请先填写并保存 AccessKey 与 SecretKey")
+    # probe 签名 (key=sk, base_url=ak)：与 _probe_gangtise 一致
+    ok, msg = await asyncio.to_thread(probe_source, GANGTISE_SOURCE_ID, decrypt(enc), ak)
+    if not ok:
+        raise HTTPException(status_code=502, detail=msg)
+    return {"ok": True, "message": msg}
 
 
 # ── 服务器环境测试（临时诊断：探测境外/境内站点连通性 + 代理状态）──────────
