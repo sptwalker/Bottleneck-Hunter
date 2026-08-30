@@ -22,11 +22,18 @@ function assert(cond, msg) {
 globalThis.window = {};
 
 // 可配置的 DOM stub：默认 getElementById 返回可写假元素；测试可临时替换。
+// textContent 赋值映射进 innerHTML（做最小 HTML 转义），使 escDC(用 textContent→innerHTML 转义)在 Node 下可用。
 function makeEl() {
-  return { innerHTML: '', textContent: '', style: {}, className: '', title: '',
-           disabled: false, value: '', appendChild() {}, querySelector() { return null; },
-           querySelectorAll() { return []; }, addEventListener() {}, closest() { return null; },
-           scrollHeight: 0, scrollTop: 0 };
+  const el = { _html: '', style: {}, className: '', title: '',
+    disabled: false, value: '', appendChild() {}, querySelector() { return null; },
+    querySelectorAll() { return []; }, addEventListener() {}, closest() { return null; },
+    scrollHeight: 0, scrollTop: 0 };
+  Object.defineProperty(el, 'innerHTML', { get() { return this._html; }, set(v) { this._html = v; }, enumerable: true });
+  Object.defineProperty(el, 'textContent', {
+    get() { return this._html; },
+    set(v) { this._html = String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); },
+    enumerable: true });
+  return el;
 }
 let _getById = () => null;   // 默认返回 null → 各 render 函数 if(!el) return 早退，不触碰 DOM
 globalThis.document = {
@@ -238,6 +245,70 @@ async function testDividerMarketColor() {
   assert(!cnDiv.className.includes('dc-divider-us'), 'A股：不带美股类');
 }
 
+// ── 测试 G：分割线摘要按市场剔他市专属 + A股本土优先 ──────────
+async function testDividerMarketContent() {
+  console.log('G. 分割线摘要按市场过滤（A股剔美国数据、本土优先；美股保留美国主线）');
+  // macro 段刻意让美国全球项排前（模拟 FRED 先跑的真实插入序），CN 本土项在后
+  const snap = {
+    ts: '2026-08-01T00:00:00',
+    indices: { sse_index: { label: '上证综指', value: 3500, change_pct: 0.6 },
+               csi300: { label: '沪深300', value: 4100, change_pct: 0.4 } },
+    sentiment: { vix: { label: 'VIX 恐慌指数', value: 18, change_pct: -2 },
+                 avg_rsi: 55 },
+    macro: { fed_funds_rate: { label: '美国联邦基金利率(%)', value: 4.5, change_pct: 0 },
+             us_10y_yield: { label: '10Y 美债收益率(%)', value: 4.2, change_pct: 0.01 },
+             dxy: { label: '美元指数', value: 103, change_pct: 0.1 },
+             cn_lpr_1y: { label: '中国1年LPR(%)', value: 3.0, change_pct: 0 },
+             cn_10y_yield: { label: '中债10Y(%)', value: 1.8, change_pct: 0 } },
+    strategy: {},
+  };
+
+  S.dcState.market = 'a_stock';
+  const cn = S._consultDividerEl(snap).innerHTML;
+  assert(!cn.includes('美国联邦基金利率'), 'A股：分割线不含美国联邦基金利率');
+  assert(!cn.includes('美债收益率'), 'A股：分割线不含美债收益率');
+  assert(!cn.includes('VIX'), 'A股：分割线不含 VIX');
+  assert(cn.includes('上证综指') || cn.includes('沪深300'), 'A股：分割线含本土大盘指数');
+  assert(cn.includes('中国1年LPR') || cn.includes('中债10Y'), 'A股：分割线含中国本土宏观（本土优先未被全球项挤出）');
+
+  S.dcState.market = 'us_stock';
+  const us = S._consultDividerEl(snap).innerHTML;
+  assert(us.includes('VIX'), '美股：分割线保留 VIX 情绪');
+  assert(us.includes('美国联邦基金利率') || us.includes('美债收益率'), '美股：分割线保留美国宏观主线');
+}
+
+// ── 测试 H：快照面板宏观段同样按市场过滤/本土优先 ─────────────
+async function testSnapshotPanelMarketContent() {
+  console.log('H. 快照面板宏观段按市场过滤（A股剔美国数据、本土优先）');
+  const snap = {
+    ts: '2026-08-01T00:00:00',
+    indices: { sse_index: { label: '上证综指', value: 3500, change_pct: 0.6 } },
+    sentiment: { vix: { label: 'VIX 恐慌指数', value: 18, change_pct: -2 } },
+    macro: { fed_funds_rate: { label: '美国联邦基金利率(%)', value: 4.5, change_pct: 0 },
+             us_10y_yield: { label: '10Y 美债收益率(%)', value: 4.2, change_pct: 0.01 },
+             cn_lpr_1y: { label: '中国1年LPR(%)', value: 3.0, change_pct: 0 },
+             cn_10y_yield: { label: '中债10Y(%)', value: 1.8, change_pct: 0 } },
+    strategy: {}, sectors: {}, positions: [], news: [],
+  };
+  const panel = makeEl();
+  _getById = (id) => (id === 'dc-consult-snapshot' ? panel : null);
+
+  S.dcState.market = 'a_stock';
+  S.renderConsultSnapshot(snap);
+  const cn = panel.innerHTML;
+  assert(!cn.includes('美国联邦基金利率'), 'A股：快照宏观段不含美国联邦基金利率');
+  assert(!cn.includes('美债收益率'), 'A股：快照宏观段不含美债收益率');
+  assert(!cn.includes('VIX'), 'A股：快照情绪段不含 VIX');
+  assert(cn.includes('中国1年LPR') || cn.includes('中债10Y'), 'A股：快照宏观段含中国本土宏观');
+  assert(cn.includes('上证综指'), 'A股：快照大盘段含本土指数');
+
+  S.dcState.market = 'us_stock';
+  S.renderConsultSnapshot(snap);
+  const usPanel = panel.innerHTML;
+  assert(usPanel.includes('美国联邦基金利率') || usPanel.includes('美债收益率'), '美股：快照宏观段保留美国主线');
+  assert(usPanel.includes('VIX'), '美股：快照情绪段保留 VIX');
+}
+
 console.log('=== 决策中心市场切换隔离自检 ===');
 await testEpochGuardDiscards();
 await testLoadOverviewDoesNotTouchBatchMutex();
@@ -247,6 +318,8 @@ await testAbortConsultStream();
 await testSwitchMarket();
 await testConsultHistoryEpochGuard();
 await testDividerMarketColor();
+await testDividerMarketContent();
+await testSnapshotPanelMarketContent();
 
 console.log('');
 if (failures === 0) { console.log('✅ 全部通过'); process.exit(0); }

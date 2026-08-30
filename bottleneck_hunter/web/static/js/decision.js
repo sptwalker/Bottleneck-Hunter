@@ -1721,6 +1721,39 @@ async function retryConsult(role, round, div) {
 }
 
 // 时效分割抬头：自动更新跨天时插入，标注日期/时间 + 即时核心市场数据，便于识别历史信息时间
+
+// 分割线数据行按市场剔除「他市专属」指标（与后端 macro_data._MARKET_EXCLUSIVE_KEYS 同源），
+// 防 A股 分割线满屏美国数据（联储利率/美债/VIX/失业率…）。历史重放的旧快照亦含 cn_* 键，一并生效。
+const _CN_DOMESTIC_KEYS = new Set([
+  'sse_index', 'csi300', 'cny_usd', 'northbound_flow',
+  'cn_cpi_yoy', 'cn_m2_yoy', 'cn_lpr_1y', 'cn_10y_yield', 'cn_social_financing',
+]);
+const _DIVIDER_FOREIGN_KEYS = {
+  // A股：美国本土/美股专属/联储·美债·美国信用利差·VIX 均属「全球外溢参考」，不进 A股 分割线摘要
+  a_stock: new Set([
+    'fed_funds_rate', 'us_10y_yield', 'yield_curve_2s10s', 'fed_balance_sheet', 'hy_oas',
+    'vix', 'sp500', 'nasdaq', 'unemployment_rate', 'cpi_yoy',
+    'core_cpi_yoy', 'core_services_cpi_yoy', 'core_pce_yoy', 'initial_claims', 'continued_claims',
+  ]),
+  // 美股：中国本土指标不进美股分割线（正常不会出现，防串味兜底）
+  us_stock: new Set([
+    'cny_usd', 'sse_index', 'csi300', 'northbound_flow',
+    'cn_cpi_yoy', 'cn_m2_yoy', 'cn_lpr_1y', 'cn_10y_yield', 'cn_social_financing',
+  ]),
+};
+const _EMPTY_SET = new Set();
+
+// 取某段（indices/sentiment/macro）用于分割线摘要的条目：剔他市专属 + A股本土优先在前。
+function _dividerEntries(obj, market) {
+  const foreign = _DIVIDER_FOREIGN_KEYS[market] || _EMPTY_SET;
+  const domestic = market === 'a_stock' ? _CN_DOMESTIC_KEYS : _EMPTY_SET;
+  const ents = Object.entries(obj || {}).filter(
+    ([k, v]) => k !== 'watchlist_breadth' && !foreign.has(k) && v && typeof v === 'object');
+  // A股 本土宏观（cn_*/北向/汇率/沪深）排前，避免 dxy/原油等全球项抢占前排把本土挤出
+  ents.sort((a, b) => (domestic.has(b[0]) ? 1 : 0) - (domestic.has(a[0]) ? 1 : 0));
+  return ents;
+}
+
 function _consultDividerEl(snap) {
   const div = document.createElement('div');
   // 按市场着色：美股蓝底红边 / A股红底黄边，肉眼即可辨历史属于哪个市场
@@ -1728,13 +1761,11 @@ function _consultDividerEl(snap) {
     : dcState.market === 'us_stock' ? 'dc-divider-us' : '';
   div.className = 'dc-consult-divider' + (mktCls ? ' ' + mktCls : '');
   const when = fmtBJ(snap.ts) || _fmtSnapTs(snap.ts);
-  // 即时核心市场数据：从 indices/sentiment/macro 精简取几项（名称+值+涨跌）
+  // 即时核心市场数据：从 indices/sentiment/macro 精简取几项（名称+值+涨跌），按市场剔他市专属
   const pick = [];
-  const take = (obj, n) => Object.entries(obj || {})
-    .filter(([k]) => k !== 'watchlist_breadth')
+  const take = (obj, n) => _dividerEntries(obj, dcState.market)
     .slice(0, n)
     .forEach(([k, v]) => {
-      if (!v || typeof v !== 'object') return;
       const label = v.label || k;
       const val = v.value != null ? v.value : '';
       const chg = v.change_pct != null ? `${v.change_pct > 0 ? '+' : ''}${v.change_pct}%` : '';
@@ -1778,8 +1809,8 @@ function appendConsultBubble(m) {
 function renderConsultSnapshot(snap) {
   const el = document.getElementById('dc-consult-snapshot');
   if (!el || !snap) return;
-  const fmtInd = (obj) => Object.entries(obj || {})
-    .filter(([k]) => k !== 'watchlist_breadth')
+  // 与分割线同源：A股 剔美国「全球外溢参考」项 + 本土优先，使快照宏观/情绪段以本土为主（保留全部条目，不截断）。
+  const fmtInd = (obj) => _dividerEntries(obj, dcState.market)
     .map(([k, v]) => {
       const label = (v && v.label) || k;
       const val = v && v.value != null ? v.value : '';
@@ -2924,5 +2955,5 @@ export const __test__ = {
   dcState, dcConsult,
   loadOverview, resetConsultContext, abortConsultStream, switchMarket,
   consultStream, setConsultSending, openConsultDrawer, closeConsultDrawer,
-  _consultDividerEl,
+  _consultDividerEl, renderConsultSnapshot,
 };

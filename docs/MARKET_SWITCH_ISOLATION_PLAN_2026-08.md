@@ -105,3 +105,10 @@ loadOverview();
 - **D（次要）**：`#dc-consult-focus` 聚焦个股下拉切换后残留旧市场票。**修复**：`resetConsultContext` 复位下拉为占位；新增 Test B 断言并经变异测试确认真实覆盖。
 
 审查其余项（B/C/E/F）经复核为无问题。全部修复后再跑全量 pytest：1493 passed / 4 skipped，零回归。
+
+## 9. 后续增强（2026-08-24）
+
+- **分割线着色**：美股蓝底红边（`dc-divider-us`）/ A股红底黄边（`dc-divider-cn`），切换后跟随市场变色，一眼辨历史属于哪个市场。
+- **分割线摘要按市场过滤**：A股 分割线原满屏美国数据（联储利率/美债/VIX），根因是 `_consultDividerEl` 盲取 macro/sentiment 前两项，而 A股 快照里全球 FRED 项（FRED 先跑）排在 `cn_*` 本土项之前。修复：新增 `_dividerEntries(obj, market)`，按市场剔「他市专属」键（与后端 `macro_data._MARKET_EXCLUSIVE_KEYS` 同源）+ A股 本土项优先排前，使 A股 分割线显示上证/沪深300/LPR/中债10Y 等本土信息。历史重放的旧快照已含 `cn_*` 键，一并生效。
+- 自检新增 Test F（着色）/ Test G（分割线按市场过滤）/ Test H（快照面板按市场过滤），共 45 断言全绿；均经变异测试证明非恒真。
+- **快照面板宏观/情绪段**同样复用 `_dividerEntries` 做按市场过滤 + 本土优先（`renderConsultSnapshot.fmtInd`），保留全部条目不截断——A股 顶部快照的大盘/情绪/宏观三段也以本土为主、剔美国外溢参考项。
