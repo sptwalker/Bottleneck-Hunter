@@ -63,7 +63,7 @@ _CAP_LABELS: dict[str, dict] = {
     CAP_INSIDER: {"label": "内部人交易", "returns": "内部人买卖动向"},
     CAP_NOTICE: {"label": "交易所公告", "returns": "近期公告"},
     CAP_SMARTMONEY: {"label": "聪明钱聚合", "returns": "内部人+机构+期权综合信号"},
-    CAP_RESEARCH: {"label": "券商研报", "returns": "中/外资研报标题/评级/目标价/摘要（Gangtise）"},
+    CAP_RESEARCH: {"label": "券商研报", "returns": "近月中/外资研报标题+摘要要点+券商/分析师/日期/深度标签（取最近3篇，Gangtise）"},
     CAP_VALUATION: {"label": "估值分位", "returns": "PE/PB/PEG 近3年窗内分位（仅A股，Gangtise）"},
 }
 

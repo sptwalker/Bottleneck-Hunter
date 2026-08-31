@@ -788,7 +788,7 @@ class GangtiseProvider:
     _RESEARCH_LOOKBACK_DAYS = 28
 
     def _fetch_research_sync(self, ak, sk, ticker, market) -> dict | None:
-        """券商研报证据：近 28 日该标的深度/业绩点评研报（按发布日降序，取前 5）。
+        """券商研报证据：近 28 日该标的深度/业绩点评研报（按发布日降序，取最近 3 篇）。
 
         美股走外资 foreign-report、A股走中资 broker-report。llm_tag 先筛深度/点评；
         若无（长尾标的无深度研报）则退回不加标签取全部，避免空手。
@@ -810,7 +810,21 @@ class GangtiseProvider:
         if not reports:
             return None
         reports.sort(key=lambda r: r.get("publish_date", ""), reverse=True)
-        return {"reports": reports[:5]}
+        # 精简回注：单篇 brief 实测达 1~2.6k 字，5 篇 JSON≈9.8k，远超协商环 _RESULT_CHARS(1200)
+        # 硬截断 → 模型只读到半篇首报。故每篇仅留「标题+摘要头+券商/分析师/日期/深度标签」，
+        # 摘要裁到 180 字（保留结论句），取最近 3 篇 → 两市（含美股长中文标题）JSON 均确定性 <1200 完整落入。
+        lean = []
+        for r in reports[:3]:
+            brief = r.get("brief_zh") or r.get("brief") or ""   # 外资优先中文译摘要
+            lean.append({
+                "title": r.get("title_zh") or r.get("title") or "",
+                "brief": brief[:180] + ("…" if len(brief) > 180 else ""),
+                "broker": r.get("broker", ""),
+                "analyst": r.get("analyst", ""),
+                "date": r.get("publish_date", ""),
+                "tags": r.get("llm_tags", []),
+            })
+        return {"reports": lean}
 
     def _fetch_kb_sync(self, ak, sk, query) -> dict | None:
         """知识库 RAG：以 ticker 槽承载的语义 query 检索片段（取回 6 片段）。"""
