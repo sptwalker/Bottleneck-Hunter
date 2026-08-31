@@ -972,8 +972,22 @@ async def generate_account_advisory(wl_store, *, account_ref: str = "", user_id:
         derivatives=inputs["deriv_text"], coverage=inputs["coverage_text"],
         experience_cards=_render_experience_cards(prior_cards),
         evidence=evidence_text)
-    resp = await llm.ainvoke(prompt)
-    draft = _validate_draft(getattr(resp, "content", resp) if not isinstance(resp, str) else resp)
+    # §9.3 推理期主动补数据：草案模型可发 [[DATA_REQ]] 经 DataHub 实时取数回注（研报/估值分位/财务→Gangtise 优先），
+    # 至多 2 轮 8 次；可查范围仅限本账户持仓。数据链异常 → 降级为无补数据单趟（建议照常产出，与本文件其它缺省降级同风格）。
+    holdings_tickers = [h.get("ticker") for h in dossier.get("holdings", []) if h.get("ticker")]
+    adv_market = getattr(wl_store, "_market", "") or ""
+
+    async def _ask(p):
+        r = await llm.ainvoke(p)
+        return getattr(r, "content", r) if not isinstance(r, str) else r
+
+    try:
+        from bottleneck_hunter.data_provider import ai_tools
+        draft_text, _fetch_log, _ = await ai_tools.negotiate(
+            _ask, prompt, market=adv_market, user_id=user_id, allowed_tickers=holdings_tickers)
+    except Exception:  # noqa: BLE001  协商环/取数异常绝不阻断建议生成
+        draft_text = await _ask(prompt)
+    draft = _validate_draft(draft_text)
     if not draft["holdings"]:
         return {"error": "草案生成失败或未返回持仓建议，请重试"}
 

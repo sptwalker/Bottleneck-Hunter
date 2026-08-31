@@ -782,17 +782,24 @@ class GangtiseProvider:
         raw = gc.fetch_valuation(ak, sk, ticker, market)
         return _map_gangtise_valuation(raw)
 
+    # 研报端点保留窗：broker-report/foreign-report 的 getList 仅服务「距 now 约 30 天内」的发布，
+    # 越限即 code:110003 TIME_RANGE_EXCEEDED（实测 start=今日-30 OK、今日-31 报错；与 endTime 无关，
+    # 是相对 now 的保留限而非跨度限）。取 28 天留 2 天余量（_format_time_range_ms 会把 end 外扩 1 天）。
+    _RESEARCH_LOOKBACK_DAYS = 28
+
     def _fetch_research_sync(self, ak, sk, ticker, market) -> dict | None:
-        """券商研报证据：近 180 日该标的深度/业绩点评研报（按发布日降序，取前 5）。
+        """券商研报证据：近 28 日该标的深度/业绩点评研报（按发布日降序，取前 5）。
 
         美股走外资 foreign-report、A股走中资 broker-report。llm_tag 先筛深度/点评；
         若无（长尾标的无深度研报）则退回不加标签取全部，避免空手。
+        窗口受端点保留限约束（见 _RESEARCH_LOOKBACK_DAYS），故只取最近数周研报——
+        对 AI 分析师/顾问而言，近月研报本就是决策最相关的部分。
         """
         from datetime import date, timedelta
 
         from bottleneck_hunter.data_provider import gangtise_client as gc
         today = date.today()
-        start = (today - timedelta(days=180)).strftime("%Y-%m-%d")
+        start = (today - timedelta(days=self._RESEARCH_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
         end = today.strftime("%Y-%m-%d")
         foreign = market == "us_stock"
         code = gc._resolve_gts_code(ak, sk, ticker, market)

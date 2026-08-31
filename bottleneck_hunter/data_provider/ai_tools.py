@@ -31,8 +31,10 @@ from bottleneck_hunter.data_provider.hub import (
     CAP_NOTICE,
     CAP_OPTIONS,
     CAP_QUOTE,
+    CAP_RESEARCH,
     CAP_SEC,
     CAP_SMARTMONEY,
+    CAP_VALUATION,
     get_hub,
 )
 from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
@@ -61,6 +63,8 @@ _CAP_LABELS: dict[str, dict] = {
     CAP_INSIDER: {"label": "内部人交易", "returns": "内部人买卖动向"},
     CAP_NOTICE: {"label": "交易所公告", "returns": "近期公告"},
     CAP_SMARTMONEY: {"label": "聪明钱聚合", "returns": "内部人+机构+期权综合信号"},
+    CAP_RESEARCH: {"label": "券商研报", "returns": "中/外资研报标题/评级/目标价/摘要（Gangtise）"},
+    CAP_VALUATION: {"label": "估值分位", "returns": "PE/PB/PEG 近3年窗内分位（仅A股，Gangtise）"},
 }
 
 _REQ_RE = re.compile(r"\[\[DATA_REQ\]\](.*?)\[\[/DATA_REQ\]\]", re.DOTALL)
@@ -80,7 +84,7 @@ def build_manifest(market: str, user_id: str = "") -> list[dict]:
     out = []
     for cap in sorted(avail):
         meta = _CAP_LABELS.get(cap)
-        if not meta:  # 未收录标签的能力（如预留 financials）不暴露给模型
+        if not meta:  # 未收录标签的能力不暴露给模型（如 macro_edb 非逐标的、kb 关键词检索，均不走逐标的 DATA_REQ）
             continue
         out.append({"capability": cap, "label": meta["label"], "returns": meta["returns"]})
     return out
