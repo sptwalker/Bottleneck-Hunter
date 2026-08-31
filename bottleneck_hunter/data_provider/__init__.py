@@ -32,6 +32,15 @@ def get_fetcher_manager() -> FetcherManager:
 def _create_manager() -> FetcherManager:
     manager = FetcherManager()
 
+    # Gangtise 行情（priority=-1，严格最高档，A股+美股统一）：admin 共享 key、境内可达、官方口径、
+    # 免费不限流，优先于 efinance/yfinance；无凭据时 fetcher 自返 None（等效未注册，但授权后即生效）。
+    # 无 _installed() 门：requests-only 无包依赖。故障熔断 60s 自动降级到下方免费源。
+    try:
+        from bottleneck_hunter.data_provider.fetchers.gangtise_fetcher import GangtiseFetcher
+        manager.register(GangtiseFetcher())
+    except ImportError:
+        logger.info("gangtise fetcher 导入失败，跳过行情最高优先层")
+
     # A股：efinance (priority=0) > akshare (1) > pytdx (2)
     if _installed("efinance"):
         from bottleneck_hunter.data_provider.fetchers.efinance_fetcher import EfinanceFetcher

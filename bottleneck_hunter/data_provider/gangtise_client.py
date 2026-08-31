@@ -62,6 +62,16 @@ _SECURITIES_SEARCH_URL = f"{_REFERENCE}/securities/search"
 #     beta=0」的根因：旧码只接了统一端点，误判为「Gangtise 无 US/HK 指数」，实为端点路由缺失。
 _QUOTE_DAILY_URL = f"{_BASE}/open-quote/kline/daily"
 _QUOTE_INDEX_DAILY_URL = f"{_BASE}/open-quote/index/kline/daily"
+# 实时快照（FetcherManager 行情路径用）：POST {fieldList: SNAP_FIELD_LIST, securityList:[...]}。
+# 端点/字段照抄 skill quote.py（QUOTE_REALTIME_URL + SNAP_FIELD_LIST），响应同为 data.fieldList+data.list 二维表。
+_QUOTE_REALTIME_URL = f"{_BASE}/open-quote/quote/realtime"
+# 日 K 完整字段（OHLCV+amount，照抄 skill quote.py _FIELD_LIST）——fetch_quote_history 只取 close，
+# fetch_ohlcv_daily 取全字段供 FetcherManager；amount 必须透传（clean_ohlc A股量能反推「手/股」依赖它）。
+_OHLCV_FIELDS = ["securityCode", "tradeDate", "open", "high", "low", "close",
+                 "preClose", "change", "pctChange", "volume", "amount"]
+# 实时快照字段（照抄 skill quote.py SNAP_FIELD_LIST）——latestPrice=最新价、pctChange=涨跌幅。
+SNAP_FIELD_LIST = ["securityCode", "exchange", "tradeDate", "tradeTime", "latestPrice",
+                   "open", "high", "low", "preClose", "change", "pctChange", "volume", "amount", "amplitude"]
 # 估值分析（open-fundamental/valuation-analysis，免费）：按 indicator 取时间序列 value + 窗内分位。
 # 实测（2026-08）：仅 A股返回数据，美股/港股/指数一律 code=120001（无覆盖）——故 fetch_valuation
 # 只对 A股有意义，provider.supports 相应只认领 a_stock，不假装全市场。
@@ -710,6 +720,135 @@ def fetch_quote_history(ak: str, sk: str, securities, start: str, end: str,
     return _parse_quote_body(resp.json())
 
 
+# ── 行情/日K OHLCV + 实时快照（FetcherManager 路径，master plan 未覆盖的第二条 dispatch）──────
+# fetch_quote_history 保持 close-only（VIP beta 消费者依赖），以下为**加法式**扩展：取全 OHLCV+amount。
+
+
+def _parse_ohlcv_body(body: dict) -> list[dict]:
+    """解析 kline/daily 二维表 → [{date,open,high,low,close,volume,amount}...]（升序）。
+
+    严格码 000000 且 status is not False；缺 tradeDate/OHLC 任一列 → []；单行任一价格非数 → 跳过。
+    volume/amount 缺失 → 0.0（下游 clean_ohlc 用 amount 反推 A股量能单位，故必须带出）。
+    """
+    if not body or str(body.get("code", "")) != "000000" or body.get("status") is False:
+        return []
+    block = body.get("data") or {}
+    fields = block.get("fieldList") or []
+    rows = block.get("list") or []
+    if not fields or not rows:
+        return []
+    idx = {name: i for i, name in enumerate(fields)}
+    if any(k not in idx for k in ("tradeDate", "open", "high", "low", "close")):
+        return []
+
+    def _num(row, name):
+        i = idx.get(name)
+        if i is None or i >= len(row):
+            return None
+        try:
+            return float(row[i])
+        except (ValueError, TypeError):
+            return None
+
+    out = []
+    i_d = idx["tradeDate"]
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or i_d >= len(row):
+            continue
+        d = str(row[i_d] or "").strip()[:10]
+        o, h, low_, c = _num(row, "open"), _num(row, "high"), _num(row, "low"), _num(row, "close")
+        if not d or None in (o, h, low_, c):
+            continue
+        out.append({
+            "date": d, "open": o, "high": h, "low": low_, "close": c,
+            "volume": _num(row, "volume") or 0.0,
+            "amount": _num(row, "amount") or 0.0,
+        })
+    out.sort(key=lambda r: r["date"])  # kline/daily 已升序；显式排序保证确定性
+    return out
+
+
+def fetch_ohlcv_daily(ak: str, sk: str, ticker: str, market: str, days: int = 180) -> list[dict]:
+    """取日频 OHLCV（含 amount）供 FetcherManager 行情路径。个股统一走 `kline/daily`。
+
+    A股 6位直通、美股经 securities/search 解析 .O/.N（`_resolve_gts_code`）。窗口按 days 放宽
+    （交易日≈日历日×5/7，取 ×1.6+15 缓冲确保覆盖 days 根 bar，下游 tail 截取）。空/错误码 → []。
+    """
+    code = _resolve_gts_code(ak, sk, ticker, market)
+    days = max(int(days), 1)
+    span = int(days * 1.6) + 15
+    end = date.today()
+    start = end - timedelta(days=span)
+    payload = {
+        "securityList": [code],
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "limit": max(days * 2, 500),
+        "fieldList": list(_OHLCV_FIELDS),
+    }
+    resp = requests.post(_QUOTE_DAILY_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        raise GangtiseError(f"ohlcv HTTP {resp.status_code}")
+    return _parse_ohlcv_body(resp.json())
+
+
+def _parse_realtime_body(body: dict) -> list[dict]:
+    """解析实时快照二维表（data.fieldList+data.list）→ 逐行 dict（原始英文键→原值）。严格码。"""
+    if not body or str(body.get("code", "")) != "000000" or body.get("status") is False:
+        return []
+    block = body.get("data") or {}
+    fields = block.get("fieldList") or []
+    rows = block.get("list") or []
+    if not fields or not rows:
+        return []
+    out = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            continue
+        n = min(len(fields), len(row))
+        if n:
+            out.append({fields[i]: row[i] for i in range(n)})
+    return out
+
+
+def fetch_realtime_quote(ak: str, sk: str, ticker: str, market: str) -> dict | None:
+    """取单只实时快照（latestPrice/pctChange/volume/amount/OHLC）→ 规范 dict 或 None。
+
+    A股 6位直通、美股经 securities/search 解析码。取匹配 securityCode 的行（无匹配退首行）；
+    latestPrice 为空/0 → None（未开市/无效行情）。失败抛 GangtiseError 交熔断。
+    """
+    code = _resolve_gts_code(ak, sk, ticker, market)
+    payload = {"fieldList": list(SNAP_FIELD_LIST), "securityList": [code]}
+    resp = requests.post(_QUOTE_REALTIME_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        raise GangtiseError(f"realtime HTTP {resp.status_code}")
+    rows = _parse_realtime_body(resp.json())
+    if not rows:
+        return None
+    up = code.upper()
+    snap = next((r for r in rows if str(r.get("securityCode", "")).upper() == up), rows[0])
+
+    def _f(k):
+        try:
+            return float(snap.get(k))
+        except (ValueError, TypeError):
+            return None
+
+    price = _f("latestPrice")
+    if not price:
+        return None
+    return {
+        "security_code": code,
+        "price": price,
+        "change_pct": _f("pctChange") or 0.0,
+        "volume": _f("volume") or 0.0,
+        "amount": _f("amount") or 0.0,
+        "open": _f("open"), "high": _f("high"), "low": _f("low"),
+        "pre_close": _f("preClose"),
+        "trade_date": str(snap.get("tradeDate") or "").strip()[:10],
+    }
+
+
 def _parse_valuation_body(body: dict) -> tuple[float | None, float | None, str]:
     """解析 valuation-analysis 单指标 body → (latest_value, latest_percentile, as_of_date)。
 
@@ -1046,6 +1185,35 @@ def _demo() -> None:
     assert q["NDX"][0][1] == 19000.0, q
     assert _parse_quote_body({"code": "000000", "status": False}) == {}     # status False → 空
     assert _parse_quote_body({"code": "000000", "data": {"fieldList": ["x"], "list": [["1"]]}}) == {}  # 缺列 → 空
+
+    # ②j-1 OHLCV 解析：全字段二维表 → [{date,ohlcv,amount}]，str→float，缺 OHLC/日期行跳过，升序
+    ob = {"code": "000000", "data": {
+        "fieldList": _OHLCV_FIELDS,
+        "list": [["600519.SH", "2026-08-29", "1500", "1520", "1495", "1512", "1490", "22", "1.48",
+                  "3.1e4", "4.6e7"],
+                 ["600519.SH", "2026-08-28", "1490", "1505", "1485", "1500", "1480", "20", "1.35",
+                  "2.9e4", "4.3e7"]]}}
+    ohlcv = _parse_ohlcv_body(ob)
+    assert len(ohlcv) == 2 and ohlcv[0]["date"] == "2026-08-28", ohlcv          # 升序：28 在前
+    assert ohlcv[1]["close"] == 1512.0 and ohlcv[1]["amount"] == 4.6e7, ohlcv    # amount 透传
+    assert ohlcv[0]["volume"] == 2.9e4, ohlcv
+    bad_ob = {"code": "000000", "data": {"fieldList": ["tradeDate", "open", "high", "low", "close"],
+              "list": [["2026-08-28", "10", "", "9", "9.5"]]}}                    # high 空 → 该行跳过
+    assert _parse_ohlcv_body(bad_ob) == [], _parse_ohlcv_body(bad_ob)
+    assert _parse_ohlcv_body({"code": "120001"}) == []                           # 错误码 → 空
+    assert _parse_ohlcv_body({"code": "000000", "data": {
+        "fieldList": ["tradeDate", "close"], "list": [["2026-08-28", "9.5"]]}}) == []  # 缺 OHLC 列 → 空
+
+    # ②j-2 实时快照解析：SNAP 二维表 → 逐行 dict；取匹配码行
+    rtb = {"code": "000000", "status": True, "data": {
+        "fieldList": SNAP_FIELD_LIST,
+        "list": [["AAPL.O", "NASDAQ", "2026-08-31", "16:00", "232.5", "230.0", "233.0", "229.5",
+                  "231.0", "1.5", "0.65", "5.2e7", "1.2e10", "1.52"]]}}
+    rrows = _parse_realtime_body(rtb)
+    assert len(rrows) == 1 and rrows[0]["latestPrice"] == "232.5", rrows
+    assert rrows[0]["securityCode"] == "AAPL.O" and rrows[0]["pctChange"] == "0.65", rrows
+    assert _parse_realtime_body({"code": "000000", "status": False}) == []       # status False → 空
+    assert _parse_realtime_body({"code": "999"}) == []
 
     # ②k 证券码：美股已带 .O/.N 后缀原样（不联网）；A股走纯映射
     assert _resolve_gts_code("ak", "sk", "AAPL.O", "us_stock") == "AAPL.O"
