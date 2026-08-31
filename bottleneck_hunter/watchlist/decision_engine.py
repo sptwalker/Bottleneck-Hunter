@@ -2121,12 +2121,66 @@ async def run_full_refresh(
 # 数据收集辅助
 # ─────────────────────────────────────────────────────────
 
+# EDB 宏观按付费计分（30 积分/指标/次；美股 7 项=210、A股 4 项=120）。指标为月频（联邦基金
+# 日频但按 FOMC 步进），L1 每轮重取必得同值 → 纯烧分。故设「重取节流窗」：窗内直接复用
+# macro_snapshots 缓存值注入，只在窗外才真打 EDB。25 天覆盖一个月频发布周期，省 ~95% 积分。
+_EDB_REFRESH_DAYS = 25
+
+
+def _edb_cache_fresh(store: WatchlistStore, market: str) -> dict | None:
+    """若本市场 EDB 指标缓存仍在节流窗内，返回可直接注入的 {key:{value,change_pct,label,as_of}}；
+    否则返回 None（表示需真打 EDB）。凭 macro_snapshots.fetched_at 的**批次新鲜度**判定：缓存全空
+    或最近批次超窗即真取；窗内则复用已落库指标（永久无覆盖的指标交下游兜底，不因其而反复付费）。
+    """
+    from bottleneck_hunter.data_provider.gangtise_edb_indicators import indicators_for_market
+    want = indicators_for_market(market)  # {key: (fid, label, scope, transform)}
+    if not want:
+        return None
+    try:
+        rows = {r["indicator"]: r for r in store.get_latest_macro_snapshots()}
+    except Exception:  # noqa: BLE001
+        return None
+    cached = {k: rows[k] for k in want if k in rows}
+    if not cached:
+        return None  # 全空（首取）→ 需真打
+    # 节流信号取「批次新鲜度」而非「全指标齐备」：EDB 同批取数共享 fetched_at；若某指标为 Gangtise
+    # 永久无覆盖，苛求齐备会令节流永不生效、每轮重复付费（US 210/CN 120 分）却拿不到那条 → 成本泄漏。
+    # 故只要最近一次批次取数在窗内，即复用；缺失键交下游 yfinance/FRED 兜底，不因其永缺而反复付费。
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_EDB_REFRESH_DAYS)
+
+    def _parse_ts(v: str):
+        try:
+            t = datetime.fromisoformat(v or "")
+            return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t
+        except (ValueError, TypeError):
+            return None
+
+    ts_list = [_parse_ts(row.get("fetched_at")) for row in cached.values()]
+    newest = max((t for t in ts_list if t is not None), default=None)
+    if newest is None or newest < cutoff:
+        return None  # 批次超窗 or 时间戳全不可解析 → 保守真取
+    out: dict = {}
+    for key, row in cached.items():
+        out[key] = {"value": row.get("value"), "change_pct": row.get("change_pct", 0.0) or 0.0,
+                    "label": want[key][1], "as_of": row.get("date")}
+    return out
+
+
 async def _inject_edb_macro(store: WatchlistStore, market: str, macro: dict) -> None:
     """把 Gangtise EDB 官方宏观并入 macro 段并落 macro_snapshot。就地改 macro，凭据缺/未开则空操作。
 
     EDB 官方口径（如中国官方 PMI、社融同比）优先级高于 yfinance/FRED 兜底，故**覆盖同 key**。
     落库用 EDB 的真实 as_of 日期，供下游 as-of 标注（防日期臆造）。
+
+    付费节流：EDB 计分 30/指标/次，指标月频。窗（_EDB_REFRESH_DAYS）内复用缓存注入、不打接口；
+    仅窗外真取。既省积分又保 L1 宏观段仍有本土/官方口径读数。
     """
+    fresh = _edb_cache_fresh(store, market)
+    if fresh is not None:
+        for key, v in fresh.items():
+            macro[key] = v  # 缓存复用：同样覆盖 yfinance/FRED 兜底口径
+        logger.debug("EDB 宏观命中节流窗(%s)，复用缓存 %d 项，跳过计费取数", market, len(fresh))
+        return
     try:
         from bottleneck_hunter.data_provider.hub import CAP_MACRO_EDB, get_hub
         edb = await get_hub().fetch(CAP_MACRO_EDB, "", market)

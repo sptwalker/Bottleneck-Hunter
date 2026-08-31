@@ -123,9 +123,19 @@ Gangtise 不是「A股财务数据源」，而是一整套**覆盖 A股/港股/�
 ### 3.4 硬边界（诚实标注）
 
 - **美股一致预期不可得**（接口 A股-only）—— 美股 `consensus_eps/pe` 须走其他源或留空，不可假装有。
+- **估值分位 / A股资金流仅 A股覆盖**（实测美股/港股/指数 `code=120001`）—— `CAP_VALUATION` 与 `fetch_fund_flow` 只对 a_stock 有意义，provider `supports` 相应只认领 a_stock，不假装全市场。
 - **指标选股板块体系目前是 A股** —— 美股选股不走此路。
 - **private vault 未验证** —— 未探测即不宣称可用。
-- 所有 amount 刻度按「原始=元」假设，量级校准点在 [`_map_gangtise_financials`](../bottleneck_hunter/data_provider/providers.py#L646) 的 `1e-8`。
+- 所有 amount 刻度按「原始=元」假设，量级校准点在 [`_map_gangtise_financials`](../bottleneck_hunter/data_provider/providers.py#L652) 的 `1e-8`（二期实测三市场量级均成立）。
+
+#### 3.4.1 二期活体证伪的两条「伪硬边界」（端点路由缺失被误判为能力缺失）
+
+| 旧误判 | 实测真相（2026-08） | 修法 |
+|---|---|---|
+| 「US/HK 指数 kline 一律 400，Gangtise 无 US/HK 基准」→ portfolio_beta 恒 0 | 统一 `kline/daily` 对**指数**返 0 行，指数须走 `index/kline/daily`；`SPX.SPI/IXIC.O/HSI.HI/000300.SH` 均取到真实收盘 | `fetch_quote_history(..., is_index=True)` + `_GTS_BENCHMARK_CODE` 扩四市场 |
+| 「美股财务只能 FMP」 | 旧码对所有市场都打 A股 `income-statement/accumulated` 端点 → 美股打错端点返 0 行；US/HK 各有专用端点 | `_INCOME_URL_BY_MARKET` 按市场路由（accumulated/us/hk） |
+
+> 教训：**「取不到」先分「端点/参数错」还是「真无覆盖」**——个股走统一 `kline/daily`、指数走 `index/kline/daily`、财务三市场三端点。真无覆盖（如估值/资金流的美港）才诚实缺省。
 
 ---
 
@@ -139,6 +149,10 @@ Gangtise 不是「A股财务数据源」，而是一整套**覆盖 A股/港股/�
 | EDB | `indicatorIdList` | 不是 `indicators`(否则100003) |
 | 财报日历 | `marketList:["aShares"/"hkStocks"/"usChinaConcept"/"usStocks"]` | 传 `cn` 报 100005 |
 | 美股码制 | gtsCode `AAPL.O` / `NVDA.N` | 不是 `.US`(返回0行)；经 securities/search 解析 |
+| 行情指数 | `open-quote/index/kline/daily`（**指数专用**） | 指数走统一 `kline/daily` 返 0 行；个股才走统一端点 |
+| 财务三市场 | A股 `.../accumulated` · 美股 `.../us` · 港股 `.../hk` | 打错端点返 0 行（旧「美股只能FMP」根因）；净利归母 A/港 `netProfitAttrParent`、美 `netProfitParent` |
+| 估值分位 | `valuation-analysis` + `indicator:peTtm/pbMrq/peg` | 单指标单请求；`percentileRank` 0~100；**A股-only**(120001) |
+| A股资金流 | `open-quote/fund-flow/daily` + `securityList` | 单位**元**；`mainNetInflow`=大+特大单净流入；**A股-only** |
 | agent | URL `open-ai/agent/{subpath}` + `securityCode` | earnings-review/viewpoint 需 getId→轮询 getContent≤600s |
 | screener | 需先 sector-search + indicator-search 补参 | 裸 payload 缺条件报 100001 |
 

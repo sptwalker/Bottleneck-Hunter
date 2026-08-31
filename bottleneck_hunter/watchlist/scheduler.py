@@ -228,21 +228,29 @@ def _oplog(uid: str, title: str, *, market: str = "", detail: str = "已完成",
         pass
 
 
-# A股基准 yfinance 码 → Gangtise kline 码（实测仅 A股指数可取）。
-# US/HK 基准 Gangtise kline 一律 400（硬边界，见 §10），不列入，故永不走 Gangtise 兜底。
-_GTS_BENCHMARK_CODE: dict[str, str] = {"000300.SS": "000300.SH"}
+# 基准 yfinance 码 → Gangtise 指数 gtsCode。生产机房 yfinance/akshare 被墙时，靠此表走 Gangtise
+# `index/kline/daily` 兜底基准历史，根治 US/HK portfolio_beta 恒 0。
+# 全部 gtsCode 经 securities/search + index 端点**活体实测**取到真实收盘（2026-08）：
+#   ^GSPC→SPX.SPI(标普500)、^IXIC→IXIC.O(纳指综合)、000300.SS→000300.SH(沪深300)、^HSI→HSI.HI(恒指)。
+# 旧注释「US/HK 指数一律 400」为误判——根因是旧码只接统一 kline/daily 端点，非 Gangtise 无能力。
+_GTS_BENCHMARK_CODE: dict[str, str] = {
+    "^GSPC": "SPX.SPI",
+    "^IXIC": "IXIC.O",
+    "000300.SS": "000300.SH",
+    "^HSI": "HSI.HI",
+}
 
 
 def _gangtise_benchmark_backfill(store: WatchlistStore, market: str, bench_code: str) -> int:
     """yfinance/akshare 取不到基准时的 Gangtise 兜底（同步，requests 阻塞 → 调用方 to_thread）。
 
-    仅 A股基准可行（实测 Gangtise kline 支持 A股指数 000300.SH，US/HK 指数/ETF 全 400）。
+    覆盖美/A/港三市场宽基基准：均走 `index/kline/daily`（指数专用端点，个股端点对指数返回 0 行）。
     取近 ~4y 日收盘，落 market_snapshots，ticker 用 yfinance 码(bench_code) 以对齐下游
     get_snapshots / _rebase_benchmark / _portfolio_risk_summary 的查询键。凭据走受控全局 key。
     """
     gts_code = _GTS_BENCHMARK_CODE.get(bench_code)
     if not gts_code:
-        return 0  # US/HK 基准无 Gangtise 源，诚实缺省
+        return 0  # 该市场基准无 Gangtise 指数码映射，诚实缺省（不臆造端点）
     from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
     creds = resolve_gangtise_credentials("")  # admin 双开关授权；缺则 None → 不兜底
     if not creds:
@@ -252,7 +260,9 @@ def _gangtise_benchmark_backfill(store: WatchlistStore, market: str, bench_code:
     end = datetime.now(_TZ_CN).date()
     start = end.replace(year=end.year - 4)
     try:
-        series = fetch_quote_history(ak, sk, [gts_code], start.isoformat(), end.isoformat()).get(gts_code, [])
+        series = fetch_quote_history(
+            ak, sk, [gts_code], start.isoformat(), end.isoformat(), is_index=True
+        ).get(gts_code, [])
     except GangtiseError as e:
         logger.warning("Gangtise 基准兜底(%s) 失败: %s", gts_code, e)
         return 0
@@ -291,8 +301,9 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
         if bench_code:
             await fetch_price_batch([bench_code], store, days=1000, market=market)
             # 生产机房 yfinance/akshare 被墙时基准桶为空 → VIP/L2 portfolio_beta 恒 0、净值无基准对照。
-            # 实测：Gangtise kline 能供 A股指数(000300.SH 真实收盘)，但 US/HK 指数与 ETF 一律 400（硬边界，
-            # 见 §10）。故仅 A股走 Gangtise 兜底；落库仍用 yfinance 码(bench_code)以对齐下游 get_snapshots。
+            # 实测：Gangtise `index/kline/daily` 供美/A/港三市场宽基指数真实收盘（SPX.SPI/IXIC.O/
+            # 000300.SH/HSI.HI 均已活体验证）。故三市场基准均可走 Gangtise 兜底；落库仍用 yfinance
+            # 码(bench_code)以对齐下游 get_snapshots。未映射的基准码诚实缺省（不臆造端点）。
             if not store.get_snapshots(bench_code, days=5):
                 await asyncio.to_thread(_gangtise_benchmark_backfill, store, market, bench_code)
     except Exception as e:  # noqa: BLE001

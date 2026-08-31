@@ -511,6 +511,38 @@ def _fmt_num(v, nd=2):
         return None
 
 
+def _gangtise_valuation_percentiles(ticker: str, market: str) -> dict | None:
+    """取 Gangtise 估值分位（PE/PB/PEG 近3年窗内分位）供投委会估值段。仅 A股；同步、best-effort。
+
+    直接走受控共享凭据（admin 双开关，缺则 None → 不加），不经 hub 异步（本函数在同步聚合链内）。
+    返回如 {'pe_ttm_percentile': 8.6, 'pb_mrq_percentile': 9.0, ...}（只保留分位与值），失败/无覆盖 → None。
+    """
+    if market != "a_stock":
+        return None
+    try:
+        from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+        creds = resolve_gangtise_credentials("")
+        if not creds:
+            return None
+        ak, sk = creds
+        from bottleneck_hunter.data_provider.gangtise_client import fetch_valuation
+        from bottleneck_hunter.data_provider.providers import _map_gangtise_valuation
+        mapped = _map_gangtise_valuation(fetch_valuation(ak, sk, ticker, market))
+        if not mapped:
+            return None
+        # 键名去碰撞：Gangtise 的裸 `peg` 会覆盖上游 yfinance 的 `peg`（见 val["peg"]），
+        # 违反"不破坏现有 yfinance 字段"约定 → 改名 peg_gts；pe_ttm/pb_mrq 与 yfinance 键
+        # （trailing_pe/price_to_book）不同名，可安全叠加。
+        out = {}
+        for k, v in mapped.items():
+            if k == "data_source" or v is None:
+                continue
+            out["peg_gts" if k == "peg" else k] = v
+        return out or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
                             market: str) -> dict:
     """为单只标的聚合投委会所需的真实背景资料。
@@ -550,6 +582,12 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
         }
         bg["valuation_data"] = ({k: v for k, v in val.items() if v is not None}
                                 or "暂无估值数据（未采集 profile）")
+        # 估值分位增强（Gangtise valuation-analysis，免费，仅 A股有覆盖）：yfinance 只给当前 PE/PB，
+        # 给不出「贵/便宜」的历史锚。补近 3 年窗内分位（0~100，越低越便宜），价值投资人 persona 的
+        # 估值论证锚点。缺则不加（不破坏现有 yfinance 字段），非 A股静默跳过。
+        vp = _gangtise_valuation_percentiles(ticker, market)
+        if vp and isinstance(bg["valuation_data"], dict):
+            bg["valuation_data"].update(vp)
     except Exception:
         bg["valuation_data"] = "暂无估值数据"
 

@@ -44,6 +44,7 @@ CAP_RESEARCH = "research"       # 券商研报（中/外资，证据层）
 CAP_KB = "kb"                   # 知识库 RAG 检索
 CAP_NARRATIVE = "narrative"     # AI 研报叙事（agent）
 CAP_SCREEN = "screen"           # 指标选股
+CAP_VALUATION = "valuation"     # 估值分位（PE/PB/PEG 近3年窗内分位，A股；投委会价值锚/择时）
 
 _MANAGER_CAPS = {CAP_QUOTE, CAP_DAILY}  # 这两个委托 FetcherManager，不建 hub 层熔断
 

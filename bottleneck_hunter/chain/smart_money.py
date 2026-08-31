@@ -42,7 +42,8 @@ def _track_astock(code_6: str) -> SmartMoneySignal:
     details: list[str] = []
     score = 5.0
 
-    # 1) 资金流向 — efinance 东财主力净流入优先（akshare 口径 2024 后不稳），失败回退 akshare
+    # 1) 资金流向 — efinance 东财主力净流入优先（akshare 口径 2024 后不稳），失败回退 akshare，
+    #    二者皆不可达（机房被墙）时用 Gangtise 兜底
     total_flow = None
     try:
         from bottleneck_hunter.data_provider.efinance_astock import _fetch_history_bill_sync
@@ -61,6 +62,22 @@ def _track_astock(code_6: str) -> SmartMoneySignal:
                     total_flow = sum(_safe_float(v, 1e-4) or 0 for v in recent[flow_col[0]])
         except Exception as e:
             logger.debug(f"资金流向获取失败 ({code_6}): {e}")
+    if total_flow is None:
+        # efinance/akshare 皆不可达（如生产机房被墙）→ Gangtise 兜底（近5日主力净流入，元→万）
+        try:
+            from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+            from bottleneck_hunter.data_provider.gangtise_client import fetch_fund_flow
+            creds = resolve_gangtise_credentials()
+            if creds:
+                end = datetime.now()
+                start = end - timedelta(days=12)  # 覆盖≥5个交易日（含周末/假日冗余）
+                rows = fetch_fund_flow(creds[0], creds[1], code_6,
+                                       start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+                recent = [r for r in rows if r.get("main_net") is not None][-5:]
+                if recent:
+                    total_flow = sum(r["main_net"] for r in recent) / 1e4  # 元 → 万
+        except Exception as e:
+            logger.debug(f"Gangtise 资金流兜底失败 ({code_6}): {e}")
     if total_flow is not None:
         signal.fund_flow_net = round(total_flow, 2)
         if total_flow > 500:

@@ -26,8 +26,16 @@ _BASE = "https://openapi.gangtise.com/application"
 _AUTH_URL = f"{_BASE}/auth/oauth/open/loginV2"
 _FUNDAMENTAL = f"{_BASE}/open-fundamental"
 _EARNING_FORECAST_URL = f"{_FUNDAMENTAL}/earning-forecast"
-# 报表：A股利润表累计口径（港美股另有 URL，起步只做 A股，见 GangtiseProvider.markets）
-_INCOME_URL = f"{_FUNDAMENTAL}/financial-report/income-statement/accumulated"
+# 利润表按市场路由（活体实测三端点均返回真实口径，字段随市场略异，见 _map_gangtise_financials）：
+#   A股→累计口径；美股→/us（net 取 netProfitParent）；港股→/hk（net 取 netProfitAttrParent，同 A股）。
+# 历史 bug：旧码对所有市场都打 accumulated（A股端点），故美股/港股财务打错端点——这正是
+# 「美股财务只能 FMP」误判的代码根因，实为 Gangtise 有 US/HK 三表、只是路由缺失。
+_INCOME_URL_BY_MARKET: dict[str, str] = {
+    "a_stock": f"{_FUNDAMENTAL}/financial-report/income-statement/accumulated",
+    "us_stock": f"{_FUNDAMENTAL}/financial-report/income-statement/us",
+    "hk_stock": f"{_FUNDAMENTAL}/financial-report/income-statement/hk",
+}
+_INCOME_URL = _INCOME_URL_BY_MARKET["a_stock"]  # 向后兼容旧引用（A股累计口径）
 # EDB 宏观：全球指标库 getData（2D 表，键 indicatorIdList，非 indicators）
 _EDB_GETDATA_URL = f"{_BASE}/open-alternative/EDB/getData"
 # 投研洞察域（财报日历 / 公告）——照抄 skill utils.py 的 GANGTISE_INSIGHT_DOMAIN
@@ -46,8 +54,21 @@ _KB_SEARCH_URL = f"{_DATA}/ai/search/knowledge_base"
 # 证券码解析（美股 .O/.N 经 open-reference/securities/search）
 _REFERENCE = f"{_BASE}/open-reference"
 _SECURITIES_SEARCH_URL = f"{_REFERENCE}/securities/search"
-# 历史行情日 K（open-quote，beta/benchmark 用；单 URL 按 securityList 路由市场）
+# 历史行情日 K（open-quote，beta/benchmark 用）。
+# 实测口径（2026-08 活体验证，见 fetch_quote_history 注释）：
+#   · 个股（美/港/A）走统一 `kline/daily` 即可（TSLA.O/00700.HK/A股均返回真实收盘）；
+#   · **指数**必须走 `index/kline/daily`——统一端点对指数返回 0 行或报错（SPX.SPI/IXIC.O/HSI.HI
+#     在 kline/daily 全空，切 index/kline/daily 后均取到真实收盘）。这正是历史「US/HK 基准
+#     beta=0」的根因：旧码只接了统一端点，误判为「Gangtise 无 US/HK 指数」，实为端点路由缺失。
 _QUOTE_DAILY_URL = f"{_BASE}/open-quote/kline/daily"
+_QUOTE_INDEX_DAILY_URL = f"{_BASE}/open-quote/index/kline/daily"
+# 估值分析（open-fundamental/valuation-analysis，免费）：按 indicator 取时间序列 value + 窗内分位。
+# 实测（2026-08）：仅 A股返回数据，美股/港股/指数一律 code=120001（无覆盖）——故 fetch_valuation
+# 只对 A股有意义，provider.supports 相应只认领 a_stock，不假装全市场。
+_VALUATION_URL = f"{_FUNDAMENTAL}/valuation-analysis"
+# A股资金流向（open-quote/fund-flow/daily，免费）：主力/大/中/小单净流入日序列（单位：元）。
+# 实测仅 A股覆盖（美股/港股/指数 code=120001）。生产机房 akshare 被墙时，这是主力资金流的可达替代源。
+_FUND_FLOW_DAILY_URL = f"{_BASE}/open-quote/fund-flow/daily"
 # AI 研报叙事（open-ai/agent/{subpath}；同步 agent POST {securityCode} 即得，异步 agent 不在此接）
 _AGENT_BASE = f"{_BASE}/open-ai/agent"
 # 指标选股（open-indicator/screener；payload 需预构造好的 universe/expression/indicatorList）
@@ -202,11 +223,13 @@ def _parse_report_body(body: dict) -> list[dict]:
 
 
 def fetch_financials(ak: str, sk: str, ticker: str, market: str) -> dict | None:
-    """取利润表（累计口径，最近报告期）。返回 {ticker, report_date, rows:[...]} 或 None。
+    """取利润表（累计/最近报告期），按市场路由端点。返回 {ticker, report_date, rows:[...]} 或 None。
 
     美股经 `_resolve_gts_code` 解析 gtsCode（.O/.N）；A股走纯 `_sec_code`（不联网）。
+    端点按 market 选：美股→/us、港股→/hk、A股→累计口径。未知市场退 A股端点（保守）。
     """
     code = _resolve_gts_code(ak, sk, ticker, market)
+    income_url = _INCOME_URL_BY_MARKET.get(market, _INCOME_URL)
     payload = {
         "securityCode": code,
         "period": ["latest"],            # 官方 period 枚举：latest=最近报告期（CLI 的 Q0 映射到此）
@@ -216,7 +239,7 @@ def fetch_financials(ak: str, sk: str, ticker: str, market: str) -> dict | None:
         "endDate": None,
         "fiscalYear": None,
     }
-    resp = requests.post(_INCOME_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+    resp = requests.post(income_url, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
     if resp.status_code != 200:
         raise GangtiseError(f"financials HTTP {resp.status_code}")
     rows = _parse_report_body(resp.json())
@@ -662,9 +685,13 @@ def _parse_quote_body(body: dict) -> dict[str, list]:
 
 
 def fetch_quote_history(ak: str, sk: str, securities, start: str, end: str,
-                        limit: int = 10000) -> dict[str, list]:
-    """取日频收盘序列（beta/benchmark 用）。securities：gtsCode 列表（自身/基准指数混传）；
+                        limit: int = 10000, *, is_index: bool = False) -> dict[str, list]:
+    """取日频收盘序列（beta/benchmark 用）。securities：gtsCode 列表；
     start/end 'yyyy-MM-dd'；返回 {gtsCode: [(date, close)...]}。不复权（beta 两侧同口径即可）。
+
+    is_index：True 走 `index/kline/daily`（宽基指数专用端点），False 走统一 `kline/daily`（个股）。
+    个股（美/港/A）统一端点即可；指数**必须**用 index 端点，否则统一端点返回 0 行——实测
+    SPX.SPI/IXIC.O/HSI.HI/000300.SH 在 index 端点均取到真实收盘，是修 US/HK 基准 beta=0 的关键。
     """
     sec_list = [str(s).upper() for s in securities] if securities else []
     if not sec_list:
@@ -676,10 +703,144 @@ def fetch_quote_history(ak: str, sk: str, securities, start: str, end: str,
         "limit": int(limit),
         "fieldList": ["securityCode", "tradeDate", "close"],
     }
-    resp = requests.post(_QUOTE_DAILY_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+    url = _QUOTE_INDEX_DAILY_URL if is_index else _QUOTE_DAILY_URL
+    resp = requests.post(url, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
     if resp.status_code != 200:
         raise GangtiseError(f"quote HTTP {resp.status_code}")
     return _parse_quote_body(resp.json())
+
+
+def _parse_valuation_body(body: dict) -> tuple[float | None, float | None, str]:
+    """解析 valuation-analysis 单指标 body → (latest_value, latest_percentile, as_of_date)。
+
+    表结构：data.fieldList=['tradeDate','value','percentileRank']，data.list=[行...]（升序）。
+    取最后一行（最新交易日）的 value 与窗内分位（percentileRank，0~100）。空/错误码 → (None,None,'')。
+    """
+    if not body or str(body.get("code", "")) != "000000" or body.get("status") is False:
+        return None, None, ""
+    block = body.get("data") or {}
+    fields = block.get("fieldList") or []
+    rows = block.get("list") or []
+    if not fields or not rows:
+        return None, None, ""
+    try:
+        ci_d = fields.index("tradeDate")
+        ci_v = fields.index("value")
+        ci_p = fields.index("percentileRank")
+    except ValueError:
+        return None, None, ""
+    for row in reversed(rows):  # 最新交易日在末尾；跳过尾部空值行
+        if not isinstance(row, (list, tuple)) or len(row) <= max(ci_d, ci_v, ci_p):
+            continue
+        try:
+            v = float(row[ci_v])
+            p = float(row[ci_p])
+        except (ValueError, TypeError):
+            continue
+        d = str(row[ci_d] or "").strip()[:10]
+        return round(v, 4), round(p, 2), d
+    return None, None, ""
+
+
+# 估值分位默认取的指标（peTtm 市盈率TTM / pbMrq 市净率 / peg）；官方 indicator 枚举，勿改拼写。
+_VALUATION_INDICATORS = ("peTtm", "pbMrq", "peg")
+
+
+def fetch_valuation(ak: str, sk: str, ticker: str, market: str,
+                    indicators=_VALUATION_INDICATORS, years: int = 3) -> dict | None:
+    """取估值分位：每指标返回 {value, percentile, as_of}（percentile=近 `years` 年窗内分位 0~100）。
+
+    仅 A股有覆盖（实测美股/港股/指数 code=120001）。窗口取近 `years` 年，分位为窗内相对位置——
+    yfinance 只给当前 PE，给不出「贵/便宜」的历史锚，这是该能力唯一增量价值。
+    返回 {indicator: {value, percentile, as_of}}；全指标皆空 → None（交 hub 视为无数据，不落桩）。
+    """
+    code = _resolve_gts_code(ak, sk, ticker, market)
+    from datetime import date as _date
+    end = _date.today()
+    try:
+        start = end.replace(year=end.year - int(years))
+    except ValueError:  # 2/29 等边界
+        start = end.replace(year=end.year - int(years), day=28)
+    out: dict = {}
+    for ind in indicators:
+        payload = {
+            "securityCode": code,
+            "indicator": ind,
+            "startDate": start.isoformat(),
+            "endDate": end.isoformat(),
+            "limit": 2000,
+            "fieldList": ["value", "percentileRank"],
+        }
+        resp = requests.post(_VALUATION_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+        if resp.status_code != 200:
+            raise GangtiseError(f"valuation HTTP {resp.status_code}")
+        v, p, as_of = _parse_valuation_body(resp.json())
+        if v is not None:
+            out[ind] = {"value": v, "percentile": p, "as_of": as_of}
+    return out or None
+
+
+def _parse_fund_flow_body(body: dict) -> list[dict]:
+    """解析 fund-flow/daily 二维表 → [{date, main_net, large_net, xlarge_net}...]（升序，单位：元）。
+
+    表结构：data.fieldList=[列名...]，data.list=[行...]。取主力/大单/特大单净流入（元）。
+    空/错误码 → []。缺列则该列缺省 None。
+    """
+    if not body or str(body.get("code", "")) != "000000" or body.get("status") is False:
+        return []
+    block = body.get("data") or {}
+    fields = block.get("fieldList") or []
+    rows = block.get("list") or []
+    if not fields or not rows:
+        return []
+    idx = {name: i for i, name in enumerate(fields)}
+    i_d = idx.get("tradeDate")
+    if i_d is None:
+        return []
+
+    def _cell(row, name):
+        i = idx.get(name)
+        if i is None or i >= len(row):
+            return None
+        try:
+            return float(row[i])
+        except (ValueError, TypeError):
+            return None
+
+    out = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or i_d >= len(row):
+            continue
+        d = str(row[i_d] or "").strip()[:10]
+        if not d:
+            continue
+        out.append({
+            "date": d,
+            "main_net": _cell(row, "mainNetInflow"),
+            "large_net": _cell(row, "largeNetInflow"),
+            "xlarge_net": _cell(row, "xlargeNetInflow"),
+        })
+    return out
+
+
+def fetch_fund_flow(ak: str, sk: str, ticker: str, start: str, end: str) -> list[dict]:
+    """取 A股资金流向日序列（主力/大单/特大单净流入，单位：元，升序）。
+
+    仅 A股覆盖。返回 [{date, main_net, large_net, xlarge_net}...]，失败抛 GangtiseError 交熔断，空 → []。
+    生产机房 akshare 被墙时的可达替代源（聪明钱 A股主力净流入兜底）。
+    """
+    code = _sec_code(ticker, "a_stock")  # A股 6位直通 → 交易所后缀（不联网）
+    payload = {
+        "securityList": [code],
+        "startDate": start.strip()[:10],
+        "endDate": end.strip()[:10],
+        "limit": 100,
+        "fieldList": ["securityCode", "tradeDate", "mainNetInflow", "largeNetInflow", "xlargeNetInflow"],
+    }
+    resp = requests.post(_FUND_FLOW_DAILY_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        raise GangtiseError(f"fund-flow HTTP {resp.status_code}")
+    return _parse_fund_flow_body(resp.json())
 
 
 def _parse_screener_body(body: dict) -> list[dict]:
@@ -925,6 +1086,28 @@ def _demo() -> None:
     assert _parse_screener_body({"code": "000000", "status": False}) == []
     assert screen("ak", "sk", universe=[], expression="F1>0",
                   indicator_list=[{"field": "F1"}]) == []                       # 缺 universe 短路
+
+    # ②l-1 估值分位解析：取末行（最新交易日）value+percentileRank；尾部空值行跳过
+    valb = {"code": "000000", "status": True, "data": {
+        "fieldList": ["tradeDate", "value", "percentileRank"],
+        "list": [["2026-08-20", "18.5", "12.0"],
+                 ["2026-08-21", "19.2", "15.3"],
+                 ["2026-08-22", "", ""]]}}   # 末行空 → 回退到前一行
+    v, p, as_of = _parse_valuation_body(valb)
+    assert v == 19.2 and p == 15.3 and as_of == "2026-08-21", (v, p, as_of)
+    assert _parse_valuation_body({"code": "120001"}) == (None, None, "")   # 无覆盖码 → 空
+    assert _parse_valuation_body({"code": "000000", "data": {"fieldList": [], "list": []}}) == (None, None, "")
+
+    # ②l-2 资金流解析：二维表 → [{date, main_net, large_net, xlarge_net}]（元、升序，缺列缺省）
+    ffb = {"code": "000000", "status": True, "data": {
+        "fieldList": ["securityCode", "tradeDate", "mainNetInflow", "largeNetInflow", "xlargeNetInflow"],
+        "list": [["600519.SH", "2026-08-21", 3.69e7, 3.26e7, 4.25e6],
+                 ["600519.SH", "2026-08-22", -1.2e7, -8.0e6, -4.0e6]]}}
+    ff = _parse_fund_flow_body(ffb)
+    assert len(ff) == 2 and ff[0]["date"] == "2026-08-21" and ff[0]["main_net"] == 3.69e7, ff
+    assert ff[1]["main_net"] == -1.2e7, ff
+    assert _parse_fund_flow_body({"code": "120001"}) == []                  # 无覆盖码 → 空
+    assert _parse_fund_flow_body({"code": "000000", "data": {"fieldList": [], "list": []}}) == []
 
     # ②m 叙事解析：data.content 直取；data 为 list 取首个非空；错误/非 True 状态 → 空串
     nb = {"code": "000000", "status": True,

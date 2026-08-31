@@ -22,6 +22,7 @@ from bottleneck_hunter.data_provider.hub import (
     CAP_OPTIONS,
     CAP_RESEARCH,
     CAP_SCREEN,
+    CAP_VALUATION,
 )
 
 logger = logging.getLogger(__name__)
@@ -656,12 +657,20 @@ def _map_gangtise_financials(fin: dict, forecast: dict | None, market: str = "a_
     ponytail: 金额刻度按「原始=元/美元本币」假设，真实连通后若量级不符，唯一校准点是此处 1e-8。
     """
     row = fin["rows"][0]
-    # 实测 A股利润表字段为缩写：opRev(营业收入) opCost(营业成本) netProfit/netProfitAttrParent(净利) basicEPS
-    # 毛利率须用「营业收入-营业成本」；营业总成本(totalOpCost)含税金/费用是营业利润口径，不能拿来算毛利率。
+    # 字段随市场略异（活体实测 2026-08）：opRev(营业收入)/opCost(营业成本) 三市场同名；净利归母
+    #   · A股/港股 = netProfitAttrParent；美股 = netProfitParent。取值链两者都覆盖，回退裸 netProfit。
+    # 毛利率优先用接口直供 grossProfit（美/港股有）；A股无该字段时用「营收-营业成本」自算。
+    # totalOpCost 含税金/费用是营业利润口径，不能拿来算毛利率。
     rev = _f(row.get("opRev") or row.get("totalOpRev"), 1e-8)
     cost = _f(row.get("opCost"), 1e-8)
-    net = _f(row.get("netProfitAttrParent") or row.get("netProfit"), 1e-8)
-    gm = round((rev - cost) / rev * 100, 2) if (rev and cost is not None) else None
+    net = _f(row.get("netProfitAttrParent") or row.get("netProfitParent") or row.get("netProfit"), 1e-8)
+    gross = _f(row.get("grossProfit"), 1e-8)
+    if gross is not None and rev:
+        gm = round(gross / rev * 100, 2)
+    elif rev and cost is not None:
+        gm = round((rev - cost) / rev * 100, 2)
+    else:
+        gm = None
     cons_eps = cons_pe = None
     if forecast and forecast.get("forecasts"):
         f0 = forecast["forecasts"][0]  # 最近发布日、最近预测年
@@ -687,6 +696,33 @@ def _map_gangtise_financials(fin: dict, forecast: dict | None, market: str = "a_
     }
 
 
+def _map_gangtise_valuation(raw: dict | None) -> dict | None:
+    """纯映射（可单测，不碰网络）：fetch_valuation 原始 {indicator:{value,percentile,as_of}} →
+    规范 CAP_VALUATION dict，键用下游消费者约定名（pe_ttm/pb_mrq/peg + *_percentile）。
+
+    percentile 为近 3 年窗内分位（0~100，越低越便宜）；缺某指标则该组键缺省（不填 None 桩），
+    整体全空 → None。as_of 取任一指标的最新交易日（同批同日）。
+    """
+    if not raw:
+        return None
+    key_map = {"peTtm": ("pe_ttm", "pe_ttm_percentile"),
+               "pbMrq": ("pb_mrq", "pb_mrq_percentile"),
+               "peg":   ("peg", "peg_percentile")}
+    out: dict = {"data_source": "gangtise"}
+    as_of = ""
+    for ind, (vk, pk) in key_map.items():
+        rec = raw.get(ind)
+        if not rec:
+            continue
+        out[vk] = rec.get("value")
+        out[pk] = rec.get("percentile")
+        as_of = as_of or (rec.get("as_of") or "")
+    if len(out) == 1:   # 只剩 data_source，无任何指标
+        return None
+    out["as_of"] = as_of
+    return out
+
+
 class GangtiseProvider:
     """Gangtise 投研 — A股基本面（CAP_FINANCIALS）+ 全市场 EDB 宏观（CAP_MACRO_EDB）。
 
@@ -704,7 +740,7 @@ class GangtiseProvider:
     priority = 0
 
     def capabilities(self) -> set[str]:
-        return {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB}
+        return {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION}
 
     def markets(self) -> set[str]:
         return {"a_stock", "us_stock"}
@@ -712,13 +748,15 @@ class GangtiseProvider:
     def supports(self, capability: str, market: str) -> bool:
         if capability == CAP_FINANCIALS:
             return market in ("a_stock", "us_stock")   # A股 6位直通；美股经 securities/search 解析 .O/.N
+        if capability == CAP_VALUATION:
+            return market == "a_stock"   # 实测仅 A股有估值分位覆盖；美股/港股 code=120001，不认领
         if capability in (CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB):
             return market in ("a_stock", "us_stock")    # 研报覆盖 A/H/US/中概；KB 与市场无关但按 market 门控
         return False
 
     async def fetch(self, capability, ticker, market, user_id="") -> dict | None:
         from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
-        if capability not in (CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB):
+        if capability not in (CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION):
             return None
         creds = resolve_gangtise_credentials(user_id)
         if not creds:
@@ -734,7 +772,15 @@ class GangtiseProvider:
             return await asyncio.to_thread(self._fetch_research_sync, ak, sk, ticker, market)
         if capability == CAP_KB:
             return await asyncio.to_thread(self._fetch_kb_sync, ak, sk, ticker)
+        if capability == CAP_VALUATION:
+            return await asyncio.to_thread(self._fetch_valuation_sync, ak, sk, ticker, market)
         return await asyncio.to_thread(self._fetch_sync, ak, sk, ticker, market)
+
+    def _fetch_valuation_sync(self, ak, sk, ticker, market) -> dict | None:
+        """估值分位（PE/PB/PEG 近3年窗内分位）。仅 A股；映射为规范 CAP_VALUATION dict。"""
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        raw = gc.fetch_valuation(ak, sk, ticker, market)
+        return _map_gangtise_valuation(raw)
 
     def _fetch_research_sync(self, ak, sk, ticker, market) -> dict | None:
         """券商研报证据：近 180 日该标的深度/业绩点评研报（按发布日降序，取前 5）。
@@ -963,11 +1009,19 @@ def _demo() -> None:
     assert cn["cn_cpi_yoy"]["change_pct"] == -0.4, cn  # (99.9-100)-(100.3-100)=-0.1-0.3
     assert "us_cpi_yoy" not in cn and "cn_cpi_yoy" not in us  # 市场隔离
     assert _map_gangtise_edb({}, "us_stock") == {}  # 空原始 → 空
-    # 能力声明自洽（防 CAP_RESEARCH/CAP_KB 未导入导致运行时 NameError）
+    # 能力声明自洽（防 CAP_RESEARCH/CAP_KB/CAP_VALUATION 未导入导致运行时 NameError）
     p = GangtiseProvider()
-    assert p.capabilities() == {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB}, p.capabilities()
+    assert p.capabilities() == {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION}, p.capabilities()
     assert p.supports(CAP_RESEARCH, "us_stock") and p.supports(CAP_KB, "a_stock")
     assert not p.supports(CAP_RESEARCH, "hk_stock")
+    # 估值分位仅 A股（valuation-analysis 端点非A股 120001）
+    assert p.supports(CAP_VALUATION, "a_stock") and not p.supports(CAP_VALUATION, "us_stock")
+    # 估值映射：原始 → 规范键（pe_ttm/pb_mrq/peg + *_percentile）
+    _v = _map_gangtise_valuation({"peTtm": {"value": 17.2, "percentile": 17.24, "as_of": "2026-08-22"},
+                                  "pbMrq": {"value": 8.1, "percentile": 10.49, "as_of": "2026-08-22"}})
+    assert _v and _v["pe_ttm"] == 17.2 and _v["pe_ttm_percentile"] == 17.24 and _v["pb_mrq"] == 8.1, _v
+    assert _v["data_source"] == "gangtise" and _v["as_of"] == "2026-08-22", _v
+    assert _map_gangtise_valuation({}) is None and _map_gangtise_valuation(None) is None
     # 叙事 provider：A/US 都支持，只认 CAP_NARRATIVE
     n = GangtiseNarrativeProvider()
     assert n.capabilities() == {CAP_NARRATIVE}
