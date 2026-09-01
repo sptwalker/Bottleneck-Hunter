@@ -195,22 +195,15 @@ def _resolve_gts_code(ak: str, sk: str, ticker: str, market: str) -> str:
     if not (str(body.get("code", "")) == "000000" and body.get("status") is True):
         return _sec_code(ticker, market)   # 接口拒绝 → 回退裸 ticker
     items = (body.get("data") or {}).get("list") or []
-    # 优先取「码前缀 == ticker 且后缀为美股」的项；否则取首个美股码项
-    best = None
+    # 只接受「码前缀 == ticker 且后缀为美股」的精确项；查无精确匹配 → 返回裸 ticker，
+    # 交由下游接口报错/降级，绝不静默借「首个美股码」映射到另一只证券（MU→MUZE.O 教训）。
     for it in items:
         gts = str(it.get("gtsCode") or "").strip().upper()
-        if not gts.endswith(_US_SUFFIXES):
-            continue
-        if gts.rsplit(".", 1)[0] == t:
-            best = gts
-            break
-        if best is None:
-            best = gts
-    resolved = best or _sec_code(ticker, market)
-    if best:
-        with _gts_code_lock:
-            _gts_code_cache[key] = resolved
-    return resolved
+        if gts.endswith(_US_SUFFIXES) and gts.rsplit(".", 1)[0] == t:
+            with _gts_code_lock:
+                _gts_code_cache[key] = gts
+            return gts
+    return _sec_code(ticker, market)
 
 
 def _parse_report_body(body: dict) -> list[dict]:
