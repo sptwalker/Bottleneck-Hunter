@@ -298,7 +298,9 @@
 #admin-imap-host,
 #admin-imap-user,
 #admin-imap-password,
-#admin-imap-pdfpw {
+#admin-imap-pdfpw,
+#admin-gts-ak,
+#admin-gts-sk {
   width: 320px;
   max-width: 60%;
   text-align: left;

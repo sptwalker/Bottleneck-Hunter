@@ -108,6 +108,7 @@ class UpdateImapConfigRequest(BaseModel):
     password: str | None = Field(default=None, max_length=512)      # 空/省略=保持原密码
     use_ssl: bool | None = None
     pdf_password: str | None = Field(default=None, max_length=512)   # 默认 PDF 解密密码；空/省略=保持原值
+    poll_enabled: bool | None = None   # 自动轮询开关；关=停止定时轮询（手动「立即轮询」不受限）
 
 
 class ConfirmPendingRequest(BaseModel):
@@ -539,6 +540,7 @@ async def get_imap_config(user: dict = Depends(_require_admin)):
     return {
         "host": cfg["host"], "port": cfg["port"], "user": cfg["user"],
         "use_ssl": cfg["use_ssl"],
+        "poll_enabled": cfg["poll_enabled"],
         "password_set": bool(cfg["password"]),
         "pdf_password_set": bool(cfg["pdf_password"]),
         "configured": bool(cfg["host"]),
@@ -559,6 +561,8 @@ async def update_imap_config(req: UpdateImapConfigRequest, user: dict = Depends(
         store.set_config("imap_user", req.user.strip())
     if req.use_ssl is not None:
         store.set_config("imap_use_ssl", "true" if req.use_ssl else "false")
+    if req.poll_enabled is not None:
+        store.set_config("imap_poll_enabled", "true" if req.poll_enabled else "false")
     if req.password:
         store.set_config("imap_password_enc", encrypt(req.password))
     if req.pdf_password:

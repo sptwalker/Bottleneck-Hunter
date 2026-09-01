@@ -1343,8 +1343,11 @@ async def job_poll_imap() -> None:
     import asyncio as _asyncio
 
     from bottleneck_hunter.auth.email_sender import imap_configured, resolve_imap_config
-    if not imap_configured(resolve_imap_config(_auth_store)):
+    cfg = resolve_imap_config(_auth_store)
+    if not imap_configured(cfg):
         return  # 运行时闸：未配 IMAP 则空转不报错
+    if not cfg.get("poll_enabled", True):
+        return  # 管理员关闭了自动轮询开关（手动「立即轮询」不受此限）
     from bottleneck_hunter.vip.mail_ingest import poll_inbox
     counts = await _asyncio.to_thread(poll_inbox, _wl_store, _auth_store)  # imaplib 阻塞→to_thread
     if counts.get("processed") or counts.get("rejected") or counts.get("errors"):

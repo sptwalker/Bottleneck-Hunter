@@ -633,6 +633,8 @@ async function loadImapConfig() {
     set('admin-imap-user', c.user || '');
     const ssl = document.getElementById('admin-imap-ssl');
     if (ssl) ssl.checked = c.use_ssl !== false;
+    const poll = document.getElementById('admin-imap-poll-enabled');
+    if (poll) poll.checked = c.poll_enabled !== false;
     const pw = document.getElementById('admin-imap-password');
     if (pw) pw.placeholder = c.password_set ? '已设置（留空保持不变）' : '未设置';
     const pdf = document.getElementById('admin-imap-pdfpw');
@@ -653,6 +655,7 @@ async function saveImapConfig() {
     port: parseInt(document.getElementById('admin-imap-port')?.value || '993'),
     user: document.getElementById('admin-imap-user')?.value.trim() || '',
     use_ssl: document.getElementById('admin-imap-ssl')?.checked ?? true,
+    poll_enabled: document.getElementById('admin-imap-poll-enabled')?.checked ?? true,
   };
   const pw = document.getElementById('admin-imap-password')?.value || '';
   if (pw) body.password = pw;

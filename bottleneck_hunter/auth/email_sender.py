@@ -156,7 +156,7 @@ def send_test_email(to_email: str, config: dict) -> tuple[bool, str]:
 def resolve_imap_config(store=None) -> dict:
     """解析生效的 IMAP 配置。store 的 system_config 设了 imap_host 则整组用 DB，否则用环境变量。
 
-    返回 {host, port, user, password, use_ssl, pdf_password, source}。
+    返回 {host, port, user, password, use_ssl, pdf_password, poll_enabled, source}。
     """
     def _ssl(v: str) -> bool:
         return str(v).strip().lower() in ("1", "true", "yes")
@@ -183,6 +183,7 @@ def resolve_imap_config(store=None) -> dict:
             "password": password,
             "use_ssl": _ssl(store.get_config("imap_use_ssl", "true")),
             "pdf_password": pdf_pwd,
+            "poll_enabled": _ssl(store.get_config("imap_poll_enabled", "true")),
             "source": "db",
         }
     return {
@@ -192,6 +193,7 @@ def resolve_imap_config(store=None) -> dict:
         "password": os.getenv("IMAP_PASSWORD", ""),
         "use_ssl": _ssl(os.getenv("IMAP_USE_SSL", "true")),
         "pdf_password": os.getenv("IMAP_PDF_PASSWORD", ""),
+        "poll_enabled": _ssl(os.getenv("IMAP_POLL_ENABLED", "true")),
         "source": "env",
     }
 
