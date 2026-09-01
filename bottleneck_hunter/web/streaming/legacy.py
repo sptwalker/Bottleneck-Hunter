@@ -57,6 +57,7 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
             max_depth=config.max_depth,
             sector=config.sector,
             language=config.language,
+            market=market,
         )
 
         queue = asyncio.Queue()

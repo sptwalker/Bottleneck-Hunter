@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
@@ -20,6 +21,7 @@ from bottleneck_hunter.chain.models import (
     ChainLink,
     IndustryNode,
     LayerType,
+    MarketRegion,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,16 +47,50 @@ def _safe_float(val, default: float = 0.5) -> float:
         return default
 
 
-def _normalize_companies(raw: list) -> list[dict]:
-    """将 LLM 返回的企业列表统一为 [{name, code}] 格式。"""
+# 主流市场代码规则（入围环节硬门槛，杜绝 OTC/粉单/ADR 等非主流代码进入产业链节点）
+_ASTOCK_RE = re.compile(r"^[03468]\d{5}$")  # 沪6/深0或3/北交所4或8，共6位数字
+_US_TICKER_RE = re.compile(r"^[A-Z]{1,5}$")  # 美股主板字母 ticker（无点后缀、无希腊/数字）
+# 明确非主流形态：带 .O/.K/.L 等交易所后缀的 ADR/外国股、含字母+数字混合、纯数字、小写、含符号
+_FOREIGN_SUFFIX_RE = re.compile(r"\.[A-Z]{1,3}$", re.IGNORECASE)
+
+
+def _market_code_allowed(code: str, market: MarketRegion) -> bool:
+    """判断代码是否符合给定市场的主板形态。
+
+    仅做形态（语法）校验，不做行情验证——行情验证由下游供应商检索统一负责。
+    RNECY(OTC ADR)、HAM(ECNQUOTE) 等非主流代码在本层就被拦下。
+    """
+    c = (code or "").strip().upper()
+    if not c:
+        return False  # 空代码视为无代码，直接丢弃（既无代码也谈不上主流市场）
+    if _FOREIGN_SUFFIX_RE.search(c):
+        return False  # 带交易所后缀的 ADR/外国股（如 MUX.O、RENN.K）一律不是主流主板形态
+    if market == MarketRegion.A_STOCK:
+        return bool(_ASTOCK_RE.match(c))
+    if market == MarketRegion.US_STOCK:
+        return bool(_US_TICKER_RE.match(c))
+    # ALL（含 A 股 + 美股）：两套主流形态任一即可
+    return bool(_ASTOCK_RE.match(c)) or bool(_US_TICKER_RE.match(c))
+
+
+def _normalize_companies(raw: list, market: MarketRegion = MarketRegion.ALL) -> list[dict]:
+    """将 LLM 返回的企业列表统一为 [{name, code}] 格式，并拦截非主流市场代码。"""
     if not isinstance(raw, list):
         return []
     result = []
     for item in raw:
         if isinstance(item, dict):
-            result.append({"name": item.get("name", ""), "code": item.get("code", "")})
+            name = item.get("name", "")
+            code = item.get("code", "")
         elif isinstance(item, str) and item.strip():
-            result.append({"name": item.strip(), "code": ""})
+            name = item.strip()
+            code = ""
+        else:
+            continue
+        if code and not _market_code_allowed(code, market):
+            logger.info(f"拦截非主流股票代码 {code!r}（{name!r}，market={market.value}）")
+            continue
+        result.append({"name": name, "code": code})
     return result
 
 
@@ -128,16 +164,37 @@ class ChainDecomposer:
         max_depth: int = 3,
         sector: str = "",
         language: str = "zh",
+        market: str | MarketRegion | None = None,
     ):
         self.llm = llm
         self.max_depth = max_depth
         self.sector = sector
         self.language = language
+        # 市场上下文为本层（入围）限制提供依据：确定只收该市场的主流主板形态代码，
+        # None/ALL 则两套主流形态都放行（拆解阶段不验行情，行情由下游供应商检索校验）。
+        self.market = self._resolve_market(market)
         self._system_prompt = _load_prompt("decompose")
         # 统计计数器（每次 decompose 调用前重置）
         self._timeout_count = 0
         self._retry_count = 0
         self._last_fail_reason = ""  # 最近一次 LLM 调用失败的中文原因(供上层弹窗判定主模型失败)
+
+    @staticmethod
+    def _resolve_market(market: str | MarketRegion | None) -> MarketRegion:
+        """将来自各调用方的市场参数归一为 MarketRegion。
+
+        调用方可能是 MarketRegion 枚举（graph/legacy）也可能是裸字符串（web phases），
+        且可能在 None（不传）时取允许最大的 ALL，避免硬性过滤掉合法代码。
+        """
+        if market is None:
+            return MarketRegion.ALL
+        raw = market.value if hasattr(market, "value") else str(market)
+        raw = raw.strip().lower()
+        if raw == MarketRegion.A_STOCK.value:
+            return MarketRegion.A_STOCK
+        if raw == MarketRegion.US_STOCK.value:
+            return MarketRegion.US_STOCK
+        return MarketRegion.ALL
 
     async def decompose(self, end_product: str, on_layer_start=None, on_progress=None,
                          deadline: float | None = None) -> ChainGraph:
@@ -254,7 +311,7 @@ class ChainDecomposer:
 
                     if not graph.get_node(child_name):
                         raw_companies = child_data.get("representative_companies", [])
-                        companies = _normalize_companies(raw_companies)
+                        companies = _normalize_companies(raw_companies, self.market)
                         child = IndustryNode(
                             name=child_name,
                             description=child_data.get("description", ""),
@@ -361,6 +418,15 @@ class ChainDecomposer:
             names_str = "、".join(existing_names[:60])  # 防止过长
             existing_hint = f"\n已有环节（请勿重复或输出语义相似的名称）: {names_str}\n"
 
+        # 市场口径约束：只收当前市场的主流主板形态，杜绝 OTC/粉单/ADR(带 .O/.K/.L 后缀)/
+        # 交易所行情类(ECNQUOTE)等非主流代码进入产业链。ALL 时给出两套形态要求。
+        if self.market == MarketRegion.A_STOCK:
+            market_note = "市场口径：本产业链为A股，代码只用6位数字(沪6开头/深0/3开头/北交所4/8开头)，禁止美股ticker、带后缀ADR、OTC/粉单代码。"
+        elif self.market == MarketRegion.US_STOCK:
+            market_note = "市场口径：本产业链为美股，代码只用主板字母ticker(1-5位大写字母，如NVDA)，禁止带后缀ADR(如MUZE.O)、OTC/粉单、交易所行情代码(ECNQUOTE)。"
+        else:
+            market_note = "市场口径：只收A股主板6位数字或美股主板字母ticker，禁止带后缀ADR、OTC/粉单、交易所行情代码(ECNQUOTE)。"
+
         user_prompt = f"""{lang_note}
 
 终端产品: {end_product}
@@ -383,6 +449,7 @@ class ChainDecomposer:
   - 若该环节主要为美股上市公司，code 为字母ticker（如"NVDA"）
   - 若该环节无上市公司或不确定，code 留空字符串
   - 务必确保推荐的公司确实在该环节有核心业务，不要为了凑数而推荐不相关的公司
+{market_note}
 
 只返回 JSON 数组，不要其他文字。"""
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -96,7 +97,7 @@ class TestExtractChainCandidates:
         searcher = SupplierSearcher(market=MarketRegion.A_STOCK)
         bn = _make_bottleneck()
         chain = _make_chain_graph()
-        candidates = searcher._extract_chain_candidates(bn, chain)
+        candidates = asyncio.run(searcher._extract_chain_candidates(bn, chain))
         tickers = {c.ticker for c in candidates}
         assert "688008.SS" in tickers
         assert "603986.SS" in tickers
@@ -107,7 +108,7 @@ class TestExtractChainCandidates:
         searcher = SupplierSearcher(market=MarketRegion.A_STOCK)
         bn = _make_bottleneck(name="GPU芯片")
         chain = _make_chain_graph()
-        candidates = searcher._extract_chain_candidates(bn, chain)
+        candidates = asyncio.run(searcher._extract_chain_candidates(bn, chain))
         tickers = {c.ticker for c in candidates}
         assert "NVDA" not in tickers
         assert "AMD" not in tickers
@@ -116,7 +117,7 @@ class TestExtractChainCandidates:
         searcher = SupplierSearcher(market=MarketRegion.ALL)
         bn = _make_bottleneck(name="GPU芯片")
         chain = _make_chain_graph()
-        candidates = searcher._extract_chain_candidates(bn, chain)
+        candidates = asyncio.run(searcher._extract_chain_candidates(bn, chain))
         tickers = {c.ticker for c in candidates}
         assert "NVDA" in tickers
         assert "AMD" in tickers
@@ -125,16 +126,16 @@ class TestExtractChainCandidates:
         searcher = SupplierSearcher(market=MarketRegion.A_STOCK)
         bn = _make_bottleneck()
         chain = _make_chain_graph()
-        candidates = searcher._extract_chain_candidates(bn, chain)
+        candidates = asyncio.run(searcher._extract_chain_candidates(bn, chain))
         names = {c.name for c in candidates}
         assert "无代码公司" not in names
 
     def test_no_chain_graph(self):
         searcher = SupplierSearcher(market=MarketRegion.A_STOCK)
         bn = _make_bottleneck()
-        candidates = searcher._extract_chain_candidates(bn, ChainGraph(
+        candidates = asyncio.run(searcher._extract_chain_candidates(bn, ChainGraph(
             sector="test", end_product="test", nodes=[], links=[],
-        ))
+        )))
         assert candidates == []
 
     def test_dedup_same_ticker(self):
@@ -159,7 +160,7 @@ class TestExtractChainCandidates:
         )
         searcher = SupplierSearcher(market=MarketRegion.A_STOCK)
         bn = _make_bottleneck()
-        candidates = searcher._extract_chain_candidates(bn, chain)
+        candidates = asyncio.run(searcher._extract_chain_candidates(bn, chain))
         assert len(candidates) == 1
 
 

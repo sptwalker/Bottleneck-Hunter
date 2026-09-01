@@ -190,6 +190,7 @@ async def stream_phase1(
         if chain is None:
             decomposer = ChainDecomposer(
                 llm=deep_llm, max_depth=max_depth, sector=sector, language=language,
+                market=market,
             )
             queue = asyncio.Queue()
             # 整体超时按拆解层数给预算（4层4200s / 5层6400s），BH_DECOMPOSE_TIMEOUT 可覆盖。

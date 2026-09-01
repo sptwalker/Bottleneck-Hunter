@@ -136,6 +136,10 @@ def fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
             if exchange and exchange not in VALID_EXCHANGES:
                 logger.info(f"跳过非主板 ticker {ticker} (exchange={exchange})")
                 continue
+            # 交易所挂牌 ≠ 普通股：HAM 等 quoteType=ECNQUOTE 也落在 NMS 内，须再挡一道。
+            if (info.get("quoteType") or "") != "EQUITY":
+                logger.info(f"跳过非普通股 ticker {ticker} (quoteType={info.get('quoteType')})")
+                continue
             name = info.get("shortName") or info.get("longName") or ticker
             mcap = info.get("marketCap")
             market_cap_b = round(mcap / 1e9, 2) if mcap else None
@@ -395,7 +399,7 @@ class SupplierSearcher:
         async def _chain_source():
             if not chain_graph:
                 return []
-            return self._extract_chain_candidates(bottleneck, chain_graph)
+            return await self._extract_chain_candidates(bottleneck, chain_graph)
 
         async def _gangtise_source():
             # §6.2 指标选股前置漏斗：仅 A股，板块内「主营含瓶颈词」粗筛（curated 板块表）
@@ -770,12 +774,18 @@ class SupplierSearcher:
 
     # ----- Chain graph candidate extraction -----------------------------------
 
-    def _extract_chain_candidates(
+    async def _extract_chain_candidates(
         self, bottleneck: BottleneckReport, chain: ChainGraph
     ) -> list[SupplierInfo]:
-        """从产业链图谱的 representative_companies 中提取候选供应商。"""
+        """从产业链图谱的 representative_companies 中提取候选供应商。
+
+        美股候选（LLM 拆解阶段自报的码）必须过 yfinance 行情校验：取不到报价的码一律剔除。
+        否则 LLM 给外国公司配的冷门 OTC 粉单 ADR 码（如 RNECY=瑞萨 ADR、HAM）会绕过
+        `_validate_us_candidates` 的兜底直接进池 → 下游 Gangtise/yfinance/finnhub 全源取数失败。
+        """
         candidates: list[SupplierInfo] = []
         seen_tickers: set[str] = set()
+        us_pending: list[SupplierInfo] = []  # 美股候选先攒起来，批量校验后再并入
 
         target_nodes = []
         node = chain.get_node(bottleneck.node_name)
@@ -813,7 +823,7 @@ class SupplierSearcher:
                     continue
                 seen_tickers.add(ticker)
 
-                candidates.append(SupplierInfo(
+                info = SupplierInfo(
                     name=name,
                     name_cn="",
                     ticker=ticker,
@@ -821,7 +831,31 @@ class SupplierSearcher:
                     sector="",
                     description=f"来自产业链节点「{n.name}」的代表企业",
                     source="chain",
-                ))
+                )
+                if market == MarketRegion.US_STOCK:
+                    us_pending.append(info)
+                else:
+                    candidates.append(info)
+
+        # 美股候选批量行情校验：yfinance 取不到报价（OTC 粉单/退市/LLM 错配码）→ 剔除
+        if us_pending:
+            tickers = [s.ticker for s in us_pending]
+            try:
+                quotes = await asyncio.to_thread(fetch_yfinance_quotes, tickers)
+            except Exception:
+                logger.exception("产业链美股候选 yfinance 校验异常")
+                quotes = {}
+            dropped = []
+            for s in us_pending:
+                q = quotes.get(s.ticker)
+                if not q:
+                    dropped.append(s.ticker)
+                    continue
+                s.market_cap = q.get("market_cap_b")
+                candidates.append(s)
+            if dropped:
+                logger.info(f"[{bottleneck.node_name}] 产业链美股候选行情校验剔除 {len(dropped)} 家无效码: "
+                            + ", ".join(dropped[:8]))
 
         if candidates:
             logger.info(f"[{bottleneck.node_name}] 从产业链图谱提取 {len(candidates)} 家候选")
