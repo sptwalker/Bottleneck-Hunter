@@ -163,26 +163,91 @@ def fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
 # FMP /stable/profile 的主板交易所名（对齐原 yfinance VALID_EXCHANGES 的语义：仅三大所普通股）
 _FMP_MAIN_EXCHANGES = {"NASDAQ", "NYSE", "AMEX"}
 
+# Yahoo v7 quote 的 exchange 短码（与 yfinance .info 同一套编码；NMS=NasdaqGS/NYQ=NYSE/PNK=粉单…）
+_YH_VALID_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "ASE", "BTS", "PCX"}
+_YH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/120 Safari/537.36")
 
-async def fetch_us_quotes(tickers: list[str]) -> dict[str, dict]:
-    """美股候选行情校验：优先 FMP /stable/profile，无 FMP key 时回退 yfinance。
 
-    国内机房直连 Yahoo(yfinance) 必 429，chain 入围曾整屏「美股行情验证失败」→ 0 公司；
-    决策中心 price_pipeline 早已弃 yfinance 改走 FMP（get_http_client 带借道 transport，白名单可达；
-    机房直连 FMP 亦通），此处复用同一路径修复 chain 侧。返回 {ticker: {name,ticker,price,market_cap_b,pe}}，
-    与原 fetch_yfinance_quotes 同形。/stable/profile 不含 PE（亏损股本就 None，入围不依赖 PE）。
+async def _fetch_yahoo_quotes_relay(tickers: list[str]) -> dict[str, dict]:
+    """经桌面借道用 Yahoo v7 批量取美股行情——机房 IP 被 Yahoo 封，借 admin 住宅 IP 取。
 
-    Key 严格按 current_user 解析（resolve_data_source_key("fmp")）；缺 key（多为本地开发）→ 退 yfinance。
+    国内机房直连 Yahoo(yfinance)必 429/403；桌面住宅 IP 不被封。走 get_http_client()
+    的借道 transport（fc.yahoo.com / query1.finance.yahoo.com 已在白名单）：
+      ① fc.yahoo.com 种 A3 cookie（cookie 全程只在桌面端 httpx jar，无需回传）
+      ② /v1/test/getcrumb 取 crumb（首访常 401，种 cookie 后重试即 200）
+      ③ /v7/finance/quote?symbols=… 批量单请求取全部候选（逗号分隔，天然规避逐调 429）
+    v7 一次即返回 marketCap/trailingPE/exchange/quoteType，过滤沿用 yfinance 双闸
+    （exchange∈VALID + quoteType==EQUITY）。无 relay/失败 → 返回 {}，由上层降级。
     """
     if not tickers:
         return {}
+    from bottleneck_hunter.watchlist.retry import get_http_client
+    from bottleneck_hunter.web.egress_relay import registry
+    # 无桌面 relay 在线时，机房直连 Yahoo 必死，直接放弃走此路（由上层 FMP/yfinance 兜底）
+    if not registry.status().get("connected"):
+        return {}
+    client = get_http_client()
+    hdr = {"User-Agent": _YH_UA}
+    try:
+        # ① 种 cookie（桌面端 jar 自动持有）
+        try:
+            await client.get("https://fc.yahoo.com/", headers=hdr, timeout=10)
+        except Exception:  # noqa: BLE001
+            pass  # fc.yahoo.com 常返 404 但已种 cookie，忽略
+        # ② 取 crumb（种 cookie 后重试一次）
+        crumb = ""
+        for _ in range(2):
+            rc = await client.get("https://query1.finance.yahoo.com/v1/test/getcrumb",
+                                  headers=hdr, timeout=10)
+            crumb = (rc.text or "").strip()
+            if rc.status_code == 200 and crumb and "<" not in crumb and "{" not in crumb:
+                break
+            crumb = ""
+        if not crumb:
+            logger.info("Yahoo 借道取 crumb 失败，降级")
+            return {}
+        # ③ 批量 quote（单请求，逗号分隔全部候选）
+        syms = ",".join(tickers)
+        rq = await client.get(
+            f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={syms}&crumb={crumb}",
+            headers=hdr, timeout=15)
+        rq.raise_for_status()
+        rows = (rq.json().get("quoteResponse") or {}).get("result") or []
+    except Exception as e:  # noqa: BLE001
+        logger.info(f"Yahoo 借道批量行情失败，降级: {e}")
+        return {}
 
-    from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
-    key = resolve_data_source_key("fmp")
-    if not key:
-        # 无 FMP key（本地开发/未配）→ 退回 yfinance（本地出口通常不被 Yahoo 限流）
-        return await asyncio.to_thread(fetch_yfinance_quotes, tickers)
+    results: dict[str, dict] = {}
+    for row in rows:
+        sym = str(row.get("symbol") or "").upper()
+        if not sym:
+            continue
+        exch = row.get("exchange") or ""
+        if exch and exch not in _YH_VALID_EXCHANGES:
+            logger.info(f"跳过非主板 ticker {sym} (exchange={exch})")
+            continue
+        if (row.get("quoteType") or "") != "EQUITY":  # 挡 ETF/ECNQUOTE（如 GLD/IQE/HAM）
+            logger.info(f"跳过非普通股 ticker {sym} (quoteType={row.get('quoteType')})")
+            continue
+        name = row.get("shortName") or row.get("longName") or ""
+        if not name or name == sym:
+            continue
+        mcap = row.get("marketCap")
+        pe = row.get("trailingPE")
+        results[sym] = {
+            "name": name,
+            "ticker": sym,
+            "price": row.get("regularMarketPrice"),
+            "market_cap_b": round(mcap / 1e9, 2) if mcap else None,
+            "pe": round(pe, 2) if pe else None,
+        }
+    return results
 
+
+async def _fetch_fmp_quotes(tickers: list[str], key: str) -> dict[str, dict]:
+    """FMP /stable/profile 取美股行情（次选源）。免费额度有限，逐调易 429；仅在 Yahoo 借道
+    不可用时兜个底。过滤对齐 yfinance 语义（exchange 三大所 + 非 ETF/基金 + 在交易）。"""
     from bottleneck_hunter.watchlist.retry import get_http_client
     client = get_http_client()
 
@@ -199,8 +264,6 @@ async def fetch_us_quotes(tickers: list[str]) -> dict[str, dict]:
         row = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
         if not row:
             return sym, None  # FMP 查无此码（冷门粉单/ECNQUOTE，如 HAM）→ 天然剔除
-        # 仅认主板、非 ETF/基金、在交易的普通股（对齐原 VALID_EXCHANGES + quoteType==EQUITY）；
-        # 主板 ADR（如 TSM=NYSE）是合法优质标的，不因 isAdr 剔除，仅 exchange 挡 OTC 粉单 ADR。
         exch = (row.get("exchange") or "").upper()
         if exch not in _FMP_MAIN_EXCHANGES:
             logger.info(f"跳过非主板 ticker {sym} (exchange={exch or '?'})")
@@ -215,22 +278,48 @@ async def fetch_us_quotes(tickers: list[str]) -> dict[str, dict]:
         if not name or name == sym:
             return sym, None
         mcap = row.get("marketCap")
-        market_cap_b = round(mcap / 1e9, 2) if mcap else None
         return sym, {
             "name": name,
             "ticker": sym,
             "price": row.get("price"),
-            "market_cap_b": market_cap_b,
-            "pe": None,  # /stable/profile 不返回 PE；如需精确 PE 另走 /stable/quote，入围不依赖
+            "market_cap_b": round(mcap / 1e9, 2) if mcap else None,
+            "pe": None,  # /stable/profile 不返回 PE；入围不依赖
         }
 
     pairs = await asyncio.gather(*[_one(t) for t in tickers])
-    results = {sym: q for sym, q in pairs if q}
-    # FMP 全军覆没（key 失效/额度耗尽）→ 兜底 yfinance，避免静默 0 公司
-    if not results:
+    return {sym: q for sym, q in pairs if q}
+
+
+async def fetch_us_quotes(tickers: list[str]) -> dict[str, dict]:
+    """美股候选行情校验，三级取数（返回 {ticker: {name,ticker,price,market_cap_b,pe}}，同原 shape）：
+
+      ① Yahoo v7 批量经桌面借道 —— 首选。机房 IP 被 Yahoo 封，借 admin 住宅 IP；
+         单请求取全部候选，字段最全（含 PE），天然规避 429。桌面 relay 在线时才走。
+      ② FMP /stable/profile —— 次选。Yahoo 借道不可用（无桌面 relay）时兜底；免费额度有限。
+      ③ yfinance —— 末选。无 FMP key（本地开发）时用；本地出口通常不被 Yahoo 限流。
+
+    机房被 Yahoo 封 + FMP 免费额度易被 chain 数百次请求打爆 → 曾整屏「美股行情验证失败」→ 0 公司。
+    Yahoo 借道批量为主源根治之。Key 严格按 current_user 解析。
+    """
+    if not tickers:
+        return {}
+
+    # ① Yahoo v7 批量借道（桌面 relay 在线时）
+    yq = await _fetch_yahoo_quotes_relay(tickers)
+    if yq:
+        return yq
+
+    # ② FMP（有 key 时）
+    from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
+    key = resolve_data_source_key("fmp")
+    if key:
+        fq = await _fetch_fmp_quotes(tickers, key)
+        if fq:
+            return fq
         logger.info("FMP 美股校验 0 命中，回退 yfinance 兜底")
-        return await asyncio.to_thread(fetch_yfinance_quotes, tickers)
-    return results
+
+    # ③ yfinance 末选兜底
+    return await asyncio.to_thread(fetch_yfinance_quotes, tickers)
 
 
 # ---------------------------------------------------------------------------

@@ -20,8 +20,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ── 借道白名单（单一事实源；客户端 import 同一份做出站校验）─────────────
-# 只放「我们代码显式发起 requests/httpx 的新闻/SEC/宏观/基本面 URL」的域名（scope-lite v1）。
-BORROW_HOSTS = {"news.google.com", "api.stlouisfed.org", "financialmodelingprep.com"}
+# 只放「我们代码显式发起 requests/httpx 的新闻/SEC/宏观/基本面/行情 URL」的域名（scope-lite v1）。
+# Yahoo 两 host 精确列出（can_reach/probe 按精确匹配；用后缀会与 probe 的 host 对不上）：
+#   fc.yahoo.com 种 A3 cookie，query1.finance.yahoo.com 取 crumb + v7 批量行情（美股入围校验）。
+BORROW_HOSTS = {"news.google.com", "api.stlouisfed.org", "financialmodelingprep.com",
+                "fc.yahoo.com", "query1.finance.yahoo.com"}
 BORROW_SUFFIXES = {"sec.gov"}  # 覆盖 www./data./efts.sec.gov
 
 RELAY_TIMEOUT = 30.0  # 单次借道取数上限（秒）
