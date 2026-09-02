@@ -160,6 +160,79 @@ def fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
     return results
 
 
+# FMP /stable/profile 的主板交易所名（对齐原 yfinance VALID_EXCHANGES 的语义：仅三大所普通股）
+_FMP_MAIN_EXCHANGES = {"NASDAQ", "NYSE", "AMEX"}
+
+
+async def fetch_us_quotes(tickers: list[str]) -> dict[str, dict]:
+    """美股候选行情校验：优先 FMP /stable/profile，无 FMP key 时回退 yfinance。
+
+    国内机房直连 Yahoo(yfinance) 必 429，chain 入围曾整屏「美股行情验证失败」→ 0 公司；
+    决策中心 price_pipeline 早已弃 yfinance 改走 FMP（get_http_client 带借道 transport，白名单可达；
+    机房直连 FMP 亦通），此处复用同一路径修复 chain 侧。返回 {ticker: {name,ticker,price,market_cap_b,pe}}，
+    与原 fetch_yfinance_quotes 同形。/stable/profile 不含 PE（亏损股本就 None，入围不依赖 PE）。
+
+    Key 严格按 current_user 解析（resolve_data_source_key("fmp")）；缺 key（多为本地开发）→ 退 yfinance。
+    """
+    if not tickers:
+        return {}
+
+    from bottleneck_hunter.data_provider.data_source_catalog import resolve_data_source_key
+    key = resolve_data_source_key("fmp")
+    if not key:
+        # 无 FMP key（本地开发/未配）→ 退回 yfinance（本地出口通常不被 Yahoo 限流）
+        return await asyncio.to_thread(fetch_yfinance_quotes, tickers)
+
+    from bottleneck_hunter.watchlist.retry import get_http_client
+    client = get_http_client()
+
+    async def _one(sym: str) -> tuple[str, dict | None]:
+        try:
+            r = await client.get(
+                f"https://financialmodelingprep.com/stable/profile?symbol={sym}&apikey={key}",
+                timeout=10, headers={"User-Agent": "BottleneckHunter/1.0"})
+            r.raise_for_status()
+            data = r.json()
+        except Exception:  # noqa: BLE001
+            logger.debug(f"FMP profile 查询失败: {sym}")
+            return sym, None
+        row = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
+        if not row:
+            return sym, None  # FMP 查无此码（冷门粉单/ECNQUOTE，如 HAM）→ 天然剔除
+        # 仅认主板、非 ETF/基金、在交易的普通股（对齐原 VALID_EXCHANGES + quoteType==EQUITY）；
+        # 主板 ADR（如 TSM=NYSE）是合法优质标的，不因 isAdr 剔除，仅 exchange 挡 OTC 粉单 ADR。
+        exch = (row.get("exchange") or "").upper()
+        if exch not in _FMP_MAIN_EXCHANGES:
+            logger.info(f"跳过非主板 ticker {sym} (exchange={exch or '?'})")
+            return sym, None
+        if row.get("isEtf") or row.get("isFund"):
+            logger.info(f"跳过 ETF/基金 ticker {sym}")
+            return sym, None
+        if row.get("isActivelyTrading") is False:
+            logger.info(f"跳过停牌/退市 ticker {sym}")
+            return sym, None
+        name = row.get("companyName") or ""
+        if not name or name == sym:
+            return sym, None
+        mcap = row.get("marketCap")
+        market_cap_b = round(mcap / 1e9, 2) if mcap else None
+        return sym, {
+            "name": name,
+            "ticker": sym,
+            "price": row.get("price"),
+            "market_cap_b": market_cap_b,
+            "pe": None,  # /stable/profile 不返回 PE；如需精确 PE 另走 /stable/quote，入围不依赖
+        }
+
+    pairs = await asyncio.gather(*[_one(t) for t in tickers])
+    results = {sym: q for sym, q in pairs if q}
+    # FMP 全军覆没（key 失效/额度耗尽）→ 兜底 yfinance，避免静默 0 公司
+    if not results:
+        logger.info("FMP 美股校验 0 命中，回退 yfinance 兜底")
+        return await asyncio.to_thread(fetch_yfinance_quotes, tickers)
+    return results
+
+
 # ---------------------------------------------------------------------------
 # AKShare fallback (A-stock only)
 # ---------------------------------------------------------------------------
@@ -681,9 +754,9 @@ class SupplierSearcher:
         )
 
         try:
-            quotes = await asyncio.to_thread(fetch_yfinance_quotes, tickers)
+            quotes = await fetch_us_quotes(tickers)
         except Exception:
-            logger.exception("yfinance API 异常")
+            logger.exception("美股行情校验异常")
             quotes = {}
 
         if not quotes:
@@ -779,7 +852,7 @@ class SupplierSearcher:
     ) -> list[SupplierInfo]:
         """从产业链图谱的 representative_companies 中提取候选供应商。
 
-        美股候选（LLM 拆解阶段自报的码）必须过 yfinance 行情校验：取不到报价的码一律剔除。
+        美股候选（LLM 拆解阶段自报的码）必须过行情校验（FMP 优先，无 key 退 yfinance）：取不到报价的码一律剔除。
         否则 LLM 给外国公司配的冷门 OTC 粉单 ADR 码（如 RNECY=瑞萨 ADR、HAM）会绕过
         `_validate_us_candidates` 的兜底直接进池 → 下游 Gangtise/yfinance/finnhub 全源取数失败。
         """
@@ -837,13 +910,13 @@ class SupplierSearcher:
                 else:
                     candidates.append(info)
 
-        # 美股候选批量行情校验：yfinance 取不到报价（OTC 粉单/退市/LLM 错配码）→ 剔除
+        # 美股候选批量行情校验（FMP 优先/yfinance 兜底）：取不到报价（OTC 粉单/退市/LLM 错配码）→ 剔除
         if us_pending:
             tickers = [s.ticker for s in us_pending]
             try:
-                quotes = await asyncio.to_thread(fetch_yfinance_quotes, tickers)
+                quotes = await fetch_us_quotes(tickers)
             except Exception:
-                logger.exception("产业链美股候选 yfinance 校验异常")
+                logger.exception("产业链美股候选行情校验异常")
                 quotes = {}
             dropped = []
             for s in us_pending:
