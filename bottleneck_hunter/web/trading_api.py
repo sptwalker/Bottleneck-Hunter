@@ -187,8 +187,10 @@ async def refresh_prices(market: str = "us_stock", user: dict = Depends(get_curr
         return {"status": "no_active_positions"}
 
     updated = 0
+    skipped = 0
     try:
         import yfinance as yf
+        from bottleneck_hunter.watchlist.trade_executor import sane_reprice
         data = yf.download(tickers, period="1d", progress=False)
         if data.empty:
             return {"status": "no_data"}
@@ -201,12 +203,15 @@ async def refresh_prices(market: str = "us_stock", user: dict = Depends(get_curr
             ticker = p["ticker"]
             try:
                 price = float(close[ticker].iloc[-1]) if len(tickers) > 1 else float(close.iloc[-1])
-                if price > 0:
-                    mv = round(p["shares"] * price, 2)
-                    pnl = round(p["shares"] * (price - p["avg_cost"]), 2)
-                    store.update_sim_position(p["id"], current_price=price,
-                                              market_value=mv, unrealized_pnl=pnl)
-                    updated += 1
+                if not sane_reprice(price, p.get("current_price") or 0):
+                    logger.warning("刷价离群拒写 %s: 新价 %s vs 现价 %s", ticker, price, p.get("current_price"))
+                    skipped += 1
+                    continue
+                mv = round(p["shares"] * price, 2)
+                pnl = round(p["shares"] * (price - p["avg_cost"]), 2)
+                store.update_sim_position(p["id"], current_price=price,
+                                          market_value=mv, unrealized_pnl=pnl)
+                updated += 1
             except Exception:
                 continue
     except ImportError:
@@ -215,7 +220,7 @@ async def refresh_prices(market: str = "us_stock", user: dict = Depends(get_curr
     from bottleneck_hunter.watchlist.trade_executor import _recalc_account
     _recalc_account(store, account["id"])
 
-    return {"status": "ok", "updated": updated}
+    return {"status": "ok", "updated": updated, "skipped": skipped}
 
 
 # ─────────────────────────────────────────────────────────

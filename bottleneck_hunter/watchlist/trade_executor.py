@@ -18,6 +18,29 @@ logger = logging.getLogger(__name__)
 COMMISSION_RATE = 0.001
 
 
+def sane_reprice(new_price: float, ref_price: float, *, lo: float = 0.5, hi: float = 2.0) -> bool:
+    """刷价离群守卫：一次刷价内新价相对参考价(上次现价/快照)跌破半价或翻倍，判为外部源脏数据，拒写。
+
+    根治「yfinance/外部源偶发坏 tick 直接落库」——历史上 MU 被写成 10.0(参考价 933，90× 偏离)
+    仅靠 `price>0` 放行。ref<=0 时无参考、放行；单票日内真涨跌不会翻倍/腰斩，拒一轮只是留旧值待下轮。
+    """
+    if not new_price or new_price <= 0:
+        return False
+    if not ref_price or ref_price <= 0:
+        return True
+    return lo <= new_price / ref_price <= hi
+
+
+def _demo() -> None:
+    # 坏 tick：933→10 必须拦下；正常波动放行；无参考放行；非正价拒绝
+    assert sane_reprice(10.0, 933.44) is False
+    assert sane_reprice(958.73, 933.44) is True
+    assert sane_reprice(500.0, 0) is True          # 无参考
+    assert sane_reprice(0, 933.44) is False         # 非正价
+    assert sane_reprice(1900.0, 933.44) is False    # >2x 翻倍
+    print("sane_reprice self-check OK")
+
+
 async def refresh_positions_live(store: WatchlistStore) -> None:
     """确认成交后：拉当前所有持仓的实时价 → 更新持仓市值/浮盈 → 重算账户权益。
 
@@ -45,6 +68,9 @@ async def refresh_positions_live(store: WatchlistStore) -> None:
             snap = mstore.get_latest_snapshot(p["ticker"])
             px = snap.get("close") if snap and snap.get("close") else None
             if not px:
+                continue
+            if not sane_reprice(px, p.get("current_price") or 0):
+                logger.warning("刷价离群拒写 %s: 新价 %s vs 现价 %s", p["ticker"], px, p.get("current_price"))
                 continue
             mstore.update_sim_position(
                 p["id"], current_price=px,
