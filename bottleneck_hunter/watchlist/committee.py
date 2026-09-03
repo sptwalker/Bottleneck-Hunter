@@ -543,6 +543,31 @@ def _gangtise_valuation_percentiles(ticker: str, market: str) -> dict | None:
         return None
 
 
+def _gangtise_top_holders(ticker: str, market: str) -> list[dict] | None:
+    """取 Gangtise 前十大股东供投委会拥挤度段。仅 A股；同步、best-effort（照 valuation 同款）。
+
+    A股 store 十大股东恒空（yfinance 无 A股口径），补 Gangtise 存量持股。失败/无覆盖 → None。
+    返回 [{name, pct}]（对齐 crowd["top_institutional_holders"] 现有结构，只取前 5）。
+    """
+    if market != "a_stock":
+        return None
+    try:
+        from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+        creds = resolve_gangtise_credentials("")
+        if not creds:
+            return None
+        ak, sk = creds
+        from bottleneck_hunter.data_provider.gangtise_client import fetch_shareholder
+        from bottleneck_hunter.data_provider.providers import _map_gangtise_shareholder
+        mapped = _map_gangtise_shareholder(fetch_shareholder(ak, sk, ticker, market))
+        holders = (mapped or {}).get("holders") or []
+        out = [{"name": h.get("name", ""), "pct": _fmt_num(h.get("pct"))}
+               for h in holders[:5] if h.get("name")]
+        return out or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
                             market: str) -> dict:
     """为单只标的聚合投委会所需的真实背景资料。
@@ -640,6 +665,11 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
             "insider_buy_count": insider_buy,
             "insider_sell_count": insider_sell,
         }
+        # A股 store 十大股东恒空（yfinance 无 A股口径）→ 补 Gangtise 存量持股，非 A股静默跳过
+        if not crowd["top_institutional_holders"]:
+            gts_holders = _gangtise_top_holders(ticker, market)
+            if gts_holders:
+                crowd["top_institutional_holders"] = gts_holders
         bg["crowding_data"] = crowd
     except Exception:
         bg["crowding_data"] = "暂无持仓集中度数据"

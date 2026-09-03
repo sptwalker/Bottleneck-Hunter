@@ -17,11 +17,13 @@ from bottleneck_hunter.data_provider.hub import (
     CAP_FINANCIALS,
     CAP_KB,
     CAP_MACRO_EDB,
+    CAP_MAINBIZ,
     CAP_NARRATIVE,
     CAP_NEWS,
     CAP_OPTIONS,
     CAP_RESEARCH,
     CAP_SCREEN,
+    CAP_SHAREHOLDER,
     CAP_VALUATION,
 )
 
@@ -649,12 +651,17 @@ class YfinanceOptionsProvider:
         return await asyncio.to_thread(_analyze_options_chain, ticker)
 
 
-def _map_gangtise_financials(fin: dict, forecast: dict | None, market: str = "a_stock") -> dict:
-    """纯映射（可单测，不碰网络）：Gangtise 利润表行 + 一致预期 → 规范 CAP_FINANCIALS dict。
+def _map_gangtise_financials(fin: dict, forecast: dict | None, market: str = "a_stock",
+                             ede: dict | None = None) -> dict:
+    """纯映射（可单测，不碰网络）：Gangtise 利润表行 + 一致预期 + EDE 公司指标 → 规范 CAP_FINANCIALS dict。
 
     金额 元→亿（1e-8）。A股利润表无 grossProfit 字段，毛利率 =(营收-营业成本)/营收 自算
     （比率与金额刻度无关，故即便 1e-8 假设有偏毛利率仍准）。美股同接口同刻度，币种记 USD。
     ponytail: 金额刻度按「原始=元/美元本币」假设，真实连通后若量级不符，唯一校准点是此处 1e-8。
+
+    ede（A股 EDE 公司指标 {code:{value}}，fetch_company_indicator 供给）非空时回填 ROE/负债率/
+    营收同比/净利同比——这四项是 supplier_eval._data_financial_health 的重权项，此前恒 None 被静默丢弃。
+    EDE 值已是百分数，直赋（见 fetch_company_indicator 校准注释）。美股/港股 ede=None → 保持 None。
     """
     row = fin["rows"][0]
     # 字段随市场略异（活体实测 2026-08）：opRev(营业收入)/opCost(营业成本) 三市场同名；净利归母
@@ -676,18 +683,23 @@ def _map_gangtise_financials(fin: dict, forecast: dict | None, market: str = "a_
         f0 = forecast["forecasts"][0]  # 最近发布日、最近预测年
         cons_eps = _f(f0.get("eps"))
         cons_pe = _f(f0.get("pe"))  # 券商前瞻 PE = 一致预期
+
+    def _ede(code):  # EDE 值已是百分数，直取，无则 None
+        rec = (ede or {}).get(code)
+        return rec.get("value") if rec else None
+
     return {
         "data_source": "gangtise",
         "currency": "USD" if market == "us_stock" else "CNY",  # 金额币种（revenue_yi/net_profit_yi 亿本币）
         "report_date": fin.get("report_date", ""),
         "revenue_yi": rev,
-        "revenue_yoy_pct": None,   # ponytail: 累计口径同比需拉多期，起步留空；接多期后用 _quarters_yoy
+        "revenue_yoy_pct": _ede("is_op_rev_yoy"),    # EDE 营业收入同比(报告期累计)，回填自 fetch_company_indicator
         "net_profit_yi": net,
-        "net_profit_yoy_pct": None,
+        "net_profit_yoy_pct": _ede("is_shnp_yoy"),   # EDE 归母净利润同比(报告期累计)
         "gross_margin_pct": gm,
-        "roe_pct": None,           # 一致预期 roe 是前瞻值，语义≠实际 roe_pct，不混入
-        "debt_ratio_pct": None,
-        "cashflow_per_share": None,
+        "roe_pct": _ede("finc_roe_avg"),             # EDE 平均净资产收益率（实际值，非一致预期前瞻 roe）
+        "debt_ratio_pct": _ede("bs_liblty_to_aset"), # EDE 资产负债率
+        "cashflow_per_share": None,   # ponytail: EDE 非其口径来源，保持 None（YAGNI）
         "consensus_eps": cons_eps,
         "consensus_pe": cons_pe,
         "analyst_rating": None,
@@ -723,6 +735,27 @@ def _map_gangtise_valuation(raw: dict | None) -> dict | None:
     return out
 
 
+def _map_gangtise_mainbiz(raw: dict | None) -> dict | None:
+    """纯映射（可单测，不碰网络）：fetch_main_business 原始 → 规范 CAP_MAINBIZ dict。
+
+    客户端已完成分段/占比自算，本映射只透传并打 data_source 标。空 → None。
+    """
+    if not raw or not raw.get("segments"):
+        return None
+    return {"data_source": "gangtise", "segments": raw["segments"],
+            "as_of": raw.get("as_of", ""), "breakdown": raw.get("breakdown", "product")}
+
+
+def _map_gangtise_shareholder(raw: dict | None) -> dict | None:
+    """纯映射（可单测，不碰网络）：fetch_shareholder 原始 → 规范 CAP_SHAREHOLDER dict。
+
+    客户端已解析前十大 holders，本映射只透传并打 data_source 标。空 → None。
+    """
+    if not raw or not raw.get("holders"):
+        return None
+    return {"data_source": "gangtise", "holders": raw["holders"], "as_of": raw.get("as_of", "")}
+
+
 class GangtiseProvider:
     """Gangtise 投研 — A股基本面（CAP_FINANCIALS）+ 全市场 EDB 宏观（CAP_MACRO_EDB）。
 
@@ -740,7 +773,8 @@ class GangtiseProvider:
     priority = 0
 
     def capabilities(self) -> set[str]:
-        return {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION}
+        return {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION,
+                CAP_MAINBIZ, CAP_SHAREHOLDER}
 
     def markets(self) -> set[str]:
         return {"a_stock", "us_stock"}
@@ -748,15 +782,16 @@ class GangtiseProvider:
     def supports(self, capability: str, market: str) -> bool:
         if capability == CAP_FINANCIALS:
             return market in ("a_stock", "us_stock")   # A股 6位直通；美股经 securities/search 解析 .O/.N
-        if capability == CAP_VALUATION:
-            return market == "a_stock"   # 实测仅 A股有估值分位覆盖；美股/港股 code=120001，不认领
+        if capability in (CAP_VALUATION, CAP_MAINBIZ, CAP_SHAREHOLDER):
+            return market == "a_stock"   # 实测仅 A股覆盖（美股/港股 code=120001），不认领
         if capability in (CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB):
             return market in ("a_stock", "us_stock")    # 研报覆盖 A/H/US/中概；KB 与市场无关但按 market 门控
         return False
 
     async def fetch(self, capability, ticker, market, user_id="") -> dict | None:
         from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
-        if capability not in (CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION):
+        if capability not in (CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION,
+                              CAP_MAINBIZ, CAP_SHAREHOLDER):
             return None
         creds = resolve_gangtise_credentials(user_id)
         if not creds:
@@ -774,6 +809,10 @@ class GangtiseProvider:
             return await asyncio.to_thread(self._fetch_kb_sync, ak, sk, ticker)
         if capability == CAP_VALUATION:
             return await asyncio.to_thread(self._fetch_valuation_sync, ak, sk, ticker, market)
+        if capability == CAP_MAINBIZ:
+            return await asyncio.to_thread(self._fetch_mainbiz_sync, ak, sk, ticker, market)
+        if capability == CAP_SHAREHOLDER:
+            return await asyncio.to_thread(self._fetch_shareholder_sync, ak, sk, ticker, market)
         return await asyncio.to_thread(self._fetch_sync, ak, sk, ticker, market)
 
     def _fetch_valuation_sync(self, ak, sk, ticker, market) -> dict | None:
@@ -781,6 +820,16 @@ class GangtiseProvider:
         from bottleneck_hunter.data_provider import gangtise_client as gc
         raw = gc.fetch_valuation(ak, sk, ticker, market)
         return _map_gangtise_valuation(raw)
+
+    def _fetch_mainbiz_sync(self, ak, sk, ticker, market) -> dict | None:
+        """主营构成（最近一期分产品营收·毛利率·占比）。仅 A股；映射为规范 CAP_MAINBIZ dict。"""
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        return _map_gangtise_mainbiz(gc.fetch_main_business(ak, sk, ticker, market))
+
+    def _fetch_shareholder_sync(self, ak, sk, ticker, market) -> dict | None:
+        """股东结构（前十大持股占比·增减）。仅 A股；映射为规范 CAP_SHAREHOLDER dict。"""
+        from bottleneck_hunter.data_provider import gangtise_client as gc
+        return _map_gangtise_shareholder(gc.fetch_shareholder(ak, sk, ticker, market))
 
     # 研报端点保留窗：broker-report/foreign-report 的 getList 仅服务「距 now 约 30 天内」的发布，
     # 越限即 code:110003 TIME_RANGE_EXCEEDED（实测 start=今日-30 OK、今日-31 报错；与 endTime 无关，
@@ -851,7 +900,8 @@ class GangtiseProvider:
         if not fin or not fin.get("rows"):
             return None
         forecast = None
-        if market == "a_stock":   # 一致预期接口 A股-only（美股返 120001）→ 美股 consensus 留空
+        ede = None
+        if market == "a_stock":   # 一致预期 + EDE 公司指标均 A股-only（美股返 120001）
             try:  # 一致预期软失败：拿不到不阻断财务主体
                 today = date.today()
                 forecast = gc.fetch_earnings_forecast(
@@ -859,7 +909,11 @@ class GangtiseProvider:
                     (today - timedelta(days=30)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
             except Exception as e:  # noqa: BLE001
                 logger.debug("Gangtise 一致预期获取失败 (%s): %s", ticker, e)
-        return _map_gangtise_financials(fin, forecast, market)
+            try:  # EDE 软失败：拿不到则 ROE/负债率/同比保持 None（回退旧行为，不阻断）
+                ede = gc.fetch_company_indicator(ak, sk, ticker, market)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Gangtise EDE 公司指标获取失败 (%s): %s", ticker, e)
+        return _map_gangtise_financials(fin, forecast, market, ede)
 
 
 def _map_gangtise_edb(raw: dict, market: str) -> dict:
@@ -1017,6 +1071,29 @@ def _demo() -> None:
     fin2 = {"report_date": "", "rows": [{"opRev": 1e8, "opCost": 6e7, "netProfit": 3e7}]}
     d3 = _map_gangtise_financials(fin2, None)
     assert d3["net_profit_yi"] == 0.3, d3["net_profit_yi"]
+    # P2 EDE 回填：ede 非空 → ROE/负债率/营收同比/净利同比被填（值已是百分数，直取）
+    ede = {"finc_roe_avg": {"value": 17.95}, "bs_liblty_to_aset": {"value": 15.19},
+           "is_op_rev_yoy": {"value": 1.47}, "is_shnp_yoy": {"value": -1.95}}
+    de = _map_gangtise_financials(fin, forecast, "a_stock", ede)
+    assert de["roe_pct"] == 17.95 and de["debt_ratio_pct"] == 15.19, de
+    assert de["revenue_yoy_pct"] == 1.47 and de["net_profit_yoy_pct"] == -1.95, de
+    # ede=None → 四项仍 None（回退旧行为，美股路径同此）
+    assert d["roe_pct"] is None and d["debt_ratio_pct"] is None, d
+    assert d["revenue_yoy_pct"] is None and d["net_profit_yoy_pct"] is None, d
+    # P1 主营构成映射：透传 segments，空 → None
+    mb = _map_gangtise_mainbiz({"segments": [{"name": "茅台酒", "revenue_yi": 777.24, "pct": 84.23,
+                                              "gross_margin_pct": 92.28}], "as_of": "2026-06-30",
+                                "breakdown": "product"})
+    assert mb and mb["data_source"] == "gangtise" and mb["segments"][0]["name"] == "茅台酒", mb
+    assert mb["as_of"] == "2026-06-30" and mb["breakdown"] == "product", mb
+    assert _map_gangtise_mainbiz({}) is None and _map_gangtise_mainbiz(None) is None
+    assert _map_gangtise_mainbiz({"segments": []}) is None
+    # P3 股东结构映射：透传 holders，空 → None
+    sh = _map_gangtise_shareholder({"holders": [{"name": "茅台集团", "pct": 54.5, "change": 0.1,
+                                                 "share_type": "无限售流通A股"}], "as_of": "2026-06-30"})
+    assert sh and sh["data_source"] == "gangtise" and sh["holders"][0]["pct"] == 54.5, sh
+    assert _map_gangtise_shareholder({}) is None and _map_gangtise_shareholder(None) is None
+    assert _map_gangtise_shareholder({"holders": []}) is None
     # EDB 映射：identity 原值 + index100 变换 + change_pct=最新−前值
     raw = {
         "M00012461": {"latest": 3.5, "prev": 4.2, "date": "20260630"},   # 美CPI identity
@@ -1030,13 +1107,16 @@ def _demo() -> None:
     assert cn["cn_cpi_yoy"]["change_pct"] == -0.4, cn  # (99.9-100)-(100.3-100)=-0.1-0.3
     assert "us_cpi_yoy" not in cn and "cn_cpi_yoy" not in us  # 市场隔离
     assert _map_gangtise_edb({}, "us_stock") == {}  # 空原始 → 空
-    # 能力声明自洽（防 CAP_RESEARCH/CAP_KB/CAP_VALUATION 未导入导致运行时 NameError）
+    # 能力声明自洽（防 CAP_RESEARCH/CAP_KB/CAP_VALUATION/CAP_MAINBIZ/CAP_SHAREHOLDER 未导入致运行时 NameError）
     p = GangtiseProvider()
-    assert p.capabilities() == {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION}, p.capabilities()
+    assert p.capabilities() == {CAP_FINANCIALS, CAP_MACRO_EDB, CAP_RESEARCH, CAP_KB, CAP_VALUATION,
+                                CAP_MAINBIZ, CAP_SHAREHOLDER}, p.capabilities()
     assert p.supports(CAP_RESEARCH, "us_stock") and p.supports(CAP_KB, "a_stock")
     assert not p.supports(CAP_RESEARCH, "hk_stock")
-    # 估值分位仅 A股（valuation-analysis 端点非A股 120001）
+    # 估值分位/主营构成/股东结构均仅 A股（非A股端点 120001）
     assert p.supports(CAP_VALUATION, "a_stock") and not p.supports(CAP_VALUATION, "us_stock")
+    assert p.supports(CAP_MAINBIZ, "a_stock") and not p.supports(CAP_MAINBIZ, "us_stock")
+    assert p.supports(CAP_SHAREHOLDER, "a_stock") and not p.supports(CAP_SHAREHOLDER, "us_stock")
     # 估值映射：原始 → 规范键（pe_ttm/pb_mrq/peg + *_percentile）
     _v = _map_gangtise_valuation({"peTtm": {"value": 17.2, "percentile": 17.24, "as_of": "2026-08-22"},
                                   "pbMrq": {"value": 8.1, "percentile": 10.49, "as_of": "2026-08-22"}})

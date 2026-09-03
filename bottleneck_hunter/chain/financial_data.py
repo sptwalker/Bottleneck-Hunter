@@ -536,6 +536,16 @@ async def fetch_financial_snapshot(supplier: SupplierInfo, user_id: str = "") ->
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"DataHub 深财务覆盖跳过 ({supplier.ticker}): {e}")
 
+            # 主营构成（仅 A股 Gangtise 有覆盖）：供三步法交叉验证「供应商营收是否真来自瓶颈环节」
+            if market == "a_stock":
+                try:
+                    from bottleneck_hunter.data_provider.hub import CAP_MAINBIZ, get_hub
+                    mb = await get_hub().fetch(CAP_MAINBIZ, tk, market, user_id)
+                    if mb:
+                        base.main_business = mb
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"主营构成覆盖跳过 ({supplier.ticker}): {e}")
+
             return base
         except Exception as e:
             logger.warning(f"财务数据拉取异常 ({supplier.name}/{supplier.ticker}): {e}")

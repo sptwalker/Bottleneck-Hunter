@@ -203,6 +203,7 @@ class FinancialSnapshot(BaseModel):
     debt_ratio_pct: float | None = Field(None, description="资产负债率(%)")
     cashflow_per_share: float | None = Field(None, description="每股经营现金流")
 
+    main_business: dict | None = Field(None, description="主营构成（分产品营收/占比/毛利率，仅A股 Gangtise）")
     analyst_report_count: int | None = Field(None, description="近期研报覆盖数")
     analyst_rating: str | None = Field(None, description="最新机构评级")
     consensus_eps: float | None = Field(None, description="一致预期 EPS（当年）")

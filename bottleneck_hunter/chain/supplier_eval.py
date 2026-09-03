@@ -240,6 +240,20 @@ def _format_financial_block(snap: FinancialSnapshot) -> str:
         analyst_lines.append(f"一致预期PE: {snap.consensus_pe}")
     if analyst_lines:
         lines.append("- " + "，".join(analyst_lines))
+    # 主营构成（仅 A股 Gangtise）：供交叉验证判断供应商营收是否真来自瓶颈环节
+    mb = snap.main_business or {}
+    segs = mb.get("segments") if isinstance(mb, dict) else None
+    if segs:
+        lines.append(f"\n## 主营构成（分{mb.get('breakdown', '产品')}，{mb.get('as_of', '')}）")
+        for s in segs:
+            parts = [s.get("name", "")]
+            if s.get("revenue_yi") is not None:
+                parts.append(f"营收{s['revenue_yi']}亿")
+            if s.get("pct") is not None:
+                parts.append(f"占比{s['pct']}%")
+            if s.get("gross_margin_pct") is not None:
+                parts.append(f"毛利率{s['gross_margin_pct']}%")
+            lines.append("- " + "，".join(parts))
     if snap.trend and snap.trend.trend_summary:
         lines.append(f"\n## 财务趋势（近{len(snap.trend.quarters)}个季度）")
         lines.append(f"- 趋势概要: {snap.trend.trend_summary}")

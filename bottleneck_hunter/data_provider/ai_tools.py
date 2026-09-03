@@ -27,12 +27,14 @@ from bottleneck_hunter.data_provider.hub import (
     CAP_FINANCIALS,
     CAP_INSIDER,
     CAP_INSTITUTIONAL,
+    CAP_MAINBIZ,
     CAP_NEWS,
     CAP_NOTICE,
     CAP_OPTIONS,
     CAP_QUOTE,
     CAP_RESEARCH,
     CAP_SEC,
+    CAP_SHAREHOLDER,
     CAP_SMARTMONEY,
     CAP_VALUATION,
     get_hub,
@@ -65,6 +67,8 @@ _CAP_LABELS: dict[str, dict] = {
     CAP_SMARTMONEY: {"label": "聪明钱聚合", "returns": "内部人+机构+期权综合信号"},
     CAP_RESEARCH: {"label": "券商研报", "returns": "近月中/外资研报标题+摘要要点+券商/分析师/日期/深度标签（取最近3篇，Gangtise）"},
     CAP_VALUATION: {"label": "估值分位", "returns": "PE/PB/PEG 近3年窗内分位（仅A股，Gangtise）"},
+    CAP_MAINBIZ: {"label": "主营构成", "returns": "最近一期分产品营收(亿)/占比%/毛利率%（仅A股，Gangtise）"},
+    CAP_SHAREHOLDER: {"label": "股东结构", "returns": "前十大股东持股占比%/较上期增减%（仅A股，Gangtise）"},
 }
 
 _REQ_RE = re.compile(r"\[\[DATA_REQ\]\](.*?)\[\[/DATA_REQ\]\]", re.DOTALL)

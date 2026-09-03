@@ -45,6 +45,8 @@ CAP_KB = "kb"                   # 知识库 RAG 检索
 CAP_NARRATIVE = "narrative"     # AI 研报叙事（agent）
 CAP_SCREEN = "screen"           # 指标选股
 CAP_VALUATION = "valuation"     # 估值分位（PE/PB/PEG 近3年窗内分位，A股；投委会价值锚/择时）
+CAP_MAINBIZ = "mainbiz"         # 主营构成（分产品营收·毛利率·占比，A股；三步法瓶颈环节定位）
+CAP_SHAREHOLDER = "shareholder" # 股东结构（前十大股东持股·增减，A股；投委会拥挤度）
 
 _MANAGER_CAPS = {CAP_QUOTE, CAP_DAILY}  # 这两个委托 FetcherManager，不建 hub 层熔断
 

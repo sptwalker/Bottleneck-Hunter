@@ -83,6 +83,13 @@ _FUND_FLOW_DAILY_URL = f"{_BASE}/open-quote/fund-flow/daily"
 _AGENT_BASE = f"{_BASE}/open-ai/agent"
 # 指标选股（open-indicator/screener；payload 需预构造好的 universe/expression/indicatorList）
 _SCREENER_URL = f"{_BASE}/open-indicator/screener"
+# 公司指标（open-indicator/EDE/time-series，A股）：财务比率/同比时序，取每指标最新值。
+# 实测仅 A股（美股/港股 code=120001）——回填 _map_gangtise_financials 的恒 None 重权字段。
+_INDICATOR_TS_URL = f"{_BASE}/open-indicator/EDE/time-series"
+# 主营构成（open-fundamental/main-business，A股）：分产品/行业/地区营收·毛利率·占比（供三步法瓶颈定位）。
+_MAIN_BUSINESS_URL = f"{_FUNDAMENTAL}/main-business"
+# 股东结构（open-fundamental/capital-structure/top-holders，A股）：前十大股东持股占比·增减（供投委会拥挤度）。
+_TOP_HOLDERS_URL = f"{_FUNDAMENTAL}/capital-structure/top-holders"
 
 # 本系统 market → 日历 marketList 枚举（传 'cn' 报 100005，必须用这些驼峰枚举）
 _CAL_MARKET = {
@@ -973,6 +980,202 @@ def fetch_fund_flow(ak: str, sk: str, ticker: str, start: str, end: str) -> list
     if resp.status_code != 200:
         raise GangtiseError(f"fund-flow HTTP {resp.status_code}")
     return _parse_fund_flow_body(resp.json())
+
+
+# ── EDE 公司指标 / 主营构成 / 股东结构（均 A股-only，美股/港股 code=120001）──────────────
+
+# EDE 财务比率码（open-indicator/EDE；search 实证 2026-09：finc_roe_avg=平均净资产收益率 /
+# bs_liblty_to_aset=资产负债率 / is_op_rev_yoy=营业收入同比(报告期累计) / is_shnp_yoy=归母净利润同比(报告期累计)）。
+# 四码经 600519 实测均返回百分数（ROE 17.95 / 负债率 15.19 / 营收同比 1.47 / 净利同比 -1.95），直赋不换算。
+_EDE_FINC_CODES = ("finc_roe_avg", "bs_liblty_to_aset", "is_op_rev_yoy", "is_shnp_yoy")
+
+
+def _parse_indicator_ts_body(body: dict) -> dict:
+    """解析 EDE time-series → {indicator_code: {value, as_of}}（每指标取最新非空点）。
+
+    单证券多指标响应：data.values[i] 为第 i 个指标（对齐 indicatorCodeList/indicatorList）的日序列，
+    data.dates 为公共日期轴。财务比率按报告期日频前推，取最大日期的非空值即最新报告值。空/错误码 → {}。
+    """
+    if not body or str(body.get("code", "")) != "000000" or body.get("status") is not True:
+        return {}
+    blk = body.get("data") or {}
+    dates = blk.get("dates") or []
+    ind_codes = blk.get("indicatorCodeList") or [i.get("code") for i in (blk.get("indicatorList") or [])]
+    values = blk.get("values") or []
+    out: dict = {}
+    for i, code in enumerate(ind_codes):
+        series = values[i] if i < len(values) else []
+        latest: tuple | None = None
+        for d, v in zip(dates, series):
+            if v is None:
+                continue
+            ds = str(d)[:10]
+            if latest is None or ds > latest[0]:
+                latest = (ds, v)
+        if latest is None:
+            continue
+        try:
+            out[str(code)] = {"value": round(float(latest[1]), 4), "as_of": latest[0]}
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def fetch_company_indicator(ak: str, sk: str, ticker: str, market: str,
+                            codes=_EDE_FINC_CODES) -> dict | None:
+    """取 EDE 公司指标（A股）每指标最新值 → {code: {value, as_of}}。仅 A股（美股/港股 code=120001）。
+
+    回填 `_map_gangtise_financials` 里恒 None 的 ROE/负债率/营收同比/净利同比（financial_health 重权项）。
+    # ponytail: EDE 财务比率实测已是百分数（17.95=17.95%），直接透传不换算——唯一需随口径变化校准的点。
+    全空 → None（交 hub 视为无数据）。
+    """
+    if market != "a_stock":
+        return None
+    code = _sec_code(ticker, "a_stock")
+    from datetime import date as _date
+    end = _date.today()
+    try:
+        start = end.replace(year=end.year - 2)
+    except ValueError:  # 2/29 边界
+        start = end.replace(year=end.year - 2, day=28)
+    payload = {
+        "startDate": start.isoformat(), "endDate": end.isoformat(),
+        "calendarType": "TD", "currency": "DFT", "scale": "0",
+        "indicatorParamList": [], "indicatorCodeList": list(codes), "universe": [code],
+    }
+    resp = requests.post(_INDICATOR_TS_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        raise GangtiseError(f"company-indicator HTTP {resp.status_code}")
+    return _parse_indicator_ts_body(resp.json()) or None
+
+
+def _parse_main_business_body(body: dict, breakdown: str) -> dict:
+    """解析 main-business 二维表 → {segments:[{name, revenue_yi, pct, gross_margin_pct}], as_of, breakdown}。
+
+    仅取最近一期（periodEndDate 最大）、剔「总计/合计」与空营收的聚合父行；营收元→亿（×1e-8）。
+    占比 opRevenueRatio 接口常返 None → 按当期各段营收自算（# ponytail: 接口给值则以接口为准）。空 → {}。
+    """
+    if not body or str(body.get("code", "")) != "000000" or body.get("status") is False:
+        return {}
+    blk = body.get("data") or {}
+    fields = blk.get("fieldList") or []
+    rows = blk.get("list") or []
+    if not fields or not rows:
+        return {}
+    idx = {n: i for i, n in enumerate(fields)}
+    i_date, i_name = idx.get("periodEndDate"), idx.get("categoryName")
+    i_rev, i_ratio, i_gm = idx.get("opRevenue"), idx.get("opRevenueRatio"), idx.get("grossMargin")
+    if i_date is None or i_name is None or i_rev is None:
+        return {}
+
+    def _f(row, i):
+        if i is None or i >= len(row):
+            return None
+        try:
+            return float(row[i])
+        except (ValueError, TypeError):
+            return None
+
+    dated = [r for r in rows if isinstance(r, (list, tuple)) and i_date < len(r) and str(r[i_date] or "").strip()]
+    if not dated:
+        return {}
+    as_of = max(str(r[i_date])[:10] for r in dated)
+    segs = []
+    for r in dated:
+        if str(r[i_date])[:10] != as_of:
+            continue
+        name = str(r[i_name] or "").strip() if i_name < len(r) else ""
+        rev = _f(r, i_rev)
+        if not name or name in ("总计", "合计") or rev is None:
+            continue
+        segs.append({"name": name, "revenue_yi": round(rev * 1e-8, 4),
+                     "_ratio": _f(r, i_ratio), "gross_margin_pct": _f(r, i_gm)})
+    if not segs:
+        return {}
+    total = sum(s["revenue_yi"] for s in segs) or None
+    for s in segs:
+        ratio = s.pop("_ratio")
+        s["pct"] = round(ratio, 2) if ratio is not None else (
+            round(s["revenue_yi"] / total * 100, 2) if total else None)
+    return {"segments": segs, "as_of": as_of, "breakdown": breakdown}
+
+
+def fetch_main_business(ak: str, sk: str, ticker: str, market: str, breakdown: str = "product") -> dict | None:
+    """取主营构成（A股）最近一期分产品营收·毛利率·占比 → {segments, as_of, breakdown}。
+
+    仅 A股（美股/港股 code=120001）。供三步法判断供应商营收是否真来自瓶颈环节。空 → None。
+    breakdown: product 分产品 / industry 分行业 / region 分地区（接口仅中报·年报，无季度）。
+    """
+    if market != "a_stock":
+        return None
+    code = _sec_code(ticker, "a_stock")
+    from datetime import date as _date
+    end = _date.today()
+    try:
+        start = end.replace(year=end.year - 2)
+    except ValueError:
+        start = end.replace(year=end.year - 2, day=28)
+    payload = {
+        "securityCode": code, "startDate": start.isoformat(), "endDate": end.isoformat(),
+        "fieldList": ["periodName", "periodEndDate", "categoryName", "opRevenue",
+                      "opRevenueRatio", "grossProfit", "grossMargin"],
+        "breakdown": breakdown,
+    }
+    resp = requests.post(_MAIN_BUSINESS_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        raise GangtiseError(f"main-business HTTP {resp.status_code}")
+    return _parse_main_business_body(resp.json(), breakdown) or None
+
+
+def _parse_shareholder_body(body: dict) -> dict:
+    """解析 top-holders（list-of-dicts）→ {holders:[{name, pct, change, share_type}], as_of}。空 → {}。
+
+    pct=持股占比(%)、change=较上期变动(%)，接口均已是百分数。as_of 取最大 reportPeriod。
+    """
+    if not body or str(body.get("code", "")) != "000000" or body.get("status") is False:
+        return {}
+    rows = (body.get("data") or {}).get("list") or []
+    if not rows:
+        return {}
+
+    def _f(v):
+        try:
+            return round(float(v), 4)
+        except (ValueError, TypeError):
+            return None
+
+    holders, as_of = [], ""
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("shareholderName") or "").strip()
+        if not name:
+            continue
+        holders.append({"name": name, "pct": _f(r.get("holdingPct")),
+                        "change": _f(r.get("chgPct")),
+                        "share_type": str(r.get("shareCategory") or "").strip() or None})
+        d = str(r.get("reportPeriod") or "").strip()[:10]
+        if d > as_of:
+            as_of = d
+    if not holders:
+        return {}
+    return {"holders": holders, "as_of": as_of}
+
+
+def fetch_shareholder(ak: str, sk: str, ticker: str, market: str, holder_type: str = "top10") -> dict | None:
+    """取前十大股东（A股）→ {holders:[{name, pct, change, share_type}], as_of}。
+
+    仅 A股（美股/港股 code=120001）。供投委会拥挤度段（yfinance 口径 A股恒空）。空 → None。
+    holder_type: top10 前十大 / top10Float 前十大流通股东。
+    """
+    if market != "a_stock":
+        return None
+    code = _sec_code(ticker, "a_stock")
+    payload = {"securityCode": code, "holderType": holder_type, "period": ["latest"]}
+    resp = requests.post(_TOP_HOLDERS_URL, headers=_headers(ak, sk), json=payload, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        raise GangtiseError(f"top-holders HTTP {resp.status_code}")
+    return _parse_shareholder_body(resp.json()) or None
 
 
 def _parse_screener_body(body: dict) -> list[dict]:
