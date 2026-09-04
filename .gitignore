@@ -30,3 +30,6 @@ test_results.txt
 
 # 抓包 cookie（含 bearer token，绝不入库）
 cookies.txt
+
+# 运维手册：含生产 root SSH/IP，公开仓库绝不入库（仅本地）
+docs/运维_登录生产服务器.md

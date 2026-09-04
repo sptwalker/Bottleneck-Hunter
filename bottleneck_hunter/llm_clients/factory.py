@@ -558,6 +558,31 @@ def get_models_for_role(
             continue
         results.append((llm, provider, model))
 
+    # 绝境兜底 pass：正常轮 + 回填仍全空 —— 说明该用户所有候选节点都被持久禁用或冷却。
+    # 若就此返回空，get_llm_for_position→None→L1/L2/L3/L4 全报「无可用 LLM」，整条决策链停摆，
+    # 连守卫补跑也同样死（生产 57 天冻结根因：超时/限流升级为持久禁用后永不自动恢复，整队变暗）。
+    # 宁可重试一个软禁用(超时/限流——多为瞬时抖动)或冷却中的节点，也别让每日刷新彻底停。
+    # 只排除硬死节点(认证失效/欠费——key 真无效，重试必再失败白耗)。返回的候选仍带记账壳，
+    # 一旦成功即自动清 strike、下轮回到正常选型。ponytail: 忽略容量门（小窗口也比无 LLM 强）。
+    if not results:
+        for provider in chain:
+            if provider_gate.is_hard_disabled(uid, provider):
+                continue
+            if not _user_has_llm_key(provider, uid):
+                continue
+            model = resolve_provider_model(provider, uid)
+            if not model:
+                continue
+            try:
+                results.append((_build(provider, model), provider, model))
+            except Exception:
+                continue
+            if len(results) >= n_slots:
+                break
+        if results:
+            logger.warning("[resolve] role=%s 命中【绝境兜底】所有节点被禁用/冷却，重试非硬死节点保决策链不停摆 → %s",
+                           role_key, [(r[1], r[2]) for r in results])
+
     if prefer_primary:
         logger.info("[resolve] role=%s 命中【优先级4 智能调度】→ %s（主模型直用未生效，已回退调度排序）",
                     role_key, [(r[1], r[2]) for r in results] or "空")

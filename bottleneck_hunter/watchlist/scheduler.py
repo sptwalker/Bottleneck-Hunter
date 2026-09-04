@@ -633,8 +633,14 @@ def get_job_statuses() -> list[dict]:
 # SSE drain helper (for background scheduled jobs)
 # ---------------------------------------------------------------------------
 
-async def _drain_sse(gen: AsyncGenerator) -> None:
-    """消费 SSE AsyncGenerator 到底，仅记录关键事件。"""
+async def _drain_sse(gen: AsyncGenerator) -> bool:
+    """消费 SSE AsyncGenerator 到底，仅记录关键事件。
+
+    返回 had_fatal：本次是否出现「无可用 LLM」致命中断（整条决策链因 LLM 全不可用而未产出）。
+    决策类 job 据此把假成功心跳翻成 error → 触发守卫超期/异常补跑（否则静默 success 掩盖停摆，
+    正是生产 57 天冻结事故的第二根因）。非决策类 caller 忽略返回值即可，行为不变。
+    """
+    had_fatal = False
     async for evt in gen:
         data = evt.get("data", {})
         if isinstance(data, str):
@@ -646,8 +652,11 @@ async def _drain_sse(gen: AsyncGenerator) -> None:
             event_type = data.get("event", evt.get("event", ""))
             if "error" in event_type:
                 logger.warning("Scheduled task SSE error: %s", data)
+                if "无可用 LLM" in str(data.get("error", "")):
+                    had_fatal = True
             elif "done" in event_type:
                 logger.info("Scheduled task completed: %s", data.get("message", ""))
+    return had_fatal
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +694,10 @@ async def job_daily_decision(market: str = "us_stock") -> None:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Daily decision (%s/%s) starting for %d tickers", market, label, len(tickers))
             from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
-            await _drain_sse(run_daily_decision(store, budget, scope="full", market=market))
+            had_fatal = await _drain_sse(run_daily_decision(store, budget, scope="full", market=market))
+            if had_fatal:
+                # 决策链无可用 LLM＝未完成刷新：抛错让心跳置 error，守卫下轮据此补跑（绝境兜底选型已尽力）。
+                raise RuntimeError(f"日常决策未完成：{market} 决策链无可用 LLM")
             logger.info("Daily decision (%s/%s) completed", market, label)
             _oplog(uid, "日常决策", market=market, detail=f"{len(tickers)} 只标的完成 L1→L4+投委会")
         except Exception as e:
@@ -837,8 +849,11 @@ async def job_weekly_strategy(market: str = "us_stock") -> None:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Weekly strategy refresh (%s/%s) starting", market, label)
             from bottleneck_hunter.watchlist.decision_engine import run_macro_strategy, run_strategic_plan
-            await _drain_sse(run_macro_strategy(store, budget, market=market))
-            await _drain_sse(run_strategic_plan(store, budget, market=market))
+            f1 = await _drain_sse(run_macro_strategy(store, budget, market=market))
+            f2 = await _drain_sse(run_strategic_plan(store, budget, market=market))
+            if f1 or f2:
+                # L1/L2 无可用 LLM＝周更未完成：抛错置 error 心跳，守卫下轮补跑（否则 L2 陈旧冻结 L3/L4）。
+                raise RuntimeError(f"每周策略未完成：{market} L1/L2 决策链无可用 LLM")
             logger.info("Weekly strategy refresh (%s/%s) completed", market, label)
             _oplog(uid, "每周策略刷新", market=market, detail="L1 宏观 + L2 组合策略已更新")
         except Exception as e:
@@ -1448,10 +1463,14 @@ async def _probe_business_staleness() -> list[str]:
                     continue
                 age_txt = "?" if l2_age is None else f"{l2_age:.0f}d"
                 findings.append(f"{market}/{uid[:8] or 'global'} L2陈旧({age_txt})→重生并补决策")
-                await _drain_sse(run_macro_strategy(s, budget, market=market))
-                await _drain_sse(run_strategic_plan(s, budget, market=market, force=True))
-                if store.is_auto_update_enabled("daily_decision"):
-                    await _drain_sse(run_daily_decision(s, budget, scope="full", market=market))
+                f1 = await _drain_sse(run_macro_strategy(s, budget, market=market))
+                f2 = await _drain_sse(run_strategic_plan(s, budget, market=market, force=True))
+                fatal = f1 or f2
+                if not fatal and store.is_auto_update_enabled("daily_decision"):
+                    fatal = await _drain_sse(run_daily_decision(s, budget, scope="full", market=market))
+                if fatal:
+                    # 解套也撞上无可用 LLM：如实记录，不谎报已解套（绝境兜底已尽力仍不可达＝用户 key 全失效）。
+                    findings.append(f"{market}/{uid[:8] or 'global'} 解套失败:决策链无可用 LLM(请检查AI配置)")
             except Exception as e:  # noqa: BLE001
                 logger.error("守卫业务探针 %s/%s 失败: %s", market, uid[:8] if uid else "global", e)
                 findings.append(f"{market}/{uid[:8] or 'global'} 解套失败:{str(e)[:60]}")

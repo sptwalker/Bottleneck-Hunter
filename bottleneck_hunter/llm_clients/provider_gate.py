@@ -115,6 +115,17 @@ def is_disabled(uid: str, provider: str) -> bool:
     return _read_info(uid, provider) is not None
 
 
+# 「硬死」禁用：key 真无效（认证失效）或没钱（欠费）——任何重试必再失败，绝境兜底也不该碰。
+# 区别于超时/限流：那多为瞬时抖动被累计升级，绝境时（全队被禁）宁可重试它也别让决策链整体停摆。
+_HARD_STATUSES = (_STATUS_AUTH, _STATUS_ARREARS)
+
+
+def is_hard_disabled(uid: str, provider: str) -> bool:
+    """是否「硬死」禁用（认证失效/欠费）。供 factory 绝境兜底 pass 判定哪些节点连重试都免。"""
+    info = _read_info(uid, provider)
+    return bool(info and info.get("status") in _HARD_STATUSES)
+
+
 def disabled_info(uid: str, provider: str) -> dict | None:
     """返回 {provider,status,reason,detail,disabled_at} 或 None。供配置中心呈现。"""
     return _read_info(uid, provider)
@@ -291,6 +302,7 @@ def _selfcheck() -> None:
         record_result("u1", "deepseek", False, _AUTH_REASON)
         assert is_disabled("u1", "deepseek")
         assert disabled_info("u1", "deepseek")["status"] == _STATUS_AUTH
+        assert is_hard_disabled("u1", "deepseek")   # 认证=硬死
         assert not is_disabled("u2", "deepseek")   # 按用户隔离
         # 重存 key（认证恢复）
         assert clear_auth_disable("u1", "deepseek")
@@ -325,6 +337,7 @@ def _selfcheck() -> None:
         assert not is_disabled("u1", "kimi"), "未达超时阈值不应禁"
         record_result("u1", "kimi", False, _TIMEOUT_REASON)   # 第 _TIMEOUT_STRIKES 次
         assert is_disabled("u1", "kimi") and disabled_info("u1", "kimi")["status"] == _STATUS_TIMEOUT
+        assert not is_hard_disabled("u1", "kimi")   # 超时=非硬死（绝境可重试）
         assert not clear_auth_disable("u1", "kimi"), "超时禁用不因重存 key 而清"
         assert is_disabled("u1", "kimi")
         assert clear("u1", "kimi")                # 过流量测试后 clear 清除
@@ -335,6 +348,7 @@ def _selfcheck() -> None:
         flip_calls.clear()
         record_result("u1", "openai", False, _ARREARS_REASON)
         assert is_disabled("u1", "openai") and disabled_info("u1", "openai")["status"] == _STATUS_ARREARS
+        assert is_hard_disabled("u1", "openai")   # 欠费=硬死
         assert flip_calls == [("u1", "openai")], ("欠费须触发翻档钩子", flip_calls)  # arrears→翻档连接
         assert not clear_auth_disable("u1", "openai"), "欠费禁用不因重存 key 而清"
         assert is_disabled("u1", "openai")
