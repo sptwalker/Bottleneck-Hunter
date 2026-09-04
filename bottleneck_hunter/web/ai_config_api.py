@@ -239,7 +239,21 @@ async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
             asyncio.to_thread(lambda: llm.invoke([HumanMessage(content="hi")])),
             timeout=60,
         )
-        return {"ok": True, "model": model}
+        # 单发探活通了，但该节点可能仍被持久熔断（欠费/限流/超时禁用）——「测试」不清熔断，
+        # 决策链仍会跳过它。提示引导用户改用「测试并恢复」，消除“测了正常、系统仍报错”的错位感。
+        resp = {"ok": True, "model": model}
+        try:
+            from bottleneck_hunter.llm_clients import provider_gate
+            info = provider_gate.disabled_info(uid, provider)
+            if info:
+                label = {"disabled_auth": "密钥失效", "disabled_ratelimit": "限流严重",
+                         "disabled_timeout": "超时频发", "disabled_arrears": "余额欠费"}.get(
+                    info.get("status", ""), "异常")
+                resp["warn"] = (f"连通正常，但该节点仍处于「{label}」禁用中，决策链暂不会调用它。"
+                                f"请点「测试并恢复」通过流量测试后才会解除禁用。")
+        except Exception:  # noqa: BLE001
+            pass
+        return resp
     except asyncio.TimeoutError:
         return {"ok": False, "error": "请求超时（60s）"}
     except Exception as e:

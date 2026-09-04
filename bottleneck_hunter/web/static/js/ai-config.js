@@ -592,7 +592,7 @@ async function testFormConfig() {
       toast(`测试请求失败 (HTTP ${resp.status})${detail ? '：' + (typeof detail === 'string' ? detail : JSON.stringify(detail)) : '；请确认已登录并刷新页面'}`);
       return;
     }
-    if (data.ok) toast(`连接成功！\n模型: ${data.model || model}`);
+    if (data.ok) toast(`连接成功！\n模型: ${data.model || model}` + (data.warn ? `\n\n⚠️ ${data.warn}` : ''));
     else toast(`连接失败：${data.error || '未返回错误信息'}`);
   } catch (e) {
     toast('测试失败: ' + e.message);

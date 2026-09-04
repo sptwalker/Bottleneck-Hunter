@@ -177,15 +177,22 @@ def resolve_primary_for_user(user_id: str = "") -> str:
 
 
 def resolve_provider_model(provider: str, user_id: str = "") -> str:
-    """解析某 provider 应使用的模型：用户覆盖 → 全局覆盖 → 自定义端点 → 种子常量。"""
+    """解析某 provider 应使用的模型：用户覆盖 →（无自有 Key 时）全局覆盖 → 自定义端点 → 种子常量。"""
     provider = (provider or "").lower().strip()
     if user_id:
         cfg = _load_provider_config_from_db(provider, user_id)
         if cfg and cfg.get("default_model"):
             return cfg["default_model"]
-    ov = _PROVIDER_OVERRIDES.get(provider)
-    if ov and ov.get("default_model"):
-        return ov["default_model"]
+    # ponytail: 用户自带该 provider 的 Key（keyed provider）却把模型留空时，必须回退种子默认，
+    # 绝不套用管理员/全局 _PROVIDER_OVERRIDES 的模型——用户账户自身才决定能调哪些模型。否则会把
+    # 他人主模型(如 kimi-k3)强加到该用户自己的 Key 上，其账户对该模型无权限 → API 报 insufficient
+    # balance → 整个 kimi 节点被误判「欠费」熔断（生产 4f4ec3b54d384135 kimi 假欠费事故根因）。
+    # _resolve_user_llm_key 对 keyless provider(ollama 等)返 None，故其仍走全局覆盖=部署默认，符合预期。
+    has_own_key = bool(_resolve_user_llm_key(provider, user_id)) if user_id else False
+    if not has_own_key:
+        ov = _PROVIDER_OVERRIDES.get(provider)
+        if ov and ov.get("default_model"):
+            return ov["default_model"]
     custom = _CUSTOM_PROVIDERS.get(provider)
     if custom and custom.get("default_model"):
         return custom["default_model"]

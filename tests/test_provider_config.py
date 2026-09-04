@@ -43,3 +43,28 @@ def test_role_defaults_no_hardcoded_model():
     g = get_role("committee_growth")
     assert g.default_provider == "qwen" and g.default_model == ""
     assert get_role("L1_macro").default_model == ""
+
+
+def test_keyed_user_blank_model_does_not_inherit_global(monkeypatch):
+    """P1 回归：用户自带 kimi Key 但模型留空时，绝不套用管理员/全局 kimi 模型，回退种子。
+    根因事故：全局 kimi-k3 被强加到 4f4ec3b54d384135 自己的 Key 上 → 其账户无该模型权限 →
+    insufficient balance → 整个 kimi 节点被误判「欠费」熔断。信号取「自有 Key」而非配置行，
+    覆盖「有 Key 但无 provider_configs 行」的用户（如 d32a4acd/cd95b8de）。"""
+    F._PROVIDER_OVERRIDES.clear()
+    F.register_provider_override("kimi", "kimi-k3", "")  # 管理员/全局把 kimi 设成 kimi-k3
+    # 用户模型留空（无自有 default_model 行，或有行但留空皆可）
+    monkeypatch.setattr(F, "_load_provider_config_from_db", lambda prov, uid: None)
+
+    # 用户自带 kimi Key → 不继承全局 kimi-k3，落到种子
+    monkeypatch.setattr(F, "_resolve_user_llm_key",
+                        lambda prov, uid: "sk-real-key" if prov == "kimi" else None)
+    assert F.resolve_provider_model("kimi", "4f4ec3b54d384135") == F.PROVIDER_MODELS["kimi"]
+    # 用户自己填了模型 → 用自己的
+    monkeypatch.setattr(F, "_load_provider_config_from_db",
+                        lambda prov, uid: {"default_model": "moonshot-v1-8k"})
+    assert F.resolve_provider_model("kimi", "4f4ec3b54d384135") == "moonshot-v1-8k"
+    # 无自有 Key 的用户 → 仍继承全局覆盖（全局覆盖只服务无 Key 的共享用户 / keyless provider）
+    monkeypatch.setattr(F, "_load_provider_config_from_db", lambda prov, uid: None)
+    monkeypatch.setattr(F, "_resolve_user_llm_key", lambda prov, uid: None)
+    assert F.resolve_provider_model("kimi", "someone") == "kimi-k3"
+    F._PROVIDER_OVERRIDES.clear()

@@ -130,7 +130,7 @@ def _record_call(provider: str, model: str, ok: bool, t0: float, reason: str = "
     # （provider_gate 有独立单测用 tmp 库直驱 record_result）。
     try:
         from bottleneck_hunter.llm_clients import provider_gate
-        provider_gate.record_result(uid, provider, ok, reason)
+        provider_gate.record_result(uid, provider, ok, reason, model=model)
     except Exception:  # noqa: BLE001
         pass
     try:

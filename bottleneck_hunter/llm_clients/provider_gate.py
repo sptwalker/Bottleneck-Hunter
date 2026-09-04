@@ -132,11 +132,17 @@ def disabled_info(uid: str, provider: str) -> dict | None:
 
 
 def _do_disable(uid: str, provider: str, status: str, reason: str, detail: str,
-                arrears_flipped: bool = False) -> None:
+                arrears_flipped: bool = False, model: str = "") -> None:
     """落库禁用；仅在**由启用→禁用**的首次弹一次提示（已禁用不重复弹）。
-    arrears_flipped=True 表示该节点因欠费刚被从免费翻成付费档，提示文案随之调整。"""
+    arrears_flipped=True 表示该节点因欠费刚被从免费翻成付费档，提示文案随之调整。
+    model：本次失败的具体模型名，用于把提示/日志精确到「provider/model」而非笼统「provider」。"""
     p = _norm(provider)
     already = is_disabled(uid, provider)
+    # 提示/日志里节点的展示名：有模型名则写「provider/model」，让「kimi 欠费」变「kimi/kimi-k3 欠费」
+    tag = f"{p}/{model}" if model else p
+    # detail 附带失败模型，落库后配置中心按用户呈现即可看到是哪个模型欠费/失效
+    if model:
+        detail = f"{detail}（模型 {model}）" if detail else f"模型 {model}"
     try:
         _get_store().disable_llm_provider(uid or "", p, status, reason, detail)
     except Exception as e:  # noqa: BLE001
@@ -148,11 +154,11 @@ def _do_disable(uid: str, provider: str, status: str, reason: str, detail: str,
         label = _STATUS_LABEL.get(status, "异常")
         if status == _STATUS_ARREARS:
             if arrears_flipped:
-                msg = f"⛔ {p} 出现欠费，已判定为**付费模型**并暂停调用，请充值后在 AI 配置中心「测试并恢复」"
+                msg = f"⛔ {tag} 出现欠费，已判定为**付费模型**并暂停调用，请充值后在 AI 配置中心「测试并恢复」"
             else:
-                msg = f"⛔ {p} 节点余额不足/欠费已暂停调用，请充值后在 AI 配置中心「测试并恢复」"
+                msg = f"⛔ {tag} 节点余额不足/欠费已暂停调用，请充值后在 AI 配置中心「测试并恢复」"
         else:
-            msg = (f"⛔ {p} 节点因{label}已被禁用，请在 AI 配置中心重新配置"
+            msg = (f"⛔ {tag} 节点因{label}已被禁用，请在 AI 配置中心重新配置"
                    + ("并通过流量测试" if status in _TEST_REQUIRED else ""))
         try:
             from bottleneck_hunter.llm_clients.fallback import push_notice
@@ -160,13 +166,14 @@ def _do_disable(uid: str, provider: str, status: str, reason: str, detail: str,
                 "kind": "provider_disabled",
                 "message": msg,
                 "provider": p,
+                "model": model,
                 "status": status,
                 "reason": reason,
             })
         except Exception:  # noqa: BLE001
             pass
         _clear_primary_if_matches(uid or "", p, label, status)
-        logger.warning("LLM 节点已禁用：%s/%s status=%s reason=%s", uid, p, status, reason)
+        logger.warning("LLM 节点已禁用：%s/%s model=%s status=%s reason=%s", uid, p, model or "-", status, reason)
 
 
 def _clear_primary_if_matches(uid: str, provider: str, label: str, status: str) -> None:
@@ -215,8 +222,10 @@ def _flip_free_to_paid_on_arrears(uid: str, provider: str) -> bool:
         return False
 
 
-def record_result(uid: str, provider: str, ok: bool, reason: str = "") -> None:
-    """在 fallback._record_call 里对每个候选调用旁路调用。fail-silent。"""
+def record_result(uid: str, provider: str, ok: bool, reason: str = "", model: str = "") -> None:
+    """在 fallback._record_call 里对每个候选调用旁路调用。fail-silent。
+    model：本次失败所用的具体模型名（如 kimi-k3），用于禁用提示/日志精确到「provider/model」，
+    避免管理员/用户把「kimi 欠费」误当成整个账户或全局欠费。"""
     p = _norm(provider)
     if not p:
         return
@@ -224,21 +233,21 @@ def record_result(uid: str, provider: str, ok: bool, reason: str = "") -> None:
         _clear_strikes(uid, p)   # 成功即重置该节点所有 strike（不动持久禁用）
         return
     if reason == _AUTH_REASON:
-        _do_disable(uid, p, _STATUS_AUTH, reason, "")
+        _do_disable(uid, p, _STATUS_AUTH, reason, "", model=model)
         return
     if reason == _ARREARS_REASON:
         # 欠费是持久性问题（钱没了不会自愈），1 击即禁，须充值后过流量测试恢复。
         # 免费模型本不该欠费——触发即证明其实是付费，自动翻档 free→paid（用户已定：照常熔断+翻档）。
         flipped = _flip_free_to_paid_on_arrears(uid, p)
-        _do_disable(uid, p, _STATUS_ARREARS, reason, "", arrears_flipped=flipped)
+        _do_disable(uid, p, _STATUS_ARREARS, reason, "", arrears_flipped=flipped, model=model)
         return
     if reason == _RL_REASON:
         if _bump_strike(uid, p, "rl", _RL_WINDOW, _RL_STRIKES):
-            _do_disable(uid, p, _STATUS_RL, reason, f"{_RL_WINDOW:.0f}s 内限流 {_RL_STRIKES}+ 次")
+            _do_disable(uid, p, _STATUS_RL, reason, f"{_RL_WINDOW:.0f}s 内限流 {_RL_STRIKES}+ 次", model=model)
         return
     if reason == _TIMEOUT_REASON:
         if _bump_strike(uid, p, "to", _TIMEOUT_WINDOW, _TIMEOUT_STRIKES):
-            _do_disable(uid, p, _STATUS_TIMEOUT, reason, f"{_TIMEOUT_WINDOW:.0f}s 内超时 {_TIMEOUT_STRIKES}+ 次")
+            _do_disable(uid, p, _STATUS_TIMEOUT, reason, f"{_TIMEOUT_WINDOW:.0f}s 内超时 {_TIMEOUT_STRIKES}+ 次", model=model)
         return
     # 其它原因（连接/服务端 5xx 等）不升级为持久禁用——交给 health.py 的临时冷却即可
 
@@ -346,8 +355,9 @@ def _selfcheck() -> None:
         # 欠费：1 击即禁；但须过流量测试才恢复（重存 key 不清，与认证不同）
         _reset_for_test()
         flip_calls.clear()
-        record_result("u1", "openai", False, _ARREARS_REASON)
+        record_result("u1", "openai", False, _ARREARS_REASON, model="gpt-x")
         assert is_disabled("u1", "openai") and disabled_info("u1", "openai")["status"] == _STATUS_ARREARS
+        assert "gpt-x" in (disabled_info("u1", "openai").get("detail") or ""), "B：失败模型名须落进 detail"
         assert is_hard_disabled("u1", "openai")   # 欠费=硬死
         assert flip_calls == [("u1", "openai")], ("欠费须触发翻档钩子", flip_calls)  # arrears→翻档连接
         assert not clear_auth_disable("u1", "openai"), "欠费禁用不因重存 key 而清"
