@@ -348,8 +348,18 @@ function renderMacro(macro) {
       <div class="dc-macro-field-value">${escDC(display)}</div>
     </div>`;
   }
-  const ts = macro.created_at || '';
-  if (ts) html += `<div style="font-size:11px;color:var(--muted);margin-top:8px">更新于 ${escDC(fmtBJ(ts))}</div>`;
+  // L1 宏观策略每周才重生成一版(created_at)，但每日日常决策会做 L1 日检并盖 updated_at。
+  // 只显 created_at 会让"一周不变"看着像停滞——补显末次校验时刻+状态，让"每天都在检查"可见。
+  const created = macro.created_at || '';
+  const checked = macro.updated_at || '';
+  const stMap = { valid: '持续有效', needs_minor_tweak: '已微调', needs_major_revision: '待重构' };
+  const stTxt = stMap[macro.status] || '';
+  if (created) {
+    let line = `本版生成于 ${escDC(fmtBJ(created))}`;
+    if (checked && checked.slice(0, 10) !== created.slice(0, 10)) line += ` · 末次校验 ${escDC(fmtBJ(checked))}`;
+    if (stTxt) line += `（${stTxt}）`;
+    html += `<div style="font-size:11px;color:var(--muted);margin-top:8px">${line}</div>`;
+  }
   html += '</div>';
   body.innerHTML = html;
 }
