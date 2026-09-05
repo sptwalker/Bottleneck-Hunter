@@ -310,8 +310,10 @@ _FRED_US_DOMESTIC = [
     ("core_cpi_yoy", "CPILFESL", "美国核心CPI同比(%,除食品能源)", "cpi"),
     ("core_services_cpi_yoy", "CUSR0000SASLE", "美国核心服务CPI同比(%,除能源服务)", "cpi"),
     ("core_pce_yoy", "PCEPILFE", "美国核心PCE同比(%,联储首选)", "cpi"),
-    ("initial_claims", "ICSA", "美国初请失业金人数(周,SA)", "level"),
-    ("continued_claims", "CCSA", "美国续请失业金人数(周,SA)", "level"),
+    # 失业金是「人数计数」(20万~180万级)，非利率/利差——须用 pct 型环比百分比。
+    # 曾误标 level：其 change_pct=val-prev 存的是绝对人数差(如+8000人)，下游加「%」渲染成荒诞的 +8000%。
+    ("initial_claims", "ICSA", "美国初请失业金人数(周,SA)", "pct"),
+    ("continued_claims", "CCSA", "美国续请失业金人数(周,SA)", "pct"),
 ]
 
 # 美股大盘指数的 FRED 兜底：yfinance(^GSPC/^IXIC)被 Yahoo 限流(429)时用 FRED 补。
