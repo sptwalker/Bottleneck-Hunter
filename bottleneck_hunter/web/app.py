@@ -213,6 +213,21 @@ async def lifespan(app: FastAPI):
                               replace_existing=True)
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).debug("数据源健康巡检启动补跑注册失败", exc_info=True)
+        # 启动即巡检：把「重启期间跨触发点漏跑的 job」补救从「等次日 07:45 守卫」提前到「开机即扫」。
+        # ponytail: 复用 system_watchdog（扫超期/interrupted 心跳→主动补跑），不为每个 job 各写启动补跑。
+        # +90s 让 reconcile 的 interrupted 心跳与 +30s 数据源补采先落定，避免误判/重复补。
+        try:
+            from datetime import datetime as _dt2
+            from datetime import timedelta as _td2
+            from datetime import timezone as _tz2
+
+            from bottleneck_hunter.watchlist.scheduler import job_system_watchdog
+            scheduler.add_job(job_system_watchdog, "date",
+                              run_date=_dt2.now(_tz2.utc) + _td2(seconds=90),
+                              id="system_watchdog_startup", name="System watchdog (startup catch-up)",
+                              replace_existing=True)
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("守卫巡检启动补跑注册失败", exc_info=True)
     yield
     shutdown_scheduler()
     shutdown_broadcaster()

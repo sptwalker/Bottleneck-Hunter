@@ -151,7 +151,14 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
         attempts = max_retry if idx == 0 else 1   # 备用模型不在同一节点上重试，快速切换
         for attempt in range(attempts):
             try:
-                content = await asyncio.to_thread(lambda: llm.invoke(prompt).content)  # noqa: B023  立即 await，无延迟绑定后果
+                # ponytail: 须 wait_for 硬超时——裸壳同步 invoke 无 asyncio 级超时上限，单个 hang 的模型
+                # 会挂死一个 to_thread 线程并拖住整个委员会/决策周期（正是「确保每周期正常执行」要防的）。
+                # 超时略高于候选级 _CAND_TIMEOUT，让 record-only 壳有机会先自然返回；真超时由下方 except 记账。
+                from bottleneck_hunter.llm_clients.fallback import _CAND_TIMEOUT
+                content = await asyncio.wait_for(
+                    asyncio.to_thread(lambda: llm.invoke(prompt).content),  # noqa: B023  立即 await，无延迟绑定后果
+                    timeout=_CAND_TIMEOUT + 30,
+                )
                 health.record_success(uid, provider)  # 恢复：清该 provider 的失败计数
                 if idx > 0 or attempt > 0:
                     logger.info("委员 %s 经重试/降级成功（%s/%s, 第%d次）",
@@ -167,8 +174,11 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
                 last_err = e
                 msg = str(e).lower()
                 transient = any(k in msg for k in _TRANSIENT_KEYS)
-                # 记入健康熔断：委员链取裸模型自管重试，此前从不记账 → 402/额度失效的 provider
-                # 永不熔断、每个委员每轮都重撞。记账后累计到阈值即 is_open，_build_llm_chain 会跳过它。
+                # 记入健康熔断。注：委员链取的裸模型其实已被包成 record-only 记账壳（factory
+                # get_llm_for_position with_fallback=False → record_only=True），壳内已记一次。此处
+                # 保留手动记账，专为兜住上方 wait_for 超时的场景——超时进本 except 时壳的后台线程
+                # 尚未返回、还没记账，删掉这里会让 wait_for 超时漏记熔断。正常失败下双记一次方向
+                # 无害（保守偏早熔断，不误伤），权衡后刻意接受轻微 over-accounting 换「超时必记」。
                 try:
                     health.record_failure(uid, provider, classify_reason(e))
                 except Exception:  # noqa: BLE001

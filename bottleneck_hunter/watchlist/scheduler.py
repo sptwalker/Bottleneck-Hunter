@@ -679,11 +679,17 @@ async def job_macro_update() -> None:
         result = await fetch_macro_data(store, markets)
         logger.info("Macro update completed: %d indicators fetched", len(result))
     except Exception as e:
+        # ponytail: 须 re-raise 置 error 心跳，守卫下轮补跑。fetch_macro_data 内部对软失败已有缓存兜底，
+        # 能抵达此处的必是真异常（无缓存可用），恒吞成 success 会让守卫永远看不到宏观采集已坏。
         logger.error("Macro update failed: %s", e)
+        raise
 
 
 async def job_daily_decision(market: str = "us_stock") -> None:
     """每日自动决策：运行完整 L1→L4→投委会流程（多用户）。"""
+    # ponytail: had_fatal 须循环外累积、末尾统一抛错——若在 per-user try 内 raise，会被本函数
+    # 自己的 except 立刻吞掉，job 心跳恒 success，守卫「据 error 心跳补跑」机制形同虚设（曾如此）。
+    fatal_users: list[str] = []
     for uid, store, budget in _iter_users("daily_decision"):
         try:
             by_market = store.get_tickers_by_market()
@@ -696,13 +702,18 @@ async def job_daily_decision(market: str = "us_stock") -> None:
             from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
             had_fatal = await _drain_sse(run_daily_decision(store, budget, scope="full", market=market))
             if had_fatal:
-                # 决策链无可用 LLM＝未完成刷新：抛错让心跳置 error，守卫下轮据此补跑（绝境兜底选型已尽力）。
-                raise RuntimeError(f"日常决策未完成：{market} 决策链无可用 LLM")
+                # 决策链无可用 LLM＝该用户未完成刷新：记 oplog + 标记，待循环末尾统一抛错（勿在此 raise）。
+                fatal_users.append(label)
+                _oplog(uid, "日常决策", market=market, error=f"{market} 决策链无可用 LLM")
+                continue
             logger.info("Daily decision (%s/%s) completed", market, label)
             _oplog(uid, "日常决策", market=market, detail=f"{len(tickers)} 只标的完成 L1→L4+投委会")
         except Exception as e:
             logger.error("Daily decision (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
             _oplog(uid, "日常决策", market=market, error=str(e))
+    if fatal_users:
+        # 各用户已各自跑完（隔离保留），但存在「无 LLM 未完成」→ 抛错置 job 心跳 error，守卫下轮补跑。
+        raise RuntimeError(f"日常决策未完成：{market} 决策链无可用 LLM（用户 {', '.join(fatal_users)}）")
 
 
 async def job_catalyst_scan() -> None:
@@ -844,6 +855,8 @@ def _upsert_catalyst(store, entry_id: str, ticker: str, meta: tuple) -> int:
 
 async def job_weekly_strategy(market: str = "us_stock") -> None:
     """每周策略刷新：L1 宏观策略 + L2 组合策略（多用户）。"""
+    # ponytail: 同 job_daily_decision——had_fatal 须循环外累积、末尾统一抛错，勿在 try 内 raise 被自己吞掉。
+    fatal_users: list[str] = []
     for uid, store, budget in _iter_users("weekly_strategy"):
         try:
             label = f"user={uid[:8]}" if uid else "global"
@@ -852,13 +865,18 @@ async def job_weekly_strategy(market: str = "us_stock") -> None:
             f1 = await _drain_sse(run_macro_strategy(store, budget, market=market))
             f2 = await _drain_sse(run_strategic_plan(store, budget, market=market))
             if f1 or f2:
-                # L1/L2 无可用 LLM＝周更未完成：抛错置 error 心跳，守卫下轮补跑（否则 L2 陈旧冻结 L3/L4）。
-                raise RuntimeError(f"每周策略未完成：{market} L1/L2 决策链无可用 LLM")
+                # L1/L2 无可用 LLM＝周更未完成：记 oplog + 标记，待循环末尾统一抛错（否则 L2 陈旧冻结 L3/L4）。
+                fatal_users.append(label)
+                _oplog(uid, "每周策略刷新", market=market, error=f"{market} L1/L2 决策链无可用 LLM")
+                continue
             logger.info("Weekly strategy refresh (%s/%s) completed", market, label)
             _oplog(uid, "每周策略刷新", market=market, detail="L1 宏观 + L2 组合策略已更新")
         except Exception as e:
             logger.error("Weekly strategy refresh (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
             _oplog(uid, "每周策略刷新", market=market, error=str(e))
+    if fatal_users:
+        # 各用户已各自跑完（隔离保留），但存在「无 LLM 未完成」→ 抛错置 job 心跳 error，守卫下轮补跑。
+        raise RuntimeError(f"每周策略未完成：{market} L1/L2 决策链无可用 LLM（用户 {', '.join(fatal_users)}）")
 
 
 async def job_auto_review(market: str = "us_stock") -> None:
@@ -1364,7 +1382,19 @@ async def job_poll_imap() -> None:
     if not cfg.get("poll_enabled", True):
         return  # 管理员关闭了自动轮询开关（手动「立即轮询」不受此限）
     from bottleneck_hunter.vip.mail_ingest import poll_inbox
-    counts = await _asyncio.to_thread(poll_inbox, _wl_store, _auth_store)  # imaplib 阻塞→to_thread
+    try:
+        counts = await _asyncio.to_thread(poll_inbox, _wl_store, _auth_store)  # imaplib 阻塞→to_thread
+    except Exception as e:
+        # ponytail: 认证/账户类硬错（密码错/IMAP 未开通/账户异常）重试永不自愈——静音 return，
+        # 视同「未正确配置」，不污染心跳、不触发守卫每日反复补跑刷屏。瞬态错（网络/超时）仍抛出让守卫补跑。
+        # 天花板：靠关键词判定，非 IMAP 响应码精析；新硬错措辞需补进 _persist 列表。
+        msg = str(e).lower()
+        _persist = ("login", "auth", "authenticate", "credential", "password",
+                    "abnormal", "not open", "not enabled", "disabled", "535", "invalid")
+        if any(k in msg for k in _persist):
+            logger.warning("邮件轮询：IMAP 认证/账户异常，视为未正确配置，静音跳过（不触发守卫补跑）：%s", e)
+            return
+        raise
     if counts.get("processed") or counts.get("rejected") or counts.get("errors"):
         logger.info("邮件轮询: %s", counts)
 

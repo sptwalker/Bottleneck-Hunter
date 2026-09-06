@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -127,6 +127,46 @@ class TestJobDailyDecision:
         with patch("bottleneck_hunter.watchlist.decision_engine.run_daily_decision", side_effect=RuntimeError("boom")):
             await scheduler.job_daily_decision(market="us_stock")
 
+    @pytest.mark.asyncio
+    async def test_had_fatal_raises_for_error_heartbeat(self):
+        """had_fatal（无可用 LLM）必须让 job 抛错 → 心跳置 error → 守卫补跑。
+        回归缺口1：旧代码在 per-user try 内 raise 被自己 except 吞掉，心跳恒 success，守卫机制形同虚设。"""
+        store = MagicMock()
+        store.get_tickers_by_market.return_value = {"us_stock": ["AAPL"]}
+        with patch.object(scheduler, "_iter_users", return_value=iter([("u1", store, MagicMock())])), \
+             patch("bottleneck_hunter.watchlist.decision_engine.run_daily_decision", MagicMock(return_value=MagicMock())), \
+             patch.object(scheduler, "_drain_sse", new=AsyncMock(return_value=True)), \
+             patch.object(scheduler, "_oplog"):
+            with pytest.raises(RuntimeError, match="无可用 LLM"):
+                await scheduler.job_daily_decision(market="us_stock")
+
+    @pytest.mark.asyncio
+    async def test_had_fatal_preserves_user_isolation(self):
+        """一个用户 had_fatal 不阻断其他用户：全部跑完后才在末尾统一抛错。"""
+        s1, s2 = MagicMock(), MagicMock()
+        s1.get_tickers_by_market.return_value = {"us_stock": ["AAPL"]}
+        s2.get_tickers_by_market.return_value = {"us_stock": ["MSFT"]}
+        drain = AsyncMock(side_effect=[True, False])  # 用户1 fatal，用户2 正常
+        with patch.object(scheduler, "_iter_users",
+                          return_value=iter([("u1", s1, MagicMock()), ("u2", s2, MagicMock())])), \
+             patch("bottleneck_hunter.watchlist.decision_engine.run_daily_decision", MagicMock(return_value=MagicMock())), \
+             patch.object(scheduler, "_drain_sse", new=drain), \
+             patch.object(scheduler, "_oplog"):
+            with pytest.raises(RuntimeError):
+                await scheduler.job_daily_decision(market="us_stock")
+        assert drain.await_count == 2  # 两个用户都被处理（隔离保留），非首个 fatal 即中断
+
+    @pytest.mark.asyncio
+    async def test_all_ok_no_raise(self):
+        """全部用户正常时不抛错（心跳 success）。"""
+        store = MagicMock()
+        store.get_tickers_by_market.return_value = {"us_stock": ["AAPL"]}
+        with patch.object(scheduler, "_iter_users", return_value=iter([("u1", store, MagicMock())])), \
+             patch("bottleneck_hunter.watchlist.decision_engine.run_daily_decision", MagicMock(return_value=MagicMock())), \
+             patch.object(scheduler, "_drain_sse", new=AsyncMock(return_value=False)), \
+             patch.object(scheduler, "_oplog"):
+            await scheduler.job_daily_decision(market="us_stock")  # 不应抛错
+
 
 class TestJobCatalystScan:
     @pytest.mark.asyncio
@@ -188,6 +228,18 @@ class TestJobWeeklyStrategy:
         store = _setup_store()
         with patch("bottleneck_hunter.watchlist.decision_engine.run_macro_strategy", side_effect=RuntimeError("err")):
             await scheduler.job_weekly_strategy()
+
+    @pytest.mark.asyncio
+    async def test_had_fatal_raises_for_error_heartbeat(self):
+        """L1/L2 无可用 LLM 必须让 job 抛错 → 心跳 error → 守卫补跑（回归缺口1）。"""
+        store = MagicMock()
+        with patch.object(scheduler, "_iter_users", return_value=iter([("u1", store, MagicMock())])), \
+             patch("bottleneck_hunter.watchlist.decision_engine.run_macro_strategy", MagicMock(return_value=MagicMock())), \
+             patch("bottleneck_hunter.watchlist.decision_engine.run_strategic_plan", MagicMock(return_value=MagicMock())), \
+             patch.object(scheduler, "_drain_sse", new=AsyncMock(side_effect=[True, False])), \
+             patch.object(scheduler, "_oplog"):
+            with pytest.raises(RuntimeError, match="无可用 LLM"):
+                await scheduler.job_weekly_strategy()
 
 
 class TestJobAutoReview:
