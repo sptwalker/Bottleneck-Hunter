@@ -784,7 +784,14 @@
             <div class="dc-card" id="dc-pending">
               <div class="dc-card-header">
                 <h3><span class="dc-light dc-light-gray" id="dc-light-pending"></span>L4 待确认执行 <span class="dc-card-toggle">▼</span></h3>
-                <span class="dc-badge dc-badge-warn" id="dc-pending-count">0</span>
+                <div class="dc-autoexec-wrap" style="display:flex;align-items:center;gap:8px;margin-left:auto">
+                  <span style="font-size:12px;color:var(--muted)" title="开启后：投委会通过的待确认操作免人工确认，由决策中心（含夜间定时决策）自动成交">自动执行</span>
+                  <label class="admin-toggle" id="dc-autoexec-toggle">
+                    <input type="checkbox" id="dc-autoexec-input">
+                    <span class="admin-toggle-slider"></span>
+                  </label>
+                  <span class="dc-badge dc-badge-warn" id="dc-pending-count">0</span>
+                </div>
               </div>
               <div class="dc-card-body" id="dc-pending-list">
                 <p class="dc-empty-hint" id="dc-pending-empty">暂无待确认计划</p>
@@ -2485,7 +2492,7 @@
 
 <!-- 推荐配置弹窗已退役（智能调度取代静态推荐冻结）-->
 
-<script type="module" src="/static/js/app.js?v=104"></script>
+<script type="module" src="/static/js/app.js?v=105"></script>
 <script src="/static/js/syslog.js"></script>
 <script>
   window.addEventListener('error', e => {

@@ -167,6 +167,31 @@ async def save_portfolio_style(style: PortfolioStyle, market: str = "us_stock",
     return {"ok": True, "style": style.model_dump()}
 
 
+class AutoExecuteReq(BaseModel):
+    enabled: bool = False
+
+
+@router.get("/auto-execute")
+async def get_auto_execute(market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """读取当前用户在该市场的 L4 自动执行开关状态。"""
+    from bottleneck_hunter.watchlist.auto_execute import is_auto_execute_enabled
+    store = _user_store(user).for_market(market)
+    return {"enabled": is_auto_execute_enabled(store)}
+
+
+@router.put("/auto-execute")
+async def save_auto_execute(req: AutoExecuteReq, market: str = "us_stock",
+                            user: dict = Depends(get_current_user)):
+    """保存 L4 自动执行开关（按用户+市场隔离，系统记忆此状态）。
+
+    开启后决策中心（定时跑批 + UI 一键决策/全量刷新）投委会通过的待确认操作免人工确认直接成交。
+    """
+    from bottleneck_hunter.watchlist.auto_execute import set_auto_execute
+    store = _user_store(user).for_market(market)
+    set_auto_execute(store, req.enabled)
+    return {"ok": True, "enabled": req.enabled}
+
+
 # ─────────────────────────────────────────────────────────
 # L1 宏观咨询互动（两位分析师流式多轮对话，每市场一条滚动会话）
 # ─────────────────────────────────────────────────────────
@@ -704,52 +729,19 @@ async def restore_execution(plan_id: str, user: dict = Depends(get_current_user)
 @router.post("/executions/{plan_id}/confirm")
 async def confirm_execution(plan_id: str, user: dict = Depends(get_current_user)):
     store = _user_store(user)
-    ok = store.confirm_execution(plan_id)
-    if not ok:
+    from bottleneck_hunter.watchlist.trade_executor import confirm_and_execute
+    res = await confirm_and_execute(store, plan_id)
+    st = res.get("status")
+    if st == "not_found":
         raise HTTPException(status_code=404, detail="执行计划不存在或已处理")
-    from bottleneck_hunter.watchlist.trade_executor import execute_trade
-    try:
-        trade_result = execute_trade(store, plan_id)
-        # 缺真实市价快照 → 按需拉一次价再重试一次（观察池刷新可能漏了该票/该周期失败）。
-        if trade_result.get("needs") == "price_snapshot":
-            tk = trade_result.get("ticker")
-            plan = store.get_execution_plan(plan_id) or {}
-            mkt = plan.get("market") or (plan.get("result_json") or {}).get("market", "us_stock")
-            if tk:
-                try:
-                    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
-                    await fetch_price_batch([tk], store.for_market(mkt), market=mkt)
-                    trade_result = execute_trade(store, plan_id)  # 单次重试，避免死循环
-                except Exception:
-                    logger.warning("按需拉价重试失败 plan_id=%s ticker=%s", plan_id, tk)
-    except Exception as e:
-        logger.exception("交易执行异常 plan_id=%s", plan_id)
-        # P2.2 执行失败回滚到 pending，避免卡在 confirmed
-        try:
-            store.revert_to_pending(plan_id)
-        except Exception:
-            logger.warning("回滚 plan_id=%s 到 pending 失败", plan_id)
-        raise HTTPException(status_code=500, detail=f"交易执行异常: {e}") from e
-    # 未达限价 → 已自动转挂单（不算失败，不回滚 pending；前端把它移入挂单区）
-    if trade_result.get("rested"):
-        return {"status": "resting", "trade": trade_result,
-                "limit_price": trade_result.get("limit_price"),
-                "market_price": trade_result.get("market_price")}
-    # execute_trade 返回 error 字段表示业务错误（约束不通过、现金不足、缺价等）
-    if "error" in trade_result:
-        # 业务错误也回滚到 pending，卡片继续可操作(可重试/可取消)，不卡在 confirmed
-        try:
-            store.revert_to_pending(plan_id)
-        except Exception:
-            logger.warning("业务错误回滚 plan_id=%s 到 pending 失败", plan_id)
-        return {"status": "error", "trade": trade_result, "message": trade_result["error"]}
-    # 成交成功 → 拉实时价重算持仓（实现"批准操作后实时更新持仓"）。失败静默降级不阻断返回。
-    try:
-        from bottleneck_hunter.watchlist.trade_executor import refresh_positions_live
-        await refresh_positions_live(store)
-    except Exception:
-        logger.warning("确认后实时刷新持仓失败 plan_id=%s", plan_id)
-    return {"status": "confirmed", "trade": trade_result}
+    if st == "exception":
+        raise HTTPException(status_code=500, detail=f"交易执行异常: {res.get('error')}")
+    if st == "resting":
+        return {"status": "resting", "trade": res.get("trade"),
+                "limit_price": res.get("limit_price"), "market_price": res.get("market_price")}
+    if st == "error":
+        return {"status": "error", "trade": res.get("trade"), "message": res.get("message")}
+    return {"status": "confirmed", "trade": res.get("trade")}
 
 
 class RejectRequest(BaseModel):
@@ -878,6 +870,7 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
     except Exception:
         logger.debug("加载投委会概览失败", exc_info=True)
 
+    from bottleneck_hunter.watchlist.auto_execute import is_auto_execute_enabled
     return {
         "macro_strategy": macro,
         "strategic_plan": strategic,
@@ -889,6 +882,7 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
         "committee": committee,
         "committee_meta": committee_meta,
         "company_names": company_names,
+        "auto_execute": is_auto_execute_enabled(store),
     }
 
 

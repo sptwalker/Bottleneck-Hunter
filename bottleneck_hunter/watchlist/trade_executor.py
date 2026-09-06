@@ -179,6 +179,59 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     return result
 
 
+async def confirm_and_execute(store: WatchlistStore, plan_id: str) -> dict:
+    """确认单条执行计划并成交 —— 确认端点与 L4 自动执行共用同一条闭环。
+
+    抽取自原 decision_api 确认端点：confirm → execute_trade →（缺快照按需拉价重试一次）
+    →（未达限价转挂单 / 业务错误回滚 pending）→ 成交后实时刷持仓。
+    返回 {"status": ...}：not_found / exception / resting / error / confirmed。
+    调用方（HTTP 端点）据 status 决定是否抛 404/500；自动执行则只据 status 计数。
+    """
+    ok = store.confirm_execution(plan_id)
+    if not ok:
+        return {"status": "not_found"}
+    try:
+        trade_result = execute_trade(store, plan_id)
+        # 缺真实市价快照 → 按需拉一次价再重试一次（观察池刷新可能漏了该票/该周期失败）。
+        if trade_result.get("needs") == "price_snapshot":
+            tk = trade_result.get("ticker")
+            plan = store.get_execution_plan(plan_id) or {}
+            mkt = plan.get("market") or (plan.get("result_json") or {}).get("market", "us_stock")
+            if tk:
+                try:
+                    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+                    await fetch_price_batch([tk], store.for_market(mkt), market=mkt)
+                    trade_result = execute_trade(store, plan_id)  # 单次重试，避免死循环
+                except Exception:
+                    logger.warning("按需拉价重试失败 plan_id=%s ticker=%s", plan_id, tk)
+    except Exception as e:
+        logger.exception("交易执行异常 plan_id=%s", plan_id)
+        # 执行失败回滚到 pending，避免卡在 confirmed
+        try:
+            store.revert_to_pending(plan_id)
+        except Exception:
+            logger.warning("回滚 plan_id=%s 到 pending 失败", plan_id)
+        return {"status": "exception", "error": str(e)}
+    # 未达限价 → 已自动转挂单（不算失败，不回滚 pending）
+    if trade_result.get("rested"):
+        return {"status": "resting", "trade": trade_result,
+                "limit_price": trade_result.get("limit_price"),
+                "market_price": trade_result.get("market_price")}
+    # execute_trade 返回 error 字段表示业务错误（约束不通过、现金不足、缺价等）
+    if "error" in trade_result:
+        try:
+            store.revert_to_pending(plan_id)
+        except Exception:
+            logger.warning("业务错误回滚 plan_id=%s 到 pending 失败", plan_id)
+        return {"status": "error", "trade": trade_result, "message": trade_result["error"]}
+    # 成交成功 → 拉实时价重算持仓。失败静默降级不阻断返回。
+    try:
+        await refresh_positions_live(store)
+    except Exception:
+        logger.warning("确认后实时刷新持仓失败 plan_id=%s", plan_id)
+    return {"status": "confirmed", "trade": trade_result}
+
+
 def _schedule_auto_review(store: WatchlistStore, trade_id: str) -> None:
     """触发卖出后自动复盘。诚信原则：不能像旧版那样"无事件循环就静默跳过"
     （那正是 auto_reviews 表长期为空的根因）。有运行中的 loop → 后台任务；

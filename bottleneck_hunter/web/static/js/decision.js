@@ -290,6 +290,8 @@ function renderAll(data) {
   renderStrategic(data.strategic_plan);
   renderTactical(data.tactical_plans || []);
   renderPending(data.pending_executions || []);
+  const aeInput = document.getElementById('dc-autoexec-input');
+  if (aeInput) aeInput.checked = !!data.auto_execute;   // 按市场同步开关状态（切市场重载 overview 即刷新）
   loadBlocked();
   loadResting();
   // 催化剂：日历视图下不要用列表覆盖(否则 overview 每次返回都把日历清成列表)；
@@ -571,6 +573,34 @@ function renderPending(executions) {
   list.innerHTML += `<div style="text-align:right;padding:8px 4px 0">
     <button class="dc-btn-reject" id="dc-clear-all-pending" style="font-size:12px">清空所有操作</button>
   </div>`;
+}
+
+/* ── L4 自动执行开关 ─────────────────────────────── */
+
+async function handleAutoExecuteToggle(e) {
+  const input = e.target;
+  const enabled = input.checked;
+  // 开启是重大设置：免人工确认自动成交，含夜间定时决策，故二次确认；关闭无需确认。
+  if (enabled) {
+    const ok = await showConfirm(
+      '开启后，投委会通过的待确认操作将【免人工确认】由决策中心自动成交（含每日/每周定时决策，无需你在场）。仅作用于当前市场的模拟账户。确定开启？',
+      { title: 'L4 自动执行', confirmText: '开启自动执行', danger: true });
+    if (!ok) { input.checked = false; return; }
+  }
+  input.disabled = true;
+  try {
+    await dcFetch(`/auto-execute?market=${encodeURIComponent(dcState.market)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    });
+    if (dcState.overview) dcState.overview.auto_execute = enabled;
+    toast(enabled ? '已开启 L4 自动执行' : '已关闭 L4 自动执行', 'success');
+  } catch (err) {
+    input.checked = !enabled;   // 回滚 UI，与服务端保持一致
+    toast('保存失败：' + err.message, 'error');
+  } finally {
+    input.disabled = false;
+  }
 }
 
 /* ── 已拦截区（被系统/投委会拦截）──────────────────── */
@@ -1138,6 +1168,10 @@ export function initDecision() {
   document.getElementById('dc-pending-list')?.addEventListener('click', handlePendingAction);
   document.getElementById('dc-blocked-section')?.addEventListener('click', handleBlockedAction);
   document.getElementById('dc-resting-section')?.addEventListener('click', handleRestingAction);
+
+  // L4 自动执行开关：change 存盘；点开关不应触发卡片折叠，故在容器上拦下冒泡
+  document.getElementById('dc-autoexec-input')?.addEventListener('change', handleAutoExecuteToggle);
+  document.querySelector('.dc-autoexec-wrap')?.addEventListener('click', (e) => e.stopPropagation());
 
   // 会议日期筛选
   document.getElementById('dc-meeting-date')?.addEventListener('change', () => loadMeetings());

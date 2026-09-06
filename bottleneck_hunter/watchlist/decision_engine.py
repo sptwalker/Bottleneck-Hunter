@@ -2052,6 +2052,20 @@ async def run_daily_decision(
             logger.exception("投委会评审失败")
             yield _sse("decision_error", layer="committee", error=str(e))
 
+    # Step 5.5: L4 自动执行（用户开启「自动执行」时，投委会通过的待确认操作免人工确认直接成交）
+    #           挂在投委会之后：拦截/否决的计划已进「已拦截」区不在 pending，只自动执行合规且通过评审的。
+    if scope in ("l3l4", "full"):
+        try:
+            from bottleneck_hunter.watchlist.auto_execute import (
+                auto_execute_pending, is_auto_execute_enabled,
+            )
+            if is_auto_execute_enabled(store):
+                async for evt in auto_execute_pending(store, market):
+                    yield evt
+        except Exception as e:
+            logger.exception("L4 自动执行失败")
+            yield _sse("decision_error", layer="auto_execute", error=str(e))
+
     # Step 6: 更新观察池综合评分（裸调用需保护，否则崩溃会中断 SSE 流导致前端面板空白）
     try:
         _update_composite_scores(store, market)
@@ -2108,6 +2122,18 @@ async def run_full_refresh(
         from bottleneck_hunter.watchlist.committee import run_committee_review
         async for evt in run_committee_review(store, pending, budget, market=market):
             yield evt
+
+    # L4 自动执行（同 run_daily_decision Step 5.5：开启时投委会通过的待确认操作免确认直接成交）
+    try:
+        from bottleneck_hunter.watchlist.auto_execute import (
+            auto_execute_pending, is_auto_execute_enabled,
+        )
+        if is_auto_execute_enabled(store):
+            async for evt in auto_execute_pending(store, market):
+                yield evt
+    except Exception as e:
+        logger.exception("L4 自动执行失败")
+        yield _sse("decision_error", layer="auto_execute", error=str(e))
 
     try:
         _update_composite_scores(store, market)
