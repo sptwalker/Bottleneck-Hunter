@@ -620,6 +620,20 @@ class _DecisionMixin:
         finally:
             conn.close()
 
+    def get_recent_executed(self, limit: int = 20) -> list[dict]:
+        """近期已成交的执行计划（status=executed，按成交时间倒序）——自动执行开启时 L4 栏据此展示，避免空白。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM execution_plans WHERE status = 'executed' "
+                "ORDER BY executed_at DESC LIMIT ?",
+                (limit,),
+            )
+            rows = conn.execute(q, p).fetchall()
+            return [self._parse_json_fields(dict(r), ("result_json",)) for r in rows]
+        finally:
+            conn.close()
+
     def mark_executed(self, plan_id: str) -> bool:
         """成交成功 → 推进到 executed（激活状态机死状态），清挂单标记。普通成交与挂单成交共用。"""
         with self._write_conn() as conn:

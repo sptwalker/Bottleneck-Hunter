@@ -81,8 +81,9 @@ function updateLightsFromData(data) {
   setLight('strategic', compute('strategic', !!strat, strat && (strat.updated_at || strat.created_at)));
   setLight('tactical', compute('tactical', tac.length > 0,
     tac.length ? (tac[0].created_at || tac[0].plan_date) : null));
-  // L4：有待确认操作即为有效绿灯（无过期概念）
-  setLight('pending', dcState.lightErrors.has('pending') ? 'red' : (pend.length ? 'green' : 'gray'));
+  // L4：有待确认操作即为有效绿灯；自动执行开启且近期已成交也算有效（无过期概念）
+  setLight('pending', dcState.lightErrors.has('pending') ? 'red'
+    : ((pend.length || (data.auto_execute && (data.recent_executed || []).length)) ? 'green' : 'gray'));
   setLight('catalysts', compute('catalysts', cats.length > 0,
     cats.length ? cats[0].created_at : null));
   // 委员会灯态由 loadMeetings 根据最近会议设置；此处仅在失败时置红
@@ -289,7 +290,10 @@ function renderAll(data) {
   renderMacro(data.macro_strategy);
   renderStrategic(data.strategic_plan);
   renderTactical(data.tactical_plans || []);
-  renderPending(data.pending_executions || []);
+  renderPending(data.pending_executions || [], {
+    autoExecute: !!data.auto_execute,
+    recentExecuted: data.recent_executed || [],
+  });
   const aeInput = document.getElementById('dc-autoexec-input');
   if (aeInput) aeInput.checked = !!data.auto_execute;   // 按市场同步开关状态（切市场重载 overview 即刷新）
   loadBlocked();
@@ -527,52 +531,78 @@ function renderTactical(plans) {
 
 /* ── L4 待确认 ────────────────────────────────────── */
 
-function renderPending(executions) {
+function renderPending(executions, opts = {}) {
+  const { autoExecute = false, recentExecuted = [] } = opts;
   const list = document.getElementById('dc-pending-list');
-  const empty = document.getElementById('dc-pending-empty');
   const countBadge = document.getElementById('dc-pending-count');
 
   if (countBadge) countBadge.textContent = executions.length;
   if (!list) return;
 
-  if (executions.length === 0) {
+  let html = '';
+
+  if (executions.length > 0) {
+    html += executions.map(ex => {
+      let rj = ex.result_json;
+      if (typeof rj === 'string') {
+        try { rj = JSON.parse(rj); } catch { rj = {}; }
+      }
+      rj = rj || {};
+
+      const action = ex.action || rj.action || '--';
+      const shares = ex.shares || rj.shares || '--';
+      const price = ex.target_price || rj.target_price || '--';
+      const reasoning = rj.reasoning || '';
+      let flags = '';
+      if (rj.committee_modified) flags += '<span class="dc-pending-flag dc-flag-committee">投委会调整</span>';
+      if (rj.auto_repaired) flags += '<span class="dc-pending-flag dc-flag-repair">自修正</span>';
+      if (rj.auto_adjusted) flags += '<span class="dc-pending-flag dc-flag-adjust">已缩量</span>';
+
+      return `<div class="dc-pending-item" data-plan-id="${escDC(ex.id)}">
+        <div class="dc-pending-header">
+          <span class="dc-pending-ticker">${escDC(dcName(ex.ticker))} ${actionBadge(action)} ${flags}</span>
+          <span style="font-size:12px;color:var(--muted)">${shares}股 @ ${price !== '--' ? fmtNum(Number(price), 2) : '--'}</span>
+        </div>
+        ${reasoning ? `<div class="dc-pending-detail">${escDC(reasoning)}</div>` : ''}
+        <div class="dc-pending-actions">
+          <button class="dc-btn-confirm" data-action="confirm" data-plan-id="${escDC(ex.id)}">确认执行</button>
+          <button class="dc-btn-reject" data-action="reject" data-plan-id="${escDC(ex.id)}">拒绝</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    html += `<div style="text-align:right;padding:8px 4px 0">
+      <button class="dc-btn-reject" id="dc-clear-all-pending" style="font-size:12px">清空所有操作</button>
+    </div>`;
+  }
+
+  // 自动执行开启：追加只读「近期已自动执行」段，L4 栏在无待确认时不再空白
+  if (autoExecute && recentExecuted.length > 0) {
+    html += `<div style="font-size:12px;color:var(--muted);padding:${executions.length ? '10px' : '0'} 4px 6px">
+      近期已自动执行（${recentExecuted.length}）</div>`;
+    html += recentExecuted.map(ex => {
+      let rj = ex.result_json;
+      if (typeof rj === 'string') { try { rj = JSON.parse(rj); } catch { rj = {}; } }
+      rj = rj || {};
+      const action = ex.action || rj.action || '--';
+      const shares = ex.shares || rj.shares || '--';
+      const price = ex.target_price || rj.target_price || '--';
+      const at = ex.executed_at ? fmtBJ(ex.executed_at) : '';
+      return `<div class="dc-pending-item" style="opacity:.85">
+        <div class="dc-pending-header">
+          <span class="dc-pending-ticker">${escDC(dcName(ex.ticker))} ${actionBadge(action)} <span class="dc-pending-flag dc-flag-committee">已自动执行</span></span>
+          <span style="font-size:12px;color:var(--muted)">${shares}股 @ ${price !== '--' ? fmtNum(Number(price), 2) : '--'}</span>
+        </div>
+        ${at ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">成交于 ${escDC(at)}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  if (!html) {
     list.innerHTML = '<p class="dc-empty-hint" id="dc-pending-empty">暂无待确认计划</p>';
     return;
   }
-  if (empty) empty.style.display = 'none';
-
-  list.innerHTML = executions.map(ex => {
-    let rj = ex.result_json;
-    if (typeof rj === 'string') {
-      try { rj = JSON.parse(rj); } catch { rj = {}; }
-    }
-    rj = rj || {};
-
-    const action = ex.action || rj.action || '--';
-    const shares = ex.shares || rj.shares || '--';
-    const price = ex.target_price || rj.target_price || '--';
-    const reasoning = rj.reasoning || '';
-    let flags = '';
-    if (rj.committee_modified) flags += '<span class="dc-pending-flag dc-flag-committee">投委会调整</span>';
-    if (rj.auto_repaired) flags += '<span class="dc-pending-flag dc-flag-repair">自修正</span>';
-    if (rj.auto_adjusted) flags += '<span class="dc-pending-flag dc-flag-adjust">已缩量</span>';
-
-    return `<div class="dc-pending-item" data-plan-id="${escDC(ex.id)}">
-      <div class="dc-pending-header">
-        <span class="dc-pending-ticker">${escDC(dcName(ex.ticker))} ${actionBadge(action)} ${flags}</span>
-        <span style="font-size:12px;color:var(--muted)">${shares}股 @ ${price !== '--' ? fmtNum(Number(price), 2) : '--'}</span>
-      </div>
-      ${reasoning ? `<div class="dc-pending-detail">${escDC(reasoning)}</div>` : ''}
-      <div class="dc-pending-actions">
-        <button class="dc-btn-confirm" data-action="confirm" data-plan-id="${escDC(ex.id)}">确认执行</button>
-        <button class="dc-btn-reject" data-action="reject" data-plan-id="${escDC(ex.id)}">拒绝</button>
-      </div>
-    </div>`;
-  }).join('');
-
-  list.innerHTML += `<div style="text-align:right;padding:8px 4px 0">
-    <button class="dc-btn-reject" id="dc-clear-all-pending" style="font-size:12px">清空所有操作</button>
-  </div>`;
+  list.innerHTML = html;
 }
 
 /* ── L4 自动执行开关 ─────────────────────────────── */

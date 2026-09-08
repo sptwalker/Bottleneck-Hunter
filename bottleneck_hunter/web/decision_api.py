@@ -871,6 +871,7 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
         logger.debug("加载投委会概览失败", exc_info=True)
 
     from bottleneck_hunter.watchlist.auto_execute import is_auto_execute_enabled
+    auto_exec = is_auto_execute_enabled(store)
     return {
         "macro_strategy": macro,
         "strategic_plan": strategic,
@@ -882,7 +883,9 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
         "committee": committee,
         "committee_meta": committee_meta,
         "company_names": company_names,
-        "auto_execute": is_auto_execute_enabled(store),
+        "auto_execute": auto_exec,
+        # 自动执行开启时，pending 常被即时消费成 executed，L4 栏改列近期已自动执行，避免空白
+        "recent_executed": store.get_recent_executed() if auto_exec else [],
     }
 
 
