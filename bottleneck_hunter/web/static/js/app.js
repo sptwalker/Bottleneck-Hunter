@@ -8,7 +8,7 @@ import { initWizard } from './phases.js';
 import { refreshPhase4Watchlist } from './phase-views.js';
 import { initReverse } from './reverse.js';
 import { initWatchlist, refreshWatchlistOnEnter } from './watchlist.js';
-import { initDecision } from './decision.js';
+import { initDecision } from './decision.js?v=1';  // ponytail: ES module 按 URL 独立缓存，bump app.js?v 不失效 decision.js；改 decision.js 必同步 +1（同 vip.js?v 约定）
 import { initSimTrading, ensureSimTradingLoaded } from './simtrading.js';
 import { initVip, ensureVipLoaded, applyVipLock } from './vip.js?v=2';
 import { initAIConfig } from './ai-config.js';
