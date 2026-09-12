@@ -26,6 +26,10 @@ _wl_store: WatchlistStore | None = None
 _budget: BudgetTracker | None = None
 _auth_store = None  # AuthStore 实例，用于获取活跃用户列表
 
+# 长期未登录阈值（天）：超过即视为休眠，冻结其全部定时自动化直到重新登录（update_last_login 刷新）。
+# ponytail: 30 天硬编码；需按套餐/角色差异化再抽成配置，YAGNI 暂不做。
+_DORMANT_DAYS = 30
+
 
 def _get_active_user_stores(category: str | None = None) -> list[tuple[str, WatchlistStore, BudgetTracker]]:
     """返回活跃用户的 (user_id, store, budget) 三元组，供定时任务遍历。
@@ -57,6 +61,11 @@ def _get_active_user_stores(category: str | None = None) -> list[tuple[str, Watc
         return []
     result = []
     for uid in user_ids:
+        # 最低运行需求门控：没配/无有效 LLM 或长期未登录的用户，冻结其全部定时自动化。
+        # 单点拦截——所有定时任务都经此门，故一处过滤即全线冻结；被冻用户不会进决策链，
+        # 因此也不再撞「无可用 LLM」污染守卫超期报警（用户诉求 3 的降噪由此自然达成）。
+        if category is not None and not _user_eligible_for_automation(uid):
+            continue
         user_store = _wl_store.for_user(uid)
         if category is not None and not user_store.is_auto_update_enabled(category):
             logger.debug("用户 %s 关闭了 %s 自动更新，跳过", uid[:8], category)
@@ -64,6 +73,43 @@ def _get_active_user_stores(category: str | None = None) -> list[tuple[str, Watc
         user_budget = BudgetTracker(user_store)
         result.append((uid, user_store, user_budget))
     return result
+
+
+def _user_eligible_for_automation(uid: str) -> bool:
+    """用户是否满足定时自动化的最低运行需求：① 至少一个可用 LLM；② 非长期未登录（休眠）。
+
+    ① 无有效 LLM（没配 Key / Key 全认证失效·欠费硬死）→ 决策链每轮必撞「无可用 LLM」，跑也白跑，
+       且会把「用户没配 Key」误报成系统超期异常（生产守卫噪音根因）。冻结直到其配置达标。
+    ② last_login_at 超 _DORMANT_DAYS 天 → 休眠用户，冻结直到重新登录刷新 last_login_at。
+       从未登录(last_login_at 空)不据此冻结——新注册用户可能正在配置中，且未配 Key 已由 ① 拦下。
+    数据源不设门：免费源(yfinance/akshare)经 _global_store 系统级统一拉取、与用户配置无关，
+    「没配付费数据 Key」不算低于最低需求（否则会误冻绝大多数免费档用户）。
+    fail-open：判定所需信息取不到时放行（宁可多跑一轮，不误冻真实用户）。"""
+    if not uid:
+        return True
+    try:
+        from bottleneck_hunter.llm_clients.factory import has_usable_llm
+        if not has_usable_llm(uid):
+            logger.info("用户 %s 无可用 LLM，冻结其定时自动化（待配置有效 Key 后恢复）", uid[:8])
+            return False
+    except Exception:  # noqa: BLE001  判定失败＝信息不足→放行，不因熔断表/工厂故障误冻
+        pass
+    try:
+        if _auth_store is None:
+            return True
+        user = _auth_store.get_user_by_id(uid)
+        last = user.last_login_at if user else None
+        if last:
+            from datetime import timedelta
+            dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - dt > timedelta(days=_DORMANT_DAYS):
+                logger.info("用户 %s 已 %d+ 天未登录，冻结其定时自动化（重新登录后恢复）", uid[:8], _DORMANT_DAYS)
+                return False
+    except Exception:  # noqa: BLE001  时间解析/读库失败→放行
+        pass
+    return True
 
 
 def _iter_users(category: str | None = None):

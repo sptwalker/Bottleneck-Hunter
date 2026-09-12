@@ -237,6 +237,37 @@ def _user_has_llm_key(provider: str, user_id: str) -> bool:
     return bool(_resolve_user_llm_key(provider, user_id))
 
 
+def has_usable_llm(user_id: str) -> bool:
+    """该用户是否至少有一个可用 LLM 节点：链上存在「有 Key(或 keyless) + 非硬死禁用 + 能解析出模型」的 provider。
+
+    与 get_models_for_role 绝境兜底 pass 完全同口径（factory.py:574）——绝境兜底都选不出＝该用户
+    每轮决策必撞「无可用 LLM」＝决策链冻结、跑也白跑。供 scheduler 自动化门控：据此冻结「没配
+    Key / Key 全失效(认证失效·欠费硬死)」用户的定时自动化，不再让其污染守卫超期报警。
+    全用显式 user_id（不依赖 current_user 上下文），可单测。"""
+    from bottleneck_hunter.llm_clients import provider_gate
+    uid = (user_id or "").strip()
+    if not uid:
+        return False
+    try:
+        universe = list_custom_provider_ids()
+    except Exception:  # noqa: BLE001
+        universe = []
+    prim = resolve_primary_for_user(uid)
+    chain = ([prim] if prim else []) + universe + [p for p, _ in _FALLBACK_CHAIN]
+    seen: set[str] = set()
+    for provider in ((c or "").lower().strip() for c in chain):
+        if not provider or provider in seen:
+            continue
+        seen.add(provider)
+        if provider_gate.is_hard_disabled(uid, provider):
+            continue
+        if not _user_has_llm_key(provider, uid):
+            continue
+        if resolve_provider_model(provider, uid):
+            return True
+    return False
+
+
 def create_llm(
     provider: str,
     model: str,

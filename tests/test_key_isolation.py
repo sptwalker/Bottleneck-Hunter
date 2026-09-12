@@ -112,3 +112,36 @@ class TestDataSourceKeyIsolation:
 
         CU.set_current_user("userB")  # userB 无 KEY → 空，不借 userA
         assert cat.resolve_data_source_key("finnhub") == ""
+
+
+class TestHasUsableLLM:
+    """自动化门控核心谓词：无 Key / Key 全硬死 → False（冻结）；有效 Key / keyless → True。"""
+
+    def test_no_user_id_false(self):
+        assert F.has_usable_llm("") is False
+
+    def test_user_with_valid_key_true(self, monkeypatch):
+        monkeypatch.setattr(F, "resolve_primary_for_user", lambda u: "deepseek")
+        monkeypatch.setattr(F, "list_custom_provider_ids", lambda: [])
+        monkeypatch.setattr(F, "_resolve_user_llm_key", lambda p, u: "sk-xxx" if u == "U" else None)
+        monkeypatch.setattr(F, "resolve_provider_model", lambda p, u="": "deepseek-chat")
+        assert F.has_usable_llm("U") is True
+
+    def test_all_keys_hard_disabled_false(self, monkeypatch):
+        """达涅利实况：配了 Key 但全部认证失效/欠费硬死 → 决策链每轮必冻 → 冻结自动化。"""
+        from bottleneck_hunter.llm_clients import provider_gate
+        monkeypatch.setattr(F, "resolve_primary_for_user", lambda u: "deepseek")
+        monkeypatch.setattr(F, "list_custom_provider_ids", lambda: [])
+        monkeypatch.setattr(F, "_resolve_user_llm_key", lambda p, u: "sk-dead")  # 有 Key
+        monkeypatch.setattr(F, "resolve_provider_model", lambda p, u="": "m")
+        monkeypatch.setattr(provider_gate, "is_hard_disabled", lambda u, p: True)  # 但全硬死
+        assert F.has_usable_llm("U") is False
+
+    def test_no_key_no_keyless_false(self, monkeypatch):
+        monkeypatch.setattr(F, "resolve_primary_for_user", lambda u: "")
+        monkeypatch.setattr(F, "list_custom_provider_ids", lambda: [])
+        monkeypatch.setattr(F, "_resolve_user_llm_key", lambda p, u: None)  # 没配任何 Key
+        # KEYLESS provider（ollama 等）仍会被 _user_has_llm_key 视为可用，但需能解析出模型；
+        # 这里让模型解析恒空，确保没有任何节点满足 → False
+        monkeypatch.setattr(F, "resolve_provider_model", lambda p, u="": "")
+        assert F.has_usable_llm("U") is False

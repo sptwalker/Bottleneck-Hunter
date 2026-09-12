@@ -49,16 +49,30 @@ class TestConfig:
 
 
 # ── 分类门控 ────────────────────────────────────────────────
+class _FakeUser:
+    def __init__(self, last_login_at):
+        self.last_login_at = last_login_at
+
+
 class _FakeAuth:
-    def __init__(self, uids, cfg_global="1"):
+    def __init__(self, uids, cfg_global="1", logins=None):
         self._uids = uids
         self._cfg = {SC.GLOBAL_ENABLED_KEY: cfg_global}
+        # logins: {uid: last_login_at iso}；缺省视为「刚登录」，不因休眠门控被冻
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self._logins = {u: now for u in uids}
+        if logins:
+            self._logins.update(logins)
 
     def list_active_user_ids(self):
         return self._uids
 
     def get_config(self, key, default=""):
         return self._cfg.get(key, default)
+
+    def get_user_by_id(self, uid):
+        return _FakeUser(self._logins.get(uid))
 
 
 class TestGating:
@@ -68,10 +82,11 @@ class TestGating:
         S._wl_store = base
         S._auth_store = _FakeAuth(["A", "B"])
         try:
-            got = [uid for uid, _s, _b in S._get_active_user_stores("daily_decision")]
-            assert got == ["B"]  # A 被跳过
-            got2 = [uid for uid, _s, _b in S._get_active_user_stores("catalyst")]
-            assert set(got2) == {"A", "B"}  # catalyst 都开
+            with patch.object(S, "_user_eligible_for_automation", return_value=True):
+                got = [uid for uid, _s, _b in S._get_active_user_stores("daily_decision")]
+                assert got == ["B"]  # A 被跳过
+                got2 = [uid for uid, _s, _b in S._get_active_user_stores("catalyst")]
+                assert set(got2) == {"A", "B"}  # catalyst 都开
         finally:
             S._wl_store = None; S._auth_store = None
 
@@ -83,6 +98,47 @@ class TestGating:
             assert S._get_active_user_stores("daily_decision") == []
             # 无 category 时不门控
             assert len(S._get_active_user_stores()) == 1
+        finally:
+            S._wl_store = None; S._auth_store = None
+
+
+# ── 最低运行需求 / 休眠冻结 ─────────────────────────────────
+class TestAutomationEligibility:
+    def test_no_llm_frozen(self, tmp):
+        """无可用 LLM 的用户被冻结出自动化门（诉求1 + 降噪诉求3 同源）。"""
+        base = WatchlistStore(db_path=str(Path(tmp) / "s.db"))
+        S._wl_store = base
+        S._auth_store = _FakeAuth(["HAS", "NONE"])
+        try:
+            with patch("bottleneck_hunter.llm_clients.factory.has_usable_llm",
+                       side_effect=lambda uid: uid == "HAS"):
+                got = [uid for uid, _s, _b in S._get_active_user_stores("daily_decision")]
+            assert got == ["HAS"]  # NONE 被冻结
+        finally:
+            S._wl_store = None; S._auth_store = None
+
+    def test_dormant_frozen(self, tmp):
+        """长期未登录用户被冻结，重新登录（刷新 last_login_at）后恢复。"""
+        from datetime import datetime, timedelta, timezone
+        old = (datetime.now(timezone.utc) - timedelta(days=S._DORMANT_DAYS + 5)).isoformat()
+        base = WatchlistStore(db_path=str(Path(tmp) / "s.db"))
+        S._wl_store = base
+        S._auth_store = _FakeAuth(["ACTIVE", "DORMANT"], logins={"DORMANT": old})
+        try:
+            with patch("bottleneck_hunter.llm_clients.factory.has_usable_llm", return_value=True):
+                got = [uid for uid, _s, _b in S._get_active_user_stores("daily_decision")]
+            assert got == ["ACTIVE"]  # DORMANT 被冻结
+        finally:
+            S._wl_store = None; S._auth_store = None
+
+    def test_eligible_when_llm_and_recent_login(self, tmp):
+        """有 LLM + 近期登录 → 放行。"""
+        base = WatchlistStore(db_path=str(Path(tmp) / "s.db"))
+        S._wl_store = base
+        S._auth_store = _FakeAuth(["U"])
+        try:
+            with patch("bottleneck_hunter.llm_clients.factory.has_usable_llm", return_value=True):
+                assert S._user_eligible_for_automation("U") is True
         finally:
             S._wl_store = None; S._auth_store = None
 
