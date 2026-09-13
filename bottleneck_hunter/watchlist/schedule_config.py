@@ -35,8 +35,9 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "us_earnings_update":     {"day_of_week": "sat", "hour": 11, "minute": 30},
     "cn_earnings_update":     {"day_of_week": "sat", "hour": 12, "minute": 0},   # 与美股财报错峰
     "datasource_report":      {"hour": 7, "minute": 30},
+    "llm_key_health":         {"hour": 4, "minute": 30},   # 每日(含周末)：LLM 节点探活巡检，凌晨错峰
     "model_calibration":      {"day_of_week": "sun", "hour": 12, "minute": 0},
-    "model_capability_refresh": {"hour": 3, "minute": 0},   # 月度(每月1号)：能力分重测
+    "model_capability_refresh": {"day_of_week": "sun", "hour": 3, "minute": 0},   # 每周(周日凌晨)：能力分重测+重新分配
     # A股（北京时间）
     "cn_price_premarket":     {"hour": 9,  "minute": 0},
     "cn_price_postmarket":    {"hour": 16, "minute": 0},

@@ -15,10 +15,12 @@ def _reset_scheduler_globals():
     old_store = scheduler._wl_store
     old_budget = scheduler._budget
     old_sched = scheduler._scheduler
+    old_auth = scheduler._auth_store
     yield
     scheduler._wl_store = old_store
     scheduler._budget = old_budget
     scheduler._scheduler = old_sched
+    scheduler._auth_store = old_auth
 
 
 def _setup_store(tickers=None):
@@ -263,6 +265,103 @@ class TestJobAutoReview:
         store = _setup_store()
         with patch("bottleneck_hunter.watchlist.trade_reviewer.run_batch_review", side_effect=RuntimeError("err")):
             await scheduler.job_auto_review()
+
+
+class TestJobLlmKeyHealth:
+    """LLM 节点每日智能巡检：探活 + 自动屏蔽/解禁 + 状态翻转触发重新分配。"""
+
+    @staticmethod
+    def _patch(is_disabled_seq, ping, model="m1", key="sk-x"):
+        """统一 patch provider_gate / factory / user_api / _ping_provider。返回 ExitStack。"""
+        import contextlib
+        from bottleneck_hunter.llm_clients import provider_gate
+        gate_disabled = MagicMock(side_effect=is_disabled_seq)
+        gate_record = MagicMock()
+        gate_clear = MagicMock()
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.object(provider_gate, "is_disabled", gate_disabled))
+        stack.enter_context(patch.object(provider_gate, "record_result", gate_record))
+        stack.enter_context(patch.object(provider_gate, "clear", gate_clear))
+        stack.enter_context(patch("bottleneck_hunter.llm_clients.factory.resolve_provider_model",
+                                  return_value=model))
+        stack.enter_context(patch("bottleneck_hunter.web.user_api.resolve_user_api_key",
+                                  return_value=key))
+        stack.enter_context(patch.object(scheduler, "_ping_provider", ping))
+        return stack, gate_record, gate_clear
+
+    @pytest.mark.asyncio
+    async def test_healthy_no_change(self):
+        """正常节点探活成功 → record_result(ok=True)，禁用态不变 → 无翻转。"""
+        stack, rec, clr = self._patch([False, False], AsyncMock())
+        with stack:
+            changed = await scheduler._probe_and_update_provider("u1", "deepseek")
+        assert changed is False
+        assert rec.call_args.kwargs.get("ok") is True
+        clr.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_blocks(self):
+        """认证失败 → record_result(ok=False, 认证原因)，节点被屏蔽 → 翻转=True（req#1 自动屏蔽标记）。"""
+        ping = AsyncMock(side_effect=Exception("invalid api key"))
+        stack, rec, clr = self._patch([False, True], ping)  # 记账后变为已禁用
+        with stack:
+            changed = await scheduler._probe_and_update_provider("u1", "deepseek")
+        assert changed is True
+        assert rec.call_args.kwargs.get("ok") is False
+        assert rec.call_args.kwargs.get("reason") == "认证失败(密钥无效)"
+
+    @pytest.mark.asyncio
+    async def test_recovered_clears(self):
+        """已屏蔽节点流量测试全过 → clear 解禁 → 翻转=True（req#1 恢复取消标记）。"""
+        ping = AsyncMock()
+        stack, rec, clr = self._patch([True, False], ping)  # 探活后变为未禁用
+        with stack:
+            changed = await scheduler._probe_and_update_provider("u1", "deepseek")
+        assert changed is True
+        clr.assert_called_once()
+        assert ping.await_count == scheduler._HEALTH_PROBE_CALLS  # 顺序全过才解禁
+
+    @pytest.mark.asyncio
+    async def test_still_failing_not_cleared(self):
+        """已屏蔽节点流量测试任一失败 → 不解禁 → 无翻转。"""
+        ping = AsyncMock(side_effect=Exception("still 401 unauthorized"))
+        stack, rec, clr = self._patch([True], ping)  # 首次失败即 return，不二次读禁用态
+        with stack:
+            changed = await scheduler._probe_and_update_provider("u1", "deepseek")
+        assert changed is False
+        clr.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_model_skips(self):
+        """未配模型 → 无从探活，直接跳过不发调用。"""
+        ping = AsyncMock()
+        stack, rec, clr = self._patch([False, False], ping, model="")
+        with stack:
+            changed = await scheduler._probe_and_update_provider("u1", "deepseek")
+        assert changed is False
+        ping.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_job_oplogs_on_change(self):
+        """job 级：节点翻转 → 写 oplog（供用户可见），且遍历该用户全部已配 provider。"""
+        scheduler._wl_store = MagicMock()
+        scheduler._auth_store = MagicMock()
+        scheduler._auth_store.get_user_api_keys.return_value = [
+            {"provider": "deepseek"}, {"provider": "qwen"}]
+        with patch.object(scheduler, "_iter_users",
+                          return_value=iter([("u1", MagicMock(), MagicMock())])), \
+             patch("bottleneck_hunter.llm_clients.factory.is_provider_active", return_value=True), \
+             patch.object(scheduler, "_probe_and_update_provider",
+                          new=AsyncMock(side_effect=[True, False])), \
+             patch.object(scheduler, "_oplog") as oplog:
+            await scheduler.job_llm_key_health()
+        oplog.assert_called_once()
+        assert "deepseek" in oplog.call_args.kwargs.get("detail", "")
+
+    @pytest.mark.asyncio
+    async def test_job_no_store_returns(self):
+        scheduler._wl_store = None
+        await scheduler.job_llm_key_health()  # 不应抛错
 
 
 class TestGetJobStatuses:

@@ -1174,10 +1174,10 @@ async def job_model_calibration() -> None:
             logger.error("Model calibration (user=%s) failed: %s", uid[:8] if uid else "global", e)
 
 
-# ── 模型能力分保鲜（月度）：对各用户已配、能力分已过期的模型重跑综合测试 ──
-# 新鲜度 45 天 > 30 天月度间隔：某用户本月刷过的模型下月仍算新鲜 → 全局配额自然
-# 轮换到其他用户，避免靠前用户每月吃满 cap、靠后用户永不刷新。
-_CAP_REFRESH_STALE_DAYS = 45
+# ── 模型能力分保鲜（每周）：对各用户已配、能力分已过期的模型重跑综合测试 ──
+# 新鲜度 6 天 < 7 天周度间隔：上周刷过的模型本周必判过期→重测，确保每周一轮全量重评；
+# 全局 cap 仍在，靠前用户吃满 cap 时靠后用户下周补上（周度轮换比月度更快追平）。
+_CAP_REFRESH_STALE_DAYS = 6
 _CAP_REFRESH_MAX_MODELS = 10    # 每次任务全局最多重测的模型数（防失控，真实 LLM 调用）
 
 
@@ -1212,14 +1212,18 @@ def _select_stale_models(uid: str, store, days: int = _CAP_REFRESH_STALE_DAYS) -
 
 
 async def job_model_capability_refresh() -> None:
-    """月度：对各用户已配、且能力分已过期的模型重跑综合测试，刷新调度器的质量先验。
+    """每周：对各用户已配、且能力分已过期的模型重跑综合测试，刷新调度器的质量先验。
+
+    这是「每周巡检」的重头——重测更新各 LLM 节点的能力分，即等于对全部节点做一轮自动评测；
+    调度为动态选型（rank_providers 调用时读能力分/熔断/遥测），故能力分一刷新，下一次决策
+    自动按新分重新分配，确保每个 LLM 节点都按最新能力被正确选用（见 health.rank_providers）。
 
     每次任务全局最多重测 _CAP_REFRESH_MAX_MODELS 个模型（防失控）。**发起真实 LLM 调用**，
     多重成本护栏：①自动更新全局总开关门控（admin 可一键停）②各用户自动更新主开关
     ③budget.can_spend 门控（已超月度预算的用户跳过）④全局封顶 10。_iter_users 设
     current_user → KEY 严格按用户。
 
-    计费口径：本任务属**有上限的诊断类维护**（月度、封顶 10 个模型、多用 免费档 模型），
+    计费口径：本任务属**有上限的诊断类维护**（每周、封顶 10 个模型、多用 免费档 模型），
     其花费不写入 BudgetTracker 台账（不计入用户日/月使用量）；由上述 can_spend 前置门控
     与全局封顶共同兜底，不会失控。如需纳入硬预算，让 model_tester 回传 token 用量后
     在此 budget.record(...) 即可。
@@ -1259,6 +1263,106 @@ async def job_model_capability_refresh() -> None:
             except Exception as e:  # noqa: BLE001
                 logger.warning("能力分刷新失败 %s/%s: %s", prov, model, e)
     logger.info("模型能力分刷新完成：本次重测 %d 个模型", tested)
+
+
+# ── LLM 节点每日智能巡检（req#1/#2）：探活各节点，异常自动屏蔽、恢复自动解禁 ──
+_HEALTH_PROBE_CALLS = 3   # 恢复流量测试：顺序全过才解禁（与 /recover 一致，躲开偶发单次成功误解禁）
+_PROBE_TIMEOUT = 60.0     # 单次探活超时（秒），与 /test/one、/recover 一致
+
+
+async def _ping_provider(uid: str, provider: str, model: str, api_key: str) -> None:
+    """对某用户某 provider/model 发一次真实调用，失败即抛异常（调用方分类）。严格用当前用户 Key。"""
+    import asyncio as _asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from bottleneck_hunter.llm_clients.factory import create_llm
+    # with_fallback=False 且非 record_only → 真正裸模型（不经 fallback 记账，本函数显式喂 provider_gate）
+    llm = create_llm(provider, model, api_key=(api_key or None), user_id=uid, with_fallback=False)
+    await _asyncio.wait_for(
+        _asyncio.to_thread(lambda: llm.invoke([HumanMessage(content="ping")])),
+        timeout=_PROBE_TIMEOUT,
+    )
+
+
+async def _probe_and_update_provider(uid: str, provider: str) -> bool:
+    """对某用户某 provider 探活并据结果更新 provider_gate 持久熔断态。
+    返回该节点「禁用态是否翻转」（新屏蔽 / 已解禁），供触发「重新分配」日志。
+
+    - 当前已屏蔽 → 顺序 _HEALTH_PROBE_CALLS 次流量测试，全过才 clear（取消标记/解禁）；
+    - 当前正常   → 单发探活，失败按 classify_reason 喂 record_result（认证/欠费 1 击禁、限流/超时累计）。
+    动态调度使「翻转」即时生效：下一次 rank_providers 读到新熔断态自动重排候选，无需持久化重算。"""
+    from bottleneck_hunter.llm_clients import provider_gate
+    from bottleneck_hunter.llm_clients.factory import resolve_provider_model
+    from bottleneck_hunter.web.user_api import resolve_user_api_key
+
+    p = (provider or "").lower().strip()
+    if not p:
+        return False
+    model = resolve_provider_model(p, uid)
+    if not model:
+        return False   # 没配模型 → 无从探活
+    try:
+        api_key = resolve_user_api_key(uid, p) or ""
+    except Exception:  # noqa: BLE001
+        api_key = ""
+
+    was_disabled = provider_gate.is_disabled(uid, p)
+    if was_disabled:
+        for _ in range(_HEALTH_PROBE_CALLS):
+            try:
+                await _ping_provider(uid, p, model, api_key)
+            except Exception:  # noqa: BLE001  任一次失败 → 保留禁用，不解除
+                return False
+        provider_gate.clear(uid, p)   # 全过 → 解禁（取消异常标记）
+    else:
+        try:
+            await _ping_provider(uid, p, model, api_key)
+            provider_gate.record_result(uid, p, ok=True, model=model)
+        except Exception as e:  # noqa: BLE001
+            from bottleneck_hunter.llm_clients.fallback import classify_reason
+            provider_gate.record_result(uid, p, ok=False, reason=classify_reason(e), model=model)
+
+    return was_disabled != provider_gate.is_disabled(uid, p)
+
+
+async def job_llm_key_health() -> None:
+    """每日 LLM 节点智能巡检（req#1/#2）：对活跃用户已配、启用中的 provider 逐个真实探活。
+
+    - 发现异常节点（认证失效/欠费即禁、限流/超时累计达阈值）→ provider_gate 自动屏蔽并标记；
+    - 发现已屏蔽节点已恢复 → 顺序流量测试全过后自动解禁（取消标记）；
+    - 任一节点禁用态翻转 → 记日志 + oplog。调度为**动态选型**（rank_providers 调用时读熔断态），
+      故节点状态一变，下一次决策自动重新分配（req#2），无需持久化角色→模型表重算。
+
+    含周末（everyday）：Key 有效性与市场是否开盘无关。探活为近零成本单发，**不设预算门**——
+    要能查出「已超预算」用户的死 Key（否则其失效节点永远发现不了）。category=model_capability
+    → 遵守全局总开关 + 用户自动更新主开关 + 最低运行需求门控（_iter_users）。"""
+    if not _wl_store or not _auth_store:
+        return
+    from bottleneck_hunter.llm_clients.factory import is_provider_active
+
+    changed_total = 0
+    for uid, _store, _budget in _iter_users("model_capability"):
+        try:
+            keyed = [k["provider"] for k in _auth_store.get_user_api_keys(uid)]
+        except Exception:  # noqa: BLE001
+            continue
+        changed: list[str] = []
+        for prov in keyed:
+            if not is_provider_active(prov):
+                continue   # 管理员禁用的 provider 不巡检
+            try:
+                if await _probe_and_update_provider(uid, prov):
+                    changed.append(prov)
+            except Exception as e:  # noqa: BLE001  单节点异常不阻断其余节点/用户
+                logger.warning("LLM 节点巡检异常 %s/%s: %s", uid[:8] if uid else "-", prov, e)
+        if changed:
+            changed_total += len(changed)
+            names = "、".join(changed)
+            logger.info("LLM 节点状态变更(user=%s): %s → 已触发动态重新分配",
+                        uid[:8] if uid else "global", names)
+            _oplog(uid, "LLM节点智能巡检", detail=f"节点状态变更并自动重新分配：{names}", result="success")
+    logger.info("LLM 节点每日巡检完成：本轮 %d 个节点状态翻转", changed_total)
 
 
 async def job_stale_refresh() -> None:
@@ -1694,8 +1798,9 @@ _JOB_SPECS = [
     ("us_earnings_update",     job_earnings_update,     {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly earnings update (FMP, incl. consensus)"),
     ("cn_earnings_update",     job_earnings_update,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly earnings update (Tushare)"),
     ("datasource_report",      job_datasource_report,   {},                     _TZ_CN,         "everyday", "Data source health check & usage report"),
+    ("llm_key_health",         job_llm_key_health,      {},                     _TZ_CN,         "everyday", "Daily LLM node key-health inspection (智能巡检)"),
     ("model_calibration",      job_model_calibration,   {},                     _TZ_CN        , "weekly",   "Weekly AI model accuracy calibration"),
-    ("model_capability_refresh", job_model_capability_refresh, {},               _TZ_CN        , "monthly",  "Monthly AI model capability re-test (刷新能力分)"),
+    ("model_capability_refresh", job_model_capability_refresh, {},               _TZ_CN        , "weekly",   "Weekly AI model capability re-test (刷新能力分+重新分配)"),
     ("stale_refresh",          job_stale_refresh,       {},                     None,           "interval", "Stale watchlist refresh (safety net)"),
     ("resting_limit_poll",     job_poll_resting_orders, {},                     None,           "interval", "Resting limit-order fill poll"),
     ("mail_ingest_poll",       job_poll_imap,           {},                     None,           "interval", "Forwarded bank-email ingest poll"),
@@ -1752,6 +1857,7 @@ def list_job_categories() -> dict[str, str]:
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
         "model_capability_refresh": "",
+        "llm_key_health": "",   # LLM 节点巡检：按用户 Key 探活，无独立每用户开关（随 model_capability 门控）
         "system_watchdog": "",  # 系统级守卫，仅受管理员全局总开关
     }
 
@@ -1775,8 +1881,9 @@ def list_job_labels() -> dict[str, dict]:
         "us_earnings_update":  {"label": "美股·财报更新",          "desc": "FMP 财报（含机构一致预期）",   "tz": "北京", "freq": "每周"},
         "cn_earnings_update":  {"label": "A股·财报更新",           "desc": "Tushare 业绩快报/预告",        "tz": "北京", "freq": "每周"},
         "datasource_report":   {"label": "数据源健康巡检",        "desc": "付费源连通探测 + 用量汇总",     "tz": "北京", "freq": "每日"},
+        "llm_key_health":      {"label": "LLM 节点智能巡检",      "desc": "探活各节点，异常自动屏蔽/恢复自动解禁并重新分配", "tz": "北京", "freq": "每日"},
         "model_calibration":   {"label": "AI 模型准确率校准",      "desc": "对比历史预测与实际，更新权重", "tz": "北京", "freq": "每周"},
-        "model_capability_refresh": {"label": "AI 模型能力分刷新", "desc": "月度重测各模型能力分",         "tz": "北京", "freq": "每月1号"},
+        "model_capability_refresh": {"label": "AI 模型能力分刷新", "desc": "每周重测各模型能力分，据新分重新分配节点", "tz": "北京", "freq": "每周"},
         # A股（北京时区）
         "cn_price_premarket":  {"label": "A股·盘前行情更新",       "desc": "开盘前采集行情快照",           "tz": "北京", "freq": "工作日"},
         "cn_price_postmarket": {"label": "A股·盘后行情更新",       "desc": "收盘后更新行情与技术指标",     "tz": "北京", "freq": "工作日"},
