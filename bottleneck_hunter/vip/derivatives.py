@@ -135,8 +135,8 @@ def _ff(pat: str, text: str, group=1) -> float | None:
 
 
 def _days_between(a: str, b: str) -> int:
-    """兼容 Citi/野村日期格式：Jul 22, 2026 / 7 July 2026 / July 7, 2026。"""
-    fmts = ("%b %d, %Y", "%d %B %Y", "%B %d, %Y", "%d %b %Y")
+    """兼容 Citi/野村日期格式：Jul 22, 2026 / 7 July 2026 / July 7, 2026 / 04-Sep-2026。"""
+    fmts = ("%b %d, %Y", "%d %B %Y", "%B %d, %Y", "%d %b %Y", "%d-%b-%Y", "%d-%B-%Y")
     def parse(s: str):
         for f in fmts:
             try:
@@ -163,23 +163,29 @@ def extract_accumulator_terms(pdf_source, pdf_password: str = "") -> DerivativeT
     elif re.search(r"Daily(?: Securities)? Accumulator", text, re.I):
         fam = "equity_accumulator"
 
-    # Citi 样本：Bloomberg Ticker / AFP / KO / DS / St-DS / Max Nominal Shares
-    if "Micron Technology Inc" in text or "Marvell Technology Inc" in text or "Alibaba Group Holding" in text:
+    # Citi 样本：Bloomberg Ticker / AFP / KO / DS / St-DS / Max Nominal Shares。
+    # 结构指纹判 Citi 版式（勿用标的名白名单——每来一只新标的就漏解析，正是 SNPS 漏检根因）：
+    # 花旗条款单固定用 "Accumulating Forward Price (AFP)" 与 "Daily Number of Shares (DS)" 标签，
+    # 野村版式则用 "Forward Price (USD)" / "Shares per Day"，二者互斥。
+    if "Accumulating Forward Price (AFP)" in text or "Daily Number of Shares (DS)" in text:
         symbol = _f(r"Bloomberg Ticker\s*:?\s*([A-Z0-9]{1,6}\s+[A-Z]{2})", text) or ""
         symbol = symbol.split()[0]
         ccy = _f(r":\s*([A-Z]{3})\s+\d+(?:\.\d+)?\s*\(.*Initial Price\)", text) or "USD"
-        trade_date = _f(r"Trade Date\s*:?\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
-        termination = _f(r"Termination Date\s*:?\s*The earlier of \(a\)\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
+        # 日期版式在同一份花旗单里都可能是 "Sep 09, 2027" 或 "04-Sep-2026"（Trade/GP 常用后者）→ 两式都收
+        _CITI_DATE = r"(?:\d{1,2}-[A-Za-z]{3}-\d{4}|[A-Za-z]{3}\s+\d{1,2},\s+\d{4})"
+        trade_date = _f(rf"Trade Date\s*:?\s*({_CITI_DATE})", text) or ""
+        termination = _f(rf"Termination Date\s*:?\s*The earlier of \(a\)\s*({_CITI_DATE})", text) or ""
         tenor = _days_between(trade_date, termination) if trade_date and termination else 365
         ds = _ff(r"Daily Number of Shares \(DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or 0.0
         # St-DS 缺抽时不可留 0：低于行权价时 payoff 用 days*St-DS 累股，St-DS=0 会把下行累购/亏损算成 0，
         # 恰在最危险方向静默低估风险。日累购市场惯例 step-up=2×DS → 缺失回落 2*DS(偏保守)。ponytail: D3 校准旋钮。
         stds = _ff(r"Step-up Daily Number of Shares \(St-DS\)\s*:?\s*(\d+(?:\.\d+)?)", text) or (2.0 * ds)
         max_nom = _ff(r"Maximum Number of Nominal Shares\s*:?\s*([\d,]+(?:\.\d+)?)", text) or 0.0
-        afp = _ff(r":\s*USD\s*([\d,]+\.\d+)\s*\(\s*70\.75% of Initial Price\s*\)", text) or _ff(r"AFP\)?\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
-        initial = _ff(r"Initial Price\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
-        ko = _ff(r"Knock-out Price \(KO\)\s*:?\s*USD\s*([\d,]+\.\d+)", text) or 0.0
-        gp = _f(r"Guaranteed Period End Date\s*:?\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})", text) or ""
+        # 价位币种不写死 USD——港股(9988 HK)等以 HKD 计价，硬编 USD 会让三价位全抽成 0 静默入库(坏风险数据)。
+        afp = _ff(r"AFP\)?\s*:?\s*[A-Z]{3}\s*([\d,]+\.\d+)", text) or 0.0
+        initial = _ff(r"Initial Price\s*:?\s*[A-Z]{3}\s*([\d,]+\.\d+)", text) or 0.0
+        ko = _ff(r"Knock-out Price \(KO\)\s*:?\s*[A-Z]{3}\s*([\d,]+\.\d+)", text) or 0.0
+        gp = _f(rf"Guaranteed Period End Date\s*:?\s*({_CITI_DATE})", text) or ""
         return DerivativeTerm(
             product_family=fam, underlying_symbol=symbol, currency=ccy, tenor_days=tenor, source_file=str(pdf_source),
             terms={"initial_price": initial, "afp": afp, "knock_out_price": ko,
@@ -761,6 +767,13 @@ def validate_derivative_term(term: DerivativeTerm, *, today: str = "") -> str:
                 return f"nonpositive_notional:{notional}"
         except (TypeError, ValueError):
             return f"bad_notional:{notional!r}"
+    # 累购/减持没有 notional 字段，其风险全由三价位驱动——价位抽成 0(币种/版式漏抽)即解析残缺，
+    # 不拦则零价头寸静默入库、payoff 全算错。故对该族补一道「初始价/AFP 必须为正」护栏。
+    if (term.product_family or "") in ("equity_accumulator", "equity_decumulator"):
+        for k in ("initial_price", "afp"):
+            v = t.get(k)
+            if v is not None and float(v) <= 0:
+                return f"nonpositive_{k}:{v}"
     maturity = (t.get("maturity") or t.get("expiry_date") or "").strip()
     m = re.match(r"^(\d{4})-", maturity)
     if m:                                    # 只在能抽出年份时判窗；非 ISO 版式不因格式误拒
@@ -962,6 +975,7 @@ def demo() -> None:
     _all_accounts_selfcheck()
     _irf_selfcheck()
     _citi_fcn_selfcheck()
+    _citi_accumulator_selfcheck()
     _barclays_fcn_selfcheck()
     _cmbi_docx_selfcheck()
     _intro_guard_selfcheck()
@@ -1166,6 +1180,50 @@ def _citi_fcn_selfcheck() -> None:
     assert t.terms["autocall_barrier"] == 200.7864 and t.terms["coupon_pa_pct"] == 8.0
     assert t.terms["trade_date"] == "2026-05-27" and t.terms["maturity"] == "2026-12-14"
     assert t.terms["market_value_usd"] is None and t.lot_key == "182.9692:141226"
+
+
+def _citi_accumulator_selfcheck() -> None:
+    """花旗 Accumulator 条款单抽取自检（内联伪造版式，不碰真实 PII PDF）。
+    守两处曾漏检的坑：① 版式识别靠结构指纹(AFP/DS 标签)而非标的名白名单——SNPS 等新标的不再漏解析；
+    ② 同份单里 Trade/GP 用 '04-Sep-2026' 式、Termination 用 'Sep 09, 2027' 式，两种日期版式都要抽到。"""
+    text = (
+        "A 1 - Year Daily Securities Accumulator - Synopsys Inc (Bloomberg Ticker : SNPS UW)\n"
+        "Trade Date \n: 04-Sep-2026\n"
+        "Termination Date\n: The earlier of (a) Sep 09, 2027 , being the expected Settlement Date\n"
+        "Guaranteed Period End Date\n: 05-Oct-2026\n"
+        "Daily Number of Shares (DS)\n: 6 Shares,\n"
+        "Step-up Daily Number of Shares (St-DS)\n: 12 Shares,\n"
+        "Maximum Number of Nominal Shares\n: 3,012 Shares ( D x St-DS )\n"
+        "Initial Price\n: USD 418.1200\n"
+        "Accumulating Forward Price (AFP)\n: USD 350.2591 ( 83.77% of Initial Price)\n"
+        "Knock-out Price (KO)\n: USD 439.0260 ( 105.00% of Initial Price)\n"
+    )
+    orig = globals()["_read_pdf_text"]
+    globals()["_read_pdf_text"] = lambda *a, **k: text
+    try:
+        t = extract_accumulator_terms("fake.pdf")
+    finally:
+        globals()["_read_pdf_text"] = orig
+    assert t.product_family == "equity_accumulator" and t.underlying_symbol == "SNPS", t
+    assert t.currency == "USD"
+    assert t.terms["initial_price"] == 418.12 and t.terms["afp"] == 350.2591 and t.terms["knock_out_price"] == 439.026
+    assert t.terms["daily_shares"] == 6.0 and t.terms["step_up_daily_shares"] == 12.0
+    assert t.terms["max_nominal_shares"] == 3012.0
+    assert t.terms["trade_date"] == "04-Sep-2026" and t.terms["guaranteed_period_end"] == "05-Oct-2026"
+    assert t.terms["expiry_date"] == "Sep 09, 2027" and t.tenor_days == 370, t.tenor_days
+    assert validate_derivative_term(t, today="2026-09-05") == "", "花旗 Accumulator 应过合理性护栏"
+
+    # 非 USD(港股 9988 HK 以 HKD 计价)：价位币种不写死，三价位仍须抽到；零价残缺记录须被护栏拦下。
+    hkd = text.replace("SNPS UW", "9988 HK").replace("USD", "HKD")
+    globals()["_read_pdf_text"] = lambda *a, **k: hkd
+    try:
+        h = extract_accumulator_terms("fake_hk.pdf")
+    finally:
+        globals()["_read_pdf_text"] = orig
+    assert h.currency == "HKD" and h.terms["initial_price"] == 418.12 and h.terms["afp"] == 350.2591, h
+    zero = DerivativeTerm("equity_accumulator", "9988", "HKD", 370, {"initial_price": 0.0, "afp": 0.0})
+    assert validate_derivative_term(zero, today="2026-09-05").startswith("nonpositive_"), "零价累购须被拦"
+    print("citi_accumulator 自检通过")
 
 
 def _barclays_fcn_selfcheck() -> None:
