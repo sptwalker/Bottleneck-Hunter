@@ -169,3 +169,29 @@
 - 本层是纯概率校准与度量函数，尚未接线到具体信号来源；现有 `chain/models.py` 打分为 0-10 分制、`model_calibrator` 记录为二元 `is_correct`，把它们喂入校准器需调用方先归一/配对，留待 P1/P2 各评估子项按需接线。
 - 等序回归是保序（单调）校准，只纠正单调错配的过/欠自信，不重排分数序；若原始分数与结果非单调相关，需先修分数本身而非依赖校准。
 - ECE 用等宽分桶（非等频/自适应桶）；桶数 `n_bins` 为口径旋钮，样本极少时分桶估计噪声大，调用方按样本量选桶。
+
+## P1-2：评委分组、相关性与有效独立性
+
+- 状态：✅ 有效独立性度量层落地，与 `committee._fallback_consensus` 明确分层，专项/范围 Ruff/全量门禁通过。
+- 背景缺陷：投委会加权表决 `committee._fallback_consensus` 按「历史权重 × 票数」线性相加（`w_approve += w`）。当多位评委高度相关（同源模型、历史投票同步、甚至重复评委）时，线性相加把同一份信号重复计数，高估共识强度——正是本子项验收「权重不以人数简单相加」所指。
+- 新增 `watchlist/judge_independence.py`：由历史投票向量度量评委相关性并做有效独立性权重校正。不引入 scipy，纯 numpy 确定可复现。
+  - **投票数值映射**：与 `committee._VALID_VOTES` 对齐——赞成族（`approve`/`approve_with_modification`）→ +1，`reject` → -1，`abstain`/未知 → 0。
+  - **`vote_similarity_matrix`**：两两 Pearson 相关钳到 `[0,1]`（对称、对角 1）。**负相关=真分歧，钳到 0 视作独立，不做反向增益**（`ponytail` 标注的刻意口径）。零方差（恒定投票）Pearson 未定义时退化为逐元素一致率：恒定且相同→1，否则按一致比例。
+  - **`effective_number_of_judges`**：`N_eff = N² / Σ相似度`。k 个完全相同评委 → N_eff=1，全独立 → N_eff=N，量化「名义人数 vs 有效独立人数」的落差。
+  - **`independence_weights`**：每位评委权重除以其冗余簇规模（相似度行和）：`eff_i = base_i / Σⱼ sim[i,j]`。k 个相同评委合计有效权重 = 单个评委权重，而非 k 倍——从结构上杜绝相关评委线性叠加。支持自定义 `base_weights`（对齐 `committee._member_weights` 的历史校准权重），非负校验。
+  - **`weighted_approval`**：给定票与权重的加权赞成/反对质量与赞成率（与 committee 口径一致：赞成族 vs 反对，弃权不计入分母），便于对比朴素计票 vs 有效独立计票。
+  - **`analyze_independence`**：一站式 `IndependenceReport`（roles/n_members/n_effective/base_weights/effective_weights/redundancy）。
+- 分层保护：本模块只做度量与权重校正，**`_fallback_consensus` 的既有等权/加权表决保持不变**，也未接线进 `committee.py`（回退旧聚合器只需不调用本模块）。与 `signal_calibration.py`（P1-1，分数→概率校准）、`model_calibrator.py`（共识准确率→权重）互不依赖、互不 import，各司其职。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_judge_independence.py -q`：`23 passed in 0.59s`。
+- 受影响回归（投委会绑定/持久化/法定人数 + P1-1/P0-6 sibling 评估模块）`test_committee_parent_binding.py test_committee_persistence_gate.py test_committee_quorum_freshness.py test_evaluation.py test_signal_calibration.py`：`49 passed`（本模块未改动既有代码，此为预防性回归）。
+- P1-2 范围 Ruff `ruff check judge_independence.py tests/test_judge_independence.py`：`All checks passed!`（SIM108 用早返回而非三元/块内双赋值消解，保留零方差与钳制两条注释）。
+- 全量 `python -m pytest -q`：`1837 passed, 4 skipped in 707.02s`，退出码 0（= P1-1 基线 1814 + 23 项 P1-2 专项）。
+
+### 已知边界
+
+- 本层是纯度量与权重校正函数，**尚未接线到 `committee.py` 生产表决**；把有效独立权重接入 `_build_consensus`/`_fallback_consensus` 需调用方先积累各评委历史投票向量（跨决策周期的投票序列），留待后续投委会评估子项（P2-3 增量消融）按需接线。
+- 相关性用 Pearson 钳 `[0,1]`：只折叠正相关（同向冗余），负相关（真分歧）保留为独立，不做反向增益——这是刻意的保守口径，避免把「对着干」误当作额外独立信息。
+- N_eff 与冗余校正基于历史投票序列长度一致的假设；序列过短时相关性估计噪声大，调用方需保证足够的历史样本（与 P0-6 walk-forward 的样本量口径一致）。
