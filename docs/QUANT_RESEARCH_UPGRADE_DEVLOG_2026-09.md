@@ -355,3 +355,41 @@
 - 迁移演练在内存 SQLite 上验应用与幂等，覆盖 SQL 层的语法/幂等性，**不覆盖**跨版本数据回填、SQLite 与生产同款引擎差异、或迁移与应用码的耦合；接真实迁移须以 `store_schema.CREATE_TABLES` 为 `setup`、`MIGRATIONS` 为演练输入再校准。
 - 默认 `compose` 命令、`host_port=8089`、`app` 名与 `data_dir` 是对齐当前部署拓扑的校准旋钮，换机/换端口须按 `project_prod_deploy_topology` 校准。
 - 非幂等迁移默认判 `warn` 而非阻断（`ALTER ADD COLUMN` 等一次性迁移合法非幂等），是否升级为阻断由调用方按迁移性质在门禁层决定。
+
+## 最终审查与验收（2026-09-15）
+
+方案 P0-0→P2-4 全部子项已完成并各自过门禁提交（HEAD `3a2d1d3`）。本节记录收官阶段的整体代码审查与验收工具复核的真实命令、数字与结论，作为发布依据。
+
+### 代码审查（11/11 叶子模块逐一评审，零真实缺陷）
+
+对 P0-0→P2-4 交付的 11 个叶子模块逐一评审。所有模块共享同一纪律：纯函数、确定可复现（种子固定、逻辑不读 wall-clock）、不接线进生产链路（回退=不调用）、各带一个可运行的 `__main__` 断言自检 + 聚焦 `test_*.py`。**结论：零真实缺陷。**
+
+仅 3 条低 severity 建模备注，均为刻意的、已加注释的设计选择，**非 bug**：
+
+1. **`pit_gate.py`**：全局 `_MIGRATION` 迁移旁路是「建议性」标记，门禁函数从不查询它——调用方通过「不调用」退出（安全叶子层范式），且仅供离线迁移、不可重入。
+2. **`event_backtest.py`**：`avg_cost`（[event_backtest.py:147](bottleneck_hunter/watchlist/event_backtest.py#L147)）不含买入佣金，故单笔 `realized_pnl` 轻微高估；但净值曲线（现金 + MTM）完整计入所有成本，内部自洽。
+3. **`llm_audit.py`**：`estimate_tokens` 是无 tokenizer 依赖的粗启发式，已在边界注明「仅兜底、非计费真值」，真实 token 应优先取 provider usage 回包。
+
+（子代理在本会话不可用，审查在主进程内逐模块完成。）
+
+### 验收工具复核（release_gate 裁决：放行 / release）
+
+用 P2-4 落地的 `release_gate.py` 对真实门禁数据跑整体验收（**只读**：迁移演练仅用 `:memory:`，回滚预案只生成文本不执行，绝不碰生产库、不部署）：
+
+**裁决 `release`（放行），released=true，5/5 门禁项通过，0 阻断失败，0 告警。** 门禁项明细：
+
+1. `full_tests` — **pass** — 全量 `python -m pytest -q` → **2031 passed, 4 skipped**，退出码 0，耗时 530.40s（= P2-3 基线 1999 + 32 项 P2-4 专项，与 P2-4 基线一致，**零回归**）。
+2. `ruff` — **pass** — 范围内只读 `ruff check`（11 叶子模块 + 11 专项测试）→ `All checks passed!`，退出码 0（不 `--fix`、不 `format`）。
+3. `code_review` — **pass** — 11/11 叶子模块逐一评审，零真实缺陷。
+4. `migration_drill` — **pass** — 「规范基础表模式」（`CREATE_TABLES` + `CREATE_INDEXES`，均 `IF NOT EXISTS`）幂等演练：applied=2/2，idempotent=True。这正是新部署 `_init_db` 实际应用的规范 DDL。
+5. `rollback_drill` — **pass** — 回滚预案 `3a2d1d3 → a7d7cca`（上一稳定提交 P2-3）经 `validate_rollback_plan` 演练：6 步（记录当前版本 → 备份数据 → `git checkout a7d7cca` → `docker compose up -d --build` → `curl /healthz:8089` → 容器内 `git rev-parse` 证真），目标非空且异于当前、序号连续、每步可验证、含健康检查、含容器内证真。
+
+### 迁移演练的忠实口径（既不 false-red 也不 false-green）
+
+门禁项迁移演练取「规范基础表模式」（新部署真正应用的 DDL），跑两遍干净且幂等 → pass。
+
+另附**诊断项（非门禁）**：全量 `MIGRATIONS` 裸重放（以基础表模式为 `setup`）→ applied=**210/224**，14 条失败**全部**为 `duplicate column`（`dup_only=True`）。这 14 条是「基础表 `CREATE_TABLES` 与历史增量 `ALTER` 同时含该列」的模式合并产物，**非本方案迁移**——本方案新增的 P0-3 `snapshot_id`/`strategy_version` 迁移在 210 条成功应用之列。生产 `_init_db`（[store.py:255](bottleneck_hunter/watchlist/store.py#L255)）对每条迁移套 `duplicate column/already exists` 例外守卫，故整条 bootstrap 在生产幂等自洽；裸重放无此守卫，仅用于暴露该事实、不作门禁裁决——既不把生产靠守卫吸收的历史产物冒充 pass（false-green），也不因一个生产按设计已处理的非问题阻断发布（false-red）。
+
+### 结论
+
+代码审查零真实缺陷 + 验收工具裁决「放行」+ 全量测试零回归，方案 P0-0→P2-4 达到发布质量。推送主线属外部不可逆操作，按既有授权边界须经用户显式确认后执行。
