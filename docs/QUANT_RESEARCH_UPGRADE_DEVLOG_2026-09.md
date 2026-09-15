@@ -195,3 +195,28 @@
 - 本层是纯度量与权重校正函数，**尚未接线到 `committee.py` 生产表决**；把有效独立权重接入 `_build_consensus`/`_fallback_consensus` 需调用方先积累各评委历史投票向量（跨决策周期的投票序列），留待后续投委会评估子项（P2-3 增量消融）按需接线。
 - 相关性用 Pearson 钳 `[0,1]`：只折叠正相关（同向冗余），负相关（真分歧）保留为独立，不做反向增益——这是刻意的保守口径，避免把「对着干」误当作额外独立信息。
 - N_eff 与冗余校正基于历史投票序列长度一致的假设；序列过短时相关性估计噪声大，调用方需保证足够的历史样本（与 P0-6 walk-forward 的样本量口径一致）。
+
+## P1-3：特征定义、依赖图与重复计权检测
+
+- 状态：✅ 特征溯源与重复计权诊断层落地，纯 stdlib，专项/范围 Ruff/全量门禁通过。
+- 背景缺陷：评分系统 `chain/supplier_eval.py` 的 `AlphaScorer.compute` 线性加权 5 维（市值/分析师/成交量/涨幅/机构持仓）+ 若干加分项；`FinalScorer.compute` 用 `quality^0.55 × alpha^0.45` 几何加权并在注释里断言「两者完全正交，无维度重叠」。但该正交性只是注释断言、无从校验；若两个特征其实源自同一原始信号（如 `volume_ratio` 与 `consecutive_volume_days` 都来自成交量）却各自计权，就把同一份信息重复计数——与 P1-2 评委相关性同构，只是换到「特征」这条轴。
+- 新增 `watchlist/feature_graph.py`：把特征来源与依赖显式化，并把「正交」断言变成可校验的诊断。纯 stdlib（`graphlib`/`dataclasses`/`collections`），不引入 numpy/scipy，确定可复现。
+  - **`FeatureSpec`**：每个特征声明 `name`、`sources`（原始来源键集合，叶子输入）、`depends_on`（上游特征名，构成图的边）、`weight`（加权汇总权重，0 = 中间特征不直接计权）。`feature()` 便捷构造把任意可迭代来源/依赖归一为 `frozenset`。
+  - **`validate_graph`**：一次性校验三类问题——**环检测**（`graphlib.TopologicalSorter.prepare` 抛 `CycleError` 即回报环链，含自环）、**缺失依赖**（`depends_on` 指向未定义特征；`sources` 是外部叶子不算缺失）、**重复特征**（来源集合完全相同的不同名特征，即同一信号换名重复定义）。无环时同时产出拓扑序。同名特征直接 `ValueError` 拒绝而非静默覆盖。
+  - **`resolve_sources`**：沿依赖图回溯任一特征的全部根来源（自身 `sources` ∪ 所有传递依赖的 `sources`），使验收标准「每个特征可追溯来源与依赖」可执行。已访问集合去重，天然防环/钻石依赖死循环。
+  - **`detect_duplicate_weighting`**：找出各自带非零权重且共享根来源的特征对（`WeightOverlap`），精确定位线性加权时被重复计权的信号。`weight=0` 的中间特征不参与，避免误报。
+  - **`analyze_features`**：一站式 `FeatureAudit`（图校验 + 重复计权检测）。
+- 分层保护：**纯诊断层**，不改任何评分口径、不接线进 `supplier_eval`；`AlphaScorer`/`FinalScorer` 的既有权重与计算完全不变。回退方式=不调用本模块（「禁用检测只限开发诊断」）。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_feature_graph.py -q`：`15 passed in 0.61s`。
+- 受影响回归（评分 sibling `alpha_scorer`/`final_scorer`/`models` + 两个新叶子模块 `feature_graph`/`judge_independence`）：`80 passed`（本模块未改动既有代码，此为预防性回归）。
+- P1-3 范围 Ruff `ruff check feature_graph.py tests/test_feature_graph.py`：`All checks passed!`。
+- 全量 `python -m pytest -q`：`1852 passed, 4 skipped in 557.61s`，退出码 0（= P1-2 基线 1837 + 15 项 P1-3 专项）。
+
+### 已知边界
+
+- 本层是纯诊断函数，**尚未接线到 `supplier_eval` 的实际特征清单**；要真正审计现网评分，需调用方把 `AlphaScorer` 的 5 维 + 加分项按其真实来源建成 `FeatureSpec` 图再喂入本模块，留待 P1-4 风险预算组合或后续评估子项按需接线。
+- 重复特征判定按「来源集合完全相同」；部分重叠（如一个特征来源 ⊂ 另一个）不归为重复特征，但会被 `detect_duplicate_weighting` 的共享根来源检测捕获——两者互补。
+- `graphlib` 每次只报一条代表性环；多环并存时修一条重跑暴露下一条（`ponytail` 标注），诊断场景够用，未做全环枚举。
