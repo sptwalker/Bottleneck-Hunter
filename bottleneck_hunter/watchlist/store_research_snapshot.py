@@ -2,6 +2,7 @@
 
 import sqlite3
 from contextlib import closing
+from datetime import datetime
 
 from bottleneck_hunter.watchlist.research_contracts import ResearchSnapshot, SourceObservation
 
@@ -74,3 +75,18 @@ class _ResearchSnapshotMixin:
                 (snapshot_id, uid, market),
             ).fetchall()
         return tuple(SourceObservation.model_validate_json(row["payload_json"]) for row in rows)
+
+    def get_visible_research_observations(self, snapshot_id: str, *,
+                                          decision_at: datetime | None = None) -> tuple[SourceObservation, ...]:
+        """P0-4 门禁读取：不可见观测在返回前即被拒绝，调用方拿不到泄漏数据。
+
+        未显式给出 decision_at 时以快照 as_of 为决策时点；快照不存在则空结果（保持
+        `get_research_snapshot` 的语义，不伪造）。
+        """
+        from bottleneck_hunter.watchlist.pit_gate import assert_snapshot_visible
+
+        snapshot = self.get_research_snapshot(snapshot_id)
+        if snapshot is None:
+            return ()
+        assert_snapshot_visible(snapshot, decision_at=decision_at)
+        return self.get_research_observations(snapshot_id)

@@ -63,3 +63,33 @@
 - `visible_at` 缺失不从 `collected_at` 推断；严格 PIT 泄漏门禁留待 P0-4。
 - 旧 `market_snapshots` 覆盖式兼容语义未改。
 - LLM prompt/provider/cost 审计属 P2-2，未在本阶段实现。
+
+## P0-4：PIT 可见性门禁、泄漏检测与缺失/降级审计
+
+- 状态：✅ 门禁接入生产读取路径，专项与全量门禁通过。
+- 新增 `watchlist/pit_gate.py`：三条边界一处收口。
+  - **可见性**：`assert_observations_visible` / `assert_snapshot_visible` 拒绝决策时点尚不可见的观测（`future_data_leak`）；决策时点早于快照 `created_at` 时拒绝（`snapshot_not_yet_created`，用未来才存在的快照做过去的决策即泄漏）；决策时点必须带时区（`naive_time`）。
+  - **泄漏**：采集早于所属期结束（`collection_before_period_end`）、采集早于可见（`collected_before_visible`）、同 ticker+指标修订号倒流或可见时间非单调（`revision_regression` / `revision_time_regression` / `revision_visible_conflict`）。修订单调性逐条与"已接受的最新修订"比较，不取全集合极值，避免后出现的低修订号被掩盖。
+  - **缺失/降级**：`audit_snapshot` 产出 `AuditReport`（`missing` / `degraded` / `ok` / `usable`）。缺失值必须带已知来源标记（`not_available` / `not_disclosed` / `provider_gap`），否则拒绝（`missing_data`），绝不用默认值静默填充；降级质量（`degraded/stale/estimated/fallback/partial` 及未知标签）只记录不阻断但必须让调用方看见；空阶段捕获记为降级（历史上下文缺口），结构损坏 payload（非 JSON / 非对象）记为缺失并拦截。
+  - `gate_snapshot` 为统一入口：先过可见性与泄漏，再做缺失/降级审计。
+- 修改 `watchlist/store_research_snapshot.py`：新增 `get_visible_research_observations(snapshot_id, *, decision_at=None)`，在返回观测前先跑 `assert_snapshot_visible`，使生产读取路径物理上无法泄漏未来数据；快照不存在返回空元组，不伪造。
+- 迁移旁路 `migrate(reason)` 上下文管理器：仅限离线迁移，空/纯空白原因拒绝（`bypass_without_reason`），作用域受限、异常时自动关闭，无生产常开开关；默认 `migration_bypass_active()` 为 False。
+
+### 本阶段修复的四个真实缺陷
+
+- `snapshot_not_yet_created` 判据方向写反：原 `if created_at < cutoff` 恰好相反——较晚的决策时点是正常的（用已存在的快照做决策），较早才是拿未来快照做过去决策。改为 `if cutoff < created_at`。
+- 修订单调性用 `max()` 取极值掩盖倒流：改为逐条与"上一条已接受修订"比较；并把该检查移入 `assert_observations_visible`，此前仅 `assert_snapshot_visible` 可达，观测级测试打不到。
+- 空捕获与损坏 payload 判定颠倒：空 payload 曾错误阻断、损坏 payload 曾错误放行；现损坏 payload 以 `missing_data` 拦截，空 payload 记降级。
+- 脏数据注入测试：最终用 `StageInputCapture.model_construct(captured_at=BASE, …)`（datetime 而非 str）+ `snapshot.model_copy(update={"captures": (...)})` 模拟绕过 Pydantic 校验的历史脏行。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_pit_gate.py -q`：`32 passed in 3.83s`。
+- P0-4 范围 Ruff `ruff check pit_gate.py store_research_snapshot.py tests/test_pit_gate.py`：`All checks passed!`。
+- 全量 `python -m pytest -q`：`1764 passed, 4 skipped in 676.16s`，退出码 0。
+
+### 已知边界
+
+- 门禁只在研究快照读取路径（`get_visible_research_observations`）强制接入；`market_snapshots` 旧覆盖式语义未改。
+- `visible_at` 仍不从 `collected_at` 推断；缺失可见时间的数据由契约层与降级审计处理，不猜测历史可见性。
+- 事件驱动回测对门禁的调用留待 P0-5 接入。
