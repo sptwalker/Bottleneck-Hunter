@@ -21,7 +21,7 @@
 | P0-3 | decision/signal/portfolio/execution/review 绑定快照 | ✅ | P0-2 | `store_*`、决策/执行模型 | 写读链路、旧数据兼容、字段完整性 | 新记录强制 `snapshot_id` 与 `strategy_version` | 读取兼容旧记录，回退旧写入 |
 | P0-4 | PIT 可见性、泄漏检测、缺失/降级审计 | ✅ | P0-1/P0-2 | `watchlist/pit_gate.py`、`store_research_snapshot.py` 门禁读取 | 人工构造未来数据、修订、缺失、降级场景 | 不可见观测被拒绝；缺失不静默填充 | 关闭门禁仅限离线迁移，不得生产绕过 |
 | P0-5 | 事件驱动回测核心 | ✅ | P0-1/P0-4 | `watchlist/event_backtest.py`（复用 slippage/performance） | 事件顺序、停牌、退市、现金、成本、滑点 | 与模拟成交回放明确分层；结果可复现 | 保留现有模拟盘回放入口 |
-| P0-6 | walk-forward、样本外、消融与统计指标 | ⬜ | P0-5 | Evaluation 模块、报告输出 | 合成数据、边界样本、置信区间回归 | 输出标准指标及区间，禁止未来数据 | 仅回滚评估入口，不删历史结果 |
+| P0-6 | walk-forward、样本外、消融与统计指标 | ✅ | P0-5 | `watchlist/evaluation.py`（numpy 固定种子，不依赖 scipy） | 合成数据、边界样本、置信区间回归 | 输出标准指标及区间，禁止未来数据 | 仅回滚评估入口，不删历史结果 |
 | P1-1 | 概率化信号与校准 | ⬜ | P0-6 | `model_calibrator.py`、signal 模型 | Brier、Log loss、ECE、曲线测试 | 校准集与测试集隔离，概率范围合法 | 保留原分数读取兼容 |
 | P1-2 | 评委分组、相关性与有效独立性 | ⬜ | P0-6 | persona/panel/evaluation | 重复评委、相关信号、权重稳定性 | 权重不以人数简单相加 | 回退旧聚合器 |
 | P1-3 | 特征定义、依赖图、重复计权检测 | ⬜ | P1-2 | feature metadata、evaluation | 环检测、重复特征、缺失依赖 | 每个特征可追溯来源与依赖 | 禁用检测只限开发诊断 |
@@ -46,7 +46,7 @@
 - 测试隔离：已抽查测试普遍显式使用 `tmp_path`/临时 `db_path`；仍需完成全量 fixture 审计，禁止依赖 `WATCHLIST_DB` 静默写生产库。
 
 ## 当前状态
-P0-0 至 P0-5 已完成并通过全量门禁（P0-5 全量 `1775 passed, 4 skipped`，退出码 0）；P0-6 起未开始。现有风险指标、决策闭环、真实快照成交、数据源降级和多用户/市场隔离可复用；严格样本外评估仍需补齐。已有工作区修改和未跟踪文件不属于本方案，实施时不得覆盖、删除或擅自提交。
+P0-0 至 P0-6 已完成并通过全量门禁（P0-6 全量 `1792 passed, 4 skipped`，退出码 0）；P1-1 起未开始。现有风险指标、决策闭环、真实快照成交、数据源降级和多用户/市场隔离可复用；概率化信号校准、评委独立性与风险预算组合仍需补齐。已有工作区修改和未跟踪文件不属于本方案，实施时不得覆盖、删除或擅自提交。
 
 ## 复用现有能力
 复用 `StandardQuote`、`safe_float`、`WatchlistStore.for_user().for_market()`、现有 provenance、`compute_portfolio_risk`、真实行情成交约束、`phase_cache`、现有 pytest/ruff 配置和 `deploy.sh`，不重复建设同类基础设施。
