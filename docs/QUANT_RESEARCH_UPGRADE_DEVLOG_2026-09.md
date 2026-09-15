@@ -220,3 +220,35 @@
 - 本层是纯诊断函数，**尚未接线到 `supplier_eval` 的实际特征清单**；要真正审计现网评分，需调用方把 `AlphaScorer` 的 5 维 + 加分项按其真实来源建成 `FeatureSpec` 图再喂入本模块，留待 P1-4 风险预算组合或后续评估子项按需接线。
 - 重复特征判定按「来源集合完全相同」；部分重叠（如一个特征来源 ⊂ 另一个）不归为重复特征，但会被 `detect_duplicate_weighting` 的共享根来源检测捕获——两者互补。
 - `graphlib` 每次只报一条代表性环；多环并存时修一条重跑暴露下一条（`ponytail` 标注），诊断场景够用，未做全环枚举。
+
+## P1-4：风险预算组合与约束
+
+- 状态：✅ 组合层风险预算体检落地，纯 stdlib，专项/受影响回归/范围 Ruff/全量门禁通过。
+- 背景与分工：既有 `constraint_validator.validate_execution_plan` 已在**逐笔交易**生成期硬校验单票/行业/现金/换手/beta（违规拒绝、告警降级），回答「这一笔能不能下」；`risk_metrics.compute_portfolio_risk` 只产出 VaR/CVaR/HHI 等**描述性**摘要（warnings，不否决）。缺口在于：组合**整体装配后**的 CVaR、跨行业同链聚集、清仓流动性天数、广义因子净暴露没有可拒绝/可降级的预算约束——CVaR 仅被描述、从不否决。P1-4 补这一层，与前两者互补而非替代。
+- 新增 `watchlist/portfolio_budget.py`：对「整本组合」在 单票/行业/因子/链条/流动性/CVaR/现金 七维逐项体检，每项超限都给出**明确的拒绝或降级 + 建议缩仓比例**，绝不静默放行。纯 stdlib（`dataclasses`），不引入 numpy/scipy，确定可复现。
+  - **上限型判定 `_ceiling_status`**：usage≤limit 通过；≤limit×(1+band) 降级（band 默认 0.15）；再高拒绝。超限项返回缩到合规需乘的比例 `suggested_scale=limit/usage`（<1）。预算=0 表示禁止该敞口，任何正暴露即拒绝（scale=0）。
+  - **下限型判定 `_floor_status`（现金）**：usage≥limit 通过；≥limit×(1−band) 降级；再低拒绝。现金是下限，无缩仓比例（`suggested_scale=None`）。
+  - **单票 / 行业**：恒可从毛敞口权重算，恒体检。市值取**绝对值**（毛敞口口径，兼容潜在空头）；行业无标签归「未知」桶，与 `compute_portfolio_risk` 口径一致，大未知桶本身即真实集中度。
+  - **链条（产业链环节聚集）**：仅对已标注 `chain_node` 的标的聚类，未标注不参与——避免凭空造簇。捕捉本系统核心风险：跨行业但同属一个瓶颈环节（如「先进封装」横跨半导体与设备）的隐性聚集。
+  - **因子净暴露**：对调用方传入的 `factor_exposures` 逐因子查 |暴露| 上限（含市场 beta）；负暴露按绝对值判（做空动量的敞口也算敞口）；本层只查上限，不建因子模型。
+  - **流动性**：清仓天数 = 市值 /（ADV×参与率）超上限即降级/拒绝；部分标的缺 ADV 时**另记一条覆盖率降级**（缺口不作通过论）；全无 ADV 则跳过该维、也不谎报覆盖率。
+  - **CVaR 预算**：把 `compute_portfolio_risk` 的描述性 CVaR 金额转成「尾部日损占权益 %」的可拒绝预算。
+  - **现金下限**：现金比例跌破下限拒绝、逼近下限降级。
+  - **最坏态聚合**：全组合状态取所有体检项最坏值（reject > degrade > ok）；`approved` = 非拒绝（degrade 仍放行但须按 `suggested_scale` 缩仓）。
+  - **输入校验**：`total_equity<=0` 直接抛 `ValueError`，绝不在非正权益上冒充体检通过。
+  - **`from_constraints`**：用既有 constraint 字典（如 `REGIME_CONSTRAINTS['balanced']`）填充对应维度，市场 beta 视作市场因子暴露上限映射到 `max_factor_exposure`；**不 import 生产模块**（调用方传字典），保持回退纯净。
+- 分层保护：**纯诊断层，不接线进生产决策链**（回退=不调用）；`compute_portfolio_risk` 描述性摘要与 `validate_execution_plan` 逐笔校验完全不变。与 P1-1/P1-2/P1-3 各叶子模块互不依赖、互不 import。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_portfolio_budget.py -q`：`29 passed in 0.73s`。
+- 受影响回归（风险/仓位/组合 sibling `test_risk_metrics_boundary`/`test_position_sizing_boundary`/`test_phase2_risk`/`test_budget`/`test_sell_holdings_guard` + 两个新叶子 `test_feature_graph`/`test_judge_independence`）：`98 passed`（本模块未改动既有代码，此为预防性回归）。
+- P1-4 范围 Ruff `ruff check portfolio_budget.py tests/test_portfolio_budget.py`：`All checks passed!`（SIM108 用早返回消解，dict 分组避免裸 zip）。
+- 全量 `python -m pytest -q`：`1881 passed, 4 skipped in 557.32s`，退出码 0（= P1-3 基线 1852 + 29 项 P1-4 专项）。
+
+### 已知边界
+
+- 本层是纯预算体检函数，**尚未接线到生产决策链**；要真正在下单前拦截超预算组合，需调用方在 L2/L4 装配组合后调用 `check_portfolio_budget` 并按 `suggested_scale` 缩仓，留待 P2-1（多市场交易规则/订单状态机）或后续执行子项按需接线。
+- 链条聚类只对已标注 `chain_node` 的标的生效；未标注标的不参与（不凭空造簇），要覆盖全组合链条聚集需调用方先补齐环节标签。
+- 因子净暴露由调用方的因子模型算好后传入，本层只查上限、不建因子模型；`max_factor_exposure` 默认对齐 `max_portfolio_beta`，多因子场景的各因子独立上限属校准旋钮。
+- 各维默认预算（链条 35% / 流动性 5 天 / CVaR 8% / 参与率 20% / 降级带 0.15）是校准旋钮而非硬事实，接实盘风控口径时在 `BudgetLimits` 校准。

@@ -25,7 +25,7 @@
 | P1-1 | 概率化信号与校准 | ✅ | P0-6 | `watchlist/signal_calibration.py`（等序回归 PAV，纯 numpy） | Brier、Log loss、ECE、曲线测试 | 校准集与测试集隔离，概率范围合法 | 保留原分数读取兼容 |
 | P1-2 | 评委分组、相关性与有效独立性 | ✅ | P0-6 | `watchlist/judge_independence.py`（相似度/N_eff/冗余校正，纯 numpy） | 重复评委、相关信号、权重稳定性 | 权重不以人数简单相加 | 回退旧聚合器 |
 | P1-3 | 特征定义、依赖图、重复计权检测 | ✅ | P1-2 | `watchlist/feature_graph.py`（graphlib 环检测/来源回溯，纯 stdlib） | 环检测、重复特征、缺失依赖 | 每个特征可追溯来源与依赖 | 禁用检测只限开发诊断 |
-| P1-4 | 风险预算组合与约束 | ⬜ | P0-6/P1-3 | `risk_metrics.py`、`position_sizing.py` | 单票/行业/因子/链条/流动性/CVaR/现金 | 超限明确拒绝或降级，不静默放行 | 保留现有风险摘要入口 |
+| P1-4 | 风险预算组合与约束 | ✅ | P0-6/P1-3 | `watchlist/portfolio_budget.py`（单票/行业/因子/链条/流动性/CVaR/现金七维，纯 stdlib 诊断层） | 单票/行业/因子/链条/流动性/CVaR/现金 | 超限明确拒绝或降级，不静默放行 | 保留现有风险摘要入口 |
 | P2-1 | 多市场交易规则、冲击与订单状态机 | ⬜ | P0-5/P1-4 | `trade_executor.py`、市场规则模块 | A/H/美股、价差、部分成交、撤单 | 订单状态单调且成交可审计 | 回退现有成交约束 |
 | P2-2 | LLM 输入输出与成本审计 | ⬜ | P0-2/P0-3 | `llm_clients/`、审计 Store | prompt、快照、版本、耗时、成本、覆写 | 每次调用可关联用户、策略和快照 | 停止新审计写入，保留调用 |
 | P2-3 | LLM、多 Agent、投委会增量消融 | ⬜ | P0-6/P1-2/P2-2 | Evaluation/报告模块 | 严格样本外、置信区间、重复实验 | 证明增量或明确无增量，不以 persona 数量代替独立性 | 不改变线上默认决策 |
@@ -46,7 +46,7 @@
 - 测试隔离：已抽查测试普遍显式使用 `tmp_path`/临时 `db_path`；仍需完成全量 fixture 审计，禁止依赖 `WATCHLIST_DB` 静默写生产库。
 
 ## 当前状态
-P0-0 至 P0-6 与 P1-1、P1-2、P1-3 已完成并通过全量门禁（P1-3 全量 `1852 passed, 4 skipped`，退出码 0）；P1-4 起未开始。现有风险指标、决策闭环、真实快照成交、数据源降级和多用户/市场隔离可复用；概率化信号校准已落地（`signal_calibration.py`：Brier/LogLoss/ECE/可靠性曲线 + 等序回归校准，校准/测试隔离），评委有效独立性度量已落地（`judge_independence.py`：投票相似度 + N_eff + 冗余校正权重，相关/重复评委不再线性叠加），特征依赖图与重复计权检测已落地（`feature_graph.py`：环检测/缺失依赖/重复特征/来源回溯，纯 stdlib 诊断层），风险预算组合仍需补齐。已有工作区修改和未跟踪文件不属于本方案，实施时不得覆盖、删除或擅自提交。
+P0-0 至 P0-6 与 P1-1、P1-2、P1-3、P1-4 已完成并通过全量门禁（P1-4 全量 `1881 passed, 4 skipped`，退出码 0）；P2-1 起未开始。现有风险指标、决策闭环、真实快照成交、数据源降级和多用户/市场隔离可复用；概率化信号校准已落地（`signal_calibration.py`：Brier/LogLoss/ECE/可靠性曲线 + 等序回归校准，校准/测试隔离），评委有效独立性度量已落地（`judge_independence.py`：投票相似度 + N_eff + 冗余校正权重，相关/重复评委不再线性叠加），特征依赖图与重复计权检测已落地（`feature_graph.py`：环检测/缺失依赖/重复特征/来源回溯，纯 stdlib 诊断层），组合层风险预算已落地（`portfolio_budget.py`：单票/行业/因子/链条/流动性/CVaR/现金七维预算，超限拒绝或降级+建议缩仓，纯 stdlib 诊断层，与逐笔校验/描述性摘要互补）；P2 多市场交易规则、LLM 成本审计、增量消融、质量门禁仍需补齐。已有工作区修改和未跟踪文件不属于本方案，实施时不得覆盖、删除或擅自提交。
 
 ## 复用现有能力
 复用 `StandardQuote`、`safe_float`、`WatchlistStore.for_user().for_market()`、现有 provenance、`compute_portfolio_risk`、真实行情成交约束、`phase_cache`、现有 pytest/ruff 配置和 `deploy.sh`，不重复建设同类基础设施。
