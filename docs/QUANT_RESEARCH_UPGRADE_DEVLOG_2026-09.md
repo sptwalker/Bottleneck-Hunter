@@ -306,3 +306,28 @@
 - `estimate_tokens` 是无 tokenizer 依赖的极粗启发式，真实 token 应优先取 provider usage 回包，本函数仅兜底、不作计费真值。
 - `redact_secrets` 是保守正则纵深防线，不替代「审计只存 prompt 哈希不存原文」这一根本隔离；超长令牌阈值（32 字符）是旋钮，接入更严格密钥规范时校准。
 - 审计条目当前为内存/传值对象，未定义持久化表结构与查询索引；跨用户/市场隔离在接线到 Store 时按既有 `.for_user().for_market()` 范式补齐。
+
+## P2-3：LLM、多智能体、投委会增量消融
+
+- 状态：✅ 组件阶梯增量消融层落地，纯计算叶子层，专项/受影响回归/范围 Ruff/全量门禁通过。
+- 背景与分工：证明「加了 LLM/多智能体/投委会到底有没有带来真实增量」所需原语**已全部就位，但无一处把它们编排成可下结论的阶梯消融**——`evaluation.ablation`（P0-6）能算「基线 vs 单一变体」的严格样本外 delta + bootstrap 区间 + 跨 0 显著性（docstring 明写「供 P2-3 复用」），`judge_independence.effective_number_of_judges`（P1-2）能算有效独立评委数 N_eff，`evaluation.walk_forward_splits` 能切样本外窗口。缺口正是 P2-3 验收所要的「证明增量或明确无增量，不以 persona 数量代替独立性」：无逐级阶梯编排、无「一次显著 vs 跨种子稳定」的区分、无「明确无增量（真零）vs 证据不足（样本不够）」的区分、无「人数涨但 N_eff 冗余」的独立性守卫。P2-3 补这一层编排，复用而非重造上述原语。
+- 新增 `watchlist/incremental_ablation.py`：把有序配置臂（如 无LLM→单LLM→多智能体→投委会）逐级做增量消融并给出可审计裁决。纯计算叶子层，仅复用 `evaluation.ablation` 与 `judge_independence`，不引入 scipy，给定输入与种子必得同一结论。
+  - **`Arm` 配置臂**：`name` + 同一组样本外窗口下的实测逐窗收益 `oos_returns` + `n_components`（原始人数）+ `n_effective`（N_eff，集成臂给出）+ `cost_usd`（复用 P2-2 成本口径）。逐窗收益须由调用方在严格 walk-forward 下实测传入，本模块不代跑回测、不臆造收益。
+  - **`incremental_ablation` 逐级编排**：校验 ≥2 臂、种子非空、各臂 `oos_returns` 非空且等长（同一组窗口）；相邻两臂逐对交给 `_one_step`，汇总为阶梯裁决（`ladder`/`steps`/`n_windows`/`n_proven_positive`/`n_proven_negative`/`any_persona_inflation`/`total_cost_delta`）。
+  - **`_one_step` 增量裁决 + 重复实验**：对每一步用多个 bootstrap 种子跑 `ablation`，`seeds[0]` 为确定性主结论；跨种子一致性 = 与主结论同向显著（或同为不显著）的比例，`>= stability_threshold` 才算稳定。裁决：显著且稳定→`proven_positive`/`proven_negative`；不显著且稳定且区间宽度 `<= null_width`→`no_increment`（真零，而非样本不足）；否则 `inconclusive`。把「一次显著」与「跨种子稳定」、「明确无增量」与「证据不足」从结构上分开。
+  - **独立性守卫（不以 persona 数量代替独立性）**：`redundancy = 1 - N_eff/人数`，人数较上一臂增加且冗余 `>= redundancy_threshold` 时置 `persona_inflation=True` 并写明「人数+N 但有效独立仅+M」的告警；非集成臂（`n_effective=None`）永不置位。报表同时呈现 delta 与 N_eff，杜绝「加了 5 个评委所以更好」这类以人数冒充独立信号的结论。
+  - **`n_eff_from_votes`**：由历史投票向量直接复用 P1-2 的 `vote_similarity_matrix` + `effective_number_of_judges` 算 N_eff，便于用真实投票构造投委会臂。
+- 分层保护：**纯计算叶子层，不接线进生产决策链**（回退=不调用，对齐验收「不改变线上默认决策」）；`evaluation`/`judge_independence` 现有路径完全不变，仅单向 import 复用。与 P1-1/P1-3/P1-4/P2-1/P2-2 各叶子模块互不依赖。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_incremental_ablation.py -q`：`20 passed in 0.91s`。
+- 范围 Ruff `ruff check incremental_ablation.py tests/test_incremental_ablation.py`：`All checks passed!`（一处 docstring E501 手工折行，未用 `--fix`）。
+- 全量 `python -m pytest -q`：`1999 passed, 4 skipped in 520.94s`，退出码 0（= P2-2 基线 1979 + 20 项 P2-3 专项）。
+
+### 已知边界
+
+- 本层只做「阶梯编排 + 裁决」，各臂逐窗样本外收益须由调用方在严格 walk-forward 下实测传入；本模块不代跑回测、不接线进生产决策链，要真正评估线上「LLM/投委会是否值回成本」需调用方喂入真实分臂回测结果，留待 P2-4 或后续子项按需接线。
+- `null_width`（明确无增量的区间宽度上限）与 `redundancy_threshold`（persona 冗余阈值）是校准旋钮而非硬事实，按收益量纲与投委会构成校准；默认 `stability_threshold=0.8`、`seeds=(0,1,2,3,4)` 同理。
+- 显著性沿用 P0-6 `ablation` 的「bootstrap 区间跨 0」判据（非参数、无 scipy），不做多重比较校正；阶梯多步时若需控制族错误率，由调用方在报表层叠加。
+- N_eff 由调用方传入或 `n_eff_from_votes` 由历史投票算得，本模块不核验投票与该臂配置是否同源，须调用方保证 `n_effective` 与 `oos_returns` 出自同一配置。
