@@ -6,6 +6,87 @@
 from __future__ import annotations
 
 CREATE_TABLES = """
+-- ponytail: 未上线研究表不做旧开发版迁移；旧表须备份后单独重建，不能靠 IF NOT EXISTS 升级。
+CREATE TABLE IF NOT EXISTS research_snapshots (
+    snapshot_id TEXT NOT NULL,
+    user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
+    market TEXT NOT NULL CHECK(length(trim(market)) > 0),
+    strategy_version TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY(user_id, market, snapshot_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_observations (
+    observation_id TEXT NOT NULL,
+    user_id TEXT NOT NULL CHECK(length(trim(user_id)) > 0),
+    market TEXT NOT NULL CHECK(length(trim(market)) > 0),
+    metric TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    PRIMARY KEY(user_id, market, observation_id)
+);
+
+-- 来源关联由封存 INSERT 自动生成；独立触发器在 foreign_keys=OFF 时也校验引用。
+CREATE TABLE IF NOT EXISTS research_snapshot_observations (
+    user_id TEXT NOT NULL,
+    market TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    observation_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    PRIMARY KEY(user_id, market, snapshot_id, observation_id),
+    UNIQUE(user_id, market, snapshot_id, ordinal),
+    FOREIGN KEY(user_id, market, snapshot_id) REFERENCES research_snapshots(user_id, market, snapshot_id),
+    FOREIGN KEY(user_id, market, observation_id) REFERENCES research_observations(user_id, market, observation_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS research_snapshots_no_replace
+BEFORE INSERT ON research_snapshots
+WHEN EXISTS (SELECT 1 FROM research_snapshots WHERE user_id=NEW.user_id
+    AND market=NEW.market AND snapshot_id=NEW.snapshot_id)
+BEGIN SELECT RAISE(ABORT, 'research snapshots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_observations_no_replace
+BEFORE INSERT ON research_observations
+WHEN EXISTS (SELECT 1 FROM research_observations WHERE user_id=NEW.user_id
+    AND market=NEW.market AND observation_id=NEW.observation_id)
+BEGIN SELECT RAISE(ABORT, 'research observations are immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS research_snapshot_members_insert
+AFTER INSERT ON research_snapshots BEGIN
+    INSERT INTO research_snapshot_observations(user_id,market,snapshot_id,observation_id,ordinal)
+    SELECT NEW.user_id,NEW.market,NEW.snapshot_id,json_extract(value,'$.observation_id'),key
+    FROM json_each(NEW.payload_json,'$.observations');
+END;
+CREATE TRIGGER IF NOT EXISTS research_snapshot_members_check
+BEFORE INSERT ON research_snapshot_observations BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM research_snapshots s
+        JOIN json_each(s.payload_json,'$.observations') j ON j.key=NEW.ordinal
+        JOIN research_observations o ON o.user_id=s.user_id AND o.market=s.market
+            AND o.observation_id=NEW.observation_id AND json(o.payload_json)=json(j.value)
+        WHERE s.user_id=NEW.user_id AND s.market=NEW.market AND s.snapshot_id=NEW.snapshot_id
+            AND json_extract(j.value,'$.observation_id')=NEW.observation_id
+    ) OR EXISTS (
+        SELECT 1 FROM research_snapshot_observations WHERE user_id=NEW.user_id AND market=NEW.market
+            AND snapshot_id=NEW.snapshot_id AND (ordinal=NEW.ordinal OR observation_id=NEW.observation_id)
+    ) THEN RAISE(ABORT, 'research snapshot membership is immutable or invalid') END;
+END;
+CREATE TRIGGER IF NOT EXISTS research_snapshot_members_no_update
+BEFORE UPDATE ON research_snapshot_observations
+BEGIN SELECT RAISE(ABORT, 'research snapshot membership is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_snapshot_members_no_delete
+BEFORE DELETE ON research_snapshot_observations
+BEGIN SELECT RAISE(ABORT, 'research snapshot membership is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS research_snapshots_immutable
+BEFORE UPDATE ON research_snapshots BEGIN SELECT RAISE(ABORT, 'research snapshots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_snapshots_no_delete
+BEFORE DELETE ON research_snapshots BEGIN SELECT RAISE(ABORT, 'research snapshots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_observations_immutable
+BEFORE UPDATE ON research_observations BEGIN SELECT RAISE(ABORT, 'research observations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_observations_no_delete
+BEFORE DELETE ON research_observations BEGIN SELECT RAISE(ABORT, 'research observations are immutable'); END;
 CREATE TABLE IF NOT EXISTS watchlist (
     id              TEXT PRIMARY KEY,
     ticker          TEXT NOT NULL,
@@ -1080,6 +1161,38 @@ MIGRATIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_reverse_market ON reverse_analyses(market, user_id)",
     # ── L1 宏观：快照记录变动率，兜底读库时不再丢失 change_pct ──
     "ALTER TABLE macro_snapshots ADD COLUMN change_pct REAL DEFAULT 0",
+    # P0-3：新决策记录绑定不可变研究快照；NULL 仅保留旧数据读取兼容。
+    "ALTER TABLE macro_strategies ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE macro_strategies ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE strategic_plans ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE strategic_plans ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE tactical_plans ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE tactical_plans ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE execution_plans ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE execution_plans ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE committee_consensus ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE committee_consensus ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE committee_reviews ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE committee_reviews ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE trade_feedback ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE trade_feedback ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE sim_trades ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE sim_trades ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE auto_reviews ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE auto_reviews ADD COLUMN strategy_version TEXT",
+    "ALTER TABLE meeting_records ADD COLUMN snapshot_id TEXT",
+    "ALTER TABLE meeting_records ADD COLUMN strategy_version TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_meeting_records_snapshot_binding ON meeting_records(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_committee_reviews_snapshot_binding "
+    "ON committee_reviews(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_feedback_snapshot_binding ON trade_feedback(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_sim_trades_snapshot_binding ON sim_trades(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_auto_reviews_snapshot_binding ON auto_reviews(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_macro_snapshot_binding ON macro_strategies(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_strategic_snapshot_binding ON strategic_plans(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_tactical_snapshot_binding ON tactical_plans(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_execution_snapshot_binding ON execution_plans(snapshot_id, strategy_version)",
+    "CREATE INDEX IF NOT EXISTS idx_consensus_snapshot_binding ON committee_consensus(snapshot_id, strategy_version)",
     # ── Phase 1.1: sim_trades 持久化已实现盈亏（卖出结算），供绩效/回测/胜率真实计算 ──
     "ALTER TABLE sim_trades ADD COLUMN realized_pnl REAL",
     # ── Phase 2.5: sim_account 记录历史权益峰值，供账户级回撤熔断 ──

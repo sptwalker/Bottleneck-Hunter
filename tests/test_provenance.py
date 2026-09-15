@@ -106,16 +106,18 @@ def test_provenance_survives_execution_plan_roundtrip(tmp_path):
     走真实 store，而非仅断言注入行存在。
     """
     from bottleneck_hunter.watchlist.decision_engine import _decision_provenance
+    from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
     from bottleneck_hunter.watchlist.store import WatchlistStore
 
-    s = WatchlistStore(str(tmp_path / "acc.db"))
+    s = WatchlistStore(str(tmp_path / "acc.db")).for_user("test-user").for_market("us_stock")
     entry_id = s.add({"ticker": "NVDA", "company_name": "NVIDIA", "market": "us_stock", "tier": "track"})
     ep = {
         "action": "buy", "shares": 50, "target_price": 188.0, "confidence": 7,
         "_provenance": _decision_provenance(["decision_execution"], [("deepseek", "deepseek-chat")],
                                             "us_stock", "L4", ["NVDA"]),
     }
-    plan_id = s.create_execution_plan("tac_x", entry_id, "NVDA", ep)
+    plan_id = s.create_execution_plan("tac_x", entry_id, "NVDA", ep,
+                                      **save_stage_snapshot(s, "L4", {"ticker": "NVDA", "target_price": 188.0}))
 
     got = s.get_execution_plan(plan_id)["result_json"]  # 读回已是解析后的 dict
     prov_back = got["_provenance"]

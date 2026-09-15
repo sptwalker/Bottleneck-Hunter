@@ -26,6 +26,7 @@ from bottleneck_hunter.watchlist.decision_engine import (
     _sse,
 )
 from bottleneck_hunter.watchlist.models import DegradationMode
+from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.store_base import normalize_market
 
@@ -626,14 +627,24 @@ async def stream_opening(store: WatchlistStore, budget: BudgetTracker | None, ma
     # 采集新快照
     snap = await _make_snapshot(store, market, budget, models)
 
-    if not session:
-        record_id = store.create_meeting_record(
-            meeting_type=MEETING_TYPE, title=f"宏观咨询 · {market}", market=market,
-            transcript_json=[], result_json={})
-        meta = {}
-    else:
-        record_id = session["id"]
-        meta = dict(session.get("result_json") or {})
+    binding = save_stage_snapshot(
+        store.for_market(market),
+        "macro_consult",
+        {
+            "snapshot": snap,
+            "prior_meeting_id": session.get("id") if session else None,
+            "prior_transcript": transcript,
+        },
+    )
+    record_id = store.create_meeting_record(
+        meeting_type=MEETING_TYPE,
+        title=f"宏观咨询 · {market}",
+        market=market,
+        transcript_json=transcript,
+        result_json=dict(session.get("result_json") or {}) if session else {},
+        **binding,
+    )
+    meta = dict(session.get("result_json") or {}) if session else {}
 
     transcript.append(snap)
     yield _sse("snapshot", **snap)
@@ -755,22 +766,34 @@ async def stream_consult(store: WatchlistStore, budget: BudgetTracker | None,
     market = normalize_market(market)
     market_ctx = _get_market_context_text([market])
     session = _load_session(store, market)
-    if not session:
-        record_id = store.create_meeting_record(
-            meeting_type=MEETING_TYPE, title=f"宏观咨询 · {market}", market=market,
-            transcript_json=[], result_json={})
-        transcript: list = []
-        meta: dict = {}
-    else:
-        record_id = session["id"]
-        transcript = list(session.get("transcript_json") or [])
-        meta = dict(session.get("result_json") or {})
+    transcript = list(session.get("transcript_json") or []) if session else []
+    meta = dict(session.get("result_json") or {}) if session else {}
 
     # 未先 open（直连 API / 竞态）→ 会话里没有快照 → 先采一份，避免分析师拿占位符空数据
     if not any(m.get("type") == "snapshot" for m in transcript):
         snap = await _make_snapshot(store, market, budget, models)
         transcript.append(snap)
         yield _sse("snapshot", **snap)
+
+    binding = save_stage_snapshot(
+        store.for_market(market),
+        "macro_consult",
+        {
+            "snapshot": next((m for m in reversed(transcript) if m.get("type") == "snapshot"), None),
+            "question": question,
+            "focus_ticker": focus_ticker,
+            "prior_meeting_id": session.get("id") if session else None,
+            "prior_transcript": transcript,
+        },
+    )
+    record_id = store.create_meeting_record(
+        meeting_type=MEETING_TYPE,
+        title=f"宏观咨询 · {market}",
+        market=market,
+        transcript_json=transcript,
+        result_json=meta,
+        **binding,
+    )
 
     # 立即落库用户提问，防止断连丢问题（聚焦个股加 [聚焦 X] 前缀，历史回看能看出这轮聊哪只）
     q_content = f"[聚焦 {focus_ticker}] {question}" if focus_ticker else question

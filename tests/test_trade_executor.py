@@ -23,7 +23,10 @@ def _mock_store(*, account=None, position=None, plan=None):
     store.get_sim_position.return_value = position
     store.get_sim_position_any.return_value = position
     store.get_sim_positions.return_value = []
+    if plan is not None:
+        plan = {"snapshot_id": "s1", "strategy_version": "v1", **plan}
     store.get_execution_plan.return_value = plan
+    store.get_research_snapshot.return_value = MagicMock(strategy_version="v1")
     store.create_sim_trade.return_value = "trade_123"
     store.get_sim_trades.return_value = []
     store.get_snapshots.return_value = []

@@ -14,6 +14,7 @@ def _plan(store, shares, action="buy", price=100.0):
     return store.create_execution_plan(
         tactical_plan_id="tp", entry_id="e", ticker="AAPL",
         result_json={"action": action, "shares": shares, "target_price": price},
+        strict=False,
     )
 
 

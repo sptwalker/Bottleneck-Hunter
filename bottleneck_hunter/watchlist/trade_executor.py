@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from bottleneck_hunter.watchlist.slippage import calc_slippage
+from bottleneck_hunter.watchlist.snapshot_binding import bind_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,23 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     result_json = plan.get("result_json", {}) if isinstance(plan.get("result_json"), dict) else {}
     market = plan.get("market") or result_json.get("market", "us_stock")
     store = store.for_market(market)
+    # 继承决策依据，不代表成交时拉取的行情；领单和建账前拒绝非法绑定。
+    try:
+        snapshot_id, strategy_version = bind_snapshot(
+            snapshot_id=plan.get("snapshot_id"), strategy_version=plan.get("strategy_version"),
+            get_snapshot=getattr(store, "get_research_snapshot", None), strict=True,
+        )
+    except ValueError as exc:
+        legacy = plan.get("snapshot_id") is None and plan.get("strategy_version") is None
+        message = "历史计划缺少研究快照绑定，请重新生成执行计划" if legacy else f"研究快照绑定无效：{exc}"
+        if legacy:
+            if plan.get("resting_until"):
+                store.expire_execution(plan_id, message)
+            else:
+                store.reject_execution(plan_id, message)
+        logger.warning("拒绝成交 plan_id=%s: %s", plan_id, message)
+        return {"error": message, "code": "legacy_unbound" if legacy else "invalid_snapshot_binding",
+                "plan_id": plan_id}
 
     account = store.get_sim_account()
 
@@ -106,7 +124,8 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
 
     action = plan.get("action") or result_json.get("action", "")
     from bottleneck_hunter.watchlist.store_base import normalize_ticker
-    ticker = normalize_ticker(plan.get("ticker", ""), market)  # 归一：执行计划 .SH 与观察池/持仓 .SS 对齐，杜绝重复持仓/误报持仓不足
+    # 归一：执行计划 .SH 与观察池/持仓 .SS 对齐，杜绝重复持仓/误报持仓不足
+    ticker = normalize_ticker(plan.get("ticker", ""), market)
     shares = plan.get("shares") or result_json.get("shares", 0)
     planned_price = (plan.get("target_price")
                      or result_json.get("target_price")
@@ -154,11 +173,11 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     if action in ("buy", "add"):
         result = _execute_buy(store, account, plan_id, ticker, shares, exec_basis,
                               plan.get("entry_id"), result_json.get("reasoning", ""),
-                              market=market)
+                              market=market, snapshot_id=snapshot_id, strategy_version=strategy_version)
     elif action in ("sell", "reduce"):
         result = _execute_sell(store, account, plan_id, ticker, shares, exec_basis,
                                plan.get("entry_id"), result_json.get("reasoning", ""),
-                               market=market)
+                               market=market, snapshot_id=snapshot_id, strategy_version=strategy_version)
     else:
         store.unclaim_execution(plan_id, prev_resting_until)
         return {"error": f"不支持的操作类型: {action}", "plan_id": plan_id}
@@ -250,7 +269,8 @@ def _schedule_auto_review(store: WatchlistStore, trade_id: str) -> None:
 def _execute_buy(store: WatchlistStore, account: dict,
                  plan_id: str, ticker: str, shares: int, price: float,
                  entry_id: str | None, reasoning: str,
-                 market: str = "us_stock") -> dict:
+                 market: str = "us_stock", snapshot_id: str | None = None,
+                 strategy_version: str | None = None) -> dict:
     avg_vol = _get_avg_volume(store, ticker)
     exec_price, slippage_bps = calc_slippage(price, shares, "buy", market, avg_vol)
 
@@ -268,6 +288,7 @@ def _execute_buy(store: WatchlistStore, account: dict,
         execution_plan_id=plan_id, entry_id=entry_id,
         trade_type="entry", reasoning=reasoning,
         slippage_bps=slippage_bps,
+        snapshot_id=snapshot_id, strategy_version=strategy_version, strict=True,
     )
 
     pos = store.get_sim_position_any(account["id"], ticker)
@@ -302,7 +323,8 @@ def _execute_buy(store: WatchlistStore, account: dict,
 def _execute_sell(store: WatchlistStore, account: dict,
                   plan_id: str, ticker: str, shares: int, price: float,
                   entry_id: str | None, reasoning: str,
-                  market: str = "us_stock") -> dict:
+                  market: str = "us_stock", snapshot_id: str | None = None,
+                 strategy_version: str | None = None) -> dict:
     pos = store.get_sim_position(account["id"], ticker)
     if not pos or pos["shares"] < shares:
         return {"error": "持仓不足", "required": shares,
@@ -324,6 +346,7 @@ def _execute_sell(store: WatchlistStore, account: dict,
         trade_type="exit", reasoning=reasoning,
         slippage_bps=slippage_bps,
         realized_pnl=realized_pnl,
+        snapshot_id=snapshot_id, strategy_version=strategy_version, strict=True,
     )
 
     # B4: 用实际盈亏结算该 ticker 的投委会投票预测，让委员历史校准权重真正生效

@@ -22,6 +22,7 @@ def _mk(store, ticker="AAPL", action="buy", target=100.0):
     pid = store.create_execution_plan(
         tactical_plan_id="tp1", entry_id="e1", ticker=ticker,
         result_json={"action": action, "shares": 10, "target_price": target},
+        strict=False,
     )
     assert store.confirm_execution(pid)  # pending → confirmed
     return pid
@@ -67,7 +68,7 @@ def test_clear_pending_spares_resting(store):
     store.rest_execution(pid, _FAR)
     _mk_pending = store.create_execution_plan(
         tactical_plan_id="tp2", entry_id="e2", ticker="MSFT",
-        result_json={"action": "buy", "shares": 5, "target_price": 50.0})
+        result_json={"action": "buy", "shares": 5, "target_price": 50.0}, strict=False)
     store.clear_pending_executions()
     assert len(store.get_resting_executions()) == 1   # 挂单保留
     assert store.get_pending_executions() == []       # pending 被清

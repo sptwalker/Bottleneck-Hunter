@@ -5,13 +5,22 @@ from __future__ import annotations
 import json
 import uuid
 
+from bottleneck_hunter.watchlist.snapshot_binding import snapshot_columns
 from bottleneck_hunter.watchlist.store_base import _now_iso, _today
 
 
 class _AIModelsMixin:
-    def record_prediction(self, *, provider: str, model: str, role_context: str,
-                          ticker: str, prediction_type: str, prediction_value: str,
-                          market: str = "") -> str:
+    def record_prediction(
+        self,
+        *,
+        provider: str,
+        model: str,
+        role_context: str,
+        ticker: str,
+        prediction_type: str,
+        prediction_value: str,
+        market: str = "",
+    ) -> str:
         rid = str(uuid.uuid4())
         now = _now_iso()
         mkt = market or self._market or "us_stock"
@@ -24,19 +33,34 @@ class _AIModelsMixin:
                         prediction_type, prediction_value, prediction_date,
                         created_at, user_id, market)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                    (rid, provider, model, role_context, ticker,
-                     prediction_type, prediction_value, now[:10],
-                     now, self._user_id, mkt),
+                    (
+                        rid,
+                        provider,
+                        model,
+                        role_context,
+                        ticker,
+                        prediction_type,
+                        prediction_value,
+                        now[:10],
+                        now,
+                        self._user_id,
+                        mkt,
+                    ),
                 )
                 conn.commit()
             finally:
                 conn.close()
         return rid
 
-
-    def record_outcome(self, ticker: str, prediction_type: str,
-                       outcome_value: str, outcome_date: str = "",
-                       score_delta: float = 0.0, prediction_date: str = "") -> int:
+    def record_outcome(
+        self,
+        ticker: str,
+        prediction_type: str,
+        outcome_value: str,
+        outcome_date: str = "",
+        score_delta: float = 0.0,
+        prediction_date: str = "",
+    ) -> int:
         now = _now_iso()
         odate = outcome_date or now[:10]
         with self._write_lock:
@@ -46,8 +70,7 @@ class _AIModelsMixin:
                 q = """UPDATE model_accuracy SET outcome_value = ?, outcome_date = ?,
                        is_correct = ?, score_delta = ?, updated_at = ?
                        WHERE ticker = ? AND prediction_type = ? AND is_correct = -1"""
-                params = (outcome_value, odate, is_correct, score_delta, now,
-                          ticker, prediction_type)
+                params = (outcome_value, odate, is_correct, score_delta, now, ticker, prediction_type)
                 if prediction_date:  # C-3：按预测日逐条结算，避免把同标的多周期 pending 一次性结成同一 outcome
                     q += " AND prediction_date = ?"
                     params = params + (prediction_date,)
@@ -60,10 +83,9 @@ class _AIModelsMixin:
             finally:
                 conn.close()
 
-
-    def list_pending_predictions(self, *, role_context: str = "",
-                                 prediction_types: list[str] | None = None,
-                                 market: str = "", limit: int = 500) -> list[dict]:
+    def list_pending_predictions(
+        self, *, role_context: str = "", prediction_types: list[str] | None = None, market: str = "", limit: int = 500
+    ) -> list[dict]:
         """读取未结算(is_correct=-1)的预测明细，供复盘逐条结算（C-3）。
         按 user_id(_user_filter) 隔离；可按 role_context / prediction_type / market 收敛。"""
         conn = self._connect()
@@ -87,10 +109,9 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-    def list_settled_predictions(self, *, role_context: str = "",
-                                 prediction_types: list[str] | None = None,
-                                 market: str = "", limit: int = 500) -> list[dict]:
+    def list_settled_predictions(
+        self, *, role_context: str = "", prediction_types: list[str] | None = None, market: str = "", limit: int = 500
+    ) -> list[dict]:
         """已结算(is_correct != -1)的预测明细，供复盘呈现（特性三 Phase1）。
         是 list_pending_predictions 的孪生：唯一差别是结算态取反；隔离/过滤/排序一致。
         {ticker, prediction_value(动作), outcome_value('chg=+5%'), is_correct, prediction_date}
@@ -116,10 +137,9 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-    def get_model_accuracy(self, provider: str, model: str,
-                           role_context: str | None = None,
-                           limit: int = 100, market: str = "") -> list[dict]:
+    def get_model_accuracy(
+        self, provider: str, model: str, role_context: str | None = None, limit: int = 100, market: str = ""
+    ) -> list[dict]:
         conn = self._connect()
         try:
             q = "SELECT * FROM model_accuracy WHERE model_provider = ? AND model_name = ?"
@@ -128,7 +148,7 @@ class _AIModelsMixin:
                 q += " AND role_context = ?"
                 p = p + (role_context,)
             if market:
-                q += " AND market = ?"   # 按市场过滤，避免近期准确率跨市场混算污染校准
+                q += " AND market = ?"  # 按市场过滤，避免近期准确率跨市场混算污染校准
                 p = p + (market,)
             q += " ORDER BY prediction_date DESC LIMIT ?"
             p = p + (limit,)
@@ -136,7 +156,6 @@ class _AIModelsMixin:
             return [dict(r) for r in conn.execute(q, p).fetchall()]
         finally:
             conn.close()
-
 
     def get_model_accuracy_stats(self, market: str = "") -> list[dict]:
         conn = self._connect()
@@ -158,9 +177,7 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-    def get_model_ratings(self, role_context: str | None = None,
-                          market: str = "") -> list[dict]:
+    def get_model_ratings(self, role_context: str | None = None, market: str = "") -> list[dict]:
         conn = self._connect()
         try:
             q = "SELECT * FROM model_ratings"
@@ -180,12 +197,19 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-    def upsert_model_rating(self, *, provider: str, model: str,
-                            role_context: str = "", total: int = 0,
-                            correct: int = 0, accuracy: float = 0.5,
-                            avg_delta: float = 0.0, weight: float = 1.0,
-                            market: str = "") -> None:
+    def upsert_model_rating(
+        self,
+        *,
+        provider: str,
+        model: str,
+        role_context: str = "",
+        total: int = 0,
+        correct: int = 0,
+        accuracy: float = 0.5,
+        avg_delta: float = 0.0,
+        weight: float = 1.0,
+        market: str = "",
+    ) -> None:
         now = _now_iso()
         mkt = market or self._market or "us_stock"
         uid = self._user_id or ""
@@ -205,8 +229,7 @@ class _AIModelsMixin:
                            avg_score_delta = ?, calibration_weight = ?,
                            last_calibrated = ?, updated_at = ?
                            WHERE id = ?""",
-                        (total, correct, accuracy, avg_delta, weight, now, now,
-                         existing["id"]),
+                        (total, correct, accuracy, avg_delta, weight, now, now, existing["id"]),
                     )
                 else:
                     conn.execute(
@@ -216,17 +239,28 @@ class _AIModelsMixin:
                             avg_score_delta, calibration_weight, last_calibrated,
                             created_at, updated_at, user_id, market)
                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (str(uuid.uuid4()), provider, model, role_context,
-                         total, correct, accuracy, avg_delta, weight, now,
-                         now, now, uid, mkt),
+                        (
+                            str(uuid.uuid4()),
+                            provider,
+                            model,
+                            role_context,
+                            total,
+                            correct,
+                            accuracy,
+                            avg_delta,
+                            weight,
+                            now,
+                            now,
+                            now,
+                            uid,
+                            mkt,
+                        ),
                     )
                 conn.commit()
             finally:
                 conn.close()
 
-
-    def get_calibration_weight(self, provider: str, model: str,
-                               role_context: str = "", market: str = "") -> float:
+    def get_calibration_weight(self, provider: str, model: str, role_context: str = "", market: str = "") -> float:
         conn = self._connect()
         try:
             mkt = market or self._market or "us_stock"
@@ -241,62 +275,83 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-    def create_meeting_record(self, *, meeting_type: str, title: str,
-                              participants: list | None = None,
-                              tickers_discussed: list | None = None,
-                              final_verdict: str = "",
-                              final_ranking: list | None = None,
-                              key_agreements: list | None = None,
-                              key_disagreements: list | None = None,
-                              risk_warnings: list | None = None,
-                              investment_thesis: str = "",
-                              transcript_json: list | None = None,
-                              result_json: dict | None = None,
-                              model_predictions: list | None = None,
-                              duration_seconds: int = 0,
-                              total_tokens: int = 0,
-                              analysis_id: str = "",
-                              execution_plan_id: str = "",
-                              market: str = "") -> str:
+    def create_meeting_record(
+        self,
+        *,
+        meeting_type: str,
+        title: str,
+        participants: list | None = None,
+        tickers_discussed: list | None = None,
+        final_verdict: str = "",
+        final_ranking: list | None = None,
+        key_agreements: list | None = None,
+        key_disagreements: list | None = None,
+        risk_warnings: list | None = None,
+        investment_thesis: str = "",
+        transcript_json: list | None = None,
+        result_json: dict | None = None,
+        model_predictions: list | None = None,
+        duration_seconds: int = 0,
+        total_tokens: int = 0,
+        analysis_id: str = "",
+        execution_plan_id: str = "",
+        market: str = "",
+        snapshot_id: str | None = None,
+        strategy_version: str | None = None,
+        strict: bool = True,
+    ) -> str:
         rid = str(uuid.uuid4())
         now = _now_iso()
         mkt = market or self._market or "us_stock"
+        columns, placeholders, binding = snapshot_columns(
+            snapshot_id=snapshot_id,
+            strategy_version=strategy_version,
+            strict=strict,
+            get_snapshot=self.for_market(mkt).get_research_snapshot,
+        )
         with self._write_lock:
             conn = self._connect()
             try:
                 conn.execute(
-                    """INSERT INTO meeting_records
+                    f"""INSERT INTO meeting_records
                        (id, meeting_type, analysis_id, execution_plan_id, market,
                         title, participants, tickers_discussed,
                         final_verdict, final_ranking, key_agreements,
                         key_disagreements, risk_warnings, investment_thesis,
                         transcript_json, result_json, model_predictions,
-                        duration_seconds, total_tokens, created_at, user_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (rid, meeting_type, analysis_id, execution_plan_id, mkt,
-                     title,
-                     json.dumps(participants or [], ensure_ascii=False),
-                     json.dumps(tickers_discussed or [], ensure_ascii=False),
-                     final_verdict,
-                     json.dumps(final_ranking or [], ensure_ascii=False),
-                     json.dumps(key_agreements or [], ensure_ascii=False),
-                     json.dumps(key_disagreements or [], ensure_ascii=False),
-                     json.dumps(risk_warnings or [], ensure_ascii=False),
-                     investment_thesis,
-                     json.dumps(transcript_json or [], ensure_ascii=False),
-                     json.dumps(result_json or {}, ensure_ascii=False),
-                     json.dumps(model_predictions or [], ensure_ascii=False),
-                     duration_seconds, total_tokens, now, self._user_id or ""),
+                        duration_seconds, total_tokens, created_at, user_id{columns})
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{placeholders})""",
+                    (
+                        rid,
+                        meeting_type,
+                        analysis_id,
+                        execution_plan_id,
+                        mkt,
+                        title,
+                        json.dumps(participants or [], ensure_ascii=False),
+                        json.dumps(tickers_discussed or [], ensure_ascii=False),
+                        final_verdict,
+                        json.dumps(final_ranking or [], ensure_ascii=False),
+                        json.dumps(key_agreements or [], ensure_ascii=False),
+                        json.dumps(key_disagreements or [], ensure_ascii=False),
+                        json.dumps(risk_warnings or [], ensure_ascii=False),
+                        investment_thesis,
+                        json.dumps(transcript_json or [], ensure_ascii=False),
+                        json.dumps(result_json or {}, ensure_ascii=False),
+                        json.dumps(model_predictions or [], ensure_ascii=False),
+                        duration_seconds,
+                        total_tokens,
+                        now,
+                        self._user_id or "",
+                    )
+                    + binding,
                 )
                 conn.commit()
             finally:
                 conn.close()
         return rid
 
-
-    def get_meeting_records(self, meeting_type: str | None = None,
-                            market: str = "", limit: int = 20) -> list[dict]:
+    def get_meeting_records(self, meeting_type: str | None = None, market: str = "", limit: int = 20) -> list[dict]:
         conn = self._connect()
         try:
             q = "SELECT * FROM meeting_records"
@@ -317,38 +372,50 @@ class _AIModelsMixin:
             result = []
             for r in rows:
                 d = dict(r)
-                self._parse_json_fields(d,
+                self._parse_json_fields(
+                    d,
                     dict_fields=("result_json",),
-                    list_fields=("participants", "tickers_discussed",
-                                 "final_ranking", "key_agreements",
-                                 "key_disagreements", "risk_warnings",
-                                 "transcript_json", "model_predictions"))
+                    list_fields=(
+                        "participants",
+                        "tickers_discussed",
+                        "final_ranking",
+                        "key_agreements",
+                        "key_disagreements",
+                        "risk_warnings",
+                        "transcript_json",
+                        "model_predictions",
+                    ),
+                )
                 result.append(d)
             return result
         finally:
             conn.close()
 
-
     def get_meeting_record(self, record_id: str) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
-                "SELECT * FROM meeting_records WHERE id = ?", (record_id,)
-            )
+            q, p = self._user_filter("SELECT * FROM meeting_records WHERE id = ?", (record_id,))
             row = conn.execute(q, p).fetchone()
             if not row:
                 return None
             d = dict(row)
-            self._parse_json_fields(d,
+            self._parse_json_fields(
+                d,
                 dict_fields=("result_json",),
-                list_fields=("participants", "tickers_discussed",
-                             "final_ranking", "key_agreements",
-                             "key_disagreements", "risk_warnings",
-                             "transcript_json", "model_predictions"))
+                list_fields=(
+                    "participants",
+                    "tickers_discussed",
+                    "final_ranking",
+                    "key_agreements",
+                    "key_disagreements",
+                    "risk_warnings",
+                    "transcript_json",
+                    "model_predictions",
+                ),
+            )
             return d
         finally:
             conn.close()
-
 
     def update_meeting_outcome(self, record_id: str, outcome_summary: str) -> bool:
         with self._write_lock:
@@ -366,9 +433,9 @@ class _AIModelsMixin:
             finally:
                 conn.close()
 
-
-    def update_meeting_review(self, record_id: str, *, transcript_json=None,
-                              result_json=None, final_verdict: str | None = None) -> bool:
+    def update_meeting_review(
+        self, record_id: str, *, transcript_json=None, result_json=None, final_verdict: str | None = None
+    ) -> bool:
         """质询/复议后更新会议记录的 transcript / 共识 / 最终结论。仅更新传入的字段。"""
         sets: list[str] = []
         vals: list = []
@@ -396,7 +463,6 @@ class _AIModelsMixin:
                 return cur.rowcount > 0
             finally:
                 conn.close()
-
 
     def get_meeting_stats(self, market: str = "") -> dict:
         conn = self._connect()
@@ -426,11 +492,16 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-    def upsert_role_config(self, role_key: str, slot_index: int,
-                           provider: str, model: str,
-                           role_label: str = "", role_group: str = "",
-                           user_id: str | None = None) -> str:
+    def upsert_role_config(
+        self,
+        role_key: str,
+        slot_index: int,
+        provider: str,
+        model: str,
+        role_label: str = "",
+        role_group: str = "",
+        user_id: str | None = None,
+    ) -> str:
         uid = user_id if user_id is not None else (self._user_id or "")
         now = _now_iso()
         with self._write_conn() as conn:
@@ -453,15 +524,13 @@ class _AIModelsMixin:
                    (id, role_key, role_label, role_group, slot_index, provider, model,
                     is_active, created_at, updated_at, user_id)
                    VALUES (?,?,?,?,?,?,?,1,?,?,?)""",
-                (rid, role_key, role_label, role_group, slot_index,
-                 provider, model, now, now, uid),
+                (rid, role_key, role_label, role_group, slot_index, provider, model, now, now, uid),
             )
             return rid
 
-
-    def get_role_configs(self, role_key: str | None = None,
-                         role_group: str | None = None,
-                         user_id: str | None = None) -> list[dict]:
+    def get_role_configs(
+        self, role_key: str | None = None, role_group: str | None = None, user_id: str | None = None
+    ) -> list[dict]:
         uid = user_id if user_id is not None else (self._user_id or "")
         conn = self._connect()
         try:
@@ -494,9 +563,16 @@ class _AIModelsMixin:
 
     # ── AI 模型调用遥测（智能调度 Phase 0）：按 日期×用户×provider×model×角色 UPSERT 累加 ──
 
-    def record_model_call(self, provider: str, model: str, ok: bool,
-                          latency_ms: float = 0.0, reason: str = "",
-                          role_context: str = "", user_id: str | None = None) -> None:
+    def record_model_call(
+        self,
+        provider: str,
+        model: str,
+        ok: bool,
+        latency_ms: float = 0.0,
+        reason: str = "",
+        role_context: str = "",
+        user_id: str | None = None,
+    ) -> None:
         """记一次 LLM 调用遥测（成败/延迟/末次原因）。失败只 debug 不抛——
         遥测是旁路，绝不影响主链路。仿 record_ds_call 的聚合 UPSERT 范式。"""
         uid = user_id if user_id is not None else (self._user_id or "")
@@ -513,27 +589,41 @@ class _AIModelsMixin:
                          latency_sum = latency_sum + excluded.latency_sum,
                          last_reason = CASE WHEN excluded.last_reason != '' THEN excluded.last_reason ELSE model_call_stats.last_reason END,
                          updated_at = excluded.updated_at""",
-                    (_today(), uid, (provider or "").lower().strip(), model or "", role_context or "",
-                     1 if ok else 0, 0 if ok else 1, float(latency_ms), (reason or "")[:200], _now_iso()),
+                    (
+                        _today(),
+                        uid,
+                        (provider or "").lower().strip(),
+                        model or "",
+                        role_context or "",
+                        1 if ok else 0,
+                        0 if ok else 1,
+                        float(latency_ms),
+                        (reason or "")[:200],
+                        _now_iso(),
+                    ),
                 )
         except Exception as e:  # noqa: BLE001
             import logging
+
             logging.getLogger(__name__).debug("record_model_call 失败: %s", e)
 
     def get_model_call_stats(self, days: int = 30, user_id: str | None = None) -> list[dict]:
         """按 provider×model 聚合最近 days 天调用遥测：总调用/成功/失败/成功率/均延迟/末次原因。
         user_id=None → 当前 store 用户；传 '' → 全平台聚合（管理看板用）。"""
         from datetime import datetime, timedelta
+
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         uid = self._user_id if user_id is None else user_id
         conn = self._connect()
         try:
-            q = ("SELECT provider, model, "
-                 "SUM(calls) AS calls, SUM(ok) AS ok, SUM(fail) AS fail, "
-                 "CASE WHEN SUM(calls)>0 THEN ROUND(100.0*SUM(ok)/SUM(calls),1) ELSE 0 END AS ok_rate, "
-                 "CASE WHEN SUM(calls)>0 THEN ROUND(SUM(latency_sum)/SUM(calls),0) ELSE 0 END AS avg_latency_ms, "
-                 "MAX(date) AS last_date "
-                 "FROM model_call_stats WHERE date >= ?")
+            q = (
+                "SELECT provider, model, "
+                "SUM(calls) AS calls, SUM(ok) AS ok, SUM(fail) AS fail, "
+                "CASE WHEN SUM(calls)>0 THEN ROUND(100.0*SUM(ok)/SUM(calls),1) ELSE 0 END AS ok_rate, "
+                "CASE WHEN SUM(calls)>0 THEN ROUND(SUM(latency_sum)/SUM(calls),0) ELSE 0 END AS avg_latency_ms, "
+                "MAX(date) AS last_date "
+                "FROM model_call_stats WHERE date >= ?"
+            )
             p: tuple = (cutoff,)
             if uid:
                 q += " AND user_id = ?"
@@ -546,15 +636,18 @@ class _AIModelsMixin:
     def get_model_call_series(self, days: int = 30, user_id: str | None = None) -> list[dict]:
         """按 日期×provider 聚合最近 days 天：用于健康看板的「长期表现曲线」。"""
         from datetime import datetime, timedelta
+
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         uid = self._user_id if user_id is None else user_id
         conn = self._connect()
         try:
-            q = ("SELECT date, provider, "
-                 "SUM(calls) AS calls, SUM(ok) AS ok, "
-                 "CASE WHEN SUM(calls)>0 THEN ROUND(100.0*SUM(ok)/SUM(calls),1) ELSE 0 END AS ok_rate, "
-                 "CASE WHEN SUM(calls)>0 THEN ROUND(SUM(latency_sum)/SUM(calls),0) ELSE 0 END AS avg_latency_ms "
-                 "FROM model_call_stats WHERE date >= ?")
+            q = (
+                "SELECT date, provider, "
+                "SUM(calls) AS calls, SUM(ok) AS ok, "
+                "CASE WHEN SUM(calls)>0 THEN ROUND(100.0*SUM(ok)/SUM(calls),1) ELSE 0 END AS ok_rate, "
+                "CASE WHEN SUM(calls)>0 THEN ROUND(SUM(latency_sum)/SUM(calls),0) ELSE 0 END AS avg_latency_ms "
+                "FROM model_call_stats WHERE date >= ?"
+            )
             p: tuple = (cutoff,)
             if uid:
                 q += " AND user_id = ?"
@@ -566,8 +659,9 @@ class _AIModelsMixin:
 
     # ── 模型调度策略（Phase 2）：per-user，role_key='' 为全局默认，非空为角色覆盖 ──
 
-    def set_routing_policy(self, prefer_tier: str = "auto", optimize_for: str = "balanced",
-                           role_key: str = "", user_id: str | None = None) -> None:
+    def set_routing_policy(
+        self, prefer_tier: str = "auto", optimize_for: str = "balanced", role_key: str = "", user_id: str | None = None
+    ) -> None:
         uid = user_id if user_id is not None else (self._user_id or "")
         with self._write_conn() as conn:
             conn.execute(
@@ -604,10 +698,7 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-
-    def delete_role_config(self, role_key: str, slot_index: int,
-                           user_id: str | None = None) -> bool:
+    def delete_role_config(self, role_key: str, slot_index: int, user_id: str | None = None) -> bool:
         uid = user_id if user_id is not None else (self._user_id or "")
         with self._write_conn() as conn:
             cur = conn.execute(
@@ -615,7 +706,6 @@ class _AIModelsMixin:
                 (role_key, slot_index, uid),
             )
             return cur.rowcount > 0
-
 
     def clear_role_configs(self, role_key: str, user_id: str | None = None) -> int:
         uid = user_id if user_id is not None else (self._user_id or "")
@@ -625,7 +715,6 @@ class _AIModelsMixin:
                 (role_key, uid),
             )
             return cur.rowcount
-
 
     def sync_role_config_model(self, provider: str, old_model: str, new_model: str) -> int:
         """provider 默认模型变更时，把角色矩阵里钉着「该 provider + 旧模型」的条目同步到新模型。
@@ -644,11 +733,15 @@ class _AIModelsMixin:
             cur = conn.execute(q, p)
             return cur.rowcount
 
-
     # ── provider_configs：内置/自定义 provider 的默认模型 + base_url + 显示名 覆盖（单一真源）──
-    def upsert_provider_config(self, provider_id: str, default_model: str = "",
-                               base_url: str = "", user_id: str | None = None,
-                               display_name: str = "") -> str:
+    def upsert_provider_config(
+        self,
+        provider_id: str,
+        default_model: str = "",
+        base_url: str = "",
+        user_id: str | None = None,
+        display_name: str = "",
+    ) -> str:
         uid = user_id if user_id is not None else (self._user_id or "")
         now = _now_iso()
         with self._write_conn() as conn:
@@ -671,7 +764,6 @@ class _AIModelsMixin:
             )
             return rid
 
-
     def get_provider_config(self, provider_id: str, user_id: str | None = None) -> dict | None:
         uid = user_id if user_id is not None else (self._user_id or "")
         conn = self._connect()
@@ -684,18 +776,14 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
     def get_provider_configs(self, user_id: str | None = None) -> list[dict]:
         uid = user_id if user_id is not None else (self._user_id or "")
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT * FROM provider_configs WHERE user_id = ?", (uid,)
-            ).fetchall()
+            rows = conn.execute("SELECT * FROM provider_configs WHERE user_id = ?", (uid,)).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
-
 
     def delete_provider_config(self, provider_id: str, user_id: str | None = None) -> bool:
         uid = user_id if user_id is not None else (self._user_id or "")
@@ -705,7 +793,6 @@ class _AIModelsMixin:
                 (provider_id, uid),
             )
             return cur.rowcount > 0
-
 
     def set_provider_config_primary(self, provider_id: str, user_id: str | None = None) -> None:
         """设该用户的**主模型**（用户级，退役全局 is_primary）：先清该 user 全部 is_primary，
@@ -737,7 +824,6 @@ class _AIModelsMixin:
                     (uuid.uuid4().hex[:16], uid, pid, now),
                 )
 
-
     def get_primary_provider_config(self, user_id: str | None = None) -> str | None:
         """返回该用户设定的主模型 provider_id，未设则 None。严格用户级，绝不回退全局。"""
         uid = user_id if user_id is not None else (self._user_id or "")
@@ -751,9 +837,7 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-    def set_provider_config_tier(self, provider_id: str, tier: str,
-                                 user_id: str | None = None) -> None:
+    def set_provider_config_tier(self, provider_id: str, tier: str, user_id: str | None = None) -> None:
         """设该用户对某 provider 的**付费类型**（用户级，压过 health 静态表）。
         tier ∈ {'', 'free', 'paid'}；缺行则建（复用主模型 upsert 写法）。"""
         uid = user_id if user_id is not None else (self._user_id or "")
@@ -780,7 +864,6 @@ class _AIModelsMixin:
                     (uuid.uuid4().hex[:16], uid, pid, t, now),
                 )
 
-
     def get_provider_tier(self, provider_id: str, user_id: str | None = None) -> str:
         """读该用户对某 provider 的付费类型；未设返回 ''。严格用户级。"""
         uid = user_id if user_id is not None else (self._user_id or "")
@@ -795,7 +878,6 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
     def get_provider_tiers(self, user_id: str | None = None) -> dict[str, str]:
         """批量返回该用户所有已设付费类型 {provider_id: tier}（供列表一次性取，免 N 次单查）。"""
         uid = user_id if user_id is not None else (self._user_id or "")
@@ -809,10 +891,15 @@ class _AIModelsMixin:
         finally:
             conn.close()
 
-
-    def save_test_result(self, provider: str, model: str, test_type: str,
-                         score: float, raw_result: str = "{}",
-                         user_id: str | None = None) -> str:
+    def save_test_result(
+        self,
+        provider: str,
+        model: str,
+        test_type: str,
+        score: float,
+        raw_result: str = "{}",
+        user_id: str | None = None,
+    ) -> str:
         uid = user_id if user_id is not None else (self._user_id or "")
         now = _now_iso()
         with self._write_conn() as conn:
@@ -835,9 +922,9 @@ class _AIModelsMixin:
             )
             return rid
 
-
-    def get_test_results(self, provider: str | None = None, model: str | None = None,
-                         user_id: str | None = None) -> list[dict]:
+    def get_test_results(
+        self, provider: str | None = None, model: str | None = None, user_id: str | None = None
+    ) -> list[dict]:
         uid = user_id if user_id is not None else (self._user_id or "")
         conn = self._connect()
         try:

@@ -16,6 +16,7 @@ from pathlib import Path
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position
 from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.snapshot_binding import bind_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
@@ -27,10 +28,13 @@ def _sse(event: str, **data) -> dict:
     return {"event": event, "data": {"event": event, **data}}
 
 
-
 def _rule_attribution(
-    return_pct: float, entry_price: float, exit_price: float,
-    period_high: float, period_low: float, benchmark_return_pct: float,
+    return_pct: float,
+    entry_price: float,
+    exit_price: float,
+    period_high: float,
+    period_low: float,
+    benchmark_return_pct: float,
 ) -> dict:
     """基于规则的简易归因分析"""
     alpha = round(return_pct - benchmark_return_pct, 2)
@@ -57,7 +61,7 @@ def _rule_attribution(
     return {
         "stock_selection": {
             "score": stock_score,
-            "assessment": f"择股{'正确' if return_pct > 0 else '待验证'}，收益 {return_pct:+.1f}%"
+            "assessment": f"择股{'正确' if return_pct > 0 else '待验证'}，收益 {return_pct:+.1f}%",
         },
         "market_timing": {
             "score": timing_score,
@@ -65,20 +69,20 @@ def _rule_attribution(
         },
         "macro_alignment": {
             "score": macro_score,
-            "assessment": f"Alpha {alpha:+.1f}%（基准 {benchmark_return_pct:+.1f}%）"
+            "assessment": f"Alpha {alpha:+.1f}%（基准 {benchmark_return_pct:+.1f}%）",
         },
-        "plan_deviation": {
-            "entry_diff_pct": 0,
-            "exit_diff_pct": 0,
-            "assessment": "规则复盘无计划目标价对比"
-        },
+        "plan_deviation": {"entry_diff_pct": 0, "exit_diff_pct": 0, "assessment": "规则复盘无计划目标价对比"},
     }
 
 
 def _rule_based_review(
-    ticker: str, entry_price: float, exit_price: float,
-    return_pct: float, holding_days: int,
-    period_high: float = 0, period_low: float = 0,
+    ticker: str,
+    entry_price: float,
+    exit_price: float,
+    return_pct: float,
+    holding_days: int,
+    period_high: float = 0,
+    period_low: float = 0,
     benchmark_return_pct: float = 0,
 ) -> dict:
     """基于规则的简易复盘 — 当 LLM 不可用或调用失败时的 fallback。"""
@@ -127,20 +131,21 @@ def _rule_based_review(
     if abs(return_pct) >= 10:
         if return_pct >= 10:
             exp_card = {
-                "scope": "ticker", "scope_key": ticker,
+                "scope": "ticker",
+                "scope_key": ticker,
                 "category": "pattern",
                 "title": f"{ticker} 盈利 {return_pct:+.1f}% 模式（规则复盘）",
-                "content": f"入场价 {entry_price:.2f}，出场价 {exit_price:.2f}，"
-                           f"持仓 {holding_days} 天。{timing_note}",
+                "content": f"入场价 {entry_price:.2f}，出场价 {exit_price:.2f}，持仓 {holding_days} 天。{timing_note}",
                 "confidence": 0.4,
             }
         else:
             exp_card = {
-                "scope": "ticker", "scope_key": ticker,
+                "scope": "ticker",
+                "scope_key": ticker,
                 "category": "lesson",
                 "title": f"{ticker} 亏损 {return_pct:+.1f}% 教训（规则复盘）",
                 "content": f"入场价 {entry_price:.2f}，出场价 {exit_price:.2f}，"
-                           f"持仓 {holding_days} 天。{'; '.join(lessons)}",
+                f"持仓 {holding_days} 天。{'; '.join(lessons)}",
                 "confidence": 0.4,
             }
 
@@ -151,8 +156,12 @@ def _rule_based_review(
         "timing_analysis": timing_note,
         "review_method": "rule_based_fallback",
         "attribution": _rule_attribution(
-            return_pct, entry_price, exit_price,
-            period_high, period_low, benchmark_return_pct,
+            return_pct,
+            entry_price,
+            exit_price,
+            period_high,
+            period_low,
+            benchmark_return_pct,
         ),
         "experience_card": exp_card or {},
     }
@@ -175,11 +184,23 @@ async def run_trade_review(
         yield _sse("review_error", trade_id=trade_id, error="找不到卖出交易")
         return
 
+    if sell_trade.get("snapshot_id") is None and sell_trade.get("strategy_version") is None:
+        yield _sse("review_legacy_skipped", trade_id=trade_id, message="历史成交无研究快照绑定，保留可读，跳过新复盘")
+        return
+
+    market = sell_trade.get("market") or "us_stock"
+    store = store.for_market(market)
+    snapshot_id, strategy_version = bind_snapshot(
+        snapshot_id=sell_trade.get("snapshot_id"),
+        strategy_version=sell_trade.get("strategy_version"),
+        get_snapshot=store.get_research_snapshot,
+        strict=True,
+    )
+    trades = [t for t in trades if (t.get("market") or "us_stock") == market]
     ticker = sell_trade["ticker"]
     exit_price = sell_trade["price"]
 
-    yield _sse("review_start", ticker=ticker, trade_id=trade_id,
-               message=f"开始复盘 {ticker} 卖出交易...")
+    yield _sse("review_start", ticker=ticker, trade_id=trade_id, message=f"开始复盘 {ticker} 卖出交易...")
 
     buy_trades = [t for t in trades if t["ticker"] == ticker and t["side"] == "buy"]
     if buy_trades:
@@ -195,8 +216,7 @@ async def run_trade_review(
     if buy_date:
         try:
             buy_dt = datetime.fromisoformat(buy_date.replace("Z", "+00:00"))
-            sell_dt = datetime.fromisoformat(
-                sell_trade.get("created_at", "").replace("Z", "+00:00"))
+            sell_dt = datetime.fromisoformat(sell_trade.get("created_at", "").replace("Z", "+00:00"))
             holding_days = (sell_dt - buy_dt).days
         except (ValueError, TypeError):
             pass
@@ -218,24 +238,37 @@ async def run_trade_review(
         reviews = store.get_reviews_for_execution(exec_plan_id)
         if reviews:
             committee_review = json.dumps(
-                [{"role": r.get("member_role", ""), "verdict": r.get("verdict", ""),
-                  "summary": r.get("summary", "")[:200]} for r in reviews[:4]],
-                ensure_ascii=False)
+                [
+                    {
+                        "role": r.get("member_role", ""),
+                        "verdict": r.get("verdict", ""),
+                        "summary": r.get("summary", "")[:200],
+                    }
+                    for r in reviews[:4]
+                ],
+                ensure_ascii=False,
+            )
 
     entry_id = sell_trade.get("entry_id", "")
     catalysts = store.get_catalysts_for_entry(entry_id) if entry_id else []
 
-    # 确定市场类型，用于选择基准指数
-    market = "us_stock"
-    if entry_id:
-        wl_entry = store.get(entry_id)
-        if wl_entry:
-            market = wl_entry.get("market", "us_stock")
+    # 以成交所属市场选基准，不依赖仍然存在的观察池记录。
     benchmark_ticker = "000300.SH" if market == "a_stock" else "SPY"
-    catalyst_status = json.dumps(
-        [{"title": c.get("title", ""), "status": c.get("status", ""),
-          "expected_date": c.get("expected_date", "")} for c in catalysts[:5]],
-        ensure_ascii=False) if catalysts else "无相关催化剂"
+    catalyst_status = (
+        json.dumps(
+            [
+                {
+                    "title": c.get("title", ""),
+                    "status": c.get("status", ""),
+                    "expected_date": c.get("expected_date", ""),
+                }
+                for c in catalysts[:5]
+            ],
+            ensure_ascii=False,
+        )
+        if catalysts
+        else "无相关催化剂"
+    )
 
     # ── 19E: 归因分析数据收集 ──
     period_high, period_low, benchmark_return_pct = 0.0, 0.0, 0.0
@@ -245,8 +278,7 @@ async def run_trade_review(
         end_date = sell_trade.get("created_at", "")[:10]
         try:
             snapshots = store.get_snapshots(ticker, days=500)
-            period_snaps = [s for s in snapshots
-                           if start_date <= s.get("date", "")[:10] <= end_date]
+            period_snaps = [s for s in snapshots if start_date <= s.get("date", "")[:10] <= end_date]
             if period_snaps:
                 highs = [s.get("high", 0) for s in period_snaps if s.get("high")]
                 lows = [s.get("low", 0) for s in period_snaps if s.get("low")]
@@ -263,8 +295,7 @@ async def run_trade_review(
             logger.debug("获取持仓期间数据失败: %s", e)
 
         try:
-            benchmark_return_pct = store.get_benchmark_return(
-                start_date, end_date, benchmark=benchmark_ticker)
+            benchmark_return_pct = store.get_benchmark_return(start_date, end_date, benchmark=benchmark_ticker)
         except Exception as e:
             logger.debug("获取基准收益率失败: %s", e)
 
@@ -284,19 +315,20 @@ async def run_trade_review(
     if not use_fallback:
         try:
             prompt_template = (PROMPTS_DIR / "trade_review.md").read_text(encoding="utf-8")
-            prompt = (prompt_template
-                      .replace("{ticker}", ticker)
-                      .replace("{entry_price}", f"{entry_price:.2f}")
-                      .replace("{exit_price}", f"{exit_price:.2f}")
-                      .replace("{return_pct}", f"{return_pct:.2f}")
-                      .replace("{holding_days}", str(holding_days))
-                      .replace("{period_market_data}", period_market_data)
-                      .replace("{period_high}", f"{period_high:.2f}")
-                      .replace("{period_low}", f"{period_low:.2f}")
-                      .replace("{benchmark_return_pct}", f"{benchmark_return_pct:.2f}")
-                      .replace("{execution_plan}", execution_plan or "无执行计划记录")
-                      .replace("{committee_review}", committee_review or "无投委会评审记录")
-                      .replace("{catalyst_status}", catalyst_status))
+            prompt = (
+                prompt_template.replace("{ticker}", ticker)
+                .replace("{entry_price}", f"{entry_price:.2f}")
+                .replace("{exit_price}", f"{exit_price:.2f}")
+                .replace("{return_pct}", f"{return_pct:.2f}")
+                .replace("{holding_days}", str(holding_days))
+                .replace("{period_market_data}", period_market_data)
+                .replace("{period_high}", f"{period_high:.2f}")
+                .replace("{period_low}", f"{period_low:.2f}")
+                .replace("{benchmark_return_pct}", f"{benchmark_return_pct:.2f}")
+                .replace("{execution_plan}", execution_plan or "无执行计划记录")
+                .replace("{committee_review}", committee_review or "无投委会评审记录")
+                .replace("{catalyst_status}", catalyst_status)
+            )
 
             yield _sse("review_progress", ticker=ticker, message=f"{ticker} LLM 分析中...")
 
@@ -315,12 +347,15 @@ async def run_trade_review(
     # ── 规则化 fallback：无需 LLM 的简易复盘 ──
     if use_fallback or result is None:
         logger.info("使用规则化 fallback 复盘 %s（原因: %s）", ticker, fallback_reason)
-        yield _sse("review_progress", ticker=ticker,
-                   message=f"{ticker} 规则化复盘中（{fallback_reason}）...")
+        yield _sse("review_progress", ticker=ticker, message=f"{ticker} 规则化复盘中（{fallback_reason}）...")
         result = _rule_based_review(
-            ticker=ticker, entry_price=entry_price, exit_price=exit_price,
-            return_pct=return_pct, holding_days=holding_days,
-            period_high=period_high, period_low=period_low,
+            ticker=ticker,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            return_pct=return_pct,
+            holding_days=holding_days,
+            period_high=period_high,
+            period_low=period_low,
             benchmark_return_pct=benchmark_return_pct,
         )
 
@@ -336,6 +371,9 @@ async def run_trade_review(
         result_json=result,
         lessons_learned="; ".join(result.get("key_lessons", [])),
         experience_card=exp_card_data,
+        snapshot_id=snapshot_id,
+        strategy_version=strategy_version,
+        strict=True,
     )
 
     # P1.2 分层绩效归因：从复盘 attribution 拆出四层评分
@@ -344,8 +382,7 @@ async def run_trade_review(
         attribution = result.get("attribution", {})
         if attribution:
             store.record_layer_performance(trade_id, ticker, attribution, return_pct)
-            logger.info("分层绩效已记录: trade=%s ticker=%s layers=%s",
-                        trade_id, ticker, list(attribution.keys()))
+            logger.info("分层绩效已记录: trade=%s ticker=%s layers=%s", trade_id, ticker, list(attribution.keys()))
         else:
             logger.warning("复盘结果缺少 attribution，分层绩效未记录: trade=%s ticker=%s", trade_id, ticker)
     except Exception as e:
@@ -387,11 +424,15 @@ async def run_trade_review(
     except Exception as e:
         logger.warning("论点证据更新失败 %s: %s", ticker, e)
 
-    yield _sse("review_done", ticker=ticker, review_id=review_id,
-                return_pct=return_pct,
-                quality_score=result.get("trade_quality_score", 0),
-                lessons=result.get("key_lessons", []),
-                message=f"{ticker} 复盘完成：收益 {return_pct:+.1f}%，质量评分 {result.get('trade_quality_score', '?')}/10")
+    yield _sse(
+        "review_done",
+        ticker=ticker,
+        review_id=review_id,
+        return_pct=return_pct,
+        quality_score=result.get("trade_quality_score", 0),
+        lessons=result.get("key_lessons", []),
+        message=f"{ticker} 复盘完成：收益 {return_pct:+.1f}%，质量评分 {result.get('trade_quality_score', '?')}/10",
+    )
 
 
 async def run_batch_review(
@@ -403,12 +444,10 @@ async def run_batch_review(
     total = len(unreviewed)
 
     if total == 0:
-        yield _sse("batch_review_done", reviewed=0,
-                    message="没有待复盘的卖出交易")
+        yield _sse("batch_review_done", reviewed=0, message="没有待复盘的卖出交易")
         return
 
-    yield _sse("batch_review_start", total=total,
-               message=f"开始批量复盘 {total} 笔交易...")
+    yield _sse("batch_review_start", total=total, message=f"开始批量复盘 {total} 笔交易...")
 
     reviewed = 0
     for trade in unreviewed:
@@ -417,13 +456,13 @@ async def run_batch_review(
             if evt.get("data", {}).get("event") == "review_done":
                 reviewed += 1
 
-    yield _sse("batch_review_done", reviewed=reviewed, total=total,
-               message=f"批量复盘完成：{reviewed}/{total} 笔")
+    yield _sse("batch_review_done", reviewed=reviewed, total=total, message=f"批量复盘完成：{reviewed}/{total} 笔")
 
 
 # ─────────────────────────────────────────────────────────
 # P3.1 机会成本复盘：扫描"没做的决定"（规则化，无需 LLM）
 # ─────────────────────────────────────────────────────────
+
 
 async def scan_missed_opportunities(
     store: WatchlistStore,
@@ -452,11 +491,13 @@ async def scan_missed_opportunities(
             chg = (cur - plan_price) / plan_price * 100
             if chg > 8:
                 store.create_experience_card(
-                    scope="ticker", scope_key=ticker, category="lesson",
+                    scope="ticker",
+                    scope_key=ticker,
+                    category="lesson",
                     title=f"{ticker} 踏空：被拦后上涨 {chg:.0f}%",
                     content=f"该买入计划因风控被拦截，但 {ticker} 现价较计划价 "
-                            f"{plan_price:.2f} 上涨 {chg:.1f}%。复盘：风控阈值是否过严，"
-                            f"或应在合规规模内建仓而非完全放弃。",
+                    f"{plan_price:.2f} 上涨 {chg:.1f}%。复盘：风控阈值是否过严，"
+                    f"或应在合规规模内建仓而非完全放弃。",
                     evidence=[f"计划价 {plan_price:.2f} → 现价 {cur:.2f}"],
                     confidence=0.4,
                 )
@@ -479,10 +520,12 @@ async def scan_missed_opportunities(
             if pnl_pct < -15:
                 ticker = p.get("ticker", "")
                 store.create_experience_card(
-                    scope="ticker", scope_key=ticker, category="lesson",
+                    scope="ticker",
+                    scope_key=ticker,
+                    category="lesson",
                     title=f"{ticker} 错误持有：浮亏 {pnl_pct:.0f}% 未止损",
                     content=f"{ticker} 持仓浮亏 {pnl_pct:.1f}%（成本 {avg:.2f}，现价 "
-                            f"{cur:.2f}），已超过 -15% 但仍未止损。复盘止损纪律是否执行到位。",
+                    f"{cur:.2f}），已超过 -15% 但仍未止损。复盘止损纪律是否执行到位。",
                     evidence=[f"成本 {avg:.2f} → 现价 {cur:.2f}, 浮亏 {pnl_pct:.1f}%"],
                     confidence=0.5,
                 )
@@ -490,5 +533,4 @@ async def scan_missed_opportunities(
     except Exception as e:
         logger.debug("错误持有扫描失败: %s", e)
 
-    yield _sse("missed_scan_done", found=found,
-               message=f"机会成本扫描完成：发现 {found} 条值得复盘的'没做的决定'")
+    yield _sse("missed_scan_done", found=found, message=f"机会成本扫描完成：发现 {found} 条值得复盘的'没做的决定'")

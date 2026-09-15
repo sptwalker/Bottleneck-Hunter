@@ -14,7 +14,7 @@ from bottleneck_hunter.watchlist.store import WatchlistStore
 @pytest.fixture
 def store(tmp_path):
     db = str(tmp_path / "test.db")
-    s = WatchlistStore(db)
+    s = WatchlistStore(db_path=db).for_user("test-user").for_market("us_stock")
 
     entry_id = s.add({
         "ticker": "AAPL",
@@ -46,7 +46,7 @@ def store_with_macro(store):
         "risk_appetite": "moderate",
         "market_summary": "市场偏多",
         "sector_outlook": {"科技": "bullish"},
-    })
+    }, strict=False)
     return s, entry_id, macro_id
 
 
@@ -59,7 +59,7 @@ def store_with_strategic(store_with_macro):
             {"ticker": "AAPL", "weight": 0.15, "action": "buy"}
         ],
         "cash_reserve": 0.3,
-    })
+    }, strict=False)
     return s, entry_id, macro_id, strat_id
 
 
@@ -393,12 +393,13 @@ class TestE2EDecisionFlow:
             CONSENSUS_RESPONSE,       # consensus
         ]
 
-        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
-                   side_effect=self._get_llm_sequence(responses)):
-            with patch("bottleneck_hunter.watchlist.committee.get_llm_for_position",
-                       side_effect=self._get_llm_sequence(
-                           [REVIEW_RESPONSE] * 4 + [CONSENSUS_RESPONSE])):
-                events = await _collect_events(run_daily_decision(s))
+        with (
+            patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
+                  side_effect=self._get_llm_sequence(responses)),
+            patch("bottleneck_hunter.watchlist.committee.get_llm_for_position",
+                  side_effect=self._get_llm_sequence([REVIEW_RESPONSE] * 4 + [CONSENSUS_RESPONSE])),
+        ):
+            events = await _collect_events(run_daily_decision(s))
 
         event_types = [e["event"] for e in events]
         assert event_types[0] == "daily_start"
@@ -474,12 +475,13 @@ class TestE2EDecisionFlow:
             CONSENSUS_RESPONSE,   # consensus
         ]
 
-        with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
-                   side_effect=self._get_llm_sequence(responses)):
-            with patch("bottleneck_hunter.watchlist.committee.get_llm_for_position",
-                       side_effect=self._get_llm_sequence(
-                           [REVIEW_RESPONSE] * 4 + [CONSENSUS_RESPONSE])):
-                events = await _collect_events(run_full_refresh(s))
+        with (
+            patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
+                  side_effect=self._get_llm_sequence(responses)),
+            patch("bottleneck_hunter.watchlist.committee.get_llm_for_position",
+                  side_effect=self._get_llm_sequence([REVIEW_RESPONSE] * 4 + [CONSENSUS_RESPONSE])),
+        ):
+            events = await _collect_events(run_full_refresh(s))
 
         event_types = [e["event"] for e in events]
         assert "refresh_start" in event_types
@@ -496,7 +498,7 @@ class TestBudgetTracker:
     @pytest.fixture
     def budget_store(self, tmp_path):
         db = str(tmp_path / "budget.db")
-        s = WatchlistStore(db)
+        s = WatchlistStore(db_path=db).for_user("test-user").for_market("us_stock")
         return s
 
     def test_degradation_full(self, budget_store):
@@ -560,7 +562,7 @@ class TestDataCollection:
     @pytest.mark.asyncio
     async def test_collect_market_context_empty(self, tmp_path):
         db = str(tmp_path / "empty.db")
-        s = WatchlistStore(db)
+        s = WatchlistStore(db_path=db).for_user("test-user").for_market("us_stock")
         from bottleneck_hunter.watchlist.decision_engine import _collect_market_context
 
         # 新契约：空观察池也应拿到真实大盘指数（不再返回空 indices）；无自选股则无 watchlist_breadth

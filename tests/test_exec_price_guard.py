@@ -2,6 +2,7 @@
 
 对应改进方案 0.4 + 挂单交易（限价单）。运行：pytest tests/test_exec_price_guard.py -q
 """
+from bottleneck_hunter.watchlist.research_contracts import ResearchSnapshot
 from bottleneck_hunter.watchlist.trade_executor import execute_trade
 
 
@@ -15,10 +16,19 @@ class _FakeStore:
         self.rejected = None
         self.unclaimed = None
         self._claim_ok = claim_ok
+        self._user_id = "test"
+        self._market = "us_stock"
+        self._research_snapshot = ResearchSnapshot(
+            snapshot_id="research-p1", market=self._market, strategy_version="test-v1",
+            as_of="2026-07-02T00:00:00+00:00", created_at="2026-07-02T00:00:00+00:00",
+            observations=(),
+        )
         self._plan = {
             "id": "p1", "market": "us_stock", "action": action,
             "ticker": "TEST", "shares": 10, "target_price": planned_price,
             "result_json": {}, "resting_until": resting_until,
+            "snapshot_id": self._research_snapshot.snapshot_id,
+            "strategy_version": self._research_snapshot.strategy_version,
         }
 
     def for_market(self, market):
@@ -26,6 +36,9 @@ class _FakeStore:
 
     def get_execution_plan(self, plan_id):
         return self._plan
+
+    def get_research_snapshot(self, snapshot_id):
+        return self._research_snapshot if snapshot_id == self._research_snapshot.snapshot_id else None
 
     def get_sim_account(self):
         return {"id": "acc1", "cash_balance": 1_000_000, "initial_capital": 1_000_000}

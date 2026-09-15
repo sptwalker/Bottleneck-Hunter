@@ -30,7 +30,7 @@ def test_transcript_roundtrip(tmp_path):
             transcript.append({"type": "analyst", "ts": mc._now_iso(), "round": rnd,
                                "role": a["role"], "name": a["label"], "content": f"{a['role']} r{rnd}"})
     rid = store.create_meeting_record(meeting_type=mc.MEETING_TYPE, title="宏观咨询 · us_stock",
-                                      market="us_stock", transcript_json=transcript, result_json={})
+                                      market="us_stock", transcript_json=transcript, result_json={}, strict=False)
     assert rid
     recs = store.get_meeting_records(meeting_type=mc.MEETING_TYPE, market="us_stock", limit=1)
     assert len(recs) == 1
@@ -55,7 +55,7 @@ def test_compress_trigger(tmp_path, monkeypatch):
     many = [{"type": "user" if i % 2 else "analyst", "ts": old_ts, "round": 1,
              "role": "macro_market", "content": f"m{i}"} for i in range(mc.SUMMARY_TRIGGER + 1)]
     rid = store.create_meeting_record(meeting_type=mc.MEETING_TYPE, market="us_stock",
-                                      title="t", transcript_json=many, result_json={})
+                                      title="t", transcript_json=many, result_json={}, strict=False)
     asyncio.run(mc._maybe_compress(store, None, rid))
     rec = store.get_meeting_record(rid)
     summaries = [m for m in rec["transcript_json"] if m.get("type") == "summary"]
@@ -68,7 +68,7 @@ def test_compress_trigger(tmp_path, monkeypatch):
     few = [{"type": "analyst", "ts": old_ts, "round": 1, "role": "macro_market", "content": f"m{i}"}
            for i in range(10)]
     rid2 = store2.create_meeting_record(meeting_type=mc.MEETING_TYPE, market="us_stock",
-                                        title="t", transcript_json=few, result_json={})
+                                        title="t", transcript_json=few, result_json={}, strict=False)
     asyncio.run(mc._maybe_compress(store2, None, rid2))
     rec2 = store2.get_meeting_record(rid2)
     assert not [m for m in rec2["transcript_json"] if m.get("type") == "summary"]

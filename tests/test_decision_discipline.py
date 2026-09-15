@@ -4,12 +4,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
 @pytest.fixture
 def store(tmp_path):
-    return WatchlistStore(tmp_path / "t.db")
+    return WatchlistStore(db_path=tmp_path / "t.db").for_user("test").for_market("us_stock")
 
 
 # ── A4: L2 target_allocation 钳制 ──────────────────────────
@@ -54,7 +55,8 @@ class TestHardStopLossSweep:
         s.create_sim_position(acct["id"], "NVDA", shares=100, avg_cost=1000.0, entry_id=eid)
         # 战术计划带止损位 900
         s.create_tactical_plan("sp1", eid, "NVDA", "2026-07-01",
-                               {"action": "hold", "exit_plan": {"stop_loss": {"price": 900, "type": "hard"}}})
+                               {"action": "hold", "exit_plan": {"stop_loss": {"price": 900, "type": "hard"}}},
+                               strict=False)
         # 现价 850 已跌破
         s.save_snapshots([{"ticker": "NVDA", "date": "2026-07-02", "close": 850.0, "market": "us_stock"}])
 
@@ -71,7 +73,8 @@ class TestHardStopLossSweep:
         eid = s.add({"ticker": "AAPL", "company_name": "Apple", "tier": "focus", "market": "us_stock"})
         s.create_sim_position(acct["id"], "AAPL", shares=10, avg_cost=200.0, entry_id=eid)
         s.create_tactical_plan("sp1", eid, "AAPL", "2026-07-01",
-                               {"action": "hold", "exit_plan": {"stop_loss": {"price": 180}}})
+                               {"action": "hold", "exit_plan": {"stop_loss": {"price": 180}}},
+                               strict=False)
         s.save_snapshots([{"ticker": "AAPL", "date": "2026-07-02", "close": 210.0, "market": "us_stock"}])
         events = await self._collect(_hard_stop_loss_sweep(s, "us_stock"))
         assert not any(e.get("event") == "decision_warning" for e in events)
@@ -88,7 +91,8 @@ class TestExecutionUsesMarketPrice:
         eid = s.add({"ticker": "MSFT", "company_name": "Microsoft", "tier": "focus", "market": "us_stock"})
         # L4 挂单价 350（≥市价，限价满足→可成交），但下单时真实市价 330
         plan_id = s.create_execution_plan("sp1", eid, "MSFT",
-                                          {"action": "buy", "shares": 10, "target_price": 350})
+                                          {"action": "buy", "shares": 10, "target_price": 350},
+                                          **save_stage_snapshot(s, "L4", {"ticker": "MSFT", "target_price": 350}))
         s.save_snapshots([{"ticker": "MSFT", "date": "2026-07-02", "close": 330.0, "market": "us_stock"}])
         s.confirm_execution(plan_id)  # execute_trade 只作用于已确认计划（原子领单）
         # validate_execution_plan 在 trade_executor 内是函数内 import，patch 其源模块以放行；聚焦成交价来源
@@ -131,8 +135,10 @@ class TestRecordOutcomeOnSell:
                             role_context="committee_risk", ticker="TSLA",
                             prediction_type="vote", prediction_value="approve", market="us_stock")
         # 卖出计划：市价 300 > 成本 200 → 盈利
-        plan_id = s.create_execution_plan("sp1", eid, "TSLA",
-                                          {"action": "sell", "shares": 10, "target_price": 300})
+        plan_id = s.create_execution_plan(
+            "sp1", eid, "TSLA", {"action": "sell", "shares": 10, "target_price": 300},
+            **save_stage_snapshot(s, "L4", {"ticker": "TSLA", "target_price": 300}),
+        )
         s.save_snapshots([{"ticker": "TSLA", "date": "2026-07-02", "close": 300.0, "market": "us_stock"}])
         s.confirm_execution(plan_id)  # execute_trade 只作用于已确认计划（原子领单）
         with patch("bottleneck_hunter.watchlist.constraint_validator.validate_execution_plan",

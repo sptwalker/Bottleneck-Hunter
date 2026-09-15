@@ -2,14 +2,20 @@
 
 import pytest
 
+from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
+
+
+def _make_execution_plan(store, tactical_plan_id, entry_id, ticker, result):
+    binding = save_stage_snapshot(store, "L4", {"ticker": ticker, "plan": result})
+    return store.create_execution_plan(tactical_plan_id, entry_id, ticker, result, **binding)
 
 
 @pytest.fixture
 def store(tmp_path):
     """创建临时 SQLite store 并写入最小测试数据"""
     db = str(tmp_path / "test.db")
-    s = WatchlistStore(db)
+    s = WatchlistStore(db_path=db).for_user("test").for_market("us_stock")
 
     entry_id = s.add({
         "ticker": "AAPL",
@@ -19,10 +25,10 @@ def store(tmp_path):
         "tier": "track",
     })
 
-    macro_id = s.create_macro_strategy({"market_summary": "市场偏多"})
+    macro_id = s.create_macro_strategy({"market_summary": "市场偏多"}, strict=False)
     strat_id = s.create_strategic_plan(macro_id, {
         "target_allocation": [{"ticker": "AAPL", "weight": 0.15, "action": "buy"}],
-    })
+    }, strict=False)
 
     # execute_trade 现要求真实价快照（拒绝按 LLM 定价成交）；给 AAPL 一条收盘价快照
     s.save_snapshots([{"ticker": "AAPL", "date": "2026-07-14", "close": 188.0}])
@@ -85,7 +91,7 @@ class TestStorePositionCRUD:
 class TestTradeExecutor:
     def test_execute_buy(self, store):
         s, entry_id, *_ = store
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "buy", "shares": 50, "target_price": 188.0,
             "amount": 9400, "reasoning": "分批建仓",
         })
@@ -113,7 +119,7 @@ class TestTradeExecutor:
         account = s.get_sim_account()
         s.create_sim_position(account["id"], "AAPL", 100, 180.0, entry_id)
 
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "sell", "shares": 50, "target_price": 180.0,
             "amount": 10000, "reasoning": "止盈",
         })
@@ -135,7 +141,7 @@ class TestTradeExecutor:
         account = s.get_sim_account()
         s.create_sim_position(account["id"], "AAPL", 50, 180.0, entry_id)
 
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "sell", "shares": 50, "target_price": 180.0,
             "amount": 10000, "reasoning": "清仓",
         })
@@ -150,7 +156,7 @@ class TestTradeExecutor:
 
     def test_insufficient_funds(self, store):
         s, entry_id, *_ = store
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "buy", "shares": 10000, "target_price": 188.0,
             "amount": 1880000, "reasoning": "test",
         })
@@ -164,7 +170,7 @@ class TestTradeExecutor:
 
     def test_insufficient_shares(self, store):
         s, entry_id, *_ = store
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "sell", "shares": 100, "target_price": 200.0,
             "amount": 20000, "reasoning": "test",
         })
@@ -181,7 +187,7 @@ class TestTradeExecutor:
         account = s.get_sim_account()
         s.create_sim_position(account["id"], "AAPL", 50, 180.0, entry_id)
 
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "add", "shares": 50, "target_price": 190.0,
             "amount": 9500, "reasoning": "加仓",
         })
@@ -199,7 +205,7 @@ class TestTradeExecutor:
 
     def test_account_recalculated(self, store):
         s, entry_id, *_ = store
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "buy", "shares": 50, "target_price": 188.0,
             "amount": 9400, "reasoning": "test",
         })
@@ -236,13 +242,13 @@ class TestDecisionAPITrade:
         dc_set_store(s)
         tr_set_store(s)
         from bottleneck_hunter.auth.dependencies import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "", "username": "test", "role": "admin"}
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "test", "username": "test", "role": "admin"}
         return TestClient(app), s
 
     def test_confirm_triggers_trade(self, client, store):
         c, s = client
         entry_id = store[1]
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "buy", "shares": 10, "target_price": 188.0,
             "amount": 1880, "reasoning": "test",
         })
@@ -257,7 +263,7 @@ class TestDecisionAPITrade:
     def test_reject_no_trade(self, client, store):
         c, s = client
         entry_id = store[1]
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "buy", "shares": 10, "target_price": 188.0,
         })
 
@@ -278,7 +284,7 @@ class TestDecisionAPITrade:
     def test_equity_history_after_trade(self, client, store):
         c, s = client
         entry_id = store[1]
-        plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        plan_id = _make_execution_plan(s, "tac_1", entry_id, "AAPL", {
             "action": "buy", "shares": 10, "target_price": 188.0,
             "amount": 1880, "reasoning": "test",
         })

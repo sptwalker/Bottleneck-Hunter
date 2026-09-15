@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from bottleneck_hunter.watchlist import trade_executor
 from bottleneck_hunter.watchlist.constraint_validator import ValidationResult
+from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 
@@ -31,6 +32,9 @@ def _make_plan(store, ticker, action, shares, price):
         result_json={"action": action, "shares": shares,
                      "target_price": price, "reasoning": "e2e test"},
         status="pending",
+        **save_stage_snapshot(store, "L4", {
+            "ticker": ticker, "action": action, "shares": shares, "target_price": price,
+        }),
     )
     store.confirm_execution(pid)  # execute_trade 只作用于已确认计划（原子领单 confirmed→executed）
     return pid
@@ -41,10 +45,10 @@ def test_buy_sell_loop_persists_realized_pnl():
     with tempfile.TemporaryDirectory() as d:
         db = str(Path(d) / "loop.db")
         store = WatchlistStore(db_path=db)  # 触发建表 + 迁移
-        store = store.for_market("us_stock")
+        store = store.for_user("test").for_market("us_stock")
 
         _seed_snapshot(store, "TEST", 100.0)
-        acct = store.get_sim_account()  # 自动创建
+        store.get_sim_account()  # 自动创建
         # 保证有足够现金
         store.update_sim_account(cash_balance=1_000_000, initial_capital=1_000_000)
 
@@ -90,7 +94,7 @@ def test_loss_trade_records_negative_pnl():
     """亏损卖出：realized_pnl 为负，win_rate 反映为 0%。"""
     with tempfile.TemporaryDirectory() as d:
         db = str(Path(d) / "loop.db")
-        store = WatchlistStore(db_path=db).for_market("us_stock")
+        store = WatchlistStore(db_path=db).for_user("test").for_market("us_stock")
         _seed_snapshot(store, "LOSE", 100.0)
         store.get_sim_account()
         store.update_sim_account(cash_balance=1_000_000, initial_capital=1_000_000)

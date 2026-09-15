@@ -6,9 +6,10 @@ import json
 import logging
 import uuid
 
-logger = logging.getLogger(__name__)
-
+from bottleneck_hunter.watchlist.snapshot_binding import snapshot_columns
 from bottleneck_hunter.watchlist.store_base import _now_iso, _today
+
+logger = logging.getLogger(__name__)
 
 
 class _DecisionMixin:
@@ -104,7 +105,12 @@ class _DecisionMixin:
             conn.close()
 
 
-    def create_macro_strategy(self, result_json: dict) -> str:
+    def create_macro_strategy(self, result_json: dict, *, snapshot_id: str | None = None,
+                              strategy_version: str | None = None, strict: bool = True) -> str:
+        cols, vals, params = snapshot_columns(
+            snapshot_id=snapshot_id, strategy_version=strategy_version, strict=strict,
+            get_snapshot=self.get_research_snapshot,
+        )
         sid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
@@ -122,8 +128,10 @@ class _DecisionMixin:
                 f"""INSERT INTO macro_strategies
                    (id, version, regime, risk_appetite, recommended_cash_pct,
                     market_summary, key_signals, sector_rotation, risk_factors,
-                    strategy_text, valid_until_trigger, result_json, status, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                    strategy_text, valid_until_trigger, result_json, status, created_at, updated_at
+                    {cols}{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                           {vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     sid, version,
                     rj.get("regime", "sideways"),
@@ -137,7 +145,7 @@ class _DecisionMixin:
                     rj.get("valid_until_trigger", ""),
                     json.dumps(rj, ensure_ascii=False),
                     "valid", now, now,
-                ) + self._user_insert_params() + self._market_insert_params(),
+                ) + params + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return sid
@@ -167,7 +175,7 @@ class _DecisionMixin:
         try:
             q, p = self._filtered(
                 """SELECT id, version, regime, risk_appetite, market_summary,
-                   status, created_at, updated_at
+                   status, created_at, updated_at, snapshot_id, strategy_version
                    FROM macro_strategies ORDER BY version DESC LIMIT ?""",
                 (limit,),
             )
@@ -212,7 +220,13 @@ class _DecisionMixin:
         )
 
 
-    def create_strategic_plan(self, macro_strategy_id: str, result_json: dict) -> str:
+    def create_strategic_plan(self, macro_strategy_id: str, result_json: dict, *,
+                              snapshot_id: str | None = None, strategy_version: str | None = None,
+                              strict: bool = True) -> str:
+        cols, vals, params = snapshot_columns(
+            snapshot_id=snapshot_id, strategy_version=strategy_version, strict=strict,
+            get_snapshot=self.get_research_snapshot,
+        )
         sid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
@@ -230,8 +244,10 @@ class _DecisionMixin:
                 f"""INSERT INTO strategic_plans
                    (id, macro_strategy_id, version, overall_stance, target_allocation,
                     sector_targets, stock_selection, risk_limits, rebalancing_triggers,
-                    strategy_text, result_json, status, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                    strategy_text, result_json, status, created_at, updated_at
+                    {cols}{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                           {vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     sid, macro_strategy_id, version,
                     rj.get("overall_stance", "balanced"),
@@ -243,7 +259,7 @@ class _DecisionMixin:
                     rj.get("strategy_text", ""),
                     json.dumps(rj, ensure_ascii=False),
                     "valid", now, now,
-                ) + self._user_insert_params() + self._market_insert_params(),
+                ) + params + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return sid
@@ -273,7 +289,7 @@ class _DecisionMixin:
         try:
             q, p = self._filtered(
                 """SELECT id, macro_strategy_id, version, overall_stance,
-                   status, created_at, updated_at
+                   status, created_at, updated_at, snapshot_id, strategy_version
                    FROM strategic_plans ORDER BY version DESC LIMIT ?""",
                 (limit,),
             )
@@ -293,7 +309,13 @@ class _DecisionMixin:
 
 
     def create_tactical_plan(self, strategic_plan_id: str, entry_id: str,
-                             ticker: str, plan_date: str, result_json: dict) -> str:
+                             ticker: str, plan_date: str, result_json: dict, *,
+                             snapshot_id: str | None = None, strategy_version: str | None = None,
+                             strict: bool = True) -> str:
+        cols, vals, params = snapshot_columns(
+            snapshot_id=snapshot_id, strategy_version=strategy_version, strict=strict,
+            get_snapshot=self.get_research_snapshot,
+        )
         sid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
@@ -302,8 +324,10 @@ class _DecisionMixin:
                 f"""INSERT INTO tactical_plans
                    (id, strategic_plan_id, entry_id, ticker, plan_date, action,
                     entry_plan, exit_plan, catalyst_watch, confidence,
-                    result_json, status, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                    result_json, status, created_at, updated_at
+                    {cols}{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                           {vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     sid, strategic_plan_id, entry_id, ticker, plan_date,
                     rj.get("action", "hold"),
@@ -313,7 +337,7 @@ class _DecisionMixin:
                     rj.get("confidence", 5),
                     json.dumps(rj, ensure_ascii=False),
                     "active", _now_iso(), _now_iso(),
-                ) + self._user_insert_params() + self._market_insert_params(),
+                ) + params + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return sid
@@ -393,7 +417,12 @@ class _DecisionMixin:
     def create_execution_plan(self, tactical_plan_id: str, entry_id: str,
                               ticker: str, result_json: dict,
                               status: str = "pending",
-                              rejection_reason: str = "") -> str:
+                              rejection_reason: str = "", *, snapshot_id: str | None = None,
+                              strategy_version: str | None = None, strict: bool = True) -> str:
+        cols, vals, params = snapshot_columns(
+            snapshot_id=snapshot_id, strategy_version=strategy_version, strict=strict,
+            get_snapshot=self.get_research_snapshot,
+        )
         sid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
@@ -402,8 +431,10 @@ class _DecisionMixin:
                 f"""INSERT INTO execution_plans
                    (id, tactical_plan_id, entry_id, ticker, action, shares,
                     target_price, amount, method, priority, confidence,
-                    reasoning, result_json, status, rejection_reason, created_at{self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                    reasoning, result_json, status, rejection_reason, created_at
+                    {cols}{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                           {vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     sid, tactical_plan_id, entry_id, ticker,
                     rj.get("action", "hold"),
@@ -416,7 +447,7 @@ class _DecisionMixin:
                     rj.get("reasoning") or rj.get("rationale", ""),
                     json.dumps(rj, ensure_ascii=False),
                     status, rejection_reason, _now_iso(),
-                ) + self._user_insert_params() + self._market_insert_params(),
+                ) + params + self._user_insert_params() + self._market_insert_params(),
             )
             conn.commit()
             return sid
@@ -426,21 +457,43 @@ class _DecisionMixin:
 
     def create_blocked_execution(self, tactical_plan_id: str, entry_id: str,
                                  ticker: str, result_json: dict,
-                                 reason: str, marker: str = "[系统拦截]") -> str:
+                                 reason: str, marker: str = "[系统拦截]", *, snapshot_id: str | None = None,
+                                 strategy_version: str | None = None, strict: bool = True) -> str:
         """创建被拦截的执行计划(status=rejected + 标记)，并写入 trade_feedback 回灌决策。"""
         full_reason = f"{marker} {reason}"
-        sid = self.create_execution_plan(
-            tactical_plan_id=tactical_plan_id, entry_id=entry_id,
-            ticker=ticker, result_json=result_json,
-            status="rejected", rejection_reason=full_reason,
+        cols, vals, params = snapshot_columns(
+            snapshot_id=snapshot_id, strategy_version=strategy_version, strict=strict,
+            get_snapshot=self.get_research_snapshot,
         )
-        try:
-            self.create_trade_feedback(
-                execution_plan_id=sid, ticker=ticker,
-                feedback_type="auto_block", reason=full_reason,
+        sid = uuid.uuid4().hex[:12]
+        fid = uuid.uuid4().hex[:12]
+        rj = result_json or {}
+        with self._write_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO execution_plans
+                   (id, tactical_plan_id, entry_id, ticker, action, shares,
+                    target_price, amount, method, priority, confidence,
+                    reasoning, result_json, status, rejection_reason, created_at
+                    {cols}{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                           {vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (sid, tactical_plan_id, entry_id, ticker, rj.get("action", "hold"),
+                 rj.get("shares", 0), rj.get("target_price") or rj.get("estimated_price"),
+                 rj.get("amount", 0) or rj.get("estimated_amount", 0),
+                 rj.get("method") or rj.get("execution_method", "market"),
+                 rj.get("priority", 5) if isinstance(rj.get("priority"), int) else 5,
+                 rj.get("confidence", 5), rj.get("reasoning") or rj.get("rationale", ""),
+                 json.dumps(rj, ensure_ascii=False), "rejected", full_reason, _now_iso())
+                + params + self._user_insert_params() + self._market_insert_params(),
             )
-        except Exception:
-            logger.debug("create_trade_feedback failed for blocked %s", ticker)
+            conn.execute(
+                f"""INSERT INTO trade_feedback
+                   (id, execution_plan_id, ticker, feedback_type, reason, created_at
+                    {cols}{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?{vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (fid, sid, ticker, "auto_block", full_reason, _now_iso())
+                + params + self._user_insert_params() + self._market_insert_params(),
+            )
         return sid
 
 
@@ -511,11 +564,14 @@ class _DecisionMixin:
             sets = ["result_json = ?"]
             vals: list = [json.dumps(rj, ensure_ascii=False)]
             if new_shares is not None:
-                sets.append("shares = ?"); vals.append(new_shares)
+                sets.append("shares = ?")
+                vals.append(new_shares)
             if new_price is not None:
-                sets.append("target_price = ?"); vals.append(new_price)
+                sets.append("target_price = ?")
+                vals.append(new_price)
             if new_method is not None:
-                sets.append("method = ?"); vals.append(new_method)
+                sets.append("method = ?")
+                vals.append(new_method)
             q, p = self._filtered(
                 f"UPDATE execution_plans SET {', '.join(sets)} WHERE id = ? AND status = 'pending'",
                 tuple(vals) + (plan_id,),
@@ -550,7 +606,8 @@ class _DecisionMixin:
         """P2.2 执行失败回滚：把 confirmed 退回 pending(状态机加固，避免卡死)。"""
         with self._write_conn() as conn:
             q, p = self._filtered(
-                "UPDATE execution_plans SET status = 'pending', confirmed_at = NULL WHERE id = ? AND status = 'confirmed'",
+                "UPDATE execution_plans SET status = 'pending', confirmed_at = NULL "
+                "WHERE id = ? AND status = 'confirmed'",
                 (plan_id,),
             )
             cur = conn.execute(q, p)
@@ -559,24 +616,36 @@ class _DecisionMixin:
 
     def reject_execution(self, plan_id: str, reason: str = "") -> bool:
         with self._write_conn() as conn:
+            q, p = self._filtered("SELECT * FROM execution_plans WHERE id = ?", (plan_id,))
+            row = conn.execute(q, p).fetchone()
+            if not row or row["status"] not in ("pending", "confirmed"):
+                return False
+            plan_market = row["market"] or self._market or "us_stock"
+            # 端点可能未 scope；按计划市场重 scope，但始终保留当前用户过滤，不能用计划 user_id 重绑。
+            if row["snapshot_id"] is not None or row["strategy_version"] is not None:
+                from bottleneck_hunter.watchlist.snapshot_binding import bind_snapshot
+
+                bind_snapshot(
+                    snapshot_id=row["snapshot_id"],
+                    strategy_version=row["strategy_version"],
+                    strict=True,
+                    get_snapshot=self.for_market(plan_market).get_research_snapshot,
+                )
             q, p = self._filtered(
-                "UPDATE execution_plans SET status = 'rejected', rejection_reason = ? WHERE id = ? AND status IN ('pending', 'confirmed')",
+                "UPDATE execution_plans SET status = 'rejected', rejection_reason = ? "
+                "WHERE id = ? AND status IN ('pending', 'confirmed')",
                 (reason, plan_id),
             )
             cur = conn.execute(q, p)
             if cur.rowcount > 0:
-                q2, p2 = self._filtered("SELECT ticker, market FROM execution_plans WHERE id = ?", (plan_id,))
-                row = conn.execute(q2, p2).fetchone()
-                if row:
-                    # 反馈市场跟计划自身走（端点常以未 scope 的 store 调用，不能靠 self._market，否则误记默认 us_stock）
-                    plan_market = row["market"] or self._market or "us_stock"
-                    conn.execute(
-                        f"""INSERT INTO trade_feedback
-                           (id, execution_plan_id, ticker, feedback_type, reason, market, created_at{self._user_insert_cols()})
-                           VALUES (?,?,?,?,?,?,?{self._user_insert_vals()})""",
-                        (uuid.uuid4().hex[:12], plan_id, row["ticker"], "rejection",
-                         reason, plan_market, _now_iso()) + self._user_insert_params(),
-                    )
+                conn.execute(
+                    """INSERT INTO trade_feedback
+                       (id, execution_plan_id, ticker, feedback_type, reason, market, created_at,
+                        user_id, snapshot_id, strategy_version)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (uuid.uuid4().hex[:12], plan_id, row["ticker"], "rejection",
+                     reason, plan_market, _now_iso(), row["user_id"], row["snapshot_id"], row["strategy_version"]),
+                )
             return cur.rowcount > 0
 
 

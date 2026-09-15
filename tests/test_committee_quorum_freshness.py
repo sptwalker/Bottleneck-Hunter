@@ -91,9 +91,15 @@ async def test_ticker_background_failure_does_not_bleed(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "_review_single", fake_review)
     monkeypatch.setattr(C, "_build_consensus", fake_consensus)
 
+    from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
+    bind = save_stage_snapshot(store, "L4", {"batch": ["AAA", "BBB"]})  # 同批共享快照，满足投委会父绑定闸
     pending = [
-        {"id": "p_aaa", "ticker": "AAA", "entry_id": "", "result_json": {"ticker": "AAA", "action": "buy"}},
-        {"id": "p_bbb", "ticker": "BBB", "entry_id": "", "result_json": {"ticker": "BBB", "action": "buy"}},
+        {"id": "p_aaa", "ticker": "AAA", "entry_id": "",
+         "snapshot_id": bind["snapshot_id"], "strategy_version": bind["strategy_version"],
+         "result_json": {"ticker": "AAA", "action": "buy"}},
+        {"id": "p_bbb", "ticker": "BBB", "entry_id": "",
+         "snapshot_id": bind["snapshot_id"], "strategy_version": bind["strategy_version"],
+         "result_json": {"ticker": "BBB", "action": "buy"}},
     ]
     async for _ in C.run_committee_review(store, pending, budget=None, market="us_stock"):
         pass
@@ -119,8 +125,8 @@ def test_upstream_age_days():
 async def test_l3_blocks_on_stale_upstream(tmp_path):
     """真实数据：strategic 回填成 10 天前 → run_tactical_plans 在取 LLM 前阻断，不产今日战术。"""
     store = _store(tmp_path, "stale.db")
-    macro_id = store.create_macro_strategy({"market_summary": "中性", "stance": "neutral"})
-    store.create_strategic_plan(macro_id, {"overall_stance": "neutral", "stock_selection": {}})
+    macro_id = store.create_macro_strategy({"market_summary": "中性", "stance": "neutral"}, strict=False)
+    store.create_strategic_plan(macro_id, {"overall_stance": "neutral", "stock_selection": {}}, strict=False)
 
     # 新鲜时：不应因「未刷新」阻断（无 LLM 会另报错，但不该是新鲜度错）
     fresh_events = [evt async for evt in run_tactical_plans(store, market="us_stock")]

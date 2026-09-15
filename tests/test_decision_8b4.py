@@ -20,10 +20,10 @@ def store(tmp_path):
         "tier": "track",
     })
 
-    macro_id = s.create_macro_strategy({"market_summary": "市场偏多"})
+    macro_id = s.create_macro_strategy({"market_summary": "市场偏多"}, strict=False)
     strat_id = s.create_strategic_plan(macro_id, {
         "target_allocation": [{"ticker": "AAPL", "weight": 0.15, "action": "buy"}],
-    })
+    }, strict=False)
 
     return s, entry_id, macro_id, strat_id
 
@@ -112,6 +112,7 @@ class TestAutoReviews:
             result_json={"what_went_right": ["入场时机好"], "trade_quality_score": 8},
             lessons_learned="入场时机选择正确",
             experience_card={"title": "测试经验", "content": "买在支撑位"},
+            strict=False,
         )
         assert rid
 
@@ -126,9 +127,9 @@ class TestAutoReviews:
 
     def test_get_auto_reviews_list(self, store):
         s, *_ = store
-        s.create_auto_review("t1", "AAPL", return_pct=5.0)
-        s.create_auto_review("t2", "MSFT", return_pct=-3.0)
-        s.create_auto_review("t3", "AAPL", return_pct=10.0)
+        s.create_auto_review("t1", "AAPL", return_pct=5.0, strict=False)
+        s.create_auto_review("t2", "MSFT", return_pct=-3.0, strict=False)
+        s.create_auto_review("t3", "AAPL", return_pct=10.0, strict=False)
 
         all_reviews = s.get_auto_reviews()
         assert len(all_reviews) == 3
@@ -139,7 +140,7 @@ class TestAutoReviews:
     def test_get_auto_reviews_limit(self, store):
         s, *_ = store
         for i in range(5):
-            s.create_auto_review(f"t{i}", "AAPL")
+            s.create_auto_review(f"t{i}", "AAPL", strict=False)
 
         limited = s.get_auto_reviews(limit=3)
         assert len(limited) == 3
@@ -153,22 +154,22 @@ class TestAutoReviews:
         account = s.get_sim_account()
 
         tid_buy = s.create_sim_trade(
-            account["id"], "AAPL", "buy", 100, 180.0, 18000.0)
+            account["id"], "AAPL", "buy", 100, 180.0, 18000.0, strict=False)
         tid_sell = s.create_sim_trade(
-            account["id"], "AAPL", "sell", 100, 195.0, 19500.0)
+            account["id"], "AAPL", "sell", 100, 195.0, 19500.0, strict=False)
 
         unreviewed = s.get_trades_without_review()
         assert len(unreviewed) == 1
         assert unreviewed[0]["id"] == tid_sell
 
-        s.create_auto_review(tid_sell, "AAPL")
+        s.create_auto_review(tid_sell, "AAPL", strict=False)
         unreviewed = s.get_trades_without_review()
         assert len(unreviewed) == 0
 
     def test_trades_without_review_ignores_buys(self, store):
         s, *_ = store
         account = s.get_sim_account()
-        s.create_sim_trade(account["id"], "AAPL", "buy", 50, 180.0, 9000.0)
+        s.create_sim_trade(account["id"], "AAPL", "buy", 50, 180.0, 9000.0, strict=False)
 
         unreviewed = s.get_trades_without_review()
         assert len(unreviewed) == 0
@@ -264,8 +265,8 @@ class TestExperienceCards:
 class TestFeedbackHistory:
     def test_get_feedback_history(self, store):
         s, *_ = store
-        s.create_trade_feedback("plan_1", "AAPL", "rejection", "风险过高")
-        s.create_trade_feedback("plan_2", "MSFT", "rejection", "估值过高")
+        s.create_trade_feedback("plan_1", "AAPL", "rejection", "风险过高", strict=False)
+        s.create_trade_feedback("plan_2", "MSFT", "rejection", "估值过高", strict=False)
 
         history = s.get_trade_feedback_history(limit=50)
         assert len(history) == 2
@@ -355,7 +356,7 @@ class TestDecisionAPIFeedback:
     def test_reviews_with_data(self, client, store):
         c, s = client
         s.create_auto_review("t1", "AAPL", return_pct=5.0,
-                             result_json={"trade_quality_score": 7})
+                             result_json={"trade_quality_score": 7}, strict=False)
 
         resp = c.get("/api/trading/reviews")
         assert resp.status_code == 200
@@ -366,7 +367,7 @@ class TestDecisionAPIFeedback:
     def test_review_detail(self, client, store):
         c, s = client
         rid = s.create_auto_review("t1", "AAPL", return_pct=5.0,
-                                   result_json={"trade_quality_score": 7})
+                                   result_json={"trade_quality_score": 7}, strict=False)
 
         resp = c.get(f"/api/trading/reviews/{rid}")
         assert resp.status_code == 200
@@ -417,7 +418,7 @@ class TestDecisionAPIFeedback:
 
     def test_feedback_with_data(self, client, store):
         c, s = client
-        s.create_trade_feedback("plan_1", "AAPL", "rejection", "太贵了")
+        s.create_trade_feedback("plan_1", "AAPL", "rejection", "太贵了", strict=False)
 
         resp = c.get("/api/trading/feedback")
         assert resp.status_code == 200
@@ -428,8 +429,8 @@ class TestDecisionAPIFeedback:
 
     def test_reviews_filter_by_ticker(self, client, store):
         c, s = client
-        s.create_auto_review("t1", "AAPL", return_pct=5.0)
-        s.create_auto_review("t2", "MSFT", return_pct=-2.0)
+        s.create_auto_review("t1", "AAPL", return_pct=5.0, strict=False)
+        s.create_auto_review("t2", "MSFT", return_pct=-2.0, strict=False)
 
         resp = c.get("/api/trading/reviews?ticker=AAPL")
         assert resp.status_code == 200

@@ -7,36 +7,62 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from bottleneck_hunter.watchlist.snapshot_binding import snapshot_columns
 from bottleneck_hunter.watchlist.store_base import _now_iso
 
 
 class _ResearchMixin:
-    def create_auto_review(self, sim_trade_id: str, ticker: str,
-                           review_type: str = "trade_close",
-                           entry_price: float = 0, exit_price: float = 0,
-                           return_pct: float = 0, result_json: dict | None = None,
-                           lessons_learned: str = "",
-                           experience_card: dict | None = None) -> str:
+    def create_auto_review(
+        self,
+        sim_trade_id: str,
+        ticker: str,
+        review_type: str = "trade_close",
+        entry_price: float = 0,
+        exit_price: float = 0,
+        return_pct: float = 0,
+        result_json: dict | None = None,
+        lessons_learned: str = "",
+        experience_card: dict | None = None,
+        *,
+        snapshot_id: str | None = None,
+        strategy_version: str | None = None,
+        strict: bool = True,
+    ) -> str:
         """写入复盘记录"""
+        cols, vals, params = snapshot_columns(
+            snapshot_id=snapshot_id,
+            strategy_version=strategy_version,
+            strict=strict,
+            get_snapshot=self.get_research_snapshot,
+        )
         rid = uuid.uuid4().hex[:12]
         with self._write_conn() as conn:
             conn.execute(
                 f"""INSERT INTO auto_reviews
                    (id, sim_trade_id, ticker, review_type, entry_price, exit_price,
-                    return_pct, lessons_learned, experience_card, result_json, created_at{self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
-                (rid, sim_trade_id, ticker, review_type,
-                 entry_price, exit_price, return_pct,
-                 lessons_learned,
-                 json.dumps(experience_card or {}, ensure_ascii=False),
-                 json.dumps(result_json or {}, ensure_ascii=False),
-                 _now_iso()) + self._user_insert_params() + self._market_insert_params(),
+                    return_pct, lessons_learned, experience_card, result_json, created_at
+                    {cols}{self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?{vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (
+                    rid,
+                    sim_trade_id,
+                    ticker,
+                    review_type,
+                    entry_price,
+                    exit_price,
+                    return_pct,
+                    lessons_learned,
+                    json.dumps(experience_card or {}, ensure_ascii=False),
+                    json.dumps(result_json or {}, ensure_ascii=False),
+                    _now_iso(),
+                )
+                + params
+                + self._user_insert_params()
+                + self._market_insert_params(),
             )
         return rid
 
-
-    def record_layer_performance(self, trade_id: str, ticker: str,
-                                 attribution: dict, return_pct: float) -> None:
+    def record_layer_performance(self, trade_id: str, ticker: str, attribution: dict, return_pct: float) -> None:
         """P1.2 从复盘 attribution 拆出四层归因，写入 layer_performance。
 
         attribution 结构(来自 trade_review.md):
@@ -63,19 +89,17 @@ class _ResearchMixin:
                     f"""INSERT INTO layer_performance
                        (id, trade_id, ticker, layer, score, assessment, return_pct, created_at{self._user_insert_cols()}{self._market_insert_cols()})
                        VALUES (?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
-                    (uuid.uuid4().hex[:12], trade_id, ticker, layer, score,
-                     assessment, return_pct, _now_iso())
-                    + self._user_insert_params() + self._market_insert_params(),
+                    (uuid.uuid4().hex[:12], trade_id, ticker, layer, score, assessment, return_pct, _now_iso())
+                    + self._user_insert_params()
+                    + self._market_insert_params(),
                 )
-
 
     def get_layer_performance_summary(self, limit: int = 100) -> dict:
         """聚合各层近期表现：平均归因分 + 样本数。返回 {L1:{avg,count}, ...}。"""
         conn = self._connect()
         try:
             q, p = self._filtered(
-                "SELECT layer, AVG(score) avg_score, COUNT(*) cnt FROM layer_performance "
-                "GROUP BY layer",
+                "SELECT layer, AVG(score) avg_score, COUNT(*) cnt FROM layer_performance GROUP BY layer",
             )
             rows = conn.execute(q, p).fetchall()
             out = {}
@@ -85,7 +109,6 @@ class _ResearchMixin:
             return out
         finally:
             conn.close()
-
 
     def get_auto_reviews(self, ticker: str | None = None, limit: int = 20) -> list[dict]:
         conn = self._connect()
@@ -111,13 +134,10 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
     def get_auto_review(self, review_id: str) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._filtered(
-                "SELECT * FROM auto_reviews WHERE id = ?", (review_id,)
-            )
+            q, p = self._filtered("SELECT * FROM auto_reviews WHERE id = ?", (review_id,))
             row = conn.execute(q, p).fetchone()
             if not row:
                 return None
@@ -127,11 +147,18 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
-    def create_vip_strategy_review(self, account_ref: str, *, horizon: str = "portfolio",
-                                   period: str = "", critique: str = "", correction: str = "",
-                                   result_json: dict | None = None,
-                                   provider: str = "", model: str = "") -> str:
+    def create_vip_strategy_review(
+        self,
+        account_ref: str,
+        *,
+        horizon: str = "portfolio",
+        period: str = "",
+        critique: str = "",
+        correction: str = "",
+        result_json: dict | None = None,
+        provider: str = "",
+        model: str = "",
+    ) -> str:
         """写入 VIP 顾问·反思式策略复盘一行（组合中周期为主，horizon 预留 macro/ticker）。"""
         rid = uuid.uuid4().hex[:12]
         with self._write_conn() as conn:
@@ -140,16 +167,26 @@ class _ResearchMixin:
                    (id, account_ref, horizon, period, critique, correction, result_json,
                     provider, model, created_at{self._user_insert_cols()}{self._market_insert_cols()})
                    VALUES (?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
-                (rid, account_ref, horizon, period, critique, correction,
-                 json.dumps(result_json or {}, ensure_ascii=False),
-                 provider, model, _now_iso())
-                + self._user_insert_params() + self._market_insert_params(),
+                (
+                    rid,
+                    account_ref,
+                    horizon,
+                    period,
+                    critique,
+                    correction,
+                    json.dumps(result_json or {}, ensure_ascii=False),
+                    provider,
+                    model,
+                    _now_iso(),
+                )
+                + self._user_insert_params()
+                + self._market_insert_params(),
             )
         return rid
 
-
-    def list_vip_strategy_reviews(self, account_ref: str | None = None, *,
-                                  horizon: str = "portfolio", limit: int = 20) -> list[dict]:
+    def list_vip_strategy_reviews(
+        self, account_ref: str | None = None, *, horizon: str = "portfolio", limit: int = 20
+    ) -> list[dict]:
         conn = self._connect()
         try:
             conds = ["horizon = ?"]
@@ -159,8 +196,7 @@ class _ResearchMixin:
                 params.append(account_ref)
             params.append(limit)
             q, p = self._filtered(
-                f"SELECT * FROM vip_strategy_reviews WHERE {' AND '.join(conds)} "
-                "ORDER BY created_at DESC LIMIT ?",
+                f"SELECT * FROM vip_strategy_reviews WHERE {' AND '.join(conds)} ORDER BY created_at DESC LIMIT ?",
                 tuple(params),
             )
             rows = conn.execute(q, p).fetchall()
@@ -172,7 +208,6 @@ class _ResearchMixin:
             return result
         finally:
             conn.close()
-
 
     def get_trades_without_review(self) -> list[dict]:
         conn = self._connect()
@@ -189,12 +224,17 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
-    def create_experience_card(self, scope: str, scope_key: str,
-                               category: str, title: str, content: str,
-                               evidence: list | None = None,
-                               confidence: float = 0.5,
-                               source_review_id: str | None = None) -> str:
+    def create_experience_card(
+        self,
+        scope: str,
+        scope_key: str,
+        category: str,
+        title: str,
+        content: str,
+        evidence: list | None = None,
+        confidence: float = 0.5,
+        source_review_id: str | None = None,
+    ) -> str:
         """创建经验卡片"""
         cid = uuid.uuid4().hex[:12]
         with self._write_conn() as conn:
@@ -203,16 +243,27 @@ class _ResearchMixin:
                    (id, scope, scope_key, category, title, content, evidence,
                     confidence, source_review_id, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
                    VALUES (?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
-                (cid, scope, scope_key or "", category, title, content,
-                 json.dumps(evidence or [], ensure_ascii=False),
-                 confidence, source_review_id, _now_iso(), _now_iso()) + self._user_insert_params() + self._market_insert_params(),
+                (
+                    cid,
+                    scope,
+                    scope_key or "",
+                    category,
+                    title,
+                    content,
+                    json.dumps(evidence or [], ensure_ascii=False),
+                    confidence,
+                    source_review_id,
+                    _now_iso(),
+                    _now_iso(),
+                )
+                + self._user_insert_params()
+                + self._market_insert_params(),
             )
         return cid
 
-
-    def get_experience_cards(self, scope: str | None = None,
-                             scope_key: str | None = None,
-                             limit: int = 20) -> list[dict]:
+    def get_experience_cards(
+        self, scope: str | None = None, scope_key: str | None = None, limit: int = 20
+    ) -> list[dict]:
         conn = self._connect()
         try:
             conditions = []
@@ -239,9 +290,7 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
-    def get_relevant_cards(self, ticker: str, sector: str = "",
-                           limit: int = 5) -> list[dict]:
+    def get_relevant_cards(self, ticker: str, sector: str = "", limit: int = 5) -> list[dict]:
         conn = self._connect()
         try:
             # 隔离铁律：三个 scope 分支必须整体括号包裹。_filtered 把 `AND user_id=? AND market=?`
@@ -280,7 +329,6 @@ class _ResearchMixin:
         result.sort(key=lambda c: (c.get("confidence") or 0, c.get("applied_count") or 0), reverse=True)
         return result[:limit]
 
-
     def search_cards(self, query: str, *, limit: int = 10) -> list[dict]:
         """P0-③ 经验卡全文检索（FTS5 trigram）：正文/标题命中，隔离随基表 JOIN 回带，按相关度(rank)排序。
 
@@ -300,7 +348,8 @@ class _ResearchMixin:
                    WHERE experience_cards_fts MATCH ?
                    ORDER BY rank
                    LIMIT ?""",
-                (phrase, limit), table="ec",
+                (phrase, limit),
+                table="ec",
             )
             rows = conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
@@ -314,7 +363,6 @@ class _ResearchMixin:
             result.append(d)
         return result
 
-
     def increment_card_applied(self, card_id: str) -> None:
         """经验卡片被引用时，递增 applied_count 并更新 last_applied_at"""
         with self._write_conn() as conn:
@@ -323,7 +371,6 @@ class _ResearchMixin:
                 (_now_iso(), _now_iso(), card_id),
             )
             conn.execute(q, p)
-
 
     def update_card_outcome(self, card_id: str, is_win: bool) -> None:
         """根据交易结果更新经验卡片置信度（贝叶斯后验）"""
@@ -349,7 +396,6 @@ class _ResearchMixin:
                 )
                 conn.execute(q3, p3)
 
-
     def delete_experience_card(self, card_id: str) -> bool:
         conn = self._connect()
         try:
@@ -360,11 +406,16 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
-    def create_thesis(self, entry_id: str, ticker: str, title: str,
-                      summary: str = "", conviction: str = "medium",
-                      time_horizon: str = "medium_term",
-                      pillars: list[dict] | None = None) -> str:
+    def create_thesis(
+        self,
+        entry_id: str,
+        ticker: str,
+        title: str,
+        summary: str = "",
+        conviction: str = "medium",
+        time_horizon: str = "medium_term",
+        pillars: list[dict] | None = None,
+    ) -> str:
         thesis_id = uuid.uuid4().hex[:12]
         now = _now_iso()
         with self._write_conn() as conn:
@@ -373,20 +424,27 @@ class _ResearchMixin:
                    (id, entry_id, ticker, thesis_title, thesis_summary,
                     conviction, status, time_horizon, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
                    VALUES (?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
-                (thesis_id, entry_id, ticker, title, summary,
-                 conviction, "active", time_horizon, now, now) + self._user_insert_params() + self._market_insert_params(),
+                (thesis_id, entry_id, ticker, title, summary, conviction, "active", time_horizon, now, now)
+                + self._user_insert_params()
+                + self._market_insert_params(),
             )
-            for p in (pillars or []):
+            for p in pillars or []:
                 pid = uuid.uuid4().hex[:12]
                 conn.execute(
                     """INSERT INTO thesis_pillars
                        (id, thesis_id, pillar_text, falsification, weight, status, created_at)
                        VALUES (?,?,?,?,?,?,?)""",
-                    (pid, thesis_id, p.get("text", ""), p.get("falsification", ""),
-                     p.get("weight", 1.0), "intact", now),
+                    (
+                        pid,
+                        thesis_id,
+                        p.get("text", ""),
+                        p.get("falsification", ""),
+                        p.get("weight", 1.0),
+                        "intact",
+                        now,
+                    ),
                 )
         return thesis_id
-
 
     def get_theses_for_entry(self, entry_id: str, active_only: bool = True) -> list[dict]:
         conn = self._connect()
@@ -405,21 +463,19 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
     def get_thesis(self, thesis_id: str) -> dict | None:
         conn = self._connect()
         try:
             q, p = self._filtered(
-                "SELECT * FROM investment_theses WHERE id = ?", (thesis_id,),
+                "SELECT * FROM investment_theses WHERE id = ?",
+                (thesis_id,),
             )
             row = conn.execute(q, p).fetchone()
             return dict(row) if row else None
         finally:
             conn.close()
 
-
-    def update_thesis_status(self, thesis_id: str, status: str,
-                             conviction: str | None = None) -> bool:
+    def update_thesis_status(self, thesis_id: str, status: str, conviction: str | None = None) -> bool:
         with self._write_conn() as conn:
             parts = ["status = ?", "updated_at = ?"]
             vals: list = [status, _now_iso()]
@@ -431,10 +487,10 @@ class _ResearchMixin:
                 vals.append(_now_iso())
             vals.append(thesis_id)
             q, p = self._filtered(
-                f"UPDATE investment_theses SET {', '.join(parts)} WHERE id = ?", tuple(vals),
+                f"UPDATE investment_theses SET {', '.join(parts)} WHERE id = ?",
+                tuple(vals),
             )
             return conn.execute(q, p).rowcount > 0
-
 
     def get_pillars(self, thesis_id: str) -> list[dict]:
         conn = self._connect()
@@ -447,7 +503,6 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
     def update_pillar_status(self, pillar_id: str, status: str) -> bool:
         with self._write_conn() as conn:
             cur = conn.execute(
@@ -456,15 +511,19 @@ class _ResearchMixin:
             )
             return cur.rowcount > 0
 
-
-    def create_evidence(self, thesis_id: str, pillar_id: str | None,
-                        date: str, data_point: str,
-                        direction: str = "neutral",
-                        thesis_impact: str = "no_change",
-                        recommended_action: str = "hold",
-                        conviction_before: str = "medium",
-                        conviction_after: str = "medium",
-                        source: str = "") -> str:
+    def create_evidence(
+        self,
+        thesis_id: str,
+        pillar_id: str | None,
+        date: str,
+        data_point: str,
+        direction: str = "neutral",
+        thesis_impact: str = "no_change",
+        recommended_action: str = "hold",
+        conviction_before: str = "medium",
+        conviction_after: str = "medium",
+        source: str = "",
+    ) -> str:
         eid = uuid.uuid4().hex[:12]
         with self._write_conn() as conn:
             conn.execute(
@@ -473,12 +532,23 @@ class _ResearchMixin:
                     thesis_impact, recommended_action, conviction_before,
                     conviction_after, source, created_at{self._user_insert_cols()})
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
-                (eid, thesis_id, pillar_id, date, data_point, direction,
-                 thesis_impact, recommended_action, conviction_before,
-                 conviction_after, source, _now_iso()) + self._user_insert_params(),
+                (
+                    eid,
+                    thesis_id,
+                    pillar_id,
+                    date,
+                    data_point,
+                    direction,
+                    thesis_impact,
+                    recommended_action,
+                    conviction_before,
+                    conviction_after,
+                    source,
+                    _now_iso(),
+                )
+                + self._user_insert_params(),
             )
         return eid
-
 
     def get_evidence_log(self, thesis_id: str, limit: int = 50) -> list[dict]:
         conn = self._connect()
@@ -492,7 +562,6 @@ class _ResearchMixin:
             return [dict(r) for r in conn.execute(q, p).fetchall()]
         finally:
             conn.close()
-
 
     def get_stale_theses(self, days: int = 90) -> list[dict]:
         conn = self._connect()
@@ -508,7 +577,6 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
     def get_thesis_dashboard(self, entry_id: str | None = None) -> dict:
         conn = self._connect()
         try:
@@ -522,12 +590,12 @@ class _ResearchMixin:
                     "SELECT * FROM investment_theses WHERE status = 'active'",
                 )
             theses = [dict(r) for r in conn.execute(q, p).fetchall()]
-            result = {"theses": [], "total_theses": len(theses),
-                      "high": 0, "medium": 0, "low": 0}
+            result = {"theses": [], "total_theses": len(theses), "high": 0, "medium": 0, "low": 0}
             for t in theses:
                 tid = t["id"]
                 pillars = conn.execute(
-                    "SELECT * FROM thesis_pillars WHERE thesis_id = ?", (tid,),
+                    "SELECT * FROM thesis_pillars WHERE thesis_id = ?",
+                    (tid,),
                 ).fetchall()
                 evidence = conn.execute(
                     "SELECT direction, COUNT(*) as cnt FROM thesis_evidence_log WHERE thesis_id = ? GROUP BY direction",
@@ -548,17 +616,23 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
-    def create_scenario_valuation(self, entry_id: str, ticker: str,
-                                   strategic_plan_id: str = "",
-                                   bear_price: float = 0, bear_probability: float = 0.2,
-                                   bear_rationale: str = "",
-                                   base_price: float = 0, base_probability: float = 0.6,
-                                   base_rationale: str = "",
-                                   bull_price: float = 0, bull_probability: float = 0.2,
-                                   bull_rationale: str = "",
-                                   current_price: float = 0,
-                                   valuation_method: str = "relative") -> str:
+    def create_scenario_valuation(
+        self,
+        entry_id: str,
+        ticker: str,
+        strategic_plan_id: str = "",
+        bear_price: float = 0,
+        bear_probability: float = 0.2,
+        bear_rationale: str = "",
+        base_price: float = 0,
+        base_probability: float = 0.6,
+        base_rationale: str = "",
+        bull_price: float = 0,
+        bull_probability: float = 0.2,
+        bull_rationale: str = "",
+        current_price: float = 0,
+        valuation_method: str = "relative",
+    ) -> str:
         vid = uuid.uuid4().hex[:12]
         expected_return = 0.0
         risk_reward = 0.0
@@ -572,9 +646,9 @@ class _ResearchMixin:
             bear_ret = (bear_price - current_price) / current_price
             base_ret = (base_price - current_price) / current_price
             bull_ret = (bull_price - current_price) / current_price
-            expected_return = round(
-                bear_ret * bear_probability + base_ret * base_probability + bull_ret * bull_probability, 4
-            ) * 100
+            expected_return = (
+                round(bear_ret * bear_probability + base_ret * base_probability + bull_ret * bull_probability, 4) * 100
+            )
             downside_ev = abs(bear_ret * bear_probability)
             upside_ev = base_ret * base_probability + bull_ret * bull_probability
             risk_reward = round(upside_ev / downside_ev, 2) if downside_ev > 0 else 0.0
@@ -589,15 +663,31 @@ class _ResearchMixin:
                     current_price, expected_return_pct, risk_reward_ratio,
                     valuation_method, created_at, updated_at{self._user_insert_cols()}{self._market_insert_cols()})
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
-                (vid, entry_id, ticker, strategic_plan_id,
-                 bear_price, bear_probability, bear_rationale,
-                 base_price, base_probability, base_rationale,
-                 bull_price, bull_probability, bull_rationale,
-                 current_price, expected_return, risk_reward,
-                 valuation_method, now, now) + self._user_insert_params() + self._market_insert_params(),
+                (
+                    vid,
+                    entry_id,
+                    ticker,
+                    strategic_plan_id,
+                    bear_price,
+                    bear_probability,
+                    bear_rationale,
+                    base_price,
+                    base_probability,
+                    base_rationale,
+                    bull_price,
+                    bull_probability,
+                    bull_rationale,
+                    current_price,
+                    expected_return,
+                    risk_reward,
+                    valuation_method,
+                    now,
+                    now,
+                )
+                + self._user_insert_params()
+                + self._market_insert_params(),
             )
         return vid
-
 
     def get_latest_valuation(self, entry_id: str) -> dict | None:
         conn = self._connect()
@@ -611,7 +701,6 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
     def get_valuation_history(self, entry_id: str, limit: int = 5) -> list[dict]:
         conn = self._connect()
         try:
@@ -622,7 +711,6 @@ class _ResearchMixin:
             return [dict(r) for r in conn.execute(q, p).fetchall()]
         finally:
             conn.close()
-
 
     def get_portfolio_valuations(self) -> list[dict]:
         conn = self._connect()
@@ -642,7 +730,6 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
     def get_trade_feedback_history(self, limit: int = 50) -> list[dict]:
         conn = self._connect()
         try:
@@ -655,10 +742,15 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
-    def create_tuning_proposal(self, type_: str, parameter_name: str,
-                                old_value: str, new_value: str,
-                                reason: str = "", evidence: list | None = None) -> str:
+    def create_tuning_proposal(
+        self,
+        type_: str,
+        parameter_name: str,
+        old_value: str,
+        new_value: str,
+        reason: str = "",
+        evidence: list | None = None,
+    ) -> str:
         tid = uuid.uuid4().hex[:12]
         conn = self._connect()
         try:
@@ -667,15 +759,23 @@ class _ResearchMixin:
                    (id, type, parameter_name, old_value, new_value,
                     reason, evidence, status, proposed_at{self._user_insert_cols()})
                    VALUES (?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
-                (tid, type_, parameter_name, old_value, new_value,
-                 reason, json.dumps(evidence or [], ensure_ascii=False),
-                 "proposed", _now_iso()) + self._user_insert_params(),
+                (
+                    tid,
+                    type_,
+                    parameter_name,
+                    old_value,
+                    new_value,
+                    reason,
+                    json.dumps(evidence or [], ensure_ascii=False),
+                    "proposed",
+                    _now_iso(),
+                )
+                + self._user_insert_params(),
             )
             conn.commit()
             return tid
         finally:
             conn.close()
-
 
     def get_tuning_proposals(self, status: str | None = None, limit: int = 20) -> list[dict]:
         conn = self._connect()
@@ -701,7 +801,6 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
     def approve_tuning(self, tuning_id: str) -> bool:
         conn = self._connect()
         try:
@@ -714,7 +813,6 @@ class _ResearchMixin:
             return cur.rowcount > 0
         finally:
             conn.close()
-
 
     def reject_tuning(self, tuning_id: str, reason: str = "") -> bool:
         conn = self._connect()
@@ -736,13 +834,22 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
-    def save_backtest_run(self, run_id: str, start_date: str, end_date: str,
-                          initial_capital: float, final_equity: float,
-                          total_return_pct: float, sharpe_ratio: float,
-                          sortino_ratio: float, max_drawdown_pct: float,
-                          calmar_ratio: float, win_rate_pct: float,
-                          trade_count: int, equity_curve: list[dict]) -> None:
+    def save_backtest_run(
+        self,
+        run_id: str,
+        start_date: str,
+        end_date: str,
+        initial_capital: float,
+        final_equity: float,
+        total_return_pct: float,
+        sharpe_ratio: float,
+        sortino_ratio: float,
+        max_drawdown_pct: float,
+        calmar_ratio: float,
+        win_rate_pct: float,
+        trade_count: int,
+        equity_curve: list[dict],
+    ) -> None:
         with self._write_conn() as conn:
             conn.execute(
                 f"""INSERT OR REPLACE INTO backtest_runs
@@ -750,13 +857,24 @@ class _ResearchMixin:
                     total_return_pct, sharpe_ratio, sortino_ratio, max_drawdown_pct,
                     calmar_ratio, win_rate_pct, trade_count, equity_curve, created_at{self._user_insert_cols()})
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._user_insert_vals()})""",
-                (run_id, start_date, end_date, initial_capital, final_equity,
-                 total_return_pct, sharpe_ratio, sortino_ratio, max_drawdown_pct,
-                 calmar_ratio, win_rate_pct, trade_count,
-                 json.dumps(equity_curve, ensure_ascii=False),
-                 _now_iso()) + self._user_insert_params(),
+                (
+                    run_id,
+                    start_date,
+                    end_date,
+                    initial_capital,
+                    final_equity,
+                    total_return_pct,
+                    sharpe_ratio,
+                    sortino_ratio,
+                    max_drawdown_pct,
+                    calmar_ratio,
+                    win_rate_pct,
+                    trade_count,
+                    json.dumps(equity_curve, ensure_ascii=False),
+                    _now_iso(),
+                )
+                + self._user_insert_params(),
             )
-
 
     def get_backtest_runs(self, limit: int = 20) -> list[dict]:
         conn = self._connect()
@@ -778,13 +896,10 @@ class _ResearchMixin:
         finally:
             conn.close()
 
-
     def get_backtest_run(self, run_id: str) -> dict | None:
         conn = self._connect()
         try:
-            q, p = self._user_filter(
-                "SELECT * FROM backtest_runs WHERE id = ?", (run_id,)
-            )
+            q, p = self._user_filter("SELECT * FROM backtest_runs WHERE id = ?", (run_id,))
             row = conn.execute(q, p).fetchone()
             if not row:
                 return None
@@ -796,4 +911,3 @@ class _ResearchMixin:
             return d
         finally:
             conn.close()
-

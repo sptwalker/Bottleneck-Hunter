@@ -27,6 +27,7 @@ from bottleneck_hunter.watchlist.budget import BudgetTracker
 from bottleneck_hunter.watchlist.persona import format_persona_for_prompt, get_user_single_cap
 from bottleneck_hunter.watchlist.provenance import build_provenance
 from bottleneck_hunter.watchlist.regime_mapper import format_bounds_for_prompt, get_allocation_bounds
+from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
 
@@ -46,29 +47,33 @@ import os as _os
 _DECISION_MAX_TOKENS = int(_os.getenv("BH_DECISION_MAX_TOKENS", "8192"))
 
 
-async def _llm_json_object(llm, prompt: str, *, layer: str = "") -> dict:
+async def _llm_json_object(llm, prompt: str, *, layer: str = "", input_prompts: list[str] | None = None) -> dict:
     """调 LLM 并抽取 JSON 对象，抗截断：加大 max_tokens；解析失败则纠偏重试一次。
 
     FallbackChatModel._generate 会把 max_tokens 透传给主/备各候选。首解析失败常因降级模型
     输出被截断/夹带说明 → 追加"只输出完整紧凑 JSON"提示重试(顺带经 fallback 重选模型)。
     仍失败则抛，交由各层既有 except 降级。
     """
-    resp = await asyncio.to_thread(
-        lambda: llm.invoke(prompt, max_tokens=_DECISION_MAX_TOKENS).content)
+    if input_prompts is not None:
+        input_prompts.append(prompt)
+    resp = await asyncio.to_thread(lambda: llm.invoke(prompt, max_tokens=_DECISION_MAX_TOKENS).content)
     try:
         return extract_json_object(resp)
     except ValueError:
         logger.warning("%s LLM 输出无法解析为 JSON(疑被截断)，纠偏重试一次", layer or "decision")
-        retry_prompt = (prompt
-                        + "\n\n【重要】上一次输出无法解析。请**只**返回一个**完整且闭合**的 JSON 对象，"
-                          "不要任何解释文字、不要 markdown 代码围栏、不要在中途截断。")
-        resp2 = await asyncio.to_thread(
-            lambda: llm.invoke(retry_prompt, max_tokens=_DECISION_MAX_TOKENS).content)
+        retry_prompt = (
+            prompt + "\n\n【重要】上一次输出无法解析。请**只**返回一个**完整且闭合**的 JSON 对象，"
+            "不要任何解释文字、不要 markdown 代码围栏、不要在中途截断。"
+        )
+        if input_prompts is not None:
+            input_prompts.append(retry_prompt)
+        resp2 = await asyncio.to_thread(lambda: llm.invoke(retry_prompt, max_tokens=_DECISION_MAX_TOKENS).content)
         return extract_json_object(resp2)  # 再失败则向上抛，走各层降级
 
 
-async def _run_data_negotiation(llm, prompt: str, *, market: str, layer: str,
-                                allowed_tickers: list[str]) -> tuple[dict, list[dict]]:
+async def _run_data_negotiation(
+    llm, prompt: str, *, market: str, layer: str, allowed_tickers: list[str], input_prompts: list[str] | None = None
+) -> tuple[dict, list[dict]]:
     """带「数据调用协商环」的决策 LLM 调用：模型缺外部数据时发 [[DATA_REQ]] → DataHub 实时取数回注。
 
     - 用户 Key 一律经 get_current_user_id() 解析（与调度/Web 注入点同源，绝无全局 Key）。
@@ -82,26 +87,31 @@ async def _run_data_negotiation(llm, prompt: str, *, market: str, layer: str,
 
     async def _ask(p: str) -> str:
         """协商轮次内的单次 LLM 调用：与 _llm_json_object 同口径（max_tokens + 一次纠偏重试）。"""
-        resp = await asyncio.to_thread(
-            lambda: llm.invoke(p, max_tokens=_DECISION_MAX_TOKENS).content)
+        if input_prompts is not None:
+            input_prompts.append(p)
+        resp = await asyncio.to_thread(lambda: llm.invoke(p, max_tokens=_DECISION_MAX_TOKENS).content)
         try:
             extract_json_object(resp)
             return resp
         except ValueError:
             # 协商轮同样可能被降级模型截断 → 纠偏重试一次，避免拿"残 JSON"去探测 request block
-            retry_prompt = (p + "\n\n【重要】上一次输出无法解析。请**只**返回一个**完整且闭合**的 JSON 对象，"
-                              "不要任何解释文字、不要 markdown 代码围栏、不要在中途截断。")
-            return await asyncio.to_thread(
-                lambda: llm.invoke(retry_prompt, max_tokens=_DECISION_MAX_TOKENS).content)
+            retry_prompt = (
+                p + "\n\n【重要】上一次输出无法解析。请**只**返回一个**完整且闭合**的 JSON 对象，"
+                "不要任何解释文字、不要 markdown 代码围栏、不要在中途截断。"
+            )
+            if input_prompts is not None:
+                input_prompts.append(retry_prompt)
+            return await asyncio.to_thread(lambda: llm.invoke(retry_prompt, max_tokens=_DECISION_MAX_TOKENS).content)
 
     try:
         final, fetch_log, _ = await ai_tools.negotiate(
-            _ask, prompt, market=market, user_id=user_id, allowed_tickers=allowed_tickers)
+            _ask, prompt, market=market, user_id=user_id, allowed_tickers=allowed_tickers
+        )
         result = extract_json_object(final)  # 最终轮必是决策 JSON；解析失败照样降级
         return result, fetch_log
     except Exception as e:  # noqa: BLE001  fail-open：任何异常（含协商环内部错误）都不中断决策
         logger.warning("L%s 数据协商失败，降级为原始调用: %s", layer, str(e)[:160])
-        return await _llm_json_object(llm, prompt, layer=layer), []
+        return await _llm_json_object(llm, prompt, layer=layer, input_prompts=input_prompts), []
 
 
 def _decision_allowed_tickers(store, market: str, *extra: str) -> list[str]:
@@ -159,8 +169,9 @@ def _decision_provenance(prompts, models, market, layer, tickers=None) -> dict:
     复盘时可查「哪个 prompt + 哪个模型 + 哪日数据」生成此判断，分辨模型幻觉 vs 数据错。
     models 空 = 规则决策（如硬止损，非 LLM）；prompts 空 = 无模板。
     """
-    return build_provenance(prompts=prompts, models=models, data_as_of=_today(),
-                            tickers=tickers, extra={"market": market, "layer": layer})
+    return build_provenance(
+        prompts=prompts, models=models, data_as_of=_today(), tickers=tickers, extra={"market": market, "layer": layer}
+    )
 
 
 # ─────────────────────────────────────────────────────────
@@ -176,7 +187,6 @@ _MARKET_CONTEXT = {
 - 止损参考：-7%（涨跌停约束下更严格）
 - 估值体系：PE/PB 中枢偏高，需参考行业分位数
 - 政策敏感：关注监管政策、产业政策导向""",
-
     "us_stock": """## 市场特性（美股）
 - 无涨跌幅限制（熔断除外）
 - 交易规则：T+0，可做空
@@ -185,7 +195,6 @@ _MARKET_CONTEXT = {
 - 止损参考：-10%
 - 估值体系：DCF 为主，EV/EBITDA、P/S 常用
 - 宏观驱动：联储利率决议、非农/CPI 数据""",
-
     "hk_stock": """## 市场特性（港股）
 - 无涨跌幅限制；设有 VCM 市调机制
 - 交易规则：T+0，可做空，港币计价
@@ -386,6 +395,7 @@ def _portfolio_risk_summary(store: WatchlistStore, positions: list[dict], total_
         return {}
     try:
         from bottleneck_hunter.watchlist.risk_metrics import compute_portfolio_risk
+
         price_histories = {}
         for pos in positions:
             tk = pos.get("ticker", "")
@@ -397,14 +407,19 @@ def _portfolio_risk_summary(store: WatchlistStore, positions: list[dict], total_
         # 复用 value_series 同一基准口径（default_benchmark_ticker + 共享桶快照），收益率按最旧→最新排列；
         # compute 内改按"最近对齐"取各序列尾部同长窗口（截至最新交易日按日历对齐，防稀疏史错配）。
         from bottleneck_hunter.watchlist.macro_data import default_benchmark_ticker
+
         bench_code, _ = default_benchmark_ticker(getattr(store, "_market", "") or "us_stock")
         bench_snaps = store.get_snapshots(bench_code, days=60)
         bench_closes = [s["close"] for s in reversed(bench_snaps) if s.get("close")] if bench_snaps else []
-        benchmark_returns = [bench_closes[i] / bench_closes[i - 1] - 1
-                             for i in range(1, len(bench_closes)) if bench_closes[i - 1] > 0]
-        m = compute_portfolio_risk(positions=positions, price_histories=price_histories,
-                                   benchmark_returns=benchmark_returns or None,
-                                   total_equity=total_equity or 100000.0)
+        benchmark_returns = [
+            bench_closes[i] / bench_closes[i - 1] - 1 for i in range(1, len(bench_closes)) if bench_closes[i - 1] > 0
+        ]
+        m = compute_portfolio_risk(
+            positions=positions,
+            price_histories=price_histories,
+            benchmark_returns=benchmark_returns or None,
+            total_equity=total_equity or 100000.0,
+        )
         return {
             "concentration_hhi": m.concentration_index,
             "max_single_weight_pct": m.max_single_weight,
@@ -413,8 +428,7 @@ def _portfolio_risk_summary(store: WatchlistStore, positions: list[dict], total_
             "cvar_95": m.cvar_95,
             "portfolio_beta": m.portfolio_beta,
             "portfolio_volatility_pct": m.portfolio_volatility,
-            "risk_coverage": {"priced": m.priced_count, "total": m.total_count,
-                              "weight_pct": m.priced_weight_pct},
+            "risk_coverage": {"priced": m.priced_count, "total": m.total_count, "weight_pct": m.priced_weight_pct},
             "high_correlation_pairs": m.correlation_pairs,
             "warnings": m.warnings,
         }
@@ -423,8 +437,9 @@ def _portfolio_risk_summary(store: WatchlistStore, positions: list[dict], total_
         return {}
 
 
-def _compute_deviation_drift(store: WatchlistStore, plan_rj: dict, account: dict,
-                             positions: list[dict], market: str) -> dict:
+def _compute_deviation_drift(
+    store: WatchlistStore, plan_rj: dict, account: dict, positions: list[dict], market: str
+) -> dict:
     """确定性计算 L2 偏离度：实际 vs 目标（equity/cash/sector 权重），代替 LLM 心算。
 
     返回 {equity_drift_pct, cash_drift_pct, sector_drift: [...], max_abs_drift_pct, rebalance_suggested}。
@@ -457,7 +472,11 @@ def _compute_deviation_drift(store: WatchlistStore, plan_rj: dict, account: dict
         target_cash = ta.get("cash_pct")
 
     # sector 实际权重（用观察池 sector 映射）
-    sector_map = {e["ticker"]: e.get("sector", "未分类") for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)}
+    sector_map = {
+        e["ticker"]: e.get("sector", "未分类")
+        for e in store.list_all()
+        if normalize_market(e.get("market")) == normalize_market(market)
+    }
     actual_sector: dict[str, float] = {}
     for p in positions:
         sec = sector_map.get(p.get("ticker", ""), "未分类")
@@ -469,16 +488,19 @@ def _compute_deviation_drift(store: WatchlistStore, plan_rj: dict, account: dict
         tgt = target_sector.get(sec)
         tgt = tgt.get("target_pct") if isinstance(tgt, dict) else tgt
         if isinstance(tgt, (int, float)):
-            sector_drift.append({"sector": sec, "actual_pct": act, "target_pct": tgt,
-                                 "drift_pct": round(act - tgt, 1)})
+            sector_drift.append({"sector": sec, "actual_pct": act, "target_pct": tgt, "drift_pct": round(act - tgt, 1)})
 
     drifts = [abs(d["drift_pct"]) for d in sector_drift]
     if isinstance(target_equity, (int, float)):
         drifts += [abs(equity_drift), abs(cash_drift)]
     max_abs = max(drifts) if drifts else 0
     return {
-        "actual_equity_pct": actual_equity_pct, "target_equity_pct": target_equity, "equity_drift_pct": equity_drift,
-        "actual_cash_pct": actual_cash_pct, "target_cash_pct": target_cash, "cash_drift_pct": cash_drift,
+        "actual_equity_pct": actual_equity_pct,
+        "target_equity_pct": target_equity,
+        "equity_drift_pct": equity_drift,
+        "actual_cash_pct": actual_cash_pct,
+        "target_cash_pct": target_cash,
+        "cash_drift_pct": cash_drift,
         "sector_drift": sector_drift,
         "max_abs_drift_pct": round(max_abs, 1),
         # 有明确目标才做确定性判定；无目标(旧格式/缺失)返回 None → 交由 LLM 判断
@@ -506,10 +528,13 @@ def _holder_qoq(store: WatchlistStore, ticker: str) -> dict | None:
     added = sorted((h for h in common if deltas[h] > 0), key=lambda h: deltas[h], reverse=True)
     trimmed = sorted((h for h in common if deltas[h] < 0), key=lambda h: deltas[h])
     return {
-        "cur_quarter": dates[0], "prev_quarter": dates[1],
+        "cur_quarter": dates[0],
+        "prev_quarter": dates[1],
         "direction": "净增持" if net > 0 else "净减持" if net < 0 else "持平",
-        "net_shares": net, "common_holders": len(common),
-        "added_holders": added[:5], "trimmed_holders": trimmed[:5],
+        "net_shares": net,
+        "common_holders": len(common),
+        "added_holders": added[:5],
+        "trimmed_holders": trimmed[:5],
     }
 
 
@@ -522,10 +547,10 @@ def _chip_context(store: WatchlistStore, ticker: str) -> dict:
     try:
         holders = store.get_institutional_holders(ticker, limit=5, latest_only=True)
         if holders:
-            out["top_institutions"] = [{"name": h.get("holder_name", ""),
-                                        "pct_held": h.get("pct_held", 0)} for h in holders[:5]]
-            out["institution_count"] = len(
-                store.get_institutional_holders(ticker, limit=50, latest_only=True))
+            out["top_institutions"] = [
+                {"name": h.get("holder_name", ""), "pct_held": h.get("pct_held", 0)} for h in holders[:5]
+            ]
+            out["institution_count"] = len(store.get_institutional_holders(ticker, limit=50, latest_only=True))
     except Exception:
         pass
     try:
@@ -556,18 +581,27 @@ def _chip_context(store: WatchlistStore, ticker: str) -> dict:
 # L1: 宏观策略
 # ─────────────────────────────────────────────────────────
 
-async def _inject_market_news(store: WatchlistStore, market: str, market_data: dict,
-                              llm, budget: BudgetTracker | None) -> None:
+
+async def _inject_market_news(
+    store: WatchlistStore, market: str, market_data: dict, llm, budget: BudgetTracker | None
+) -> None:
     """把市场/主题级近期新闻注入 market_data['news']（优先读库，未采集则实时兜底）。"""
     from bottleneck_hunter.watchlist.news_pipeline import fetch_market_news, market_sentinel
     from bottleneck_hunter.watchlist.prompt_guard import sanitize_external_text
+
     _mnews = store.get_news(market_sentinel(market), limit=15)
     if _mnews:
-        market_data["news"] = [{"topic": sanitize_external_text(n.get("llm_analysis", "")),
-                                "title": sanitize_external_text(n.get("title", "")),
-                                "summary": sanitize_external_text(n.get("summary", "")),
-                                "date": n.get("date", ""), "source_name": n.get("source_name", ""),
-                                "sentiment": n.get("sentiment", "")} for n in _mnews]
+        market_data["news"] = [
+            {
+                "topic": sanitize_external_text(n.get("llm_analysis", "")),
+                "title": sanitize_external_text(n.get("title", "")),
+                "summary": sanitize_external_text(n.get("summary", "")),
+                "date": n.get("date", ""),
+                "source_name": n.get("source_name", ""),
+                "sentiment": n.get("sentiment", ""),
+            }
+            for n in _mnews
+        ]
     else:
         market_data["news"] = await fetch_market_news(market, llm, budget)
 
@@ -585,8 +619,7 @@ async def run_macro_strategy(
     避免重复跑一轮 yfinance/akshare 采集与新闻注入。
     """
     store = store.for_market(market)
-    yield _sse("decision_start", layer="L1", action="generate",
-               market=market, message="开始生成 L1 宏观策略...")
+    yield _sse("decision_start", layer="L1", action="generate", market=market, message="开始生成 L1 宏观策略...")
 
     llm, provider, model = get_llm_for_position(position="L1_macro")
     if not llm:
@@ -604,24 +637,30 @@ async def run_macro_strategy(
         active_markets = market_data.get("markets", [])
         market_ctx = _get_market_context_text(active_markets)
         prompt_template = _load_prompt("decision_macro")
-        prompt = (prompt_template
-                  .replace("{market_context}", market_ctx)
-                  .replace("{market_indices}", json.dumps(market_data.get("indices", {}), ensure_ascii=False))
-                  .replace("{sector_performance}", json.dumps(market_data.get("sectors", {}), ensure_ascii=False))
-                  .replace("{sentiment_indicators}", json.dumps(market_data.get("sentiment", {}), ensure_ascii=False))
-                  .replace("{macro_economic}", json.dumps(market_data.get("macro", {}), ensure_ascii=False))
-                  .replace("{market_news}", json.dumps(market_data.get("news", []), ensure_ascii=False))
-                  .replace("{user_persona}", format_persona_for_prompt(store))
-                  )
+        prompt = (
+            prompt_template.replace("{market_context}", market_ctx)
+            .replace("{market_indices}", json.dumps(market_data.get("indices", {}), ensure_ascii=False))
+            .replace("{sector_performance}", json.dumps(market_data.get("sectors", {}), ensure_ascii=False))
+            .replace("{sentiment_indicators}", json.dumps(market_data.get("sentiment", {}), ensure_ascii=False))
+            .replace("{macro_economic}", json.dumps(market_data.get("macro", {}), ensure_ascii=False))
+            .replace("{market_news}", json.dumps(market_data.get("news", []), ensure_ascii=False))
+            .replace("{user_persona}", format_persona_for_prompt(store))
+        )
 
+        input_prompts = []
         all_models = get_models_for_role("L1_macro")
         use_cross = len(all_models) >= 2
 
         if use_cross:
-            yield _sse("decision_progress", layer="L1", step="llm_reasoning",
-                       message=f"L1 双模型交叉验证中... ({len(all_models)} 路)")
+            yield _sse(
+                "decision_progress",
+                layer="L1",
+                step="llm_reasoning",
+                message=f"L1 双模型交叉验证中... ({len(all_models)} 路)",
+            )
 
             async def _invoke_model(m_llm, m_prov, m_mod):
+                input_prompts.append(prompt)
                 r = await asyncio.to_thread(lambda: m_llm.invoke(prompt).content)
                 if budget:
                     budget.record(m_prov, m_mod, 5000, 2000, "macro_strategy")
@@ -641,25 +680,35 @@ async def run_macro_strategy(
             else:
                 raise RuntimeError("所有模型调用均失败")
         else:
-            yield _sse("decision_progress", layer="L1", step="llm_reasoning",
-                       message="L1 LLM 推理中...")
+            yield _sse("decision_progress", layer="L1", step="llm_reasoning", message="L1 LLM 推理中...")
             allowed_tk = _decision_allowed_tickers(store, market)
             result, _fetch_log = await _run_data_negotiation(
-                llm, prompt, market=market, layer="1", allowed_tickers=allowed_tk)
+                llm, prompt, market=market, layer="1", allowed_tickers=allowed_tk, input_prompts=input_prompts
+            )
             if _fetch_log:
-                yield _sse("decision_progress", layer="L1", step="data_fetch_round",
-                           message=f"L1 数据补充 {len(_fetch_log)} 条")
+                yield _sse(
+                    "decision_progress",
+                    layer="L1",
+                    step="data_fetch_round",
+                    message=f"L1 数据补充 {len(_fetch_log)} 条",
+                )
             if budget:
                 budget.record(provider, model, 5000, 2000, "macro_strategy")
-        _l1_models = ([tuple(s.split(":", 1)) for s in result.get("_models_used", []) if ":" in s]
-                      or [(provider, model)])  # 交叉验证用实际参与的多模型，否则单模型
+        _l1_models = [tuple(s.split(":", 1)) for s in result.get("_models_used", []) if ":" in s] or [
+            (provider, model)
+        ]  # 交叉验证用实际参与的多模型，否则单模型
         result["_provenance"] = _decision_provenance(["decision_macro"], _l1_models, market, "L1")
-        strategy_id = store.create_macro_strategy(result)
+        _l1_binding = save_stage_snapshot(store, "L1", {"market_data": market_data, "prompts": input_prompts})
+        strategy_id = store.create_macro_strategy(result, **_l1_binding)
 
-        yield _sse("decision_done", layer="L1", strategy_id=strategy_id,
-                   regime=result.get("regime", "sideways"),
-                   risk_appetite=result.get("risk_appetite", "balanced"),
-                   message=f"L1 宏观策略已生成：{result.get('regime', '?')} / {result.get('risk_appetite', '?')}")
+        yield _sse(
+            "decision_done",
+            layer="L1",
+            strategy_id=strategy_id,
+            regime=result.get("regime", "sideways"),
+            risk_appetite=result.get("risk_appetite", "balanced"),
+            message=f"L1 宏观策略已生成：{result.get('regime', '?')} / {result.get('risk_appetite', '?')}",
+        )
 
     except Exception as e:
         logger.exception("L1 宏观策略生成失败")
@@ -673,13 +722,11 @@ async def run_macro_check(
 ) -> AsyncGenerator[dict, None]:
     """L1 日常检查 — 判断现有宏观策略是否仍然有效"""
     store = store.for_market(market)
-    yield _sse("decision_start", layer="L1", action="check",
-               message="L1 日常检查中...")
+    yield _sse("decision_start", layer="L1", action="check", message="L1 日常检查中...")
 
     current = store.get_latest_macro_strategy()
     if not current:
-        yield _sse("decision_info", layer="L1",
-                   message="无现有 L1 策略，需要先全面生成")
+        yield _sse("decision_info", layer="L1", message="无现有 L1 策略，需要先全面生成")
         async for evt in run_macro_strategy(store, budget, market=market):
             yield evt
         return
@@ -708,14 +755,14 @@ async def run_macro_check(
                 pass
 
         prompt_template = _load_prompt("decision_macro_check")
-        prompt = (prompt_template
-                  .replace("{market_context}", market_ctx)
-                  .replace("{strategy_date}", created_at[:10] if created_at else "未知")
-                  .replace("{days_ago}", str(days_ago))
-                  .replace("{version}", str(current.get("version", 1)))
-                  .replace("{current_strategy}", json.dumps(current.get("result_json", {}), ensure_ascii=False))
-                  .replace("{today_market_data}", json.dumps(market_data, ensure_ascii=False))
-                  )
+        prompt = (
+            prompt_template.replace("{market_context}", market_ctx)
+            .replace("{strategy_date}", created_at[:10] if created_at else "未知")
+            .replace("{days_ago}", str(days_ago))
+            .replace("{version}", str(current.get("version", 1)))
+            .replace("{current_strategy}", json.dumps(current.get("result_json", {}), ensure_ascii=False))
+            .replace("{today_market_data}", json.dumps(market_data, ensure_ascii=False))
+        )
 
         result = await _llm_json_object(llm, prompt, layer="L1-check")
 
@@ -725,20 +772,24 @@ async def run_macro_check(
         status = result.get("strategy_status", "valid")
 
         if status == "needs_major_revision":
-            yield _sse("decision_info", layer="L1",
-                       message="L1 宏观策略需要重大修订，开始重新生成...")
+            yield _sse("decision_info", layer="L1", message="L1 宏观策略需要重大修订，开始重新生成...")
             # 复用日检已采集的 market_data，避免重复跑一轮 yfinance/akshare 采集
             async for evt in run_macro_strategy(store, budget, market=market, market_data=market_data):
                 yield evt
         else:
             store.update_macro_status(
-                current["id"], status,
+                current["id"],
+                status,
                 minor_tweaks=result.get("minor_tweaks"),
             )
-            yield _sse("decision_done", layer="L1", action="check",
-                       status=status,
-                       commentary=result.get("daily_commentary", ""),
-                       message=f"L1 检查完成：{status}")
+            yield _sse(
+                "decision_done",
+                layer="L1",
+                action="check",
+                status=status,
+                commentary=result.get("daily_commentary", ""),
+                message=f"L1 检查完成：{status}",
+            )
 
     except Exception as e:
         logger.exception("L1 日常检查失败")
@@ -749,6 +800,7 @@ async def run_macro_check(
 # L2: 组合策略
 # ─────────────────────────────────────────────────────────
 
+
 async def run_strategic_plan(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
@@ -757,13 +809,11 @@ async def run_strategic_plan(
 ) -> AsyncGenerator[dict, None]:
     """生成全新的 L2 组合策略。force=True 忽略当日复用缓存强制重生成。"""
     store = store.for_market(market)
-    yield _sse("decision_start", layer="L2", action="generate",
-               message="开始生成 L2 组合策略...")
+    yield _sse("decision_start", layer="L2", action="generate", message="开始生成 L2 组合策略...")
 
     macro = store.get_latest_macro_strategy()
     if not macro:
-        yield _sse("decision_info", layer="L2",
-                   message="无 L1 宏观策略，需要先生成")
+        yield _sse("decision_info", layer="L2", message="无 L1 宏观策略，需要先生成")
         async for evt in run_macro_strategy(store, budget, market=market):
             yield evt
         macro = store.get_latest_macro_strategy()
@@ -781,6 +831,7 @@ async def run_strategic_plan(
     # L2 是策略层非交易执行；每日仍有 run_deviation_check 做偏离检查，故当日复用安全。
     # BH_DECISION_REUSE_HOURS=0 可关闭。
     import os as _os
+
     _reuse_h = float(_os.getenv("BH_DECISION_REUSE_HOURS", "20"))
     if not force and _reuse_h > 0:
         try:
@@ -791,6 +842,7 @@ async def run_strategic_plan(
             _fresh = False
             try:
                 from datetime import datetime, timezone
+
                 _t = datetime.fromisoformat(_prev.get("created_at", ""))
                 if _t.tzinfo is None:
                     _t = _t.replace(tzinfo=timezone.utc)
@@ -799,12 +851,15 @@ async def run_strategic_plan(
                 _fresh = False
             if _fresh:
                 _rj = _prev.get("result_json") or {}
-                yield _sse("decision_done", layer="L2", reused=True,
-                           plan_id=_prev.get("id", ""),
-                           stance=(_rj.get("overall_stance", "balanced") if isinstance(_rj, dict) else "balanced"),
-                           result=_rj,
-                           message=f"♻ 复用当日 L2 组合策略 v{_prev.get('version', '?')}"
-                                   f"（上游 L1 未变），跳过重生成省算力")
+                yield _sse(
+                    "decision_done",
+                    layer="L2",
+                    reused=True,
+                    plan_id=_prev.get("id", ""),
+                    stance=(_rj.get("overall_stance", "balanced") if isinstance(_rj, dict) else "balanced"),
+                    result=_rj,
+                    message=f"♻ 复用当日 L2 组合策略 v{_prev.get('version', '?')}（上游 L1 未变），跳过重生成省算力",
+                )
                 return
 
     if budget and not budget.can_spend(estimated_tokens=8000):
@@ -839,38 +894,60 @@ async def run_strategic_plan(
             alloc_bounds["max_single_pct"] = min(alloc_bounds["max_single_pct"], _user_cap)
         bounds_text = format_bounds_for_prompt(alloc_bounds)
 
-        prompt = (prompt_template
-                  .replace("{market_context}", market_ctx)
-                  .replace("{macro_strategy}", json.dumps(macro_json, ensure_ascii=False))
-                  .replace("{allocation_bounds}", bounds_text)
-                  .replace("{watchlist_signals}", json.dumps(watchlist_signals, ensure_ascii=False))
-                  .replace("{account_status}", json.dumps({
-                      "total_equity": account_status.get("total_equity", 100000),
-                      "cash_balance": account_status.get("cash_balance", 100000),
-                      "positions": [{"ticker": p["ticker"], "weight_pct": p.get("weight_pct", 0),
-                                     "unrealized_pnl": p.get("unrealized_pnl", 0)} for p in positions],
-                  }, ensure_ascii=False))
-                  .replace("{portfolio_risk}", json.dumps(
-                      _portfolio_risk_summary(store, positions, account_status.get("total_equity", 100000)),
-                      ensure_ascii=False) or "暂无持仓风险数据")
-                  .replace("{lessons_learned}", lessons or "暂无历史复盘数据")
-                  .replace("{previous_strategic_plan}", json.dumps(
-                      previous_plan.get("result_json", {}) if previous_plan else {},
-                      ensure_ascii=False,
-                  ))
-                  .replace("{user_persona}", format_persona_for_prompt(store))
-                  )
+        prompt = (
+            prompt_template.replace("{market_context}", market_ctx)
+            .replace("{macro_strategy}", json.dumps(macro_json, ensure_ascii=False))
+            .replace("{allocation_bounds}", bounds_text)
+            .replace("{watchlist_signals}", json.dumps(watchlist_signals, ensure_ascii=False))
+            .replace(
+                "{account_status}",
+                json.dumps(
+                    {
+                        "total_equity": account_status.get("total_equity", 100000),
+                        "cash_balance": account_status.get("cash_balance", 100000),
+                        "positions": [
+                            {
+                                "ticker": p["ticker"],
+                                "weight_pct": p.get("weight_pct", 0),
+                                "unrealized_pnl": p.get("unrealized_pnl", 0),
+                            }
+                            for p in positions
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            .replace(
+                "{portfolio_risk}",
+                json.dumps(
+                    _portfolio_risk_summary(store, positions, account_status.get("total_equity", 100000)),
+                    ensure_ascii=False,
+                )
+                or "暂无持仓风险数据",
+            )
+            .replace("{lessons_learned}", lessons or "暂无历史复盘数据")
+            .replace(
+                "{previous_strategic_plan}",
+                json.dumps(
+                    previous_plan.get("result_json", {}) if previous_plan else {},
+                    ensure_ascii=False,
+                ),
+            )
+            .replace("{user_persona}", format_persona_for_prompt(store))
+        )
 
-        yield _sse("decision_progress", layer="L2", step="llm_reasoning",
-                   message="L2 LLM 推理中...")
+        yield _sse("decision_progress", layer="L2", step="llm_reasoning", message="L2 LLM 推理中...")
 
         _pos_tk = [p.get("ticker", "") for p in (positions or [])]
         allowed_tk = _decision_allowed_tickers(store, market, *_pos_tk)
+        input_prompts = []
         result, _fetch_log = await _run_data_negotiation(
-            llm, prompt, market=market, layer="2", allowed_tickers=allowed_tk)
+            llm, prompt, market=market, layer="2", allowed_tickers=allowed_tk, input_prompts=input_prompts
+        )
         if _fetch_log:
-            yield _sse("decision_progress", layer="L2", step="data_fetch_round",
-                       message=f"L2 数据补充 {len(_fetch_log)} 条")
+            yield _sse(
+                "decision_progress", layer="L2", step="data_fetch_round", message=f"L2 数据补充 {len(_fetch_log)} 条"
+            )
 
         if budget:
             budget.record(provider, model, 8000, 3000, "strategic_plan")
@@ -883,20 +960,30 @@ async def run_strategic_plan(
             for w in clamp_warnings:
                 yield _sse("decision_warning", layer="L2", message=f"⚠ L2 配置越界已钳制：{w}")
         _sel = result.get("stock_selection", {})
-        _l2_tk = [h.get("ticker", "") for h in
-                  (_sel.get("core_holdings", []) + _sel.get("tactical_holdings", []))]
+        _l2_tk = [h.get("ticker", "") for h in (_sel.get("core_holdings", []) + _sel.get("tactical_holdings", []))]
         result["_provenance"] = _decision_provenance(["decision_strategic"], [(provider, model)], market, "L2", _l2_tk)
-        plan_id = store.create_strategic_plan(macro["id"], result)
+        binding = save_stage_snapshot(
+            store,
+            "L2",
+            {
+                "prompts": input_prompts,
+                "macro": macro,
+                "allocation_bounds": alloc_bounds,
+            },
+        )
+        plan_id = store.create_strategic_plan(macro["id"], result, **binding)
 
         # Phase 20D: 解析并保存三场景估值
         # 诚信原则：写入失败/跳过必须计数并告警，不再静默吞（历史上此表长期 0 行无人知）。
         sv_saved, sv_skipped_no_entry, sv_missing = 0, 0, 0
         try:
             stock_selection = result.get("stock_selection", {})
-            entry_map = {e["ticker"]: e["id"] for e in store.list_all()
-                         if normalize_market(e.get("market")) == normalize_market(market)}
-            for holding in (stock_selection.get("core_holdings", []) +
-                            stock_selection.get("tactical_holdings", [])):
+            entry_map = {
+                e["ticker"]: e["id"]
+                for e in store.list_all()
+                if normalize_market(e.get("market")) == normalize_market(market)
+            }
+            for holding in stock_selection.get("core_holdings", []) + stock_selection.get("tactical_holdings", []):
                 sv = holding.get("scenario_valuation")
                 if not sv:
                     sv_missing += 1
@@ -929,14 +1016,20 @@ async def run_strategic_plan(
         except Exception as e:
             logger.error("场景估值保存异常: %s", e, exc_info=True)
         if sv_skipped_no_entry or (sv_missing and not sv_saved):
-            yield _sse("decision_warning", layer="L2",
-                       message=f"⚠ 场景估值：已存 {sv_saved}，无匹配entry跳过 {sv_skipped_no_entry}，LLM未产出 {sv_missing}")
-        logger.info("场景估值 L2: saved=%d skipped_no_entry=%d missing=%d",
-                    sv_saved, sv_skipped_no_entry, sv_missing)
+            yield _sse(
+                "decision_warning",
+                layer="L2",
+                message=f"⚠ 场景估值：已存 {sv_saved}，无匹配entry跳过 {sv_skipped_no_entry}，LLM未产出 {sv_missing}",
+            )
+        logger.info("场景估值 L2: saved=%d skipped_no_entry=%d missing=%d", sv_saved, sv_skipped_no_entry, sv_missing)
 
-        yield _sse("decision_done", layer="L2", plan_id=plan_id,
-                   stance=result.get("overall_stance", "balanced"),
-                   message=f"L2 组合策略已生成：{result.get('overall_stance', '?')}")
+        yield _sse(
+            "decision_done",
+            layer="L2",
+            plan_id=plan_id,
+            stance=result.get("overall_stance", "balanced"),
+            message=f"L2 组合策略已生成：{result.get('overall_stance', '?')}",
+        )
 
     except Exception as e:
         logger.exception("L2 组合策略生成失败")
@@ -950,13 +1043,11 @@ async def run_deviation_check(
 ) -> AsyncGenerator[dict, None]:
     """L2 偏离检查 — 对比实际持仓与目标策略"""
     store = store.for_market(market)
-    yield _sse("decision_start", layer="L2", action="deviation_check",
-               message="L2 偏离检查中...")
+    yield _sse("decision_start", layer="L2", action="deviation_check", message="L2 偏离检查中...")
 
     plan = store.get_latest_strategic_plan()
     if not plan:
-        yield _sse("decision_info", layer="L2",
-                   message="无 L2 组合策略，跳过偏离检查")
+        yield _sse("decision_info", layer="L2", message="无 L2 组合策略，跳过偏离检查")
         return
 
     llm, provider, model = get_llm_for_position(position="L2_strategic")
@@ -973,28 +1064,37 @@ async def run_deviation_check(
         positions = store.get_sim_positions(account.get("id"))
         positions_data = []
         for p in positions:
-            positions_data.append({
-                "ticker": p["ticker"],
-                "shares": p.get("shares", 0),
-                "market_value": p.get("market_value", 0),
-                "weight_pct": p.get("weight_pct", 0),
-                "unrealized_pnl": p.get("unrealized_pnl", 0),
-            })
+            positions_data.append(
+                {
+                    "ticker": p["ticker"],
+                    "shares": p.get("shares", 0),
+                    "market_value": p.get("market_value", 0),
+                    "weight_pct": p.get("weight_pct", 0),
+                    "unrealized_pnl": p.get("unrealized_pnl", 0),
+                }
+            )
 
         prompt_template = _load_prompt("decision_deviation_check")
         # B7: 确定性计算偏离度，代替 LLM 心算；注入数值让 LLM 只做叙述与优先级
         drift = _compute_deviation_drift(store, plan.get("result_json", {}), account, positions, market)
-        prompt = (prompt_template
-                  .replace("{strategic_plan}", json.dumps(plan.get("result_json", {}), ensure_ascii=False))
-                  .replace("{computed_drift}", json.dumps(drift, ensure_ascii=False))
-                  .replace("{current_positions}", json.dumps({
-                      "total_equity": account.get("total_equity", 100000),
-                      "cash_balance": account.get("cash_balance", 100000),
-                      "cash_pct": round(account.get("cash_balance", 100000)
-                                        / max(account.get("total_equity", 100000), 1) * 100, 1),
-                      "positions": positions_data,
-                  }, ensure_ascii=False))
-                  )
+        prompt = (
+            prompt_template.replace("{strategic_plan}", json.dumps(plan.get("result_json", {}), ensure_ascii=False))
+            .replace("{computed_drift}", json.dumps(drift, ensure_ascii=False))
+            .replace(
+                "{current_positions}",
+                json.dumps(
+                    {
+                        "total_equity": account.get("total_equity", 100000),
+                        "cash_balance": account.get("cash_balance", 100000),
+                        "cash_pct": round(
+                            account.get("cash_balance", 100000) / max(account.get("total_equity", 100000), 1) * 100, 1
+                        ),
+                        "positions": positions_data,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
 
         result = await _llm_json_object(llm, prompt, layer="L2-deviation")
 
@@ -1007,11 +1107,15 @@ async def run_deviation_check(
         else:
             rebalance_needed = bool(result.get("rebalance_needed", False)) or drift["rebalance_suggested"]
 
-        yield _sse("decision_done", layer="L2", action="deviation_check",
-                   rebalance_needed=rebalance_needed,
-                   deviation_pct=drift["max_abs_drift_pct"],
-                   commentary=result.get("commentary", ""),
-                   message=f"L2 偏离检查完成：{'需要调仓' if rebalance_needed else '在容忍范围内'}（最大偏离 {drift['max_abs_drift_pct']}%）")
+        yield _sse(
+            "decision_done",
+            layer="L2",
+            action="deviation_check",
+            rebalance_needed=rebalance_needed,
+            deviation_pct=drift["max_abs_drift_pct"],
+            commentary=result.get("commentary", ""),
+            message=f"L2 偏离检查完成：{'需要调仓' if rebalance_needed else '在容忍范围内'}（最大偏离 {drift['max_abs_drift_pct']}%）",
+        )
 
     except Exception as e:
         logger.exception("L2 偏离检查失败")
@@ -1022,6 +1126,7 @@ async def run_deviation_check(
 # L3: 战术计划
 # ─────────────────────────────────────────────────────────
 
+
 async def run_tactical_plans(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
@@ -1029,8 +1134,7 @@ async def run_tactical_plans(
 ) -> AsyncGenerator[dict, None]:
     """生成 L3 战术计划 — 每只目标股票的买卖时机"""
     store = store.for_market(market)
-    yield _sse("decision_start", layer="L3", action="generate",
-               message="开始生成 L3 战术计划...")
+    yield _sse("decision_start", layer="L3", action="generate", message="开始生成 L3 战术计划...")
 
     strategic = store.get_latest_strategic_plan()
     if not strategic:
@@ -1047,10 +1151,16 @@ async def run_tactical_plans(
     for _layer, _label, _plan in (("L2", "组合策略", strategic), ("L1", "宏观策略", macro)):
         _age = _upstream_age_days(_plan.get("created_at", ""))
         if _age is None or _age > _STALE_UPSTREAM_DAYS:
-            _why = ("创建时间无法解析" if _age is None
-                    else f"已 {_age:.0f} 天未刷新（超 {_STALE_UPSTREAM_DAYS} 天周度阈值）")
-            yield _sse("decision_error", layer="L3",
-                       error=f"上游 {_layer} {_label}{_why}，跳过 L3 避免据陈旧上游产今日战术；请先刷新 L1/L2")
+            _why = (
+                "创建时间无法解析"
+                if _age is None
+                else f"已 {_age:.0f} 天未刷新（超 {_STALE_UPSTREAM_DAYS} 天周度阈值）"
+            )
+            yield _sse(
+                "decision_error",
+                layer="L3",
+                error=f"上游 {_layer} {_label}{_why}，跳过 L3 避免据陈旧上游产今日战术；请先刷新 L1/L2",
+            )
             return
 
     llm, provider, model = get_llm_for_position(position="L3_tactical")
@@ -1068,13 +1178,15 @@ async def run_tactical_plans(
         catalysts = store.get_upcoming_catalysts(days=30)
         catalyst_by_ticker = {}
         for c in catalysts:
-            catalyst_by_ticker.setdefault(c["ticker"], []).append({
-                "title": c.get("title", ""),
-                "type": c.get("catalyst_type", ""),
-                "expected_date": c.get("expected_date", ""),
-                "impact_level": c.get("impact_level", "medium"),
-                "confidence": c.get("confidence", 5),
-            })
+            catalyst_by_ticker.setdefault(c["ticker"], []).append(
+                {
+                    "title": c.get("title", ""),
+                    "type": c.get("catalyst_type", ""),
+                    "expected_date": c.get("expected_date", ""),
+                    "impact_level": c.get("impact_level", "medium"),
+                    "confidence": c.get("confidence", 5),
+                }
+            )
 
         # P1.1 已判定催化剂(realized/failed/partial) → 买卖信号
         judged = store.get_recently_judged_catalysts(days=7)
@@ -1084,12 +1196,14 @@ async def run_tactical_plans(
             tk = c.get("ticker", "")
             if not tk:
                 continue
-            outcome_by_ticker.setdefault(tk, []).append({
-                "title": c.get("title", ""),
-                "outcome": c.get("outcome", ""),
-                "impact": c.get("outcome_impact", 0),
-                "judged_at": (c.get("judged_at", "") or "")[:10],
-            })
+            outcome_by_ticker.setdefault(tk, []).append(
+                {
+                    "title": c.get("title", ""),
+                    "outcome": c.get("outcome", ""),
+                    "impact": c.get("outcome_impact", 0),
+                    "judged_at": (c.get("judged_at", "") or "")[:10],
+                }
+            )
             catalyst_outcome_tickers.add(tk)
 
         stock_data = []
@@ -1107,9 +1221,10 @@ async def run_tactical_plans(
         selected_tickers = core_tickers | tactical_tickers | watch_tickers
 
         # P1.1 强制纳入：持仓中且催化剂已落空的标的(即使不在 L2 选股)，确保能生成止损/减仓战术
-        held_tickers = {p["ticker"] for p in store.get_sim_positions(
-            store.get_sim_account().get("id")) if p.get("shares", 0) > 0}
-        forced = (catalyst_outcome_tickers & held_tickers)
+        held_tickers = {
+            p["ticker"] for p in store.get_sim_positions(store.get_sim_account().get("id")) if p.get("shares", 0) > 0
+        }
+        forced = catalyst_outcome_tickers & held_tickers
 
         # B3: 论点失效(invalidated/weakened)且在持仓 → 强制纳入 L3 并注入告警（倾向 reduce/sell/收紧止损）
         thesis_alerts = {}
@@ -1119,11 +1234,13 @@ async def run_tactical_plans(
             for th in store.get_theses_for_entry(e["id"], active_only=True):
                 st = th.get("status", "")
                 if st in ("invalidated", "weakened"):
-                    thesis_alerts.setdefault(e["ticker"], []).append({
-                        "thesis": th.get("thesis_title", ""),
-                        "status": st,
-                        "conviction": th.get("conviction", ""),
-                    })
+                    thesis_alerts.setdefault(e["ticker"], []).append(
+                        {
+                            "thesis": th.get("thesis_title", ""),
+                            "status": st,
+                            "conviction": th.get("conviction", ""),
+                        }
+                    )
         thesis_forced = set(thesis_alerts.keys())
         forced = forced | thesis_forced
         if forced:
@@ -1133,15 +1250,22 @@ async def run_tactical_plans(
             entries = [e for e in entries if e["ticker"] in selected_tickers]
             if not entries:
                 logger.warning("L2 选股 %s 未匹配到观察池标的，降级为全量处理", selected_tickers)
-                entries = [e for e in store.list_all()
-                           if normalize_market(e.get("market")) == normalize_market(market)]
-                yield _sse("decision_info", layer="L3", degraded=True,
-                           message=f"⚠️ L2 选股 {sorted(selected_tickers)} 未匹配到本市场观察池标的，"
-                                   "L3 降级为全观察池处理（结果非 L2 精选，请知悉）")
+                entries = [e for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)]
+                yield _sse(
+                    "decision_info",
+                    layer="L3",
+                    degraded=True,
+                    message=f"⚠️ L2 选股 {sorted(selected_tickers)} 未匹配到本市场观察池标的，"
+                    "L3 降级为全观察池处理（结果非 L2 精选，请知悉）",
+                )
         else:
             # (B) 空 L2 选股不再静默全量：如实标注降级信号，让用户知道本轮 L3 未受 L2 约束
-            yield _sse("decision_info", layer="L3", degraded=True,
-                       message="⚠️ L2 未选出任何标的，L3 降级为全观察池处理（结果非 L2 精选，请知悉）")
+            yield _sse(
+                "decision_info",
+                layer="L3",
+                degraded=True,
+                message="⚠️ L2 未选出任何标的，L3 降级为全观察池处理（结果非 L2 精选，请知悉）",
+            )
 
         for entry in entries:
             ticker = entry["ticker"]
@@ -1155,54 +1279,63 @@ async def run_tactical_plans(
                     l2_target_weight = s.get("target_weight_pct", 0)
                     break
 
-            stock_data.append({
-                "ticker": ticker,
-                "company_name": entry.get("company_name", ticker),
-                "sector": entry.get("sector", ""),
-                "tier": entry.get("tier", "track"),
-                "l2_role": l2_role,
-                "l2_target_weight": l2_target_weight,
-                "signal": signal.get("signal", "neutral"),
-                "confidence": signal.get("confidence", 5),
-                "price": snap.get("close") if snap else None,
-                "change_pct": snap.get("change_pct") if snap else None,
-                "rsi_14": snap.get("rsi_14") if snap else None,
-                "sma_50": snap.get("sma_50") if snap else None,
-                "volume": snap.get("volume") if snap else None,
-                "chip_signals": _chip_context(store, ticker),  # B5: 机构持仓/评级/目标价
-            })
+            stock_data.append(
+                {
+                    "ticker": ticker,
+                    "company_name": entry.get("company_name", ticker),
+                    "sector": entry.get("sector", ""),
+                    "tier": entry.get("tier", "track"),
+                    "l2_role": l2_role,
+                    "l2_target_weight": l2_target_weight,
+                    "signal": signal.get("signal", "neutral"),
+                    "confidence": signal.get("confidence", 5),
+                    "price": snap.get("close") if snap else None,
+                    "change_pct": snap.get("change_pct") if snap else None,
+                    "rsi_14": snap.get("rsi_14") if snap else None,
+                    "sma_50": snap.get("sma_50") if snap else None,
+                    "volume": snap.get("volume") if snap else None,
+                    "chip_signals": _chip_context(store, ticker),  # B5: 机构持仓/评级/目标价
+                }
+            )
 
         prompt_template = _load_prompt("decision_tactical")
-        macro_text = macro.get("market_summary", "") or json.dumps(
-            macro.get("result_json", {}), ensure_ascii=False)[:500]
+        macro_text = (
+            macro.get("market_summary", "") or json.dumps(macro.get("result_json", {}), ensure_ascii=False)[:500]
+        )
 
         recent_map = _recent_executed_by_ticker(store)
         recent_trades_text = _format_recent_trades(recent_map)
 
-        prompt = (prompt_template
-                  .replace("{market_context}", market_ctx)
-                  .replace("{macro_summary}", macro_text)
-                  .replace("{strategic_plan}", json.dumps(strategic.get("result_json", {}), ensure_ascii=False))
-                  .replace("{stock_data}", json.dumps(stock_data, ensure_ascii=False))
-                  .replace("{catalyst_timeline}", json.dumps(catalyst_by_ticker, ensure_ascii=False))
-                  .replace("{catalyst_outcomes}",
-                           json.dumps(outcome_by_ticker, ensure_ascii=False) if outcome_by_ticker else "暂无已判定催化剂")
-                  .replace("{thesis_alerts}",
-                           json.dumps(thesis_alerts, ensure_ascii=False) if thesis_alerts else "暂无失效投资论点")
-                  .replace("{recent_trades}", recent_trades_text)
-                  .replace("{user_persona}", format_persona_for_prompt(store))
-                  )
+        prompt = (
+            prompt_template.replace("{market_context}", market_ctx)
+            .replace("{macro_summary}", macro_text)
+            .replace("{strategic_plan}", json.dumps(strategic.get("result_json", {}), ensure_ascii=False))
+            .replace("{stock_data}", json.dumps(stock_data, ensure_ascii=False))
+            .replace("{catalyst_timeline}", json.dumps(catalyst_by_ticker, ensure_ascii=False))
+            .replace(
+                "{catalyst_outcomes}",
+                json.dumps(outcome_by_ticker, ensure_ascii=False) if outcome_by_ticker else "暂无已判定催化剂",
+            )
+            .replace(
+                "{thesis_alerts}",
+                json.dumps(thesis_alerts, ensure_ascii=False) if thesis_alerts else "暂无失效投资论点",
+            )
+            .replace("{recent_trades}", recent_trades_text)
+            .replace("{user_persona}", format_persona_for_prompt(store))
+        )
 
-        yield _sse("decision_progress", layer="L3", step="llm_reasoning",
-                   message="L3 LLM 推理中...")
+        yield _sse("decision_progress", layer="L3", step="llm_reasoning", message="L3 LLM 推理中...")
 
         _l3_tk = [e.get("ticker", "") for e in entries] + list(held_tickers)
         allowed_tk = _decision_allowed_tickers(store, market, *_l3_tk)
+        input_prompts = []
         result, _fetch_log = await _run_data_negotiation(
-            llm, prompt, market=market, layer="3", allowed_tickers=allowed_tk)
+            llm, prompt, market=market, layer="3", allowed_tickers=allowed_tk, input_prompts=input_prompts
+        )
         if _fetch_log:
-            yield _sse("decision_progress", layer="L3", step="data_fetch_round",
-                       message=f"L3 数据补充 {len(_fetch_log)} 条")
+            yield _sse(
+                "decision_progress", layer="L3", step="data_fetch_round", message=f"L3 数据补充 {len(_fetch_log)} 条"
+            )
 
         if budget:
             budget.record(provider, model, 8000, 3000, "tactical_plans")
@@ -1216,6 +1349,18 @@ async def run_tactical_plans(
         # 避免「日常决策 / 全量刷新 / 定时任务 / 重复点击」多次运行累积重复；
         # LLM 返回空时不清空当日，保留既有计划。
         if tactical_plans:
+            binding = save_stage_snapshot(
+                store,
+                "L3",
+                {
+                    "prompts": input_prompts,
+                    "strategic": strategic,
+                    "macro": macro,
+                    "entries": entries,
+                    "held_tickers": sorted(held_tickers),
+                    "recent_trades": recent_map,
+                },
+            )
             cleared = store.delete_tactical_plans_by_date(_today())
             if cleared:
                 logger.info("L3 重新生成：清理今日旧战术计划 %d 条", cleared)
@@ -1233,13 +1378,17 @@ async def run_tactical_plans(
                 ticker=ticker,
                 plan_date=_today(),
                 result_json=tp,
+                **binding,
             )
             plan_ids.append(plan_id)
 
-        yield _sse("decision_done", layer="L3",
-                   plan_count=len(plan_ids),
-                   priority_ranking=result.get("priority_ranking", []),
-                   message=f"L3 战术计划已生成：{len(plan_ids)} 只股票")
+        yield _sse(
+            "decision_done",
+            layer="L3",
+            plan_count=len(plan_ids),
+            priority_ranking=result.get("priority_ranking", []),
+            message=f"L3 战术计划已生成：{len(plan_ids)} 只股票",
+        )
 
     except Exception as e:
         logger.exception("L3 战术计划生成失败")
@@ -1254,6 +1403,7 @@ async def run_tactical_plans(
 EXECUTION_COOLDOWN_DAYS = 5
 _BUY_FAMILY = {"buy", "add", "accumulate", "open"}
 _SELL_FAMILY = {"sell", "reduce", "trim", "close"}
+
 
 def _recent_executed_by_ticker(store, days=EXECUTION_COOLDOWN_DAYS) -> dict[str, list[dict]]:
     """返回 {ticker: [{side, shares, date}]}，仅含近 days 天已执行的 sim_trades。"""
@@ -1273,12 +1423,15 @@ def _recent_executed_by_ticker(store, days=EXECUTION_COOLDOWN_DAYS) -> dict[str,
             continue  # 时间戳缺失/非法，无法判定冷却窗口，跳过
         if created_dt < cutoff:
             continue
-        out.setdefault(ticker, []).append({
-            "side": t.get("side", ""),
-            "shares": t.get("shares", 0),
-            "date": created[:10],
-        })
+        out.setdefault(ticker, []).append(
+            {
+                "side": t.get("side", ""),
+                "shares": t.get("shares", 0),
+                "date": created[:10],
+            }
+        )
     return out
+
 
 def _is_recent_duplicate(action, ticker, recent_map) -> bool:
     """该 ticker 的同向操作族近期是否已执行过。"""
@@ -1290,10 +1443,7 @@ def _is_recent_duplicate(action, ticker, recent_map) -> bool:
         # 未知动作无法归入买/卖族，去重失效 → 记日志告警而非静默放行
         logger.warning("去重：未知 action=%r (ticker=%s)，跳过冷却检查", action, ticker)
         return False
-    for t in recent_map.get(ticker, []):
-        if t["side"] in fam:
-            return True
-    return False
+    return any(t["side"] in fam for t in recent_map.get(ticker, []))
 
 
 # execute_trade 只认这四种真实成交动作（trade_executor.py:128/132）；其余不可成交。
@@ -1327,9 +1477,15 @@ def _format_recent_trades(recent_map: dict[str, list[dict]]) -> str:
             lines.append(f"{tk} {tr['side']} {tr['shares']}股 ({tr['date']})")
     return "\n".join(lines) if lines else "暂无近期已执行交易"
 
-def _format_constraints_for_prompt(constraints: dict, alloc_bounds: dict,
-                                   account: dict, positions: list[dict],
-                                   cash_balance: float, market: str = "us_stock") -> str:
+
+def _format_constraints_for_prompt(
+    constraints: dict,
+    alloc_bounds: dict,
+    account: dict,
+    positions: list[dict],
+    cash_balance: float,
+    market: str = "us_stock",
+) -> str:
     """把【当前真实生效】的动态约束 + 组合现状余量格式化成 prompt 文本。
 
     关键：LLM 必须看到 regime 收紧后的实际上限（如熊市单股 5%），否则会按
@@ -1337,6 +1493,7 @@ def _format_constraints_for_prompt(constraints: dict, alloc_bounds: dict,
     单笔上限与校验器同源(_effective_single_trade_cap)，币种符号按 market，避免对 A股仍标 $。
     """
     from bottleneck_hunter.watchlist.constraint_validator import _ccy_symbol, _effective_single_trade_cap
+
     equity = account.get("total_equity") or account.get("current_capital", 100000) or 100000
     sym = _ccy_symbol(market)
     single_cap = _effective_single_trade_cap(constraints, equity)
@@ -1360,26 +1517,32 @@ def _format_constraints_for_prompt(constraints: dict, alloc_bounds: dict,
             by_sector[sec] = by_sector.get(sec, 0) + (p.get("market_value", 0) or 0)
         hot = sorted(by_sector.items(), key=lambda kv: kv[1], reverse=True)[:3]
         if hot:
-            lines.append("- 当前板块占比：" + "，".join(
-                f"{s} {v / equity * 100:.1f}%" for s, v in hot))
+            lines.append("- 当前板块占比：" + "，".join(f"{s} {v / equity * 100:.1f}%" for s, v in hot))
     return "\n".join(lines)
 
-def _repair_execution_plan(llm, ep: dict, violations: list[str],
-                           account: dict, constraints: dict) -> dict | None:
+
+def _repair_execution_plan(llm, ep: dict, violations: list[str], account: dict, constraints: dict) -> dict | None:
     """P0.2 LLM 自修正：带违规详情重新生成单个执行计划。
 
     返回修正后的 ep dict；若 LLM 判定不可行或调用失败，返回 None。
     """
     try:
         template = _load_prompt("decision_execution_repair")
-        prompt = (template
-                  .replace("{original_plan}", json.dumps(ep, ensure_ascii=False))
-                  .replace("{violations}", "\n".join(f"- {v}" for v in violations))
-                  .replace("{account_status}", json.dumps({
-                      "total_equity": account.get("total_equity", 100000),
-                      "cash_balance": account.get("cash_balance", 0),
-                  }, ensure_ascii=False))
-                  .replace("{constraints}", json.dumps(constraints, ensure_ascii=False)))
+        prompt = (
+            template.replace("{original_plan}", json.dumps(ep, ensure_ascii=False))
+            .replace("{violations}", "\n".join(f"- {v}" for v in violations))
+            .replace(
+                "{account_status}",
+                json.dumps(
+                    {
+                        "total_equity": account.get("total_equity", 100000),
+                        "cash_balance": account.get("cash_balance", 0),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            .replace("{constraints}", json.dumps(constraints, ensure_ascii=False))
+        )
         response = llm.invoke(prompt).content
         fixed = extract_json_object(response)
         if not fixed or not fixed.get("feasible", False):
@@ -1393,8 +1556,9 @@ def _repair_execution_plan(llm, ep: dict, violations: list[str],
             ep["target_price"] = fixed["estimated_price"]
         if fixed.get("execution_method"):
             ep["execution_method"] = fixed["execution_method"]
-        ep["estimated_amount"] = (ep.get("shares", 0) or 0) * (fixed.get("estimated_price")
-                                                               or ep.get("estimated_price", 0) or 0)
+        ep["estimated_amount"] = (ep.get("shares", 0) or 0) * (
+            fixed.get("estimated_price") or ep.get("estimated_price", 0) or 0
+        )
         ep["auto_repaired"] = True
         ep["repair_note"] = fixed.get("adjustment_note", "")
         return ep
@@ -1410,19 +1574,16 @@ async def run_execution_plans(
 ) -> AsyncGenerator[dict, None]:
     """生成 L4 执行方案 — 可执行操作序列"""
     store = store.for_market(market)
-    yield _sse("decision_start", layer="L4", action="generate",
-               message="开始生成 L4 执行方案...")
+    yield _sse("decision_start", layer="L4", action="generate", message="开始生成 L4 执行方案...")
 
     tactical_plans = store.get_tactical_plans_by_date(_today())
     if not tactical_plans:
-        yield _sse("decision_info", layer="L4",
-                   message="今日无 L3 战术计划，跳过 L4")
+        yield _sse("decision_info", layer="L4", message="今日无 L3 战术计划，跳过 L4")
         return
 
     actionable = [tp for tp in tactical_plans if tp.get("action") not in ("hold", "wait_for_pullback")]
     if not actionable:
-        yield _sse("decision_done", layer="L4",
-                   message="L3 计划全部为持有，无需生成执行方案")
+        yield _sse("decision_done", layer="L4", message="L3 计划全部为持有，无需生成执行方案")
         return
 
     llm, provider, model = get_llm_for_position(position="L4_execution")
@@ -1440,6 +1601,7 @@ async def run_execution_plans(
         positions = store.get_sim_positions(account.get("id"))
         # P2.5 账户级熔断：单日巨亏/深度回撤时，本轮只允许减仓，禁止新开/加仓
         from bottleneck_hunter.watchlist.constraint_validator import check_account_circuit_breaker
+
         _cb = check_account_circuit_breaker(account)
         if not _cb.valid:
             logger.warning("账户级熔断触发：%s", "; ".join(_cb.violations))
@@ -1449,25 +1611,38 @@ async def run_execution_plans(
         cash_balance = account.get("cash_balance", 100000)
 
         prompt_template = _load_prompt("decision_execution")
-        tactical_json = json.dumps(
-            [tp.get("result_json", tp) for tp in actionable], ensure_ascii=False)
-        account_json = json.dumps({
-            "total_equity": account.get("total_equity", 100000),
-            "cash_balance": cash_balance,
-            "positions": [{"ticker": p["ticker"], "shares": p.get("shares", 0),
-                           "avg_cost": p.get("avg_cost", 0),
-                           "market_value": p.get("market_value", 0),
-                           "weight_pct": p.get("weight_pct", 0),
-                           "unrealized_pnl": p.get("unrealized_pnl", 0)}
-                          for p in positions],
-        }, ensure_ascii=False)
-        feedback_text = (json.dumps(
-            [{"ticker": f.get("ticker", ""), "reason": f.get("reason", "")}
-             for f in feedback[:5]], ensure_ascii=False)
-            if feedback else "暂无历史拒绝记录")
-        pref_text = (json.dumps(
-            {p["key"]: p["value"] for p in preferences}, ensure_ascii=False)
-            if preferences else "暂无用户偏好")
+        tactical_json = json.dumps([tp.get("result_json", tp) for tp in actionable], ensure_ascii=False)
+        account_json = json.dumps(
+            {
+                "total_equity": account.get("total_equity", 100000),
+                "cash_balance": cash_balance,
+                "positions": [
+                    {
+                        "ticker": p["ticker"],
+                        "shares": p.get("shares", 0),
+                        "avg_cost": p.get("avg_cost", 0),
+                        "market_value": p.get("market_value", 0),
+                        "weight_pct": p.get("weight_pct", 0),
+                        "unrealized_pnl": p.get("unrealized_pnl", 0),
+                    }
+                    for p in positions
+                ],
+            },
+            ensure_ascii=False,
+        )
+        feedback_text = (
+            json.dumps(
+                [{"ticker": f.get("ticker", ""), "reason": f.get("reason", "")} for f in feedback[:5]],
+                ensure_ascii=False,
+            )
+            if feedback
+            else "暂无历史拒绝记录"
+        )
+        pref_text = (
+            json.dumps({p["key"]: p["value"] for p in preferences}, ensure_ascii=False)
+            if preferences
+            else "暂无用户偏好"
+        )
 
         tickers_in_play = [tp.get("ticker", "") for tp in actionable if tp.get("ticker")]
         experience_text = "暂无历史经验"
@@ -1483,14 +1658,21 @@ async def run_execution_plans(
                         all_cards.append(c)
             if all_cards:
                 experience_text = json.dumps(
-                    [{"title": c["title"], "content": c["content"],
-                      "scope": c["scope"], "confidence": c["confidence"]}
-                     for c in all_cards[:8]], ensure_ascii=False)
+                    [
+                        {
+                            "title": c["title"],
+                            "content": c["content"],
+                            "scope": c["scope"],
+                            "confidence": c["confidence"],
+                        }
+                        for c in all_cards[:8]
+                    ],
+                    ensure_ascii=False,
+                )
                 applied_card_ids = [c["id"] for c in all_cards[:8]]
 
         layer_perf = store.get_layer_performance_summary()
-        layer_perf_text = (json.dumps(layer_perf, ensure_ascii=False)
-                           if layer_perf else "暂无分层绩效数据")
+        layer_perf_text = json.dumps(layer_perf, ensure_ascii=False) if layer_perf else "暂无分层绩效数据"
 
         # 近期已执行交易：同一函数内 prompt 构建与下方去重循环复用同一份 recent_map
         recent_map = _recent_executed_by_ticker(store)
@@ -1510,6 +1692,7 @@ async def run_execution_plans(
             PositionSizer,
             target_shares_for_buy,
         )
+
         macro = store.get_latest_macro_strategy()
         macro_rj = (macro or {}).get("result_json", {}) if macro else {}
         risk_appetite = (macro or {}).get("risk_appetite", "")
@@ -1524,37 +1707,42 @@ async def run_execution_plans(
         constraints = get_constraints_for_appetite(risk_appetite)
         if alloc_bounds.get("max_single_pct"):
             constraints["max_single_position_pct"] = min(
-                constraints.get("max_single_position_pct", 100), alloc_bounds["max_single_pct"])
+                constraints.get("max_single_position_pct", 100), alloc_bounds["max_single_pct"]
+            )
         if alloc_bounds.get("beta_limit"):
             constraints["max_portfolio_beta"] = min(
-                constraints.get("max_portfolio_beta", 10), alloc_bounds["beta_limit"])
+                constraints.get("max_portfolio_beta", 10), alloc_bounds["beta_limit"]
+            )
         constraints_text = _format_constraints_for_prompt(
-            constraints, alloc_bounds, account, positions, cash_balance, market)
+            constraints, alloc_bounds, account, positions, cash_balance, market
+        )
 
-        prompt = (prompt_template
-                  .replace("{market_context}", market_ctx)
-                  .replace("{tactical_plans}", tactical_json)
-                  .replace("{account_status}", account_json)
-                  .replace("{available_cash}", f"{cash_balance:,.0f}")
-                  .replace("{constraints}", constraints_text)
-                  .replace("{trade_feedback}", feedback_text)
-                  .replace("{recent_trades}", recent_trades_text)
-                  .replace("{user_preferences}", pref_text)
-                  .replace("{user_persona}", format_persona_for_prompt(store))
-                  .replace("{experience_cards}", experience_text)
-                  .replace("{layer_performance}", layer_perf_text)
-                  )
+        prompt = (
+            prompt_template.replace("{market_context}", market_ctx)
+            .replace("{tactical_plans}", tactical_json)
+            .replace("{account_status}", account_json)
+            .replace("{available_cash}", f"{cash_balance:,.0f}")
+            .replace("{constraints}", constraints_text)
+            .replace("{trade_feedback}", feedback_text)
+            .replace("{recent_trades}", recent_trades_text)
+            .replace("{user_preferences}", pref_text)
+            .replace("{user_persona}", format_persona_for_prompt(store))
+            .replace("{experience_cards}", experience_text)
+            .replace("{layer_performance}", layer_perf_text)
+        )
 
-        yield _sse("decision_progress", layer="L4", step="llm_reasoning",
-                   message="L4 LLM 推理中...")
+        yield _sse("decision_progress", layer="L4", step="llm_reasoning", message="L4 LLM 推理中...")
 
         _pos_tk = [p.get("ticker", "") for p in (positions or [])]
         allowed_tk = _decision_allowed_tickers(store, market, *tickers_in_play, *_pos_tk)
+        input_prompts = []
         result, _fetch_log = await _run_data_negotiation(
-            llm, prompt, market=market, layer="4", allowed_tickers=allowed_tk)
+            llm, prompt, market=market, layer="4", allowed_tickers=allowed_tk, input_prompts=input_prompts
+        )
         if _fetch_log:
-            yield _sse("decision_progress", layer="L4", step="data_fetch_round",
-                       message=f"L4 数据补充 {len(_fetch_log)} 条")
+            yield _sse(
+                "decision_progress", layer="L4", step="data_fetch_round", message=f"L4 数据补充 {len(_fetch_log)} 条"
+            )
 
         if budget:
             budget.record(provider, model, 5000, 2000, "execution_plans")
@@ -1562,8 +1750,16 @@ async def run_execution_plans(
         _normalize_result_tickers(result)  # 归一执行计划 ticker，与观察池/持仓对齐
         exec_plans = result.get("execution_plans", [])
 
-        entry_map = {e["ticker"]: e["id"] for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)}
-        sector_map = {e["ticker"]: e.get("sector", "") for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)}
+        entry_map = {
+            e["ticker"]: e["id"]
+            for e in store.list_all()
+            if normalize_market(e.get("market")) == normalize_market(market)
+        }
+        sector_map = {
+            e["ticker"]: e.get("sector", "")
+            for e in store.list_all()
+            if normalize_market(e.get("market")) == normalize_market(market)
+        }
         tactical_map = {tp["ticker"]: tp["id"] for tp in actionable}
         created_ids = []
         skipped = 0
@@ -1585,7 +1781,32 @@ async def run_execution_plans(
         # 挂单中的标的也算「已有计划」，避免对已挂单标的重复生成执行计划
         existing_tickers |= {ep["ticker"] for ep in store.get_resting_executions() if ep.get("ticker")}
         batch_tickers = set()
+        pending_writes = []
+        repair_inputs = []
         # recent_map 已在上方 prompt 构建时计算，此处直接复用（同批生成期间无新成交）
+
+        risk_snapshots = {}
+        for ticker in {ep.get("ticker", "") for ep in exec_plans if ep.get("action") in ("buy", "add")}:
+            try:
+                risk_snapshots[ticker] = store.get_snapshots(ticker, days=60)
+            except Exception:
+                risk_snapshots[ticker] = []
+        stage_inputs = {
+            "prompts": input_prompts,
+            "tactical_plans": actionable,
+            "account": account,
+            "positions": positions,
+            "macro": macro,
+            "constraints": constraints,
+            "allocation_bounds": alloc_bounds,
+            "beta_map": beta_map,
+            "risk_snapshots": risk_snapshots,
+            "entry_map": entry_map,
+            "sector_map": sector_map,
+            "existing_tickers": sorted(existing_tickers),
+            "recent_trades": recent_map,
+            "circuit_breaker": {"valid": _cb.valid, "violations": _cb.violations},
+        }
 
         for ep in exec_plans:
             ticker = ep.get("ticker", "")
@@ -1605,11 +1826,18 @@ async def run_execution_plans(
                 continue
             # P2.5 熔断期只放行减仓/清仓：新开/加仓计划直接拦截进"已拦截"区
             if not _cb.valid and ep.get("action") in ("buy", "add"):
-                store.create_blocked_execution(
-                    tactical_plan_id=tactical_map.get(ticker, ""), entry_id=entry_map.get(ticker, ""),
-                    ticker=ticker, result_json=ep,
-                    reason="账户级熔断：" + "; ".join(_cb.violations),
-                    marker=store.BLOCK_MARKER_SYSTEM,
+                pending_writes.append(
+                    (
+                        True,
+                        dict(
+                            tactical_plan_id=tactical_map.get(ticker, ""),
+                            entry_id=entry_map.get(ticker, ""),
+                            ticker=ticker,
+                            result_json=ep,
+                            reason="账户级熔断：" + "; ".join(_cb.violations),
+                            marker=store.BLOCK_MARKER_SYSTEM,
+                        ),
+                    )
                 )
                 blocked += 1
                 logger.info("熔断拦截加仓计划 %s (%s)", ticker, ep.get("action"))
@@ -1629,8 +1857,9 @@ async def run_execution_plans(
             if ep.get("action") in ("buy", "add"):
                 _price = float(ep.get("target_price") or ep.get("estimated_price") or 0) or 0.0
                 _equity = float(account.get("total_equity") or account.get("cash_balance") or 0) or 0.0
-                _existing = next((float(p.get("market_value") or 0)
-                                  for p in positions if p.get("ticker") == ticker), 0.0)
+                _existing = next(
+                    (float(p.get("market_value") or 0) for p in positions if p.get("ticker") == ticker), 0.0
+                )
                 # LLM 意图权重：优先其自报 after_weight_pct，否则由它提的 shares 反推（=它真实想要的仓位）
                 _impact = ep.get("position_impact") or {}
                 try:
@@ -1645,22 +1874,25 @@ async def run_execution_plans(
                 # 个股年化波动率（近60日快照）；算不出→0，helper 内退化为「只按下限/上限」不设风险帽
                 _vol = 0.0
                 try:
-                    _snaps = store.get_snapshots(ticker, days=60)
+                    _snaps = risk_snapshots.get(ticker, [])
                     _closes = [float(s["close"]) for s in reversed(_snaps or []) if s.get("close") not in (None, "")]
                     _rets = [_closes[i] / _closes[i - 1] - 1.0 for i in range(1, len(_closes)) if _closes[i - 1] > 0]
                     _vol = PositionSizer.compute_stock_volatility(_rets)
                 except Exception:
                     _vol = 0.0
                 _sized = target_shares_for_buy(
-                    price=_price, account_equity=_equity, existing_value=_existing,
-                    llm_weight_pct=_llm_w, floor_pct=_MIN_BUILD_WEIGHT_PCT,
+                    price=_price,
+                    account_equity=_equity,
+                    existing_value=_existing,
+                    llm_weight_pct=_llm_w,
+                    floor_pct=_MIN_BUILD_WEIGHT_PCT,
                     cap_pct=float(constraints.get("max_single_position_pct") or 0),
-                    stock_vol=_vol, market=market,
+                    stock_vol=_vol,
+                    market=market,
                 )
                 if _sized <= 0:
                     # 够不到 3% 下限（加仓已达标 / A股不足一手 / 无价）→ 不开零头仓
-                    logger.info("跳过无法定到 %.0f%% 下限仓位的 %s（已达标/整手/无价）",
-                                _MIN_BUILD_WEIGHT_PCT, ticker)
+                    logger.info("跳过无法定到 %.0f%% 下限仓位的 %s（已达标/整手/无价）", _MIN_BUILD_WEIGHT_PCT, ticker)
                     skipped += 1
                     continue
                 if _sized != int(float(ep.get("shares") or 0)):
@@ -1687,8 +1919,10 @@ async def run_execution_plans(
             if not vres.valid:
                 # ── P0.2 LLM 自修正（最多 2 轮）──
                 for _ in range(2):
+                    repair_inputs.append(json.loads(json.dumps({"plan": ep, "violations": vres.violations})))
                     fixed = await asyncio.to_thread(
-                        _repair_execution_plan, llm, ep, vres.violations, account, constraints)
+                        _repair_execution_plan, llm, ep, vres.violations, account, constraints
+                    )
                     if fixed is None:
                         break
                     fixed.setdefault("market", market)
@@ -1713,11 +1947,18 @@ async def run_execution_plans(
 
             if not vres.valid:
                 # ── P0.3 无法降级：拦截，写入"已拦截"区 + 回灌反馈 ──
-                store.create_blocked_execution(
-                    tactical_plan_id=tactical_id, entry_id=entry_id,
-                    ticker=ticker, result_json=ep,
-                    reason="; ".join(vres.violations),
-                    marker=store.BLOCK_MARKER_SYSTEM,
+                pending_writes.append(
+                    (
+                        True,
+                        dict(
+                            tactical_plan_id=tactical_id,
+                            entry_id=entry_id,
+                            ticker=ticker,
+                            result_json=ep,
+                            reason="; ".join(vres.violations),
+                            marker=store.BLOCK_MARKER_SYSTEM,
+                        ),
+                    )
                 )
                 blocked += 1
                 logger.info("拦截不合规执行计划 %s: %s", ticker, vres.violations)
@@ -1725,20 +1966,32 @@ async def run_execution_plans(
 
             if not _is_executable_plan(ep):
                 # hold / 漏填股数的计划过校验会 fail-open 成 valid，落库即“--股”不可执行指令
-                logger.info("跳过不可执行计划 %s: action=%s shares=%s",
-                            ticker, ep.get("action"), ep.get("shares"))
+                logger.info("跳过不可执行计划 %s: action=%s shares=%s", ticker, ep.get("action"), ep.get("shares"))
                 skipped += 1
                 continue
 
             ep["_provenance"] = _decision_provenance(
-                ["decision_execution"], [(provider, model)], market, "L4", [ticker])
-            plan_id = store.create_execution_plan(
-                tactical_plan_id=tactical_id,
-                entry_id=entry_id,
-                ticker=ticker,
-                result_json=ep,
+                ["decision_execution"], [(provider, model)], market, "L4", [ticker]
             )
-            created_ids.append(plan_id)
+            pending_writes.append(
+                (
+                    False,
+                    dict(
+                        tactical_plan_id=tactical_id,
+                        entry_id=entry_id,
+                        ticker=ticker,
+                        result_json=ep,
+                    ),
+                )
+            )
+
+        if pending_writes:
+            binding = save_stage_snapshot(store, "L4", {**stage_inputs, "repair_inputs": repair_inputs})
+            for is_blocked, values in pending_writes:
+                if is_blocked:
+                    store.create_blocked_execution(**values, **binding)
+                else:
+                    created_ids.append(store.create_execution_plan(**values, **binding))
 
         for cid in applied_card_ids:
             store.increment_card_applied(cid)
@@ -1751,13 +2004,16 @@ async def run_execution_plans(
         if blocked:
             extra.append(f"拦截 {blocked} 条不合规")
         extra_msg = ("，" + "，".join(extra)) if extra else ""
-        yield _sse("decision_done", layer="L4",
-                   plan_count=len(created_ids),
-                   blocked_count=blocked,
-                   repaired_count=repaired,
-                   execution_summary=result.get("execution_summary", {}),
-                   skipped=result.get("skipped_plans", []),
-                   message=f"L4 执行方案已生成：{len(created_ids)} 条待确认操作{extra_msg}")
+        yield _sse(
+            "decision_done",
+            layer="L4",
+            plan_count=len(created_ids),
+            blocked_count=blocked,
+            repaired_count=repaired,
+            execution_summary=result.get("execution_summary", {}),
+            skipped=result.get("skipped_plans", []),
+            message=f"L4 执行方案已生成：{len(created_ids)} 条待确认操作{extra_msg}",
+        )
 
         # P3.2 过度交易监控：近 7 天成交超阈值则告警
         try:
@@ -1765,8 +2021,11 @@ async def run_execution_plans(
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
             recent_count = sum(1 for t in recent if (t.get("created_at", "") or "") >= cutoff)
             if recent_count >= 15:
-                yield _sse("decision_warning", layer="L4",
-                           message=f"⚠ 过度交易提示：近7天已成交 {recent_count} 笔，注意手续费与择时损耗")
+                yield _sse(
+                    "decision_warning",
+                    layer="L4",
+                    message=f"⚠ 过度交易提示：近7天已成交 {recent_count} 笔，注意手续费与择时损耗",
+                )
         except Exception:
             pass
 
@@ -1813,6 +2072,16 @@ async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGene
             continue
         # 已跌破止损位 → 生成清仓卖出执行计划（待投委会/确认）
         try:
+            binding = save_stage_snapshot(
+                store.for_market(market),
+                "hard_stop",
+                {
+                    "account": account,
+                    "position": pos,
+                    "tactical_plan": plan,
+                    "price_snapshot": snap,
+                },
+            )
             eid = store.create_execution_plan(
                 tactical_plan_id=plan.get("id", ""),
                 entry_id=pos.get("entry_id", ""),
@@ -1826,10 +2095,15 @@ async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGene
                     "_hard_stop": True,
                     "_provenance": _decision_provenance([], [], market, "L4", [ticker]),
                 },
+                **binding,
             )
             triggered += 1
-            yield _sse("decision_warning", layer="risk_control", ticker=ticker,
-                       message=f"⚠ 硬止损触发 {ticker}：现价 {close} < 止损 {stop_price}，已生成清仓计划 {eid[:8]}")
+            yield _sse(
+                "decision_warning",
+                layer="risk_control",
+                ticker=ticker,
+                message=f"⚠ 硬止损触发 {ticker}：现价 {close} < 止损 {stop_price}，已生成清仓计划 {eid[:8]}",
+            )
         except Exception as e:
             logger.warning("硬止损生成卖出计划失败 %s: %s", ticker, e)
 
@@ -1837,13 +2111,14 @@ async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGene
         logger.info("硬止损巡检(%s): %d 只触发", market, triggered)
 
 
-
 # 时效门单次扫描的最大标的数（防超大观察池扫描过慢；抽样足以判定数据源是否整体过期）
 MAX_STALE_SCAN = 30
 
 
 async def _ensure_price_freshness(
-    store: WatchlistStore, market: str, halt: dict,
+    store: WatchlistStore,
+    market: str,
+    halt: dict,
 ) -> AsyncGenerator[dict, None]:
     """决策启动前的数据时效门：核对行情快照是否过期，过期则主动更新，更新失败则请求硬停。
 
@@ -1856,8 +2131,7 @@ async def _ensure_price_freshness(
     """
     from bottleneck_hunter.watchlist.quality_gate import validate_data_freshness
 
-    entries = [e for e in store.list_all()
-               if normalize_market(e.get("market")) == normalize_market(market)]
+    entries = [e for e in store.list_all() if normalize_market(e.get("market")) == normalize_market(market)]
     if not entries:
         return
 
@@ -1877,23 +2151,29 @@ async def _ensure_price_freshness(
             stale.append((ticker, f"{days}天"))
 
     if not stale:
-        yield _sse("data_freshness_pass", layer="data",
-                   message=f"数据时效核对通过（{min(len(entries), MAX_STALE_SCAN)} 票新鲜）")
+        yield _sse(
+            "data_freshness_pass",
+            layer="data",
+            message=f"数据时效核对通过（{min(len(entries), MAX_STALE_SCAN)} 票新鲜）",
+        )
         return
 
     stale_tickers = [t for t, _ in stale]
     detail = ", ".join(f"{t}({d})" for t, d in stale[:5]) + ("…" if len(stale) > 5 else "")
-    yield _sse("data_refresh_start", layer="data",
-               message=f"检测到 {len(stale)} 票行情过期（{detail}），启动主动更新…")
+    yield _sse("data_refresh_start", layer="data", message=f"检测到 {len(stale)} 票行情过期（{detail}），启动主动更新…")
 
     from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+
     try:
         results = await fetch_price_batch(stale_tickers, store, market=market)
     except Exception as e:  # noqa: BLE001
         logger.error("数据时效门主动更新整体失败 (%s): %s", market, e)
         halt["stop"] = True
-        yield _sse("data_refresh_block", layer="data",
-                   message=f"⛔ 行情主动更新失败（{e}）——决策已中止。请检查数据源/网络，修复后重跑。")
+        yield _sse(
+            "data_refresh_block",
+            layer="data",
+            message=f"⛔ 行情主动更新失败（{e}）——决策已中止。请检查数据源/网络，修复后重跑。",
+        )
         return
 
     err = [t for t, v in results.items() if isinstance(v, str) and v.startswith("error")]
@@ -1903,9 +2183,14 @@ async def _ensure_price_freshness(
     # 仅过半失败才算「更新失败」→ 硬停；个别票失败（退市/停牌代码）只告警、继续
     if len(err) > len(results) / 2:
         halt["stop"] = True
-        yield _sse("data_refresh_block", layer="data",
-                   message=(f"⛔ 行情主动更新过半失败（{len(err)}/{len(results)} 票：{', '.join(err[:5])}）"
-                            f"——决策已中止。请检查数据源/网络，修复后重跑。"))
+        yield _sse(
+            "data_refresh_block",
+            layer="data",
+            message=(
+                f"⛔ 行情主动更新过半失败（{len(err)}/{len(results)} 票：{', '.join(err[:5])}）"
+                f"——决策已中止。请检查数据源/网络，修复后重跑。"
+            ),
+        )
         return
 
     msg = f"数据已主动更新：成功 {len(ok)} 票"
@@ -1947,6 +2232,7 @@ async def run_daily_decision(
     # Step 0: 催化剂时效检查
     try:
         from bottleneck_hunter.watchlist.catalyst_monitor import check_catalyst_expiry
+
         async for evt in check_catalyst_expiry(store):
             yield evt
     except Exception as e:
@@ -1955,6 +2241,7 @@ async def run_daily_decision(
     # Step 0.5: 投资论点有效性检查
     try:
         from bottleneck_hunter.watchlist.thesis_tracker import check_all_theses
+
         async for evt in check_all_theses(store):
             yield evt
     except Exception as e:
@@ -1977,6 +2264,7 @@ async def run_daily_decision(
     if scope in ("full",):
         try:
             from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
+
             async for evt in run_quality_checks(store, "pre_l2"):
                 yield evt
 
@@ -1984,8 +2272,7 @@ async def run_daily_decision(
             plan = store.get_latest_strategic_plan()
 
             if not plan and macro:
-                yield _sse("decision_info", layer="L2",
-                           message="无 L2 组合策略，自动生成...")
+                yield _sse("decision_info", layer="L2", message="无 L2 组合策略，自动生成...")
                 async for evt in run_strategic_plan(store, budget, market=market):
                     yield evt
             elif plan:
@@ -2003,6 +2290,7 @@ async def run_daily_decision(
     if scope in ("l3l4", "full"):
         try:
             from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
+
             async for evt in run_quality_checks(store, "pre_l3"):
                 yield evt
         except Exception as e:
@@ -2018,6 +2306,7 @@ async def run_daily_decision(
     if scope in ("l3l4", "full"):
         try:
             from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
+
             async for evt in run_quality_checks(store, "pre_l4"):
                 yield evt
                 if evt.get("event") == "quality_check_block":
@@ -2029,8 +2318,11 @@ async def run_daily_decision(
     #          A1 硬止损已生成的卖出计划不受影响，仍进入投委会）
     if scope in ("l3l4", "full"):
         if l4_blocked:
-            yield _sse("decision_warning", layer="L4",
-                       message="⛔ 质量门红灯，已阻断 L4 新建执行计划（数据过期/仓位超限），仅保留风控性卖出")
+            yield _sse(
+                "decision_warning",
+                layer="L4",
+                message="⛔ 质量门红灯，已阻断 L4 新建执行计划（数据过期/仓位超限），仅保留风控性卖出",
+            )
         else:
             async for evt in run_execution_plans(store, budget, market=market):
                 yield evt
@@ -2041,13 +2333,12 @@ async def run_daily_decision(
             pending = store.get_pending_executions()
             if pending:
                 from bottleneck_hunter.watchlist.committee import run_committee_review
-                yield _sse("decision_info", layer="committee",
-                           message=f"启动投委会评审 {len(pending)} 条执行计划...")
+
+                yield _sse("decision_info", layer="committee", message=f"启动投委会评审 {len(pending)} 条执行计划...")
                 async for evt in run_committee_review(store, pending, budget, market=market):
                     yield evt
             else:
-                yield _sse("decision_info", layer="committee",
-                           message="无待评审执行计划，跳过投委会")
+                yield _sse("decision_info", layer="committee", message="无待评审执行计划，跳过投委会")
         except Exception as e:
             logger.exception("投委会评审失败")
             yield _sse("decision_error", layer="committee", error=str(e))
@@ -2057,8 +2348,10 @@ async def run_daily_decision(
     if scope in ("l3l4", "full"):
         try:
             from bottleneck_hunter.watchlist.auto_execute import (
-                auto_execute_pending, is_auto_execute_enabled,
+                auto_execute_pending,
+                is_auto_execute_enabled,
             )
+
             if is_auto_execute_enabled(store):
                 async for evt in auto_execute_pending(store, market):
                     yield evt
@@ -2099,6 +2392,7 @@ async def run_full_refresh(
     # 先刷新市场新闻源（拉新 RSS 落库），供 L1 与宏观咨询读到最新新闻
     try:
         from bottleneck_hunter.watchlist.news_pipeline import refresh_market_news
+
         llm, _p, _m = get_llm_for_position(position="L1_macro")
         n = await refresh_market_news(store, market, llm=llm, budget=budget)
         yield _sse("refresh_progress", step="market_news", message=f"市场新闻已更新（{n} 条）")
@@ -2120,14 +2414,17 @@ async def run_full_refresh(
     pending = store.get_pending_executions()
     if pending:
         from bottleneck_hunter.watchlist.committee import run_committee_review
+
         async for evt in run_committee_review(store, pending, budget, market=market):
             yield evt
 
     # L4 自动执行（同 run_daily_decision Step 5.5：开启时投委会通过的待确认操作免确认直接成交）
     try:
         from bottleneck_hunter.watchlist.auto_execute import (
-            auto_execute_pending, is_auto_execute_enabled,
+            auto_execute_pending,
+            is_auto_execute_enabled,
         )
+
         if is_auto_execute_enabled(store):
             async for evt in auto_execute_pending(store, market):
                 yield evt
@@ -2159,6 +2456,7 @@ def _edb_cache_fresh(store: WatchlistStore, market: str) -> dict | None:
     或最近批次超窗即真取；窗内则复用已落库指标（永久无覆盖的指标交下游兜底，不因其而反复付费）。
     """
     from bottleneck_hunter.data_provider.gangtise_edb_indicators import indicators_for_market
+
     want = indicators_for_market(market)  # {key: (fid, label, scope, transform)}
     if not want:
         return None
@@ -2187,8 +2485,12 @@ def _edb_cache_fresh(store: WatchlistStore, market: str) -> dict | None:
         return None  # 批次超窗 or 时间戳全不可解析 → 保守真取
     out: dict = {}
     for key, row in cached.items():
-        out[key] = {"value": row.get("value"), "change_pct": row.get("change_pct", 0.0) or 0.0,
-                    "label": want[key][1], "as_of": row.get("date")}
+        out[key] = {
+            "value": row.get("value"),
+            "change_pct": row.get("change_pct", 0.0) or 0.0,
+            "label": want[key][1],
+            "as_of": row.get("date"),
+        }
     return out
 
 
@@ -2209,6 +2511,7 @@ async def _inject_edb_macro(store: WatchlistStore, market: str, macro: dict) -> 
         return
     try:
         from bottleneck_hunter.data_provider.hub import CAP_MACRO_EDB, get_hub
+
         edb = await get_hub().fetch(CAP_MACRO_EDB, "", market)
     except Exception as e:  # noqa: BLE001
         logger.debug("EDB 宏观注入失败: %s", e)
@@ -2218,13 +2521,14 @@ async def _inject_edb_macro(store: WatchlistStore, market: str, macro: dict) -> 
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for key, v in edb.items():
         as_of = v.get("as_of") or ""
-        if len(as_of) == 8 and as_of.isdigit():   # EDB yyyymmdd → yyyy-mm-dd（与表内其它源一致）
+        if len(as_of) == 8 and as_of.isdigit():  # EDB yyyymmdd → yyyy-mm-dd（与表内其它源一致）
             as_of = f"{as_of[:4]}-{as_of[4:6]}-{as_of[6:]}"
             v["as_of"] = as_of
         macro[key] = v  # EDB 官方口径覆盖兜底
         try:
-            store.save_macro_snapshot(key, as_of or now_iso[:10], v["value"], now_iso,
-                                      change_pct=v.get("change_pct", 0.0))
+            store.save_macro_snapshot(
+                key, as_of or now_iso[:10], v["value"], now_iso, change_pct=v.get("change_pct", 0.0)
+            )
         except Exception as e:  # noqa: BLE001
             logger.debug("EDB 宏观落库失败 %s: %s", key, e)
 
@@ -2249,15 +2553,18 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
         logger.warning("宏观数据采集失败，使用缓存: %s", e)
         macro = {}
         from bottleneck_hunter.watchlist.macro_data import foreign_indicator_keys
+
         foreign = foreign_indicator_keys(active_markets)  # 剔除他市专属指标，防缓存兜底串味
         cached = store.get_latest_macro_snapshots()
         for row in cached:
             if row["indicator"] in foreign:
                 continue
-            macro[row["indicator"]] = {"value": row["value"],
-                                       "change_pct": row.get("change_pct", 0.0) or 0.0,
-                                       "label": row["indicator"],
-                                       "as_of": row.get("date")}
+            macro[row["indicator"]] = {
+                "value": row["value"],
+                "change_pct": row.get("change_pct", 0.0) or 0.0,
+                "label": row["indicator"],
+                "as_of": row.get("date"),
+            }
 
     # Gangtise EDB 官方宏观（CPI/PPI/利率/PMI/社融）注入 L1——填补 macro 段本土/官方口径薄弱。
     # 走 hub（享受凭据双开关 + 熔断）；无凭据/未开则空返回，静默跳过不影响既有 macro。
@@ -2278,8 +2585,15 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
             all_snapshots.append(snap)
 
     if not all_snapshots:
-        return {"indices": dict(real_indices), "sectors": {}, "sentiment": dict(macro_sentiment),
-                "macro": macro, "news": [], "markets": active_markets, "positioning": positioning}
+        return {
+            "indices": dict(real_indices),
+            "sectors": {},
+            "sentiment": dict(macro_sentiment),
+            "macro": macro,
+            "news": [],
+            "markets": active_markets,
+            "positioning": positioning,
+        }
 
     avg_change = sum(s.get("change_pct", 0) or 0 for s in all_snapshots) / max(len(all_snapshots), 1)
     avg_rsi = sum(s.get("rsi_14", 50) or 50 for s in all_snapshots) / max(len(all_snapshots), 1)
@@ -2306,8 +2620,7 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
     for ticker in tickers[:5]:
         recent = store.get_news(ticker, limit=2)
         for n in recent:
-            news_items.append({"ticker": ticker, "title": n.get("title", ""),
-                               "sentiment": n.get("sentiment", "")})
+            news_items.append({"ticker": ticker, "title": n.get("title", ""), "sentiment": n.get("sentiment", "")})
 
     return {
         "indices": {
@@ -2323,8 +2636,7 @@ async def _collect_market_context(store: WatchlistStore, market: str = "us_stock
             **macro_sentiment,  # VIX 恐慌指数（真市场情绪）
             "avg_rsi": round(avg_rsi, 1),
             "stocks_above_sma50": sum(
-                1 for s in all_snapshots
-                if s.get("close") and s.get("sma_50") and s["close"] > s["sma_50"]
+                1 for s in all_snapshots if s.get("close") and s.get("sma_50") and s["close"] > s["sma_50"]
             ),
             "stocks_total": len(all_snapshots),
         },
@@ -2358,8 +2670,11 @@ def _positioning_signals(store: WatchlistStore, tickers: list[str]) -> dict:
             tot_put += p
             pcr_names += 1
     if pcr_names and tot_call:
-        out["options"] = {"put_call_ratio": round(tot_put / tot_call, 3),
-                          "coverage": pcr_names, "universe": len(tickers)}
+        out["options"] = {
+            "put_call_ratio": round(tot_put / tot_call, 3),
+            "coverage": pcr_names,
+            "universe": len(tickers),
+        }
 
     # 13F 机构持仓：逐票取近两季环比(复用 _holder_qoq 的两季共同机构口径)，聚合成观察池增/减/平家数。
     added = trimmed = flat = covered = 0
@@ -2377,7 +2692,8 @@ def _positioning_signals(store: WatchlistStore, tickers: list[str]) -> dict:
     if covered:
         out["institutional"] = {
             "quarter_net": {"added": added, "trimmed": trimmed, "flat": flat},
-            "coverage": covered, "universe": len(tickers),
+            "coverage": covered,
+            "universe": len(tickers),
             "note": "基于两个申报季共同机构的净增减股数(季频/覆盖有限，随季度积累更全)",
         }
     return out
@@ -2402,17 +2718,19 @@ def _collect_watchlist_signals(store: WatchlistStore, market: str = "us_stock") 
             logger.info("跳过停牌股 %s", ticker)
             continue
 
-        signals.append({
-            "ticker": ticker,
-            "company_name": entry.get("company_name", ticker),
-            "sector": entry.get("sector", ""),
-            "tier": entry.get("tier", "track"),
-            "signal": summary.get("signal", "neutral"),
-            "confidence": summary.get("confidence", 5),
-            "price": snap.get("close") if snap else None,
-            "change_pct": snap.get("change_pct") if snap else None,
-            "rsi_14": snap.get("rsi_14") if snap else None,
-        })
+        signals.append(
+            {
+                "ticker": ticker,
+                "company_name": entry.get("company_name", ticker),
+                "sector": entry.get("sector", ""),
+                "tier": entry.get("tier", "track"),
+                "signal": summary.get("signal", "neutral"),
+                "confidence": summary.get("confidence", 5),
+                "price": snap.get("close") if snap else None,
+                "change_pct": snap.get("change_pct") if snap else None,
+                "rsi_14": snap.get("rsi_14") if snap else None,
+            }
+        )
 
     return signals
 
@@ -2434,10 +2752,7 @@ def _update_composite_scores(store: WatchlistStore, market: str = "us_stock") ->
             confidence = strategy.get("confidence", 5)
 
             reviews = _get_latest_reviews_for_ticker(store, ticker)
-            if reviews:
-                avg_score = sum(r.get("score", 5) or 5 for r in reviews) / len(reviews)
-            else:
-                avg_score = 5.0
+            avg_score = sum(r.get("score", 5) or 5 for r in reviews) / len(reviews) if reviews else 5.0
 
             catalysts = store.get_catalysts_for_ticker(ticker)
             active_catalysts = [c for c in catalysts if c.get("status") in ("pending", "monitoring")]
@@ -2455,10 +2770,7 @@ def _update_composite_scores(store: WatchlistStore, market: str = "us_stock") ->
                 freshness = 0.0
 
             composite = round(
-                avg_score * w_review +
-                confidence * w_conf +
-                catalyst_score * 0.15 +
-                freshness * 0.15,
+                avg_score * w_review + confidence * w_conf + catalyst_score * 0.15 + freshness * 0.15,
                 2,
             )
 

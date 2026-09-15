@@ -11,11 +11,8 @@ import json
 import logging
 import re
 import sqlite3
-from pathlib import Path
-
-logger = logging.getLogger(__name__)
-
 from contextlib import contextmanager
+from pathlib import Path
 
 from bottleneck_hunter.watchlist.store_ai_models import _AIModelsMixin
 from bottleneck_hunter.watchlist.store_base import _DEFAULT_DB, _get_db_lock
@@ -27,6 +24,7 @@ from bottleneck_hunter.watchlist.store_intel import _IntelMixin
 from bottleneck_hunter.watchlist.store_market_data import _MarketDataMixin
 from bottleneck_hunter.watchlist.store_oplog import _OpLogMixin
 from bottleneck_hunter.watchlist.store_research import _ResearchMixin
+from bottleneck_hunter.watchlist.store_research_snapshot import _ResearchSnapshotMixin
 from bottleneck_hunter.watchlist.store_schema import (
     CREATE_INDEXES as _CREATE_INDEXES,
 )
@@ -45,6 +43,8 @@ from bottleneck_hunter.watchlist.store_schema import (
 from bottleneck_hunter.watchlist.store_simtrading import _SimTradingMixin
 from bottleneck_hunter.watchlist.store_vip_projection import _VipProjectionMixin
 from bottleneck_hunter.watchlist.store_watchlist import _WatchlistMixin
+
+logger = logging.getLogger(__name__)
 
 # G-5 fail-closed 护栏用：VIP 专属表清单（仅 VIP 写入、行按 user_id 隔离；生产中 user_id 永不为空）。
 # _user_filter 命中其一且 store 未绑定用户(_user_id 空) → 显式报错，而非静默放行不加过滤，
@@ -76,6 +76,7 @@ class WatchlistStore(
     _SimTradingMixin,
     _VipProjectionMixin,
     _ResearchMixin,
+    _ResearchSnapshotMixin,
     _AIModelsMixin,
     _OpLogMixin,
     _I18nMixin,
@@ -92,7 +93,6 @@ class WatchlistStore(
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-
     def for_user(self, user_id: str, *, tier_caps: dict[str, int] | None = None) -> WatchlistStore:
         """返回绑定指定用户的 store 克隆（共享同一 DB 和写锁）。
 
@@ -107,7 +107,6 @@ class WatchlistStore(
         clone._tier_caps = tier_caps
         return clone
 
-
     def for_market(self, market: str) -> WatchlistStore:
         """返回绑定指定市场的 store 克隆（共享同一 DB 和写锁）。"""
         clone = object.__new__(WatchlistStore)
@@ -117,7 +116,6 @@ class WatchlistStore(
         clone._write_lock = self._write_lock
         clone._tier_caps = getattr(self, "_tier_caps", None)
         return clone
-
 
     def _user_filter(self, query: str, params: tuple = (), *, table: str = "") -> tuple[str, tuple]:
         """为 SQL 查询自动追加 user_id 过滤条件。
@@ -168,26 +166,22 @@ class WatchlistStore(
             idx = upper.find(kw, search_start)
             if idx != -1 and idx < insert_pos:
                 insert_pos = idx
-        count_before = query[:insert_pos].count('?')
+        count_before = query[:insert_pos].count("?")
         query = query[:insert_pos] + clause + query[insert_pos:]
         new_params = params[:count_before] + (self._user_id,) + params[count_before:]
         return query, new_params
-
 
     def _user_insert_cols(self) -> str:
         """返回 INSERT 语句中的 user_id 列名。"""
         return ", user_id" if self._user_id else ""
 
-
     def _user_insert_vals(self) -> str:
         """返回 INSERT 语句中的 user_id 占位符。"""
         return ", ?" if self._user_id else ""
 
-
     def _user_insert_params(self) -> tuple:
         """返回 INSERT 语句中的 user_id 参数。"""
         return (self._user_id,) if self._user_id else ()
-
 
     def _market_filter(self, query: str, params: tuple = (), *, table: str = "") -> tuple[str, tuple]:
         """为 SQL 查询自动追加 market 过滤条件（与 _user_filter 平行）。
@@ -206,23 +200,19 @@ class WatchlistStore(
             idx = upper.find(kw, search_start)
             if idx != -1 and idx < insert_pos:
                 insert_pos = idx
-        count_before = query[:insert_pos].count('?')
+        count_before = query[:insert_pos].count("?")
         query = query[:insert_pos] + clause + query[insert_pos:]
         new_params = params[:count_before] + (self._market,) + params[count_before:]
         return query, new_params
 
-
     def _market_insert_cols(self) -> str:
         return ", market" if self._market else ""
-
 
     def _market_insert_vals(self) -> str:
         return ", ?" if self._market else ""
 
-
     def _market_insert_params(self) -> tuple:
         return (self._market,) if self._market else ()
-
 
     def _filtered(self, query: str, params: tuple = (), *, table: str = "") -> tuple[str, tuple]:
         """链式 user + market 过滤。"""
@@ -230,14 +220,12 @@ class WatchlistStore(
         q, p = self._market_filter(q, p, table=table)
         return q, p
 
-
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
-
 
     @contextmanager
     def _write_conn(self):
@@ -254,7 +242,6 @@ class WatchlistStore(
         finally:
             conn.close()
             self._write_lock.release()
-
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -318,13 +305,14 @@ class WatchlistStore(
             )
             has_uid = any(r["name"] == "user_id" for r in info)
             src = "key, value, COALESCE(user_id,'')" if has_uid else "key, value, ''"
-            conn.execute(f"INSERT OR IGNORE INTO budget_config_new(key, value, user_id) SELECT {src} FROM budget_config")
+            conn.execute(
+                f"INSERT OR IGNORE INTO budget_config_new(key, value, user_id) SELECT {src} FROM budget_config"
+            )
             conn.execute("DROP TABLE budget_config")
             conn.execute("ALTER TABLE budget_config_new RENAME TO budget_config")
             logger.info("budget_config 主键已重建为 (key, user_id)，修复跨用户预算覆盖")
         except sqlite3.OperationalError as e:
             logger.warning("budget_config 主键重建失败（可忽略，退回旧行为）: %s", e)
-
 
     def _migrate_focus_reports_history(self, conn) -> None:
         """focus_reports 从「每键一行(主键 ticker,user_id,market)」重建为「加自增 id、每键留多份历史」。
@@ -362,12 +350,13 @@ class WatchlistStore(
             )
             conn.execute("DROP TABLE focus_reports")
             conn.execute("ALTER TABLE focus_reports_new RENAME TO focus_reports")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_focus_reports_key "
-                         "ON focus_reports(ticker, user_id, market, uploaded_at DESC)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_focus_reports_key "
+                "ON focus_reports(ticker, user_id, market, uploaded_at DESC)"
+            )
             logger.info("focus_reports 已重建：加自增 id、去三列复合主键，支持每键留最近多份历史")
         except sqlite3.OperationalError as e:
             logger.warning("focus_reports 历史留存重建失败（可忽略，退回旧行为）: %s", e)
-
 
     def _migrate_watchlist_drop_global_unique(self, conn) -> None:
         """去掉 watchlist 旧的全局 `ticker UNIQUE`，改为 (user_id, ticker) 复合唯一。
@@ -400,9 +389,11 @@ class WatchlistStore(
                     notes TEXT DEFAULT '', is_active INTEGER DEFAULT 1, user_id TEXT DEFAULT ''
                 )
             """)
-            base = ("id, ticker, company_name, company_name_cn, market, tier, tier_rank, "
-                    "composite_score, source, source_analysis_id, sector, bottleneck_node, "
-                    "added_at, updated_at, notes, is_active")
+            base = (
+                "id, ticker, company_name, company_name_cn, market, tier, tier_rank, "
+                "composite_score, source, source_analysis_id, sector, bottleneck_node, "
+                "added_at, updated_at, notes, is_active"
+            )
             uid_sel = "COALESCE(user_id,'')" if has_uid else "''"
             conn.execute(f"INSERT INTO watchlist_new({base}, user_id) SELECT {base}, {uid_sel} FROM watchlist")
             conn.execute("DROP TABLE watchlist")
@@ -414,7 +405,6 @@ class WatchlistStore(
             logger.info("watchlist 已重建：去掉全局 ticker UNIQUE，改 (user_id,ticker) 复合唯一，多用户可共享同票")
         except sqlite3.OperationalError as e:
             logger.warning("watchlist 去全局 UNIQUE 重建失败（可忽略，退回旧行为）: %s", e)
-
 
     def _migrate_catalyst_market_from_entry(self, conn) -> None:
         """按关联 watchlist entry 的真实 market 回填纠正 catalyst_tracking.market。
@@ -435,7 +425,6 @@ class WatchlistStore(
         except sqlite3.OperationalError as e:
             logger.warning("catalyst 市场纠正迁移失败（可忽略）: %s", e)
 
-
     def _migrate_market_labels_from_source(self, conn) -> None:
         """全面纠正历史错标市场：market 列后加(ALTER DEFAULT 'us_stock')，列存在前建的 A股行被误打
         us_stock，泄漏进美股视图。按可靠来源回填(与 catalyst 同法)，依赖顺序：先纠父表再纠子表。
@@ -450,8 +439,14 @@ class WatchlistStore(
         total = 0
         try:
             # 1) entry_id → watchlist.market（有 entry_id 列的表）
-            for t in ("investment_theses", "scenario_valuations", "tactical_plans",
-                      "execution_plans", "sim_positions", "sim_trades"):
+            for t in (
+                "investment_theses",
+                "scenario_valuations",
+                "tactical_plans",
+                "execution_plans",
+                "sim_positions",
+                "sim_trades",
+            ):
                 try:
                     n = conn.execute(f"""
                         UPDATE {t} SET market = (SELECT w.market FROM watchlist w WHERE w.id = {t}.entry_id)
@@ -462,12 +457,16 @@ class WatchlistStore(
                 except sqlite3.OperationalError:
                     pass
             # 2) ticker 兜底（entry_id 空/孤儿，但 ticker 判得出 A股）——只把误标 us_stock 的 A股票改回
-            for t in ("tactical_plans", "execution_plans", "sim_positions", "sim_trades",
-                      "trade_feedback", "auto_reviews"):
+            for t in (
+                "tactical_plans",
+                "execution_plans",
+                "sim_positions",
+                "sim_trades",
+                "trade_feedback",
+                "auto_reviews",
+            ):
                 try:
-                    n = conn.execute(
-                        f"UPDATE {t} SET market='a_stock' WHERE market='us_stock' AND {A_TICKER}"
-                    ).rowcount
+                    n = conn.execute(f"UPDATE {t} SET market='a_stock' WHERE market='us_stock' AND {A_TICKER}").rowcount
                     total += n or 0
                 except sqlite3.OperationalError:
                     pass
@@ -503,10 +502,11 @@ class WatchlistStore(
             except sqlite3.OperationalError:
                 pass
             if total:
-                logger.info("历史市场错标全面纠正 %d 行（theses/plans/sim/committee/reviews 等，修 A股泄漏进美股视图）", total)
+                logger.info(
+                    "历史市场错标全面纠正 %d 行（theses/plans/sim/committee/reviews 等，修 A股泄漏进美股视图）", total
+                )
         except sqlite3.OperationalError as e:
             logger.warning("历史市场标签纠正迁移失败（可忽略）: %s", e)
-
 
     def _migrate_normalize_astock_tickers(self, conn) -> None:
         """把历史 A股 ticker 归一为 canonical(.SS/.SZ/.BJ)，根治 .SH 与观察池 .SS 精确匹配失败。
@@ -515,17 +515,27 @@ class WatchlistStore(
         holding ticker 用 Python 读出→normalize→写回。只动 A股(.SH 后缀/裸6位)，美股不动。幂等。
         """
         from bottleneck_hunter.watchlist.store_base import normalize_ticker
+
         try:
             # 1) 普通 ticker 列：上交所 .SH → .SS（其它后缀本已 canonical；裸码留给写入口/下次刷新归一）
-            plain = ("watchlist", "execution_plans", "tactical_plans", "sim_positions",
-                     "sim_trades", "catalyst_tracking", "market_snapshots",
-                     "investment_theses", "scenario_valuations", "auto_reviews", "trade_feedback")
+            plain = (
+                "watchlist",
+                "execution_plans",
+                "tactical_plans",
+                "sim_positions",
+                "sim_trades",
+                "catalyst_tracking",
+                "market_snapshots",
+                "investment_theses",
+                "scenario_valuations",
+                "auto_reviews",
+                "trade_feedback",
+            )
             total = 0
             for t in plain:
                 try:
                     n = conn.execute(
-                        f"UPDATE {t} SET ticker = substr(ticker,1,length(ticker)-3) || '.SS' "
-                        f"WHERE ticker LIKE '%.SH'"
+                        f"UPDATE {t} SET ticker = substr(ticker,1,length(ticker)-3) || '.SS' WHERE ticker LIKE '%.SH'"
                     ).rowcount
                     total += n or 0
                 except sqlite3.OperationalError:
@@ -543,18 +553,22 @@ class WatchlistStore(
                         continue
                     changed = False
                     for bucket in ("core_holdings", "tactical_holdings"):
-                        for h in (ss.get(bucket) or []):
+                        for h in ss.get(bucket) or []:
                             if isinstance(h, dict) and h.get("ticker"):
                                 nt = normalize_ticker(h["ticker"])
                                 if nt != h["ticker"]:
-                                    h["ticker"] = nt; changed = True
+                                    h["ticker"] = nt
+                                    changed = True
                     if isinstance(ss.get("watchlist_only"), list):
                         nw = [normalize_ticker(x) for x in ss["watchlist_only"]]
                         if nw != ss["watchlist_only"]:
-                            ss["watchlist_only"] = nw; changed = True
+                            ss["watchlist_only"] = nw
+                            changed = True
                     if changed:
-                        conn.execute("UPDATE strategic_plans SET stock_selection = ? WHERE id = ?",
-                                     (json.dumps(ss, ensure_ascii=False), r["id"]))
+                        conn.execute(
+                            "UPDATE strategic_plans SET stock_selection = ? WHERE id = ?",
+                            (json.dumps(ss, ensure_ascii=False), r["id"]),
+                        )
                         total += 1
             except sqlite3.OperationalError:
                 pass
@@ -563,16 +577,25 @@ class WatchlistStore(
         except sqlite3.OperationalError as e:
             logger.warning("A股 ticker 归一迁移失败（可忽略）: %s", e)
 
-
     def _migrate_normalize_us_exchange_suffix(self, conn) -> None:
         """剥除历史美股 ticker 的交易所后缀 .US（如 MRVL.US→MRVL）。
 
         反向分析/EOD 源偶带 .US 后缀 → yfinance/finnhub 无法解析(403/超时)，行情/基本面恒空。
         只动带 .US 的美股票；A股(.SS/.SZ/.BJ)不受影响。幂等（无 .US 则 0 行）。
         """
-        plain = ("watchlist", "execution_plans", "tactical_plans", "sim_positions",
-                 "sim_trades", "catalyst_tracking", "market_snapshots",
-                 "investment_theses", "scenario_valuations", "auto_reviews", "trade_feedback")
+        plain = (
+            "watchlist",
+            "execution_plans",
+            "tactical_plans",
+            "sim_positions",
+            "sim_trades",
+            "catalyst_tracking",
+            "market_snapshots",
+            "investment_theses",
+            "scenario_valuations",
+            "auto_reviews",
+            "trade_feedback",
+        )
         total = 0
         for t in plain:
             try:
@@ -585,7 +608,6 @@ class WatchlistStore(
                 pass
         if total:
             logger.info("美股 ticker 剥除交易所后缀 %d 处（.US→裸码，修 yfinance/finnhub 解析失败）", total)
-
 
     def _migrate_shared_company_profiles(self, conn) -> None:
         """阶段2 公共信息层：company_profiles(PK 含 user_id, 每用户一份) 折叠进共享桶 __shared__。
@@ -611,25 +633,19 @@ class WatchlistStore(
         except sqlite3.OperationalError as e:
             logger.warning("company_profiles 共享折叠失败（可忽略）: %s", e)
 
-
     def _table_cols(self, conn, table: str) -> set[str]:
         try:
             return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         except sqlite3.OperationalError:
             return set()
 
-
     def _table_sql(self, conn, table: str) -> str:
-        row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
         return (row["sql"] or "") if row else ""
-
 
     # ponytail: 已删除 _migrate_purge_empty_account_ref —— 它无条件删所有 account_ref='' 的
     # sim_account+sim_*，而决策中心正用 account_ref='' 作合法业务键，每次重启都清空决策模拟账户
     # （见 memory project_dc_sim_account_decoupled_from_vip）。移除迁移即根因修复。
-
 
     def _migrate_sim_account_per_account(self, conn) -> None:
         """sim_account 从 market 单槽重建为 per-account 槽。"""
@@ -682,7 +698,6 @@ class WatchlistStore(
         except sqlite3.OperationalError as e:
             logger.warning("sim_account 多账户迁移失败（可忽略）: %s", e)
 
-
     def _migrate_vip_imports_account_ref(self, conn) -> None:
         try:
             cols = self._table_cols(conn, "vip_imports")
@@ -724,11 +739,12 @@ class WatchlistStore(
             )
             conn.execute("DROP TABLE vip_imports")
             conn.execute("ALTER TABLE vip_imports_new RENAME TO vip_imports")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_vip_imports_user ON vip_imports(user_id, market, account_ref, created_at DESC)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vip_imports_user ON vip_imports(user_id, market, account_ref, created_at DESC)"
+            )
             logger.info("vip_imports 已重建为按账户隔离")
         except sqlite3.OperationalError as e:
             logger.warning("vip_imports 多账户迁移失败（可忽略）: %s", e)
-
 
     def _migrate_vip_derivative_terms_account_ref(self, conn) -> None:
         try:
@@ -781,7 +797,6 @@ class WatchlistStore(
         except sqlite3.OperationalError as e:
             logger.warning("vip_derivative_terms 多账户迁移失败（可忽略）: %s", e)
 
-
     def _migrate_flag_indicative_derivative_terms(self, conn) -> None:
         """历史脏行一次性标记：把「产品介绍/推介稿」(indicative term sheet，非成交持仓)行 is_indicative=1。
 
@@ -812,7 +827,6 @@ class WatchlistStore(
             )
         except sqlite3.OperationalError as e:
             logger.warning("vip_derivative_terms 推介稿标记迁移失败（可忽略）: %s", e)
-
 
     def _migrate_vip_projections_lot_key(self, conn) -> None:
         """给 vip_projections 加 lot_key 列并把 UNIQUE 纳入 lot_key（同标的多笔逐日推算不折叠）。"""
@@ -863,14 +877,14 @@ class WatchlistStore(
             )
             conn.execute("DROP TABLE vip_projections")
             conn.execute("ALTER TABLE vip_projections_new RENAME TO vip_projections")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_vip_proj_acct "
-                         "ON vip_projections(user_id, market, account_ref, as_of_date DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_vip_proj_status "
-                         "ON vip_projections(user_id, market, status)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vip_proj_acct "
+                "ON vip_projections(user_id, market, account_ref, as_of_date DESC)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_vip_proj_status ON vip_projections(user_id, market, status)")
             logger.info("vip_projections 已重建为含 lot_key")
         except sqlite3.OperationalError as e:
             logger.warning("vip_projections lot_key 迁移失败（可忽略）: %s", e)
-
 
     def _migrate_vip_reports_account_ref(self, conn) -> None:
         try:
@@ -905,7 +919,6 @@ class WatchlistStore(
         except sqlite3.OperationalError as e:
             logger.warning("vip_reports 多账户迁移失败（可忽略）: %s", e)
 
-
     def _migrate_chat_sessions_account_ref(self, conn) -> None:
         try:
             cols = self._table_cols(conn, "chat_sessions")
@@ -939,7 +952,6 @@ class WatchlistStore(
             logger.info("chat_sessions 已补 account_ref")
         except sqlite3.OperationalError as e:
             logger.warning("chat_sessions 多账户迁移失败（可忽略）: %s", e)
-
 
     def _migrate_chat_messages_account_ref(self, conn) -> None:
         try:
@@ -982,7 +994,6 @@ class WatchlistStore(
         except sqlite3.OperationalError as e:
             logger.warning("chat_messages 多账户迁移失败（可忽略）: %s", e)
 
-
     def _migrate_experience_cards_widen_scope(self, conn) -> None:
         """放宽 experience_cards.scope 的 CHECK，纳入 VIP 复盘卡片作用域（vip_portfolio/macro/ticker）。
 
@@ -992,7 +1003,8 @@ class WatchlistStore(
         """
         try:
             row = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='experience_cards'").fetchone()
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='experience_cards'"
+            ).fetchone()
             if not row or not row["sql"] or "vip_portfolio" in row["sql"]:
                 return  # 表不存在或已放宽
             conn.execute("""
@@ -1009,9 +1021,25 @@ class WatchlistStore(
                     last_applied_at TEXT, market TEXT DEFAULT 'us_stock'
                 )
             """)
-            known = {"id", "scope", "scope_key", "category", "title", "content", "evidence",
-                     "confidence", "applied_count", "source_review_id", "created_at", "updated_at",
-                     "user_id", "win_count", "loss_count", "last_applied_at", "market"}
+            known = {
+                "id",
+                "scope",
+                "scope_key",
+                "category",
+                "title",
+                "content",
+                "evidence",
+                "confidence",
+                "applied_count",
+                "source_review_id",
+                "created_at",
+                "updated_at",
+                "user_id",
+                "win_count",
+                "loss_count",
+                "last_applied_at",
+                "market",
+            }
             common = [c for c in (self._table_cols(conn, "experience_cards") or []) if c in known]
             collist = ", ".join(common)
             conn.execute(f"INSERT INTO experience_cards_new({collist}) SELECT {collist} FROM experience_cards")
@@ -1023,7 +1051,6 @@ class WatchlistStore(
             logger.info("experience_cards 已重建：scope CHECK 纳入 vip_portfolio/macro/ticker")
         except sqlite3.OperationalError as e:
             logger.warning("experience_cards 放宽 scope 重建失败（可忽略）: %s", e)
-
 
     def _migrate_experience_cards_fts(self, conn) -> None:
         """P0-③：给 experience_cards 建 FTS5 外部内容全文索引 + 同步触发器 + 存量回填（幂等）。
@@ -1038,7 +1065,8 @@ class WatchlistStore(
         """
         try:
             existed = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experience_cards_fts'").fetchone()
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experience_cards_fts'"
+            ).fetchone()
             conn.execute(_EC_FTS_TABLE)
         except sqlite3.OperationalError as e:
             logger.debug("experience_cards FTS5 不可用（sqlite 无 fts5 模块），全文检索降级为 scope 粗筛: %s", e)
@@ -1054,9 +1082,7 @@ class WatchlistStore(
         except sqlite3.OperationalError as e:
             logger.warning("experience_cards FTS5 触发器/回填失败（可忽略，检索降级 scope 粗筛）: %s", e)
 
-
-    def _parse_json_fields(self, d: dict, dict_fields: tuple = (),
-                           list_fields: tuple = ()) -> dict:
+    def _parse_json_fields(self, d: dict, dict_fields: tuple = (), list_fields: tuple = ()) -> dict:
         for field in dict_fields:
             if isinstance(d.get(field), str):
                 try:
@@ -1070,4 +1096,3 @@ class WatchlistStore(
                 except (json.JSONDecodeError, TypeError):
                     d[field] = []
         return d
-

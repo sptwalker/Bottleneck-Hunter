@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 # ─────────────────────────────────────────────────────────
@@ -15,7 +16,7 @@ from bottleneck_hunter.watchlist.store import WatchlistStore
 def store(tmp_path):
     """创建临时 SQLite store 并写入最小测试数据"""
     db = str(tmp_path / "test.db")
-    s = WatchlistStore(db)
+    s = WatchlistStore(db_path=db).for_user("test-user").for_market("us_stock")
 
     entry_id = s.add({
         "ticker": "AAPL",
@@ -41,14 +42,14 @@ def store(tmp_path):
         "market_summary": "市场整体偏多，科技板块强势",
         "risk_level": "medium",
         "sector_outlook": {"科技": "bullish"},
-    })
+    }, strict=False)
 
     strat_id = s.create_strategic_plan(macro_id, {
         "target_allocation": [
             {"ticker": "AAPL", "weight": 0.15, "action": "buy"}
         ],
         "cash_reserve": 0.3,
-    })
+    }, strict=False)
 
     return s, entry_id, macro_id, strat_id
 
@@ -158,8 +159,8 @@ class TestRunTacticalPlans:
     @pytest.mark.asyncio
     async def test_no_strategic_plan(self, tmp_path):
         db = str(tmp_path / "empty.db")
-        s = WatchlistStore(db)
-        s.create_macro_strategy({"market_summary": "ok"})
+        s = WatchlistStore(db_path=db).for_user("test-user").for_market("us_stock")
+        s.create_macro_strategy({"market_summary": "ok"}, strict=False)
 
         from bottleneck_hunter.watchlist.decision_engine import run_tactical_plans
         events = []
@@ -171,7 +172,7 @@ class TestRunTacticalPlans:
     @pytest.mark.asyncio
     async def test_no_macro_strategy(self, tmp_path):
         db = str(tmp_path / "empty2.db")
-        s = WatchlistStore(db)
+        s = WatchlistStore(db_path=db).for_user("test-user").for_market("us_stock")
 
         from bottleneck_hunter.watchlist.decision_engine import run_tactical_plans
         events = []
@@ -195,7 +196,7 @@ class TestRunExecutionPlans:
         s.create_tactical_plan(strat_id, entry_id, "AAPL", today, {
             "action": "buy", "confidence": 8,
             "entry_plan": {"price": 188}, "exit_plan": {"stop_loss": 175},
-        })
+        }, strict=False)
 
         llm = _mock_llm_response(EXECUTION_RESPONSE)
         with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
@@ -223,7 +224,7 @@ class TestRunExecutionPlans:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         s.create_tactical_plan(strat_id, entry_id, "AAPL", today, {
             "action": "hold", "confidence": 5,
-        })
+        }, strict=False)
 
         from bottleneck_hunter.watchlist.decision_engine import run_execution_plans
         events = []
@@ -252,10 +253,12 @@ class TestCommittee:
     async def test_full_review_flow(self, store):
         s, entry_id, macro_id, strat_id = store
 
-        exec_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
+        execution = {
             "action": "buy", "shares": 50, "amount": 9400,
             "target_price": 188, "confidence": 7,
-        })
+        }
+        binding = save_stage_snapshot(s, "L4", {"execution_plans": [execution]})
+        exec_id = s.create_execution_plan("tac_1", entry_id, "AAPL", execution, **binding)
 
         pending = s.get_pending_executions()
         assert len(pending) == 1
@@ -365,7 +368,7 @@ class TestStoreCRUD:
             "entry_plan": {"price": 188},
             "exit_plan": {"stop_loss": 175},
             "catalyst_watch": ["Q3财报"],
-        })
+        }, strict=False)
 
         plans = s.get_tactical_plans_by_date(today)
         assert len(plans) == 1
@@ -382,7 +385,7 @@ class TestStoreCRUD:
             "action": "buy", "shares": 50, "amount": 9400,
             "target_price": 188, "method": "limit",
             "priority": 8, "confidence": 7,
-        })
+        }, strict=False)
 
         plan = s.get_execution_plan(plan_id)
         assert plan is not None
@@ -400,7 +403,7 @@ class TestStoreCRUD:
         s, entry_id, *_ = store
         plan_id = s.create_execution_plan("tac_1", entry_id, "AAPL", {
             "action": "buy", "shares": 30,
-        })
+        }, strict=False)
 
         s.reject_execution(plan_id, "风险过高")
         plan = s.get_execution_plan(plan_id)
@@ -414,6 +417,7 @@ class TestStoreCRUD:
             model_provider="deepseek",
             model_name="deepseek-chat",
             result_json=REVIEW_RESPONSE,
+            strict=False,
         )
         reviews = s.get_reviews_for_execution("exec_1")
         assert len(reviews) == 1
@@ -425,6 +429,7 @@ class TestStoreCRUD:
         cid = s.create_committee_consensus(
             execution_plan_id="exec_1",
             result_json=CONSENSUS_RESPONSE,
+            strict=False,
         )
         conn = s._connect()
         try:
@@ -462,7 +467,7 @@ class TestDecisionAPI:
         set_store(s)
         trading_set_store(s)
         from bottleneck_hunter.auth.dependencies import get_current_user
-        app.dependency_overrides[get_current_user] = lambda: {"sub": "", "username": "test", "role": "admin"}
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "test-user", "username": "test", "role": "admin"}
         return TestClient(app)
 
     def test_overview(self, client):

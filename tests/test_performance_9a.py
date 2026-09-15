@@ -18,13 +18,13 @@ def perf_store(tmp_path):
     aid = account["id"]
 
     # 添加交易记录
-    store.create_sim_trade(aid, "AAPL", "buy", 100, 150.0, 15000.0, reasoning="test buy")
-    store.create_sim_trade(aid, "AAPL", "sell", 100, 160.0, 16000.0, reasoning="test sell")
-    store.create_sim_trade(aid, "NVDA", "buy", 50, 400.0, 20000.0, reasoning="test buy 2")
-    store.create_sim_trade(aid, "NVDA", "sell", 50, 380.0, 19000.0, reasoning="test sell 2")
+    store.create_sim_trade(aid, "AAPL", "buy", 100, 150.0, 15000.0, reasoning="test buy", strict=False)
+    store.create_sim_trade(aid, "AAPL", "sell", 100, 160.0, 16000.0, reasoning="test sell", strict=False)
+    store.create_sim_trade(aid, "NVDA", "buy", 50, 400.0, 20000.0, reasoning="test buy 2", strict=False)
+    store.create_sim_trade(aid, "NVDA", "sell", 50, 380.0, 19000.0, reasoning="test sell 2", strict=False)
 
     # 添加复盘记录
-    trade_id = store.create_sim_trade(aid, "TSLA", "sell", 100, 220.0, 22000.0)
+    trade_id = store.create_sim_trade(aid, "TSLA", "sell", 100, 220.0, 22000.0, strict=False)
     store.create_auto_review(
         sim_trade_id=trade_id,
         ticker="TSLA",
@@ -32,6 +32,7 @@ def perf_store(tmp_path):
         exit_price=220.0,
         return_pct=10.0,
         result_json={"trade_quality_score": 8, "key_lessons": ["止盈及时", "顺势而为"]},
+        strict=False,
     )
 
     store.record_llm_usage({
@@ -262,7 +263,7 @@ async def test_generate_tuning_success(perf_store):
     # 添加更多复盘数据
     aid = perf_store.get_sim_account()["id"]
     for i in range(5):
-        tid = perf_store.create_sim_trade(aid, f"TEST{i}", "sell", 100, 100.0, 10000.0)
+        tid = perf_store.create_sim_trade(aid, f"TEST{i}", "sell", 100, 100.0, 10000.0, strict=False)
         perf_store.create_auto_review(
             sim_trade_id=tid,
             ticker=f"TEST{i}",
@@ -270,6 +271,7 @@ async def test_generate_tuning_success(perf_store):
             exit_price=95.0,
             return_pct=-5.0,
             result_json={"trade_quality_score": 5, "key_lessons": ["止损不及时"]},
+            strict=False,
         )
 
     mock_response = MagicMock()

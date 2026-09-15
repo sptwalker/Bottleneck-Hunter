@@ -90,8 +90,8 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     # (2+1)×timeout=180s，正是 Loki 归因里"单个失败模型拖 6.5 分钟"的根因）；重试/降级由
     # _invoke_with_retry 显式掌控，慢模型单次超时即切下一个备用，不白等。
     llm, provider, model = get_llm_for_position(
-        position=member.get("config_key"), provider_hint=member["provider_hint"],
-        with_fallback=False, max_retries=0)
+        position=member.get("config_key"), provider_hint=member["provider_hint"], with_fallback=False, max_retries=0
+    )
     if llm:
         chain.append((llm, provider, model))
         seen.add(provider)
@@ -100,6 +100,7 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     from bottleneck_hunter.auth.current_user import get_current_user_id
     from bottleneck_hunter.llm_clients.factory import list_custom_provider_ids
     from bottleneck_hunter.llm_clients.health import health
+
     uid = get_current_user_id()
     try:
         _universe = list_custom_provider_ids()
@@ -107,7 +108,7 @@ def _build_llm_chain(member: dict) -> list[tuple]:
         _universe = []
     _bk_seen: set[str] = set()
     backup_pool = []
-    for h in (list(_universe) + _FALLBACK_PROVIDERS):
+    for h in list(_universe) + _FALLBACK_PROVIDERS:
         hl = (h or "").lower().strip()
         if hl and hl not in _bk_seen:
             _bk_seen.add(hl)
@@ -128,13 +129,23 @@ def _build_llm_chain(member: dict) -> list[tuple]:
     return chain
 
 
-_TRANSIENT_KEYS = ("429", "overload", "rate limit", "ratelimit", "timeout",
-                   "timed out", "503", "502", "500", "busy", "unavailable",
-                   "temporarily")
+_TRANSIENT_KEYS = (
+    "429",
+    "overload",
+    "rate limit",
+    "ratelimit",
+    "timeout",
+    "timed out",
+    "503",
+    "502",
+    "500",
+    "busy",
+    "unavailable",
+    "temporarily",
+)
 
 
-async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
-                             max_retry: int = 2) -> tuple[str, str, str]:
+async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str, max_retry: int = 2) -> tuple[str, str, str]:
     """带重试 + 降级的 LLM 调用。
 
     主模型(idx=0)对瞬态错误退避重试 max_retry 次；备用模型(idx>0)只试一次即切下一个——
@@ -146,26 +157,28 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
     from bottleneck_hunter.auth.current_user import get_current_user_id
     from bottleneck_hunter.llm_clients.fallback import classify_reason
     from bottleneck_hunter.llm_clients.health import health
+
     uid = get_current_user_id()
     for idx, (llm, provider, model) in enumerate(chain):
-        attempts = max_retry if idx == 0 else 1   # 备用模型不在同一节点上重试，快速切换
+        attempts = max_retry if idx == 0 else 1  # 备用模型不在同一节点上重试，快速切换
         for attempt in range(attempts):
             try:
                 # ponytail: 须 wait_for 硬超时——裸壳同步 invoke 无 asyncio 级超时上限，单个 hang 的模型
                 # 会挂死一个 to_thread 线程并拖住整个委员会/决策周期（正是「确保每周期正常执行」要防的）。
                 # 超时略高于候选级 _CAND_TIMEOUT，让 record-only 壳有机会先自然返回；真超时由下方 except 记账。
                 from bottleneck_hunter.llm_clients.fallback import _CAND_TIMEOUT
+
                 content = await asyncio.wait_for(
                     asyncio.to_thread(lambda: llm.invoke(prompt).content),  # noqa: B023  立即 await，无延迟绑定后果
                     timeout=_CAND_TIMEOUT + 30,
                 )
                 health.record_success(uid, provider)  # 恢复：清该 provider 的失败计数
                 if idx > 0 or attempt > 0:
-                    logger.info("委员 %s 经重试/降级成功（%s/%s, 第%d次）",
-                                role, provider, model, attempt + 1)
+                    logger.info("委员 %s 经重试/降级成功（%s/%s, 第%d次）", role, provider, model, attempt + 1)
                 if idx > 0:
                     # 真正切到了备用模型 → 提示用户
                     from bottleneck_hunter.llm_clients.fallback import _build_message, push_notice
+
                     fp, fm = chain[0][1], chain[0][2]
                     reason = classify_reason(last_err) if last_err else "调用异常"
                     push_notice(_build_message(fp, fm, reason, provider, model))
@@ -183,9 +196,9 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str,
                     health.record_failure(uid, provider, classify_reason(e))
                 except Exception:  # noqa: BLE001
                     pass
-                logger.warning("委员 %s 调用 %s/%s 失败(%s): %s",
-                               role, provider, model,
-                               "瞬态" if transient else "非瞬态", e)
+                logger.warning(
+                    "委员 %s 调用 %s/%s 失败(%s): %s", role, provider, model, "瞬态" if transient else "非瞬态", e
+                )
                 if not transient:
                     break  # 非瞬态错误：不在同模型重试，直接换备用模型
                 if attempt < attempts - 1:
@@ -241,13 +254,13 @@ async def _review_single(
         return result
     except Exception as e:
         logger.warning("委员 %s 评审失败(已重试+降级): %s", member["role"], e)
-        return {"role": member["role"], "error": str(e), "vote": "abstain",
-                "provider": provider, "model": model}
+        return {"role": member["role"], "error": str(e), "vote": "abstain", "provider": provider, "model": model}
 
 
 # ─────────────────────────────────────────────────────────
 # 第 2 轮：辩论与质疑
 # ─────────────────────────────────────────────────────────
+
 
 def _summarize_round1(reviews: dict[str, dict], exclude_role: str = "") -> str:
     """把第 1 轮各委员评审压缩为简报（供第 2 轮互相质疑）。"""
@@ -259,8 +272,7 @@ def _summarize_round1(reviews: dict[str, dict], exclude_role: str = "") -> str:
         if r.get("error"):
             continue  # 跳过失败的委员
         concerns = r.get("key_concerns", [])
-        concern_str = "；".join(c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)
-                                for c in concerns[:3])
+        concern_str = "；".join(c if isinstance(c, str) else json.dumps(c, ensure_ascii=False) for c in concerns[:3])
         parts.append(
             f"### {role_label.get(role, role)}\n"
             f"- 投票：{r.get('vote', 'abstain')}（信心 {r.get('confidence', 5)}/10）\n"
@@ -287,15 +299,23 @@ async def _review_round2(
         return my_r1  # 无可用 LLM，沿用第 1 轮
 
     template = _load_prompt("committee_rebuttal")
-    prompt = (template
-              .replace("{member_label}", member["label"])
-              .replace("{execution_plan}", json.dumps(execution_plan, ensure_ascii=False))
-              .replace("{my_round1}", json.dumps({
-                  "vote": my_r1.get("vote"), "confidence": my_r1.get("confidence"),
-                  "overall_assessment": my_r1.get("overall_assessment", ""),
-                  "key_concerns": my_r1.get("key_concerns", []),
-              }, ensure_ascii=False))
-              .replace("{peers_round1}", _summarize_round1(round1_reviews, exclude_role=role)))
+    prompt = (
+        template.replace("{member_label}", member["label"])
+        .replace("{execution_plan}", json.dumps(execution_plan, ensure_ascii=False))
+        .replace(
+            "{my_round1}",
+            json.dumps(
+                {
+                    "vote": my_r1.get("vote"),
+                    "confidence": my_r1.get("confidence"),
+                    "overall_assessment": my_r1.get("overall_assessment", ""),
+                    "key_concerns": my_r1.get("key_concerns", []),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        .replace("{peers_round1}", _summarize_round1(round1_reviews, exclude_role=role))
+    )
 
     try:
         response, provider, model = await _invoke_with_retry(chain, prompt, role)
@@ -316,6 +336,7 @@ async def _review_round2(
 # 圆桌讨论
 # ─────────────────────────────────────────────────────────
 
+
 async def _run_discussion(
     disputed_ticker: str,
     reviews: dict[str, dict],
@@ -329,14 +350,14 @@ async def _run_discussion(
         return {"error": "无可用 LLM 进行圆桌讨论"}
 
     prompt_template = _load_prompt("committee_discussion")
-    prompt = (prompt_template
-              .replace("{disputed_ticker}", disputed_ticker)
-              .replace("{risk_officer_review}", json.dumps(reviews.get("risk_officer", {}), ensure_ascii=False))
-              .replace("{growth_investor_review}", json.dumps(reviews.get("growth_investor", {}), ensure_ascii=False))
-              .replace("{value_investor_review}", json.dumps(reviews.get("value_investor", {}), ensure_ascii=False))
-              .replace("{contrarian_review}", json.dumps(reviews.get("contrarian", {}), ensure_ascii=False))
-              .replace("{original_plan}", json.dumps(execution_plan, ensure_ascii=False))
-              )
+    prompt = (
+        prompt_template.replace("{disputed_ticker}", disputed_ticker)
+        .replace("{risk_officer_review}", json.dumps(reviews.get("risk_officer", {}), ensure_ascii=False))
+        .replace("{growth_investor_review}", json.dumps(reviews.get("growth_investor", {}), ensure_ascii=False))
+        .replace("{value_investor_review}", json.dumps(reviews.get("value_investor", {}), ensure_ascii=False))
+        .replace("{contrarian_review}", json.dumps(reviews.get("contrarian", {}), ensure_ascii=False))
+        .replace("{original_plan}", json.dumps(execution_plan, ensure_ascii=False))
+    )
 
     response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
     return extract_json_object(response)
@@ -345,6 +366,7 @@ async def _run_discussion(
 # ─────────────────────────────────────────────────────────
 # 共识汇总
 # ─────────────────────────────────────────────────────────
+
 
 def _member_weights(store, reviews: dict[str, dict], market: str = "") -> dict[str, float]:
     """取每位委员的历史可信权重（model_ratings.calibration_weight，默认 1.0）。
@@ -356,8 +378,8 @@ def _member_weights(store, reviews: dict[str, dict], market: str = "") -> dict[s
     for role, r in reviews.items():
         try:
             w = store.get_calibration_weight(
-                r.get("provider", ""), r.get("model", ""),
-                role_context=f"committee_{role}", market=market)
+                r.get("provider", ""), r.get("model", ""), role_context=f"committee_{role}", market=market
+            )
             weights[role] = float(w) if w and float(w) > 0 else 1.0
         except Exception:
             weights[role] = 1.0
@@ -384,20 +406,21 @@ async def _build_consensus(
 
     role_label = {m["role"]: m["label"] for m in MEMBERS}
     weights = weights or {}
-    wlines = [f"- {role_label.get(role, role)}：历史可信权重 {float(weights.get(role, 1.0)):.2f}x"
-              for role in reviews]
+    wlines = [f"- {role_label.get(role, role)}：历史可信权重 {float(weights.get(role, 1.0)):.2f}x" for role in reviews]
     weights_text = "\n".join(wlines) if wlines else "（暂无历史权重，按等权处理）"
 
     prompt_template = _load_prompt("committee_consensus")
-    prompt = (prompt_template
-              .replace("{risk_review}", json.dumps(reviews.get("risk_officer", {}), ensure_ascii=False))
-              .replace("{growth_review}", json.dumps(reviews.get("growth_investor", {}), ensure_ascii=False))
-              .replace("{value_review}", json.dumps(reviews.get("value_investor", {}), ensure_ascii=False))
-              .replace("{contrarian_review}", json.dumps(reviews.get("contrarian", {}), ensure_ascii=False))
-              .replace("{discussion_results}",
-                       json.dumps(discussion_results, ensure_ascii=False) if discussion_results else "无圆桌讨论")
-              .replace("{member_weights}", weights_text)
-              )
+    prompt = (
+        prompt_template.replace("{risk_review}", json.dumps(reviews.get("risk_officer", {}), ensure_ascii=False))
+        .replace("{growth_review}", json.dumps(reviews.get("growth_investor", {}), ensure_ascii=False))
+        .replace("{value_review}", json.dumps(reviews.get("value_investor", {}), ensure_ascii=False))
+        .replace("{contrarian_review}", json.dumps(reviews.get("contrarian", {}), ensure_ascii=False))
+        .replace(
+            "{discussion_results}",
+            json.dumps(discussion_results, ensure_ascii=False) if discussion_results else "无圆桌讨论",
+        )
+        .replace("{member_weights}", weights_text)
+    )
 
     try:
         response = await asyncio.to_thread(lambda: llm.invoke(prompt).content)
@@ -480,8 +503,11 @@ def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | No
         note = f"（⚠️ 有效评审员仅 {valid_n}/{len(reviews)}，多数失败或弃权，结论不可背书，须人工复核）"
     else:
         note = "（加权规则引擎兜底）" if weighted else "（规则引擎兜底）"
-    tally = (f"加权 赞成 {w_approve:.1f} / 反对 {w_reject:.1f}（{n_approve}赞成/{n_reject}反对）"
-             if weighted else f"{n_approve} 票赞成, {n_reject} 票反对")
+    tally = (
+        f"加权 赞成 {w_approve:.1f} / 反对 {w_reject:.1f}（{n_approve}赞成/{n_reject}反对）"
+        if weighted
+        else f"{n_approve} 票赞成, {n_reject} 票反对"
+    )
     return {
         "final_verdict": verdict,
         "approval_rate": approval_rate,
@@ -503,14 +529,13 @@ def _needs_discussion(reviews: dict[str, dict]) -> bool:
     if approve == 2 and reject == 2:
         return True
     confidences = [r.get("confidence", 5) for r in reviews.values()]
-    if confidences and max(confidences) - min(confidences) >= 5:
-        return True
-    return False
+    return bool(confidences and max(confidences) - min(confidences) >= 5)
 
 
 # ─────────────────────────────────────────────────────────
 # 背景资料补全（阶段 1.1）：把占位桩接真实数据
 # ─────────────────────────────────────────────────────────
+
 
 def _fmt_num(v, nd=2):
     try:
@@ -531,12 +556,14 @@ def _gangtise_valuation_percentiles(ticker: str, market: str) -> dict | None:
         return None
     try:
         from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+
         creds = resolve_gangtise_credentials("")
         if not creds:
             return None
         ak, sk = creds
         from bottleneck_hunter.data_provider.gangtise_client import fetch_valuation
         from bottleneck_hunter.data_provider.providers import _map_gangtise_valuation
+
         mapped = _map_gangtise_valuation(fetch_valuation(ak, sk, ticker, market))
         if not mapped:
             return None
@@ -563,23 +590,23 @@ def _gangtise_top_holders(ticker: str, market: str) -> list[dict] | None:
         return None
     try:
         from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
+
         creds = resolve_gangtise_credentials("")
         if not creds:
             return None
         ak, sk = creds
         from bottleneck_hunter.data_provider.gangtise_client import fetch_shareholder
         from bottleneck_hunter.data_provider.providers import _map_gangtise_shareholder
+
         mapped = _map_gangtise_shareholder(fetch_shareholder(ak, sk, ticker, market))
         holders = (mapped or {}).get("holders") or []
-        out = [{"name": h.get("name", ""), "pct": _fmt_num(h.get("pct"))}
-               for h in holders[:5] if h.get("name")]
+        out = [{"name": h.get("name", ""), "pct": _fmt_num(h.get("pct"))} for h in holders[:5] if h.get("name")]
         return out or None
     except Exception:  # noqa: BLE001
         return None
 
 
-def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
-                            market: str) -> dict:
+def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str, market: str) -> dict:
     """为单只标的聚合投委会所需的真实背景资料。
 
     返回 dict，键对应各委员 prompt 占位符：
@@ -591,8 +618,7 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
 
     # 催化剂（成长投资人）
     try:
-        bg["catalyst_data"] = (store.get_catalysts_for_entry(entry_id, active_only=True)
-                               if entry_id else [])
+        bg["catalyst_data"] = store.get_catalysts_for_entry(entry_id, active_only=True) if entry_id else []
     except Exception:
         bg["catalyst_data"] = []
 
@@ -615,8 +641,7 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
             "market_cap": snap.get("market_cap") or raw.get("marketCap"),
             "sector": prof.get("sector", "") or raw.get("sector", ""),
         }
-        bg["valuation_data"] = ({k: v for k, v in val.items() if v is not None}
-                                or "暂无估值数据（未采集 profile）")
+        bg["valuation_data"] = {k: v for k, v in val.items() if v is not None} or "暂无估值数据（未采集 profile）"
         # 估值分位增强（Gangtise valuation-analysis，免费，仅 A股有覆盖）：yfinance 只给当前 PE/PB，
         # 给不出「贵/便宜」的历史锚。补近 3 年窗内分位（0~100，越低越便宜），价值投资人 persona 的
         # 估值论证锚点。缺则不加（不破坏现有 yfinance 字段），非 A股静默跳过。
@@ -629,8 +654,7 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
     # 情绪（逆向投资人）← 新闻情感 + 期权 PCR
     try:
         news = store.get_news(ticker, limit=15) or []
-        scores = [n.get("sentiment_score") for n in news
-                  if isinstance(n.get("sentiment_score"), (int, float))]
+        scores = [n.get("sentiment_score") for n in news if isinstance(n.get("sentiment_score"), (int, float))]
         avg_sent = round(sum(scores) / len(scores), 3) if scores else None
         pos = sum(1 for n in news if n.get("sentiment") == "positive")
         neg = sum(1 for n in news if n.get("sentiment") == "negative")
@@ -642,13 +666,11 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
             "positive_news": pos,
             "negative_news": neg,
             "put_call_ratio": pcr,
-            "recent_headlines": sanitize_list(
-                [n.get("title", "") for n in news[:5] if n.get("title")]),
+            "recent_headlines": sanitize_list([n.get("title", "") for n in news[:5] if n.get("title")]),
         }
         # 只过滤真正缺失（None/空列表），保留合法 0 值（如中性情绪、零正面新闻），
         # 否则"零正面新闻"与"未采集"无法区分
-        bg["sentiment_data"] = ({k: v for k, v in sent.items()
-                                 if v not in (None, [])} or "暂无市场情绪数据")
+        bg["sentiment_data"] = {k: v for k, v in sent.items() if v not in (None, [])} or "暂无市场情绪数据"
     except Exception:
         bg["sentiment_data"] = "暂无市场情绪数据"
 
@@ -661,14 +683,15 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
             key = (r.get("rating", "") or "未知").lower()
             rating_dist[key] = rating_dist.get(key, 0) + 1
         insiders = store.get_insider_trades(ticker, limit=10) or []
-        insider_buy = sum(1 for t in insiders
-                          if "buy" in (t.get("transaction_type", "") or "").lower()
-                          or "购" in (t.get("transaction_type", "") or ""))
+        insider_buy = sum(
+            1
+            for t in insiders
+            if "buy" in (t.get("transaction_type", "") or "").lower() or "购" in (t.get("transaction_type", "") or "")
+        )
         insider_sell = len(insiders) - insider_buy
         crowd = {
             "top_institutional_holders": [
-                {"name": h.get("holder_name", ""), "pct": _fmt_num(h.get("pct_held"))}
-                for h in holders[:5]
+                {"name": h.get("holder_name", ""), "pct": _fmt_num(h.get("pct_held"))} for h in holders[:5]
             ],
             "analyst_rating_distribution": rating_dist or "无评级数据",
             "analyst_count": len(ratings),
@@ -698,16 +721,17 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
                 psnap = store.get_latest_snapshot(tk) or {}
                 pprof = store.get_company_profile(tk) or {}
                 praw = pprof.get("raw", {}) if isinstance(pprof.get("raw"), dict) else {}
-                peers.append({
-                    "ticker": tk,
-                    "pe": _fmt_num(praw.get("trailingPE")),
-                    "pb": _fmt_num(praw.get("priceToBook")),
-                    "change_pct": _fmt_num(psnap.get("change_pct")),
-                })
+                peers.append(
+                    {
+                        "ticker": tk,
+                        "pe": _fmt_num(praw.get("trailingPE")),
+                        "pb": _fmt_num(praw.get("priceToBook")),
+                        "change_pct": _fmt_num(psnap.get("change_pct")),
+                    }
+                )
                 if len(peers) >= 6:
                     break
-        bg["peer_comparison"] = ({"sector": sector, "peers": peers}
-                                 if peers else "暂无同业对比数据")
+        bg["peer_comparison"] = {"sector": sector, "peers": peers} if peers else "暂无同业对比数据"
     except Exception:
         bg["peer_comparison"] = "暂无同业对比数据"
 
@@ -721,6 +745,7 @@ def build_ticker_background(store: WatchlistStore, ticker: str, entry_id: str,
 # 主入口
 # ─────────────────────────────────────────────────────────
 
+
 async def run_committee_review(
     store: WatchlistStore,
     pending_plans: list[dict],
@@ -730,20 +755,21 @@ async def run_committee_review(
     """对待审执行计划逐一进行投委会评审"""
     store = store.for_market(market)
     total = len(pending_plans)
-    yield _sse("committee_start", total=total,
-               message=f"投委会评审启动，共 {total} 条执行计划")
+    yield _sse("committee_start", total=total, message=f"投委会评审启动，共 {total} 条执行计划")
 
     macro = store.get_latest_macro_strategy()
     account = store.get_sim_account()
     positions = store.get_sim_positions(account.get("id"))
 
     from bottleneck_hunter.watchlist.decision_engine import _get_market_context_text
+
     active_markets = list(store.get_tickers_by_market().keys())
     market_ctx = _get_market_context_text(active_markets)
 
     # B2: 组合级风险（HHI/相关性/VaR/CVaR/beta）——供风险委员与逆向委员判断真实分散度
     try:
         from bottleneck_hunter.watchlist.decision_engine import _portfolio_risk_summary
+
         portfolio_risk = _portfolio_risk_summary(store, positions, account.get("total_equity", 100000))
     except Exception as e:
         logger.warning("投委会组合风险计算失败: %s", e)
@@ -755,15 +781,19 @@ async def run_committee_review(
     #     这 6 个顶层键，从不就地改嵌套的 account_status/portfolio_risk（市场级只读）。
     base_context = {
         "market_context": market_ctx,
-        "macro_summary": (macro.get("market_summary", "") if macro
-                          else "暂无宏观环境数据"),
+        "macro_summary": (macro.get("market_summary", "") if macro else "暂无宏观环境数据"),
         "account_status": {
             "total_equity": account.get("total_equity", 100000),
             "cash_balance": account.get("cash_balance", 100000),
-            "positions": [{"ticker": p["ticker"], "shares": p.get("shares", 0),
-                           "avg_cost": p.get("avg_cost", 0),
-                           "market_value": p.get("market_value", 0)}
-                          for p in positions],
+            "positions": [
+                {
+                    "ticker": p["ticker"],
+                    "shares": p.get("shares", 0),
+                    "avg_cost": p.get("avg_cost", 0),
+                    "market_value": p.get("market_value", 0),
+                }
+                for p in positions
+            ],
         },
         "portfolio_risk": portfolio_risk or "暂无组合风险数据",
         "catalyst_data": [],
@@ -788,11 +818,32 @@ async def run_committee_review(
         ticker = plan.get("ticker", "unknown")
         exec_plan = plan.get("result_json", plan)
 
-        yield _sse("committee_plan_start", index=idx, total=total,
-                   ticker=ticker, plan_id=plan_id,
-                   message=f"评审 [{idx}/{total}] {ticker}...")
+        yield _sse(
+            "committee_plan_start",
+            index=idx,
+            total=total,
+            ticker=ticker,
+            plan_id=plan_id,
+            message=f"评审 [{idx}/{total}] {ticker}...",
+        )
 
         entry_id = plan.get("entry_id", "")
+        plan_market = plan.get("market") or market
+        try:
+            from bottleneck_hunter.watchlist.snapshot_binding import bind_snapshot
+
+            if plan.get("snapshot_id") is None and plan.get("strategy_version") is None:
+                raise ValueError("legacy unbound execution plan")
+            bind_snapshot(
+                snapshot_id=plan.get("snapshot_id"),
+                strategy_version=plan.get("strategy_version"),
+                strict=True,
+                get_snapshot=store.for_market(plan_market).get_research_snapshot,
+            )
+        except Exception as e:
+            logger.warning("执行计划父快照校验失败 %s: %s", ticker, e)
+            yield _sse("committee_error", ticker=ticker, plan_id=plan_id, error="父快照绑定无效，跳过该计划")
+            continue
         # 阶段 1.1：用真实数据填充该标的的背景资料（估值/情绪/拥挤度/同业/催化剂）
         # (C) 每标的从市场级基底浅拷贝重建，避免跨标的 .update() 残留上一标的背景
         context = dict(base_context)
@@ -807,6 +858,7 @@ async def run_committee_review(
         # 与未接入前逐字节一致。注：研报接口无评级/目标价字段，此处只附研报摘要（诚实标注）。
         try:
             from bottleneck_hunter.chain.evidence import gather_evidence
+
             ev = await gather_evidence(ticker, market, f"{ticker} 风险 竞争")
             context["research_evidence"] = ev or "暂无券商研报"
         except Exception as e:  # noqa: BLE001
@@ -816,6 +868,19 @@ async def run_committee_review(
         if budget and not budget.can_spend(estimated_tokens=15000):
             yield _sse("committee_error", ticker=ticker, error="预算不足，跳过后续评审")
             break
+
+        from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
+
+        committee_binding = save_stage_snapshot(
+            store,
+            "committee",
+            {
+                "execution_plan": plan,
+                "context": context,
+                "parent_snapshot_id": plan.get("snapshot_id"),
+                "parent_strategy_version": plan.get("strategy_version"),
+            },
+        )
 
         # ── 第 1 轮：4 位委员并行独立评审 ──
         tasks = [_review_single(m, exec_plan, context) for m in MEMBERS]
@@ -830,28 +895,41 @@ async def run_committee_review(
             reviews1[role] = r
             try:
                 store.create_committee_review(
-                    execution_plan_id=plan_id, member_role=role,
-                    model_provider=r.get("provider", ""), model_name=r.get("model", ""),
+                    execution_plan_id=plan_id,
+                    member_role=role,
+                    model_provider=r.get("provider", ""),
+                    model_name=r.get("model", ""),
                     result_json=r,
+                    **committee_binding,
                 )
             except Exception as e:
                 logger.warning("保存委员评审失败 %s/%s: %s", ticker, role, e)
 
-        yield _sse("committee_round1_done", ticker=ticker,
-                   votes={role: r.get("vote", "abstain") for role, r in reviews1.items()},
-                   message=f"{ticker} 第 1 轮独立评审完成")
+        yield _sse(
+            "committee_round1_done",
+            ticker=ticker,
+            votes={role: r.get("vote", "abstain") for role, r in reviews1.items()},
+            message=f"{ticker} 第 1 轮独立评审完成",
+        )
 
         # H-18 独立性守卫：委员若挤在同一 provider（如都降级到 kimi/glm），
         # 交叉验证退化为"1 个模型算 N 次"，必须显式告警而非静默放行。
         providers_used = [r.get("provider", "") for r in reviews1.values() if not r.get("error")]
         distinct_providers = {p for p in providers_used if p}
         if len(providers_used) >= 2 and len(distinct_providers) <= 1:
-            logger.warning("投委会独立性降级：%d 位委员均使用 provider=%s，交叉验证失去多样性",
-                           len(providers_used), next(iter(distinct_providers), "?"))
-            yield _sse("committee_diversity_warning", ticker=ticker,
-                       provider_count=len(distinct_providers), member_count=len(providers_used),
-                       message=f"⚠ {ticker} 投委会 {len(providers_used)} 位委员集中于 "
-                               f"{len(distinct_providers)} 个 provider，独立性下降（结论仅供参考）")
+            logger.warning(
+                "投委会独立性降级：%d 位委员均使用 provider=%s，交叉验证失去多样性",
+                len(providers_used),
+                next(iter(distinct_providers), "?"),
+            )
+            yield _sse(
+                "committee_diversity_warning",
+                ticker=ticker,
+                provider_count=len(distinct_providers),
+                member_count=len(providers_used),
+                message=f"⚠ {ticker} 投委会 {len(providers_used)} 位委员集中于 "
+                f"{len(distinct_providers)} 个 provider，独立性下降（结论仅供参考）",
+            )
 
         # ── 第 2 轮：互相质疑，可改票（基于第 1 轮，需 ≥2 位有效委员才有意义）──
         # 优化：第 2 轮辩论是为化解分歧；若第 1 轮已**全票一致且信心接近**，辩论几无价值，
@@ -862,12 +940,15 @@ async def run_committee_review(
         _distinct_votes = {r.get("vote", "abstain") for r in valid1.values()}
         _unanimous = len(valid1) >= 2 and len(_distinct_votes) == 1 and not _needs_discussion(valid1)
         if _unanimous:
-            yield _sse("committee_round2_skipped", ticker=ticker, vote=next(iter(_distinct_votes)),
-                       message=f"{ticker} 第 1 轮 {len(valid1)} 位委员全票一致"
-                               f"（{next(iter(_distinct_votes))}）且信心接近，跳过第 2 轮辩论省算力")
+            yield _sse(
+                "committee_round2_skipped",
+                ticker=ticker,
+                vote=next(iter(_distinct_votes)),
+                message=f"{ticker} 第 1 轮 {len(valid1)} 位委员全票一致"
+                f"（{next(iter(_distinct_votes))}）且信心接近，跳过第 2 轮辩论省算力",
+            )
         elif len(valid1) >= 2:
-            yield _sse("committee_round2_start", ticker=ticker,
-                       message=f"{ticker} 第 2 轮辩论与质疑...")
+            yield _sse("committee_round2_start", ticker=ticker, message=f"{ticker} 第 2 轮辩论与质疑...")
             r2_tasks = [_review_round2(m, exec_plan, reviews1) for m in MEMBERS]
             r2_results = await asyncio.gather(*r2_tasks, return_exceptions=True)
             for r in r2_results:
@@ -878,11 +959,13 @@ async def run_committee_review(
                 reviews2[role] = r
                 if r.get("vote") != prev.get("vote"):
                     revised.append({"role": role, "from": prev.get("vote"), "to": r.get("vote")})
-            yield _sse("committee_round2_done", ticker=ticker,
-                       votes={role: r.get("vote", "abstain") for role, r in reviews2.items()},
-                       revised=revised,
-                       message=f"{ticker} 第 2 轮辩论完成"
-                               + (f"，{len(revised)} 位委员改票" if revised else "，无人改票"))
+            yield _sse(
+                "committee_round2_done",
+                ticker=ticker,
+                votes={role: r.get("vote", "abstain") for role, r in reviews2.items()},
+                revised=revised,
+                message=f"{ticker} 第 2 轮辩论完成" + (f"，{len(revised)} 位委员改票" if revised else "，无人改票"),
+            )
 
         # 终票以第 2 轮为准
         reviews = reviews2
@@ -890,34 +973,54 @@ async def run_committee_review(
         for role, r in reviews.items():
             try:
                 store.record_prediction(
-                    provider=r.get("provider", ""), model=r.get("model", ""),
-                    role_context=f"committee_{role}", ticker=ticker,
-                    prediction_type="vote", prediction_value=r.get("vote", "abstain"),
+                    provider=r.get("provider", ""),
+                    model=r.get("model", ""),
+                    role_context=f"committee_{role}",
+                    ticker=ticker,
+                    prediction_type="vote",
+                    prediction_value=r.get("vote", "abstain"),
                     market=market,
                 )
             except Exception:
                 logger.debug("record_prediction failed for committee %s", role)
 
-        yield _sse("committee_reviews_done", ticker=ticker,
-                   votes={role: r.get("vote", "abstain") for role, r in reviews.items()},
-                   message=f"{ticker} 评审完成（终票）")
+        yield _sse(
+            "committee_reviews_done",
+            ticker=ticker,
+            votes={role: r.get("vote", "abstain") for role, r in reviews.items()},
+            message=f"{ticker} 评审完成（终票）",
+        )
 
         # 判断是否需要圆桌讨论（基于第 2 轮终票）
         discussion_result = None
         if _needs_discussion(reviews):
-            yield _sse("committee_discussion_start", ticker=ticker,
-                       message=f"{ticker} 意见分歧，启动圆桌讨论...")
+            yield _sse("committee_discussion_start", ticker=ticker, message=f"{ticker} 意见分歧，启动圆桌讨论...")
             try:
                 discussion_result = await _run_discussion(ticker, reviews, exec_plan)
-                yield _sse("committee_discussion_done", ticker=ticker,
-                           consensus_reached=discussion_result.get("consensus_reached", False),
-                           message=f"{ticker} 圆桌讨论完成")
+                yield _sse(
+                    "committee_discussion_done",
+                    ticker=ticker,
+                    consensus_reached=discussion_result.get("consensus_reached", False),
+                    message=f"{ticker} 圆桌讨论完成",
+                )
             except Exception as e:
                 logger.warning("圆桌讨论失败: %s", e)
                 yield _sse("committee_discussion_error", ticker=ticker, error=str(e))
 
         # 生成共识（按委员历史可信权重加权表决）
         weights = _member_weights(store, reviews, market)
+        consensus_binding = save_stage_snapshot(
+            store,
+            "committee_consensus",
+            {
+                "parent_snapshot_id": committee_binding["snapshot_id"],
+                "execution_plan": plan,
+                "reviews1": reviews1,
+                "reviews2": reviews2,
+                "discussion": discussion_result,
+                "weights": weights,
+            },
+        )
         try:
             consensus = await _build_consensus(reviews, discussion_result, weights)
         except Exception as e:
@@ -928,20 +1031,26 @@ async def run_committee_review(
             store.create_committee_consensus(
                 execution_plan_id=plan_id,
                 result_json=consensus,
+                **consensus_binding,
             )
         except Exception as e:
             logger.warning("保存共识失败 %s: %s", ticker, e)
+            yield _sse("committee_error", ticker=ticker, plan_id=plan_id, error="保存共识失败，跳过该计划")
+            continue
 
         # ── P0.5 投委会 gating：按共识结论实际动作 ──
         verdict_raw = consensus.get("final_verdict", "unknown")
         summary_text = consensus.get("summary", "")
         try:
             if verdict_raw == "rejected":
-                store.reject_execution(
-                    plan_id, f"{store.BLOCK_MARKER_COMMITTEE} {summary_text}")
-                yield _sse("committee_gating", ticker=ticker, plan_id=plan_id,
-                           action="blocked",
-                           message=f"{ticker} 被投委会否决，已移出待确认队列")
+                store.reject_execution(plan_id, f"{store.BLOCK_MARKER_COMMITTEE} {summary_text}")
+                yield _sse(
+                    "committee_gating",
+                    ticker=ticker,
+                    plan_id=plan_id,
+                    action="blocked",
+                    message=f"{ticker} 被投委会否决，已移出待确认队列",
+                )
             elif verdict_raw == "approved_with_modifications":
                 mods: dict = {}
                 for m in consensus.get("consensus_modifications", []):
@@ -950,96 +1059,126 @@ async def run_committee_review(
                         continue
                     field = m.get("field", "")
                     val = m.get("modified")
-                    if field in ("shares", "target_price", "limit_price",
-                                 "execution_method", "method") and val is not None:
+                    if (
+                        field in ("shares", "target_price", "limit_price", "execution_method", "method")
+                        and val is not None
+                    ):
                         mods[field] = val
                 if mods:
                     ok = store.apply_committee_modifications(plan_id, mods)
                     if ok:
-                        yield _sse("committee_gating", ticker=ticker, plan_id=plan_id,
-                                   action="modified", modifications=mods,
-                                   message=f"{ticker} 已应用投委会修改: {mods}")
+                        yield _sse(
+                            "committee_gating",
+                            ticker=ticker,
+                            plan_id=plan_id,
+                            action="modified",
+                            modifications=mods,
+                            message=f"{ticker} 已应用投委会修改: {mods}",
+                        )
         except Exception as e:
             logger.warning("投委会 gating 动作失败 %s: %s", ticker, e)
 
         try:
             role_label = {m["role"]: m["label"] for m in MEMBERS}
             participants = [
-                {"role": r.get("role", ""), "name": role_label.get(r.get("role", ""), r.get("name", "")),
-                 "model": f"{r.get('provider', '')}/{r.get('model', '')}"}
+                {
+                    "role": r.get("role", ""),
+                    "name": role_label.get(r.get("role", ""), r.get("name", "")),
+                    "model": f"{r.get('provider', '')}/{r.get('model', '')}",
+                }
                 for r in reviews.values()
             ]
 
             # 阶段 1.3：构建完整会议 transcript（背景快照 + 各委员评审 + 圆桌讨论）
             transcript = []
             # 第 0 条：本次会议各委员读入的背景资料（透明化）
-            transcript.append({
-                "round": 0, "role": "_background", "name": "会议输入资料",
-                "data": {
-                    "valuation_data": context.get("valuation_data"),
-                    "sentiment_data": context.get("sentiment_data"),
-                    "crowding_data": context.get("crowding_data"),
-                    "peer_comparison": context.get("peer_comparison"),
-                    "catalyst_data": context.get("catalyst_data"),
-                    "sector_trends": context.get("sector_trends"),
-                    "account_status": context.get("account_status"),
-                    "macro_summary": context.get("macro_summary"),
-                },
-            })
+            transcript.append(
+                {
+                    "round": 0,
+                    "role": "_background",
+                    "name": "会议输入资料",
+                    "data": {
+                        "valuation_data": context.get("valuation_data"),
+                        "sentiment_data": context.get("sentiment_data"),
+                        "crowding_data": context.get("crowding_data"),
+                        "peer_comparison": context.get("peer_comparison"),
+                        "catalyst_data": context.get("catalyst_data"),
+                        "sector_trends": context.get("sector_trends"),
+                        "account_status": context.get("account_status"),
+                        "macro_summary": context.get("macro_summary"),
+                    },
+                }
+            )
             # 第 1 轮：各委员独立评审（真实首轮立场，用 reviews1 而非终票）
             for role, r in reviews1.items():
-                transcript.append({
-                    "round": 1, "role": role, "name": role_label.get(role, role),
-                    "model": f"{r.get('provider', '')}/{r.get('model', '')}",
-                    "provider": r.get("provider", ""),
-                    "model_name": r.get("model", ""),
-                    "weight": round(float(weights.get(role, 1.0)), 2),
-                    "vote": r.get("vote", "abstain"),
-                    "confidence": r.get("confidence", 5),
-                    "content": r.get("overall_assessment", "") or "",
-                    "key_concerns": r.get("key_concerns", []),
-                    "suggestions": r.get("suggestions", []),
-                    "strengths": r.get("strengths", []),
-                    # 记录 LLM 调用错误，使"因系统错误弃权"可被前端区分于真实弃权
-                    "error": r.get("error", ""),
-                })
+                transcript.append(
+                    {
+                        "round": 1,
+                        "role": role,
+                        "name": role_label.get(role, role),
+                        "model": f"{r.get('provider', '')}/{r.get('model', '')}",
+                        "provider": r.get("provider", ""),
+                        "model_name": r.get("model", ""),
+                        "weight": round(float(weights.get(role, 1.0)), 2),
+                        "vote": r.get("vote", "abstain"),
+                        "confidence": r.get("confidence", 5),
+                        "content": r.get("overall_assessment", "") or "",
+                        "key_concerns": r.get("key_concerns", []),
+                        "suggestions": r.get("suggestions", []),
+                        "strengths": r.get("strengths", []),
+                        # 记录 LLM 调用错误，使"因系统错误弃权"可被前端区分于真实弃权
+                        "error": r.get("error", ""),
+                    }
+                )
             # 第 2 轮：辩论后改票/终票（仅记录立场或理由确有变化的委员，避免重复）
             for role, r in reviews2.items():
                 prev = reviews1.get(role, {})
-                if (r.get("vote") == prev.get("vote")
-                        and r.get("overall_assessment") == prev.get("overall_assessment")):
+                if r.get("vote") == prev.get("vote") and r.get("overall_assessment") == prev.get("overall_assessment"):
                     continue
-                transcript.append({
-                    "round": 2, "role": role, "name": role_label.get(role, role),
-                    "model": f"{r.get('provider', '')}/{r.get('model', '')}",
-                    "provider": r.get("provider", ""),
-                    "model_name": r.get("model", ""),
-                    "weight": round(float(weights.get(role, 1.0)), 2),
-                    "vote": r.get("vote", "abstain"),
-                    "confidence": r.get("confidence", 5),
-                    "content": r.get("overall_assessment", "") or "",
-                    "key_concerns": r.get("key_concerns", []),
-                    "suggestions": r.get("suggestions", []),
-                    "strengths": r.get("strengths", []),
-                    "prev_vote": prev.get("vote", ""),
-                    "error": r.get("error", ""),
-                })
+                transcript.append(
+                    {
+                        "round": 2,
+                        "role": role,
+                        "name": role_label.get(role, role),
+                        "model": f"{r.get('provider', '')}/{r.get('model', '')}",
+                        "provider": r.get("provider", ""),
+                        "model_name": r.get("model", ""),
+                        "weight": round(float(weights.get(role, 1.0)), 2),
+                        "vote": r.get("vote", "abstain"),
+                        "confidence": r.get("confidence", 5),
+                        "content": r.get("overall_assessment", "") or "",
+                        "key_concerns": r.get("key_concerns", []),
+                        "suggestions": r.get("suggestions", []),
+                        "strengths": r.get("strengths", []),
+                        "prev_vote": prev.get("vote", ""),
+                        "error": r.get("error", ""),
+                    }
+                )
             # 圆桌讨论（如有分歧才触发）
             if discussion_result and not discussion_result.get("error"):
-                transcript.append({
-                    "round": 2, "role": "_discussion", "name": "圆桌讨论",
-                    "content": discussion_result.get("reasoning", "")
-                    or discussion_result.get("final_recommendation", {}).get("conditions", ""),
-                    "consensus_reached": discussion_result.get("consensus_reached", False),
-                    "key_agreement": discussion_result.get("key_agreement", ""),
-                    "key_disagreement": discussion_result.get("key_disagreement", ""),
-                    "minority_view": discussion_result.get("minority_view", {}),
-                })
+                transcript.append(
+                    {
+                        "round": 2,
+                        "role": "_discussion",
+                        "name": "圆桌讨论",
+                        "content": discussion_result.get("reasoning", "")
+                        or discussion_result.get("final_recommendation", {}).get("conditions", ""),
+                        "consensus_reached": discussion_result.get("consensus_reached", False),
+                        "key_agreement": discussion_result.get("key_agreement", ""),
+                        "key_disagreement": discussion_result.get("key_disagreement", ""),
+                        "minority_view": discussion_result.get("minority_view", {}),
+                    }
+                )
 
             model_predictions = [
-                {"role": role, "name": role_label.get(role, role),
-                 "provider": r.get("provider", ""), "model": r.get("model", ""),
-                 "vote": r.get("vote", "abstain"), "confidence": r.get("confidence", 5)}
+                {
+                    "role": role,
+                    "name": role_label.get(role, role),
+                    "provider": r.get("provider", ""),
+                    "model": r.get("model", ""),
+                    "vote": r.get("vote", "abstain"),
+                    "confidence": r.get("confidence", 5),
+                }
                 for role, r in reviews.items()
             ]
 
@@ -1057,22 +1196,26 @@ async def run_committee_review(
                 result_json=consensus,
                 execution_plan_id=plan_id,
                 market=market,
+                **consensus_binding,
             )
         except Exception:
             logger.exception("create_meeting_record failed for committee %s", ticker)
 
         verdict = consensus.get("final_verdict", "unknown")
-        yield _sse("committee_plan_done", ticker=ticker, plan_id=plan_id,
-                   verdict=verdict,
-                   approval_rate=consensus.get("approval_rate", 0),
-                   summary=consensus.get("summary", ""),
-                   message=f"{ticker} 评审结果: {verdict}")
+        yield _sse(
+            "committee_plan_done",
+            ticker=ticker,
+            plan_id=plan_id,
+            verdict=verdict,
+            approval_rate=consensus.get("approval_rate", 0),
+            summary=consensus.get("summary", ""),
+            message=f"{ticker} 评审结果: {verdict}",
+        )
 
         if budget:
             budget.record("committee", "multi", 15000, 6000, f"committee_{ticker}")
 
-    yield _sse("committee_done", total=total,
-               message=f"投委会评审完成，共处理 {total} 条执行计划")
+    yield _sse("committee_done", total=total, message=f"投委会评审完成，共处理 {total} 条执行计划")
 
 
 # ─────────────────────────────────────────────────────────
@@ -1122,8 +1265,7 @@ def _regate_after_challenge(store, plan_id: str, verdict: str, consensus: dict, 
     try:
         if verdict == "rejected":
             if status == "pending":
-                store.reject_execution(
-                    plan_id, f"{store.BLOCK_MARKER_COMMITTEE} 用户质询后改判否决")
+                store.reject_execution(plan_id, f"{store.BLOCK_MARKER_COMMITTEE} 用户质询后改判否决")
                 return "rejected"
             return "kept_rejected" if status == "rejected" else "noop_not_pending"
         # 非否决：若此前被投委会否决，恢复为 pending
@@ -1175,9 +1317,9 @@ async def challenge_member(
         return {"error": f"未知委员: {role}"}
 
     transcript = rec.get("transcript_json", []) or []
-    member_entries = [t for t in transcript
-                      if t.get("role") == role and t.get("type") != "challenge"
-                      and t.get("round") in (1, 2, 3)]
+    member_entries = [
+        t for t in transcript if t.get("role") == role and t.get("type") != "challenge" and t.get("round") in (1, 2, 3)
+    ]
     if not member_entries:
         return {"error": "该委员无评审记录，无法质询"}
     latest = max(member_entries, key=lambda t: t.get("round", 0))
@@ -1196,11 +1338,13 @@ async def challenge_member(
     if not chain:
         return {"error": "无可用 LLM"}
 
-    prompt = (_load_prompt("committee_challenge")
-              .replace("{member_label}", member["label"])
-              .replace("{ticker}", ticker or "该标的")
-              .replace("{original_review}", json.dumps(original_review, ensure_ascii=False))
-              .replace("{user_message}", user_message))
+    prompt = (
+        _load_prompt("committee_challenge")
+        .replace("{member_label}", member["label"])
+        .replace("{ticker}", ticker or "该标的")
+        .replace("{original_review}", json.dumps(original_review, ensure_ascii=False))
+        .replace("{user_message}", user_message)
+    )
     try:
         response, provider, model = await _invoke_with_retry(chain, prompt, role)
         result = extract_json_object(response)
@@ -1218,25 +1362,42 @@ async def challenge_member(
     vote_changed = new_vote != old_vote
 
     # transcript 始终追加质询记录
-    transcript.append({
-        "round": 3, "role": role, "name": latest.get("name", role),
-        "type": "challenge",
-        "user_message": user_message,
-        "response": member_response,
-        "accept_user_point": bool(result.get("accept_user_point", False)),
-        "old_vote": old_vote, "new_vote": new_vote, "vote_changed": vote_changed,
-        "provider": provider, "model_name": model, "model": f"{provider}/{model}",
-    })
+    transcript.append(
+        {
+            "round": 3,
+            "role": role,
+            "name": latest.get("name", role),
+            "type": "challenge",
+            "user_message": user_message,
+            "response": member_response,
+            "accept_user_point": bool(result.get("accept_user_point", False)),
+            "old_vote": old_vote,
+            "new_vote": new_vote,
+            "vote_changed": vote_changed,
+            "provider": provider,
+            "model_name": model,
+            "model": f"{provider}/{model}",
+        }
+    )
     # 改票则追加一条 round-3 修订评审（供概览/共识取最新票）
     if vote_changed:
-        transcript.append({
-            "round": 3, "role": role, "name": latest.get("name", role),
-            "provider": provider, "model_name": model, "model": f"{provider}/{model}",
-            "weight": latest.get("weight", 1.0),
-            "vote": new_vote, "confidence": new_conf, "content": revised,
-            "key_concerns": original_review["key_concerns"],
-            "prev_vote": old_vote, "revised_by_challenge": True,
-        })
+        transcript.append(
+            {
+                "round": 3,
+                "role": role,
+                "name": latest.get("name", role),
+                "provider": provider,
+                "model_name": model,
+                "model": f"{provider}/{model}",
+                "weight": latest.get("weight", 1.0),
+                "vote": new_vote,
+                "confidence": new_conf,
+                "content": revised,
+                "key_concerns": original_review["key_concerns"],
+                "prev_vote": old_vote,
+                "revised_by_challenge": True,
+            }
+        )
 
     consensus = rec.get("result_json", {})
     if not isinstance(consensus, dict):
@@ -1254,13 +1415,12 @@ async def challenge_member(
         consensus["member_weights"] = new_consensus["member_weights"]
         base_summary = consensus.get("summary", "") or ""
         consensus["summary"] = (
-            base_summary
-            + f"\n[用户质询] {member['label']} 由「{old_vote}」改为「{new_vote}」，"
-              f"重算结论：{new_consensus['final_verdict']}（加权通过率 {new_consensus['approval_rate']}%）。")
+            base_summary + f"\n[用户质询] {member['label']} 由「{old_vote}」改为「{new_vote}」，"
+            f"重算结论：{new_consensus['final_verdict']}（加权通过率 {new_consensus['approval_rate']}%）。"
+        )
         plan_id = rec.get("execution_plan_id", "")
         if plan_id:
-            gating_action = _regate_after_challenge(
-                store, plan_id, new_consensus["final_verdict"], consensus, ticker)
+            gating_action = _regate_after_challenge(store, plan_id, new_consensus["final_verdict"], consensus, ticker)
 
     store.update_meeting_review(
         meeting_id,
@@ -1286,6 +1446,7 @@ async def challenge_member(
 
 def _selfcheck() -> None:
     """assert 自检：主模型瞬态失败会重试 max_retry 次；备用模型只试一次即快速切换。"""
+
     class _Boom:
         def __init__(self):
             self.calls = 0
@@ -1300,8 +1461,10 @@ def _selfcheck() -> None:
 
         def invoke(self, *a, **k):
             self.calls += 1
+
             class _R:
                 content = "ok"
+
             return _R()
 
     # 主模型瞬态失败(retry 2) → 备用成功：主被调 2 次，备用 1 次
