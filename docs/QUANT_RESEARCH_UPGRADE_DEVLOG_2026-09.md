@@ -146,3 +146,26 @@
 - 本层是纯统计评估函数，尚未接线到具体信号/决策数据；与实际回测收益的对接留待 P1/P2 各评估子项按需调用。
 - 夏普用无风险=0 的简化口径；年化用 `(1+mean)**periods_per_year - 1` 的几何近似，接实盘时按需替换为对数收益或含无风险利率口径。
 - `ablation` 的独立重采样分支适用于不等长样本；配对分支要求等长且逐元素对齐（同一批样本外窗口），调用方需保证语义匹配。
+
+## P1-1：概率化信号与校准
+
+- 状态：✅ 概率校准层落地，与共识加权明确分层，专项/范围 Ruff/全量门禁通过。
+- 新增 `watchlist/signal_calibration.py`：把原始信号分数映射为校准概率，并度量校准质量。不引入 scipy，纯 numpy 确定可复现。
+  - **Brier / LogLoss**：概率预测整体误差。`brier_score = mean((p-y)^2)`（完美 0、最差 1）；`log_loss = -mean(y·log p + (1-y)·log(1-p))`，`p` 先钳到 `[eps, 1-eps]` 防 `log(0)` 溢出。两者入口都强校验：概率必须落在 `[0,1]`、结果必须为 0/1、形状一致、非空，否则 `ValueError`——从源头拒绝非法概率。
+  - **可靠性曲线 + ECE**：`reliability_curve` 把 `[0,1]` 等宽分桶，返回每桶预测均值（置信度）与实际正例率（准确率），空桶记 `nan`+`count=0`；末桶取闭区间纳入 `p==1.0`。`expected_calibration_error` 按各桶样本占比加权 `|实际频率 - 预测均值|` 求和，量化过/欠自信。
+  - **`IsotonicCalibrator`（等序回归 PAV）**：用 Pool Adjacent Violators 把"原始分数 → 经验正例率"拟合成单调非降映射；`fit` 先按唯一分数聚合正例率与样本数再做加权等序回归，`predict` 用分段线性插值、越界钳到端点，输出恒在 `[0,1]`。无随机、相同输入必得相同映射。
+  - **校准/测试隔离**：`calibrate_and_evaluate` 只在校准集 `fit`、在独立测试集 `apply` 并度量 Brier/LogLoss/ECE/可靠性曲线，从结构上避免用测试集信息调参。
+- 分层保护：与 `model_calibrator.py` 明确分层——后者是 AI 模型共识"准确率 → 权重"的加权（consensus calibration_weight），本模块是"原始分数 → 校准概率"的概率校准，两者互不依赖、互不 import。回滚只需移除新模块，既有分数读取与共识加权入口不受影响（保留原分数读取兼容）。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_signal_calibration.py -q`：`22 passed in 0.60s`。
+- 受影响回归（评估/事件回测/打分模型 sibling 模块）`test_evaluation.py test_event_backtest.py test_models.py`：`48 passed`（本模块未改动既有代码，此为预防性回归）。
+- P1-1 范围 Ruff `ruff check signal_calibration.py tests/test_signal_calibration.py`：`All checks passed!`。
+- 全量 `python -m pytest -q`：`1814 passed, 4 skipped in 369.34s`，退出码 0（= P0-6 基线 1792 + 22 项 P1-1 专项）。
+
+### 已知边界
+
+- 本层是纯概率校准与度量函数，尚未接线到具体信号来源；现有 `chain/models.py` 打分为 0-10 分制、`model_calibrator` 记录为二元 `is_correct`，把它们喂入校准器需调用方先归一/配对，留待 P1/P2 各评估子项按需接线。
+- 等序回归是保序（单调）校准，只纠正单调错配的过/欠自信，不重排分数序；若原始分数与结果非单调相关，需先修分数本身而非依赖校准。
+- ECE 用等宽分桶（非等频/自适应桶）；桶数 `n_bins` 为口径旋钮，样本极少时分桶估计噪声大，调用方按样本量选桶。
