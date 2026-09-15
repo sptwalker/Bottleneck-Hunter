@@ -280,3 +280,29 @@
 - 撮合按「当日单一参考价 + 半价差」成交，不建模盘中逐笔撮合、盘口深度、排队优先级；`participation_rate` 是流动性上限的近似旋钮。
 - 港股 tick 实为按价分档（如 <0.25 港元为 0.001）、lot 因股而异，本表简化为 tick 0.01 / lot 100；A股涨跌停按主板 ±10% / 双创 ±20% 两档，未含 ST（±5%）、北交所（±30%）等细分档；接实盘按交易所细则在 `MarketRules` 校准。
 - T+1 仅由 `next_sellable_index` 给出可卖日下标供调用方按自身交易日历判定，本模块不持有持仓账本，不自动拦截 T+0 卖出；现金账本亦由调用方管理，避免与 `event_backtest` 组合账本重复扣现。
+
+## P2-2：LLM 输入输出与成本审计
+
+- 状态：✅ 单次调用审计层落地，纯 stdlib，专项/受影响回归/范围 Ruff/全量门禁通过。
+- 背景与分工：LLM 审计所需信号**已散落在四处，但无一条把它们串成「单次调用」维度的可查询审计**——`store_budget.record_llm_usage` 是**按日聚合**的预算账（token/成本，且 `estimated_cost_usd` 由调用方外部传入，**全仓无任何中央定价计算**），`store_ai_models.record_model_call` 是**按日×用户×provider×model×角色聚合**的健康/延迟遥测（有耗时/成败但无 prompt/快照/策略/成本），`fallback._record_call` 在调用点算出 `latency_ms` 但只喂给聚合遥测（且 pytest 下跳过落库），`provenance.build_provenance` 把 prompt 哈希/model/快照嵌进决策 `result_json`（无成本/耗时/覆写，非可查询条目）。缺口正是 P2-2 验收所要的「每次调用可关联用户、策略和快照」：无单条不可变审计把 (用户+策略版本+快照) × (prompt 哈希+model+版本) × (耗时+token+成本) × (人工覆写) 绑在一起；且**无确定性 token→成本模型**（`estimated_cost_usd` 无人计算）。P2-2 补这一层，与上述四处互补而非替代。
+- 新增 `watchlist/llm_audit.py`：在「一次 LLM 调用」维度产出一条不可变、可追溯的审计条目。纯 stdlib（`dataclasses`/`re`/`uuid`/`datetime`），复用 `provenance.prompt_hash`，不引入 numpy/scipy，定价与哈希给定输入必得同一结果。
+  - **确定性成本模型 `_PRICING` + `price_for` + `estimate_cost`**：定价表 `provider → {model 前缀: (输入价, 输出价)/1K tok USD}`，`model` 按**最长前缀命中**（`gpt-4o-mini` 压过 `gpt-4o`），缺省回退 provider 缺省价、再回退全局缺省价 `(0.001, 0.002)`；`ollama` 本地零费用。`estimate_cost` token→USD 保留 6 位小数、负 token 当 0。补齐既有 `estimated_cost_usd` 无人计算的缺口。定价为校准旋钮而非硬事实，接实盘按各家价目表校准。
+  - **`estimate_tokens` 兜底**：CJK≈1 token、其余≈4 字符/token 的无依赖启发式，仅在上游 usage 回包缺 token 数时兜底，明确注释勿当计费真值。
+  - **`redact_secrets` 密钥遮蔽**：保守正则遮蔽 `sk-*`/`Bearer *`/超长令牌，作用于自由文本字段（`reason`/`override_reason`）；审计只存 prompt 哈希不存原文，本函数是纵深防线，过度遮蔽可接受，从源头杜绝 Key/凭据泄漏进审计。
+  - **`LlmCallAudit`（frozen dataclass）+ `build_call_audit`**：单次调用的不可变审计记录，字段即审计六维 + 关联维——`user_id`/`strategy_version`/`snapshot_id`（复用 P0-2/P0-3 快照与策略版本）、`provider`/`model`/`model_version`、`prompt_hashes`（prompt 名列表逐个取 `provenance.prompt_hash` + 内联哈希合并）、`input_tokens`/`output_tokens`/`cost_usd`（缺省由定价表估算，可显式覆盖）、`latency_ms`（与 fallback 遥测同源口径）、`overridden`/`override_reason`/`override_by`（人工改判）。`provider` 归一化小写，token/latency 负值夹 0，`call_id` 缺省 uuid4、`created_at` 缺省当前 UTC，使「每次调用可关联用户、策略与快照」可执行、可验证。
+  - **`summarize` 汇总报表**：把一批审计条目汇总为总量 + 按 `provider/model` + 按 `strategy_version`（calls/token/成本/覆写数/失败数），供 P2-3 增量消融成本核算与 P2-4 审计报表复用。
+- 分层保护：**纯审计/诊断叶子层，不接线进生产 LLM 调用链**（回退=不调用，对齐验收「停止新审计写入，保留调用」）；`FallbackChatModel`/`_record_call`/`record_llm_usage`/`record_model_call`/`build_provenance` 现有路径完全不变，持久化审计 Store 表留待接线时再建（YAGNI）。与 P1-1/P1-2/P1-3/P1-4/P2-1 各叶子模块互不依赖、互不 import（仅单向复用 `provenance.prompt_hash`）。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_llm_audit.py -q`：`38 passed in 0.55s`。
+- 范围 Ruff `ruff check llm_audit.py tests/test_llm_audit.py`：`All checks passed!`（两处 E501 手工改多行/删长断言消息，未用 `--fix`）。
+- 全量 `python -m pytest -q`：`1979 passed, 4 skipped in 554.19s`，退出码 0（= P2-1 基线 1941 + 38 项 P2-2 专项）。
+
+### 已知边界
+
+- 本层是纯审计记录/成本模型函数，**尚未接线到生产 LLM 调用链**；要真正逐次审计线上调用，需调用方在 `fallback._record_call`（已持有 provider/model/latency）或各角色调用点装配 `build_call_audit` 并落库到新审计表，留待 P2-3/P2-4 或后续子项按需接线。
+- 定价表 `_PRICING` 是校准旋钮而非硬事实，各家价目随时调整；未知 provider/model 回退全局缺省价宁可粗估不为 0（0 会让成本审计静默失真），接实盘须按各家最新价目表校准。
+- `estimate_tokens` 是无 tokenizer 依赖的极粗启发式，真实 token 应优先取 provider usage 回包，本函数仅兜底、不作计费真值。
+- `redact_secrets` 是保守正则纵深防线，不替代「审计只存 prompt 哈希不存原文」这一根本隔离；超长令牌阈值（32 字符）是旋钮，接入更严格密钥规范时校准。
+- 审计条目当前为内存/传值对象，未定义持久化表结构与查询索引；跨用户/市场隔离在接线到 Store 时按既有 `.for_user().for_market()` 范式补齐。
