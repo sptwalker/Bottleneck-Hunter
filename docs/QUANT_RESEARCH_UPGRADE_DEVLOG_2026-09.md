@@ -252,3 +252,31 @@
 - 链条聚类只对已标注 `chain_node` 的标的生效；未标注标的不参与（不凭空造簇），要覆盖全组合链条聚集需调用方先补齐环节标签。
 - 因子净暴露由调用方的因子模型算好后传入，本层只查上限、不建因子模型；`max_factor_exposure` 默认对齐 `max_portfolio_beta`，多因子场景的各因子独立上限属校准旋钮。
 - 各维默认预算（链条 35% / 流动性 5 天 / CVaR 8% / 参与率 20% / 降级带 0.15）是校准旋钮而非硬事实，接实盘风控口径时在 `BudgetLimits` 校准。
+
+## P2-1：多市场交易规则、冲击与订单状态机
+
+- 状态：✅ 单笔订单微结构层落地，纯 stdlib，专项/受影响回归/范围 Ruff/全量门禁通过。
+- 背景与分工：既有执行链只有**组合级全量成交**能力——`event_backtest.run_event_backtest`（P0-5，下一交易日 close+滑点，全有或全无成交）、`trade_executor.execute_trade`（生产真实行情快照成交，全有或全无）、`slippage.calc_slippage`（sqrt 冲击成本）、`position_sizing._round_lot`（A股建仓定量取整手）。缺口在于**单笔订单的微结构**：最小变动价位（tick）、成交期涨跌停**约束**（`decision_engine` 里 A股涨跌停/T+1 仅是提示词文本、`data_validator` 里涨跌停仅作脏数据标记，都不可执行）、订单状态机、部分成交、撤单、T+1 可卖延迟——全系统无任何现成实现。P2-1 补这一层，与前述组合级能力互补而非替代。
+- 新增 `watchlist/execution_rules.py`：在「一笔订单」维度用**可审计的订单状态机**驱动成交并施加各市场真实规则。纯 stdlib（`dataclasses`/`enum`），不引入 numpy/scipy，确定可复现。
+  - **`MarketRules` 规则表 + `rules_for`**：美股（tick 0.01 / lot 1 / 无涨跌停 / T+0 / 可空）、港股（lot 100 / 无涨跌停 / T+0）、A股主板（lot 100 / ±10% / T+1 / 不可空）；A股创业板·科创板经 `board` 参数走 ±20% 变体；未知市场回退美股规则。默认值为校准旋钮而非硬事实。
+  - **`round_to_tick` / `round_to_lot`**：价格就近对齐最小变动价位；数量向下取整到最小交易单位（A股不足一手→0，美股 1 股）。把 `position_sizing._round_lot` 的整手语义一般化进规则表并在**成交时**强制。
+  - **`limit_band` / `can_fill` / `fill_price`**：由昨收算涨跌停带；封涨停买不到、封跌停卖不掉（无涨跌停市场恒可成交）；成交价 = 参考价按半价差向不利方向偏移 → 涨跌停带夹取 → tick 取整。价差是与 `calc_slippage` 冲击成本**不同的成本旋钮**，明确注释勿重复叠加。
+  - **`OrderStatus`（IntEnum）+ `Order` 状态机**：状态 `NEW→PARTIALLY_FILLED→FILLED/CANCELLED/REJECTED` **数值单调、终态不可逆**。`_advance` 是唯一推进入口，`new < self.status` 即抛错——从结构上杜绝状态回退。`record_fill` 拒绝终态订单/非正数量/超额成交；`cancel` 仅未完结订单可撤（保留已成交部分）；`reject` 仅未成交新订单可拒（已部分成交须走撤单）。每笔成交落一条不可变 `Fill`（seq/数量/价格/金额/佣金/价差/成交后状态），使「订单状态单调且成交可审计」可执行、可验证；`avg_fill_price` 按成交额加权。
+  - **`match_against_bar` 撮合**：对一根 bar 撮合至多一笔（可能部分）成交，流动性上限 = `bar_volume×participation_rate` 向下取整手，买单再受 `cash` 上限约束；卖方叠加印花税。`bar_volume=None`=无量数据不设限、`<=0`=当日零成交/停牌不可成交（二者刻意区分）。
+  - **`simulate_execution` 驱动 + `next_sellable_index`**：按 bar 序列逐轮撮合，部分成交累积到全部成交，跑完仍有余额则撤单（GTC 到期）；昨收由上一根 bar 价链式推得。`next_sellable_index` 给出 T+t_plus 最早可卖交易日下标。
+- 本阶段修复的一处真实缺陷：`match_against_bar` 原用 `if bar_volume and bar_volume > 0` 把「无量数据（None）」与「当日零成交/停牌（0）」混为一谈而同样跳过流动性上限，导致**停牌/零成交量当日订单竟能全额成交**（前视式虚假流动性）。改为 `None` 不设限、`<=0` 返回 None 不可成交，并加 `__main__` 自检 + `test_match_zero_volume_no_fill_but_none_volume_fills` 专项锁死。
+- 分层保护：**纯叶子层，不接线进生产成交链**（回退=不调用）；`trade_executor.execute_trade` 全量成交路径、`event_backtest` 组合回测完全不变。与 P1-1/P1-2/P1-3/P1-4 各叶子模块互不依赖、互不 import。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_execution_rules.py -q`：`60 passed in 0.61s`。
+- 受影响回归（执行/成交/仓位 sibling `test_event_backtest`/`test_exec_price_guard`/`test_trade_executor`/`test_position_sizing_boundary`/`test_downstream_snapshot_binding`）：`52 passed`（本模块未改动既有代码，此为预防性回归）。
+- P2-1 范围 Ruff `ruff check execution_rules.py tests/test_execution_rules.py`：`All checks passed!`。
+- 全量 `python -m pytest -q`：`1941 passed, 4 skipped in 317.16s`，退出码 0（= P1-4 基线 1881 + 60 项 P2-1 专项）。
+
+### 已知边界
+
+- 本层是纯规则/状态机函数，**尚未接线到生产成交链**；要在生产成交时强制涨跌停/部分成交/T+1，需调用方在 `trade_executor`/`event_backtest` 显式改调本模块，留待 P2-4 部署验收或后续执行子项按需接线。
+- 撮合按「当日单一参考价 + 半价差」成交，不建模盘中逐笔撮合、盘口深度、排队优先级；`participation_rate` 是流动性上限的近似旋钮。
+- 港股 tick 实为按价分档（如 <0.25 港元为 0.001）、lot 因股而异，本表简化为 tick 0.01 / lot 100；A股涨跌停按主板 ±10% / 双创 ±20% 两档，未含 ST（±5%）、北交所（±30%）等细分档；接实盘按交易所细则在 `MarketRules` 校准。
+- T+1 仅由 `next_sellable_index` 给出可卖日下标供调用方按自身交易日历判定，本模块不持有持仓账本，不自动拦截 T+0 卖出；现金账本亦由调用方管理，避免与 `event_backtest` 组合账本重复扣现。
