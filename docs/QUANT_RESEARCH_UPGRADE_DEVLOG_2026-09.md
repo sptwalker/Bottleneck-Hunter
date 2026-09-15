@@ -331,3 +331,27 @@
 - `null_width`（明确无增量的区间宽度上限）与 `redundancy_threshold`（persona 冗余阈值）是校准旋钮而非硬事实，按收益量纲与投委会构成校准；默认 `stability_threshold=0.8`、`seeds=(0,1,2,3,4)` 同理。
 - 显著性沿用 P0-6 `ablation` 的「bootstrap 区间跨 0」判据（非参数、无 scipy），不做多重比较校正；阶梯多步时若需控制族错误率，由调用方在报表层叠加。
 - N_eff 由调用方传入或 `n_eff_from_votes` 由历史投票算得，本模块不核验投票与该臂配置是否同源，须调用方保证 `n_effective` 与 `oos_returns` 出自同一配置。
+
+## P2-4：质量门禁、审计报表、回滚与部署验收
+
+- 状态：✅ 发布质量门禁 + 迁移演练 + 回滚预案 + 验收报表落地，纯计算叶子层，专项/范围 Ruff/全量门禁通过。
+- 背景与分工：P2-4 是方案收官项。现有 `deploy.sh` 是**实际执行**的一键部署（备份→`git pull --ff-only`→`docker compose up -d --build`→`/healthz` 30 次重试），但它**无发布前门禁、无回滚路径、无迁移演练**——健康检查失败只记录 `OLD_REV` 并不自动回滚；`quality_gate.py` 是**运行期决策质量**门禁（数据新鲜度/持仓一致性/催化剂过期，SSE），面向单次决策，与发布/部署期是不同域、不可重载。缺口正是 P2-4 验收所要的「门禁失败阻止发布，回滚步骤经演练，使用上一稳定镜像/提交」：无「任一阻断项失败即不放行」的发布裁决、无「迁移能否干净应用且幂等重跑」的演练、无确定可执行且经演练的回滚预案、无把门禁/演练/回滚/审计拼成一体的验收报表。P2-4 补这层判定与预案，复用 `deploy.sh` 机制、`store_schema` 迁移语义与 `llm_audit.summarize` 审计汇总，而非新建 CI 或改动生产部署脚本。
+- 新增 `watchlist/release_gate.py`：把「一次上线」的门禁判定、迁移演练、回滚预案与验收报表收敛成确定可复现的纯函数。纯 stdlib（迁移演练用内建 sqlite3 内存库），逻辑不读 wall-clock，给定输入必得同一裁决/预案。
+  - **质量门禁 `evaluate_release`**：汇总 `GateCheck`（`pass|fail|warn|skip` + `blocking`），任一**阻断项** fail 即裁决 `block`、绝不放行；非阻断失败与告警项并入 `warnings` 照实上报但不阻断，落实「门禁失败阻止发布」且不静默吞掉次要问题。
+  - **迁移演练 `migration_drill`**：在 `:memory:` SQLite 上把迁移 SQL 真跑两遍——首遍验能否干净应用（坏 SQL→`ok=False`→阻断 fail），次遍验可否幂等重跑（`ALTER ADD COLUMN` 这类非幂等语句被抓出→`idempotent=False`→warn）；`setup` 前置建表仅应用一次、不计入幂等判定。**只连内存库，与生产数据完全隔离**，`as_check()` 直接产出对应门禁项。
+  - **回滚预案 `build_rollback_plan` + 演练 `validate_rollback_plan`**：按 `deploy.sh` 真实机制生成确定有序步骤——记录当前版本→备份数据→（提交模式）检出上一稳定提交 + `docker compose up -d --build` 重建 /（镜像模式）切回上一稳定镜像、不重建→`/healthz`→**容器内 `git rev-parse` 证真**；落实「使用上一稳定镜像/提交」，并把教训「容器烘焙源码、git reset/restart 不上线代码、必须重建 + 容器内核对版本」编码进步骤。缺 `to_rev`/`image_tag` 直接抛错，绝不生成空目标预案。`validate_rollback_plan` 演练预案完备性（目标非空且不同于当前、序号连续、每步可验证、含健康检查、含容器内证真），把回滚变成可判定门禁项——「回滚步骤经演练」。
+  - **验收报表 `acceptance_report` + `render_checklist`**：把门禁裁决 + 迁移演练 + 回滚预案 + 调用方传入的 `llm_audit.summarize(...)` 审计汇总拼成结构化报表与 ✅/❌/⚠️/⬜ 人读验收清单；`meta` 由调用方补充（版本/提交/时间戳），本函数不自造时间戳以保持确定可复现。
+- 分层保护：**纯计算叶子层，不接线进生产部署链**（回退=不调用，`deploy.sh` 与现有流程完全不变）；不执行真实部署、不 SSH、不碰生产库——迁移演练只用内存库。与 `quality_gate.py` 运行期门禁不同域，不重叠、不改动。与 P1-1/…/P2-3 各叶子模块互不依赖，仅在验收报表处按传值方式复用 P2-2 `llm_audit.summarize` 的输出形状。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_release_gate.py -q`：`32 passed in 0.60s`。
+- 范围 Ruff `ruff check release_gate.py tests/test_release_gate.py`：`All checks passed!`（一处测试未用 import 手工删除，未用 `--fix`）。
+- 全量 `python -m pytest -q`：`2031 passed, 4 skipped in 316.39s`，退出码 0（= P2-3 基线 1999 + 32 项 P2-4 专项）。
+
+### 已知边界
+
+- 本层只做「判定 + 预案生成 + 演练」，**不执行任何真实部署/回滚动作**；回滚步骤是可执行文本，实际执行仍由运维在生产按 `deploy.sh` 拓扑操作，外部/不可逆操作须按授权确认。要把发布门禁接进 CI，需调用方在流水线里采集各门禁项结果喂给 `evaluate_release`，留待接线时按需补齐（本方案不新建 `.github/workflows/`、不改 `deploy.sh`）。
+- 迁移演练在内存 SQLite 上验应用与幂等，覆盖 SQL 层的语法/幂等性，**不覆盖**跨版本数据回填、SQLite 与生产同款引擎差异、或迁移与应用码的耦合；接真实迁移须以 `store_schema.CREATE_TABLES` 为 `setup`、`MIGRATIONS` 为演练输入再校准。
+- 默认 `compose` 命令、`host_port=8089`、`app` 名与 `data_dir` 是对齐当前部署拓扑的校准旋钮，换机/换端口须按 `project_prod_deploy_topology` 校准。
+- 非幂等迁移默认判 `warn` 而非阻断（`ALTER ADD COLUMN` 等一次性迁移合法非幂等），是否升级为阻断由调用方按迁移性质在门禁层决定。
