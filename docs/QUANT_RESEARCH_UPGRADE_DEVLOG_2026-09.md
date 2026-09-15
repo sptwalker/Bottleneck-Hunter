@@ -93,3 +93,30 @@
 - 门禁只在研究快照读取路径（`get_visible_research_observations`）强制接入；`market_snapshots` 旧覆盖式语义未改。
 - `visible_at` 仍不从 `collected_at` 推断；缺失可见时间的数据由契约层与降级审计处理，不猜测历史可见性。
 - 事件驱动回测对门禁的调用留待 P0-5 接入。
+
+## P0-5：事件驱动回测核心
+
+- 状态：✅ 与模拟盘复盘明确分层，专项/回归/全量门禁通过。
+- 新增 `watchlist/event_backtest.py`：给定历史 bar 与决策日订单，按交易日历逐日推进的确定性回测引擎。
+  - **结构性 PIT（无前视）**：第 T 日信息产生的订单只能在 `decision_date < day` 的首个可交易日成交（下一交易日规则），成交价取该成交日 bar，绝不回看更晚价格。`test_no_lookahead_price_is_from_fill_day`、`test_order_on_last_day_never_fills` 锁死此边界。
+  - **交易日历**：由所有 ticker 的 bar 日期并集排序生成；每日按 `退市清仓 → 订单成交 → 盯市` 三步推进。
+  - **停牌**：`halted` 当日不可成交，订单顺延至下一可交易日（`still_pending`），持仓按最后有效价盯市。
+  - **退市**：`delisted` 当日优先强制清仓（以当日 close，不加滑点，`trade_type="delisting_liquidation"`），并将该 ticker 标记为已退市；此后针对它的订单以 `ticker_delisted` 拒绝。
+  - **现金约束**：买入前校验 `amount + commission <= cash`，不足以 `insufficient_cash` 拒绝，现金绝不为负；卖出无持仓以 `no_position` 拒绝，超持仓按当前持仓封顶。
+  - **成本**：`COST_CONFIG` 按市场配置佣金 + 卖方印花税（校准旋钮，非硬编码事实）；`_commission` 卖方叠加 `stamp_sell_bps`，入账按 4 位小数。滑点复用现有 `slippage.calc_slippage`。
+  - **可复现**：无随机、迭代有序、订单按 `(decision_date, ticker, side)` 稳定排序；相同输入必得逐字段一致结果（`test_deterministic_reproducibility`）。
+  - **指标接入**：收盘计算净值曲线，末日调用现有 `performance.compute_metrics`，与既有绩效口径一致。
+- 分层保护：不改动 `backtest.py` 的"模拟盘复盘"（回放系统自身已发生的 `sim_trades`）；本模块是"信号 → 订单 → 成交"的独立事件引擎，回滚只需移除新模块，现有模拟盘回放入口不受影响。
+
+### 门禁结果
+
+- 专项测试 `python -m pytest tests/test_event_backtest.py -q`：`11 passed`。
+- 受影响回归（watchlist 回测/绩效/滑点相关）：`42 passed`。
+- P0-5 范围 Ruff `ruff check event_backtest.py tests/test_event_backtest.py`：`All checks passed!`。
+- 全量 `python -m pytest -q`：`1775 passed, 4 skipped in 401.97s`，退出码 0。
+
+### 已知边界
+
+- 引擎按"当日参考价（close）+ 滑点"成交，不建模盘中撮合、部分成交与订单状态机——这些属于 P2-1 多市场交易规则范围。
+- 尚未在引擎内接入 P0-4 PIT 门禁校验 bar/订单来源可见性；当前依赖调用方传入的 bar 已是可见数据，快照级门禁接入留待后续风险/执行子项。
+- `COST_CONFIG` 为近似费率旋钮，接实盘费率（分档佣金、最低佣金、过户费等）时在此校准。
