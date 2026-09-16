@@ -1789,9 +1789,9 @@ async def job_forum_ai_round() -> None:
             if not bound.is_forum_ai_enabled():
                 continue
             from bottleneck_hunter.watchlist.forum_ai import run_forum_ai_round
-            posted = await run_forum_ai_round(bound, uid, max_posts=3)
-            if posted:
-                _oplog(uid, "论坛AI发言", detail=f"本轮发帖 {posted} 篇")
+            r = await run_forum_ai_round(bound, uid, max_posts=3)
+            if r["posts"] or r["replies"]:
+                _oplog(uid, "论坛AI发言", detail=f"本轮发帖 {r['posts']} 篇、回帖 {r['replies']} 条")
         except Exception as e:
             logger.error("Forum AI round (user=%s) failed: %s", uid[:8], e)
             _oplog(uid, "论坛AI发言", error=str(e))

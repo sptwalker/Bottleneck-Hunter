@@ -57,6 +57,7 @@ async function openForum() {
   const d = $('forum-drawer');
   if (!d) return;
   d.style.display = '';
+  document.body.style.overflow = 'hidden';  // 锁背景滚动：抽屉内 .drawer-panel 自身 overflow-y 独立滚动，否则内容不满屏时滚轮冒泡到背景页
   try { await ensureIdentities(); } catch { /* 名字映射失败不挡帖子渲染 */ }
   loadPosts();
   startStream();
@@ -64,6 +65,7 @@ async function openForum() {
 function closeForum() {
   const d = $('forum-drawer');
   if (d) d.style.display = 'none';
+  document.body.style.overflow = '';  // 还原背景滚动
   stopStream();
 }
 
@@ -98,7 +100,7 @@ function renderPosts(posts) {
       ${p.title ? `<div class="forum-post-title">${esc(p.title)}</div>` : ''}
       <div class="forum-post-body">${esc(p.body)}</div>
       <div class="forum-post-actions">
-        <button class="forum-link" data-act="replies">💬 回帖</button>
+        <button class="forum-link" data-act="replies">💬 回帖${p.reply_count ? ` ${p.reply_count}` : ''}</button>
         <button class="forum-link" data-act="toggleclose">${p.comments_closed ? '开评' : '关评'}</button>
         <button class="forum-link forum-danger" data-act="del">删帖</button>
       </div>
@@ -232,8 +234,13 @@ async function runAI() {
   setCfgStatus('AI 发言中…');
   try {
     const r = await jpost('/ai/run');
-    setCfgStatus(r.posted ? `本轮 AI 发了 ${r.posted} 条` : (r.reason || '本轮没有新发言'));
-    if (r.posted) toast(`AI 发了 ${r.posted} 条`);
+    const total = (r.posts || 0) + (r.replies || 0);
+    if (total) {
+      const msg = `本轮 AI 发帖 ${r.posts || 0} 条、回帖 ${r.replies || 0} 条`;
+      setCfgStatus(msg); toast(msg);
+    } else {
+      setCfgStatus(r.reason || '本轮没有新发言');
+    }
   } catch (e) { toast(e.message || '触发失败', 'error'); setCfgStatus(''); } finally { btn.disabled = false; }
 }
 function setCfgStatus(t) { const el = $('forum-settings-status'); if (el) el.textContent = t; }

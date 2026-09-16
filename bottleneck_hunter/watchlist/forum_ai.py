@@ -37,34 +37,34 @@ _POST_INSTRUCTION = (
 )
 
 
-async def run_forum_ai_round(store, user_id, *, max_posts=None) -> int:
-    """跑一轮 AI 自主发言，返回实际落库条数。opt-in 门禁不过返回 0。"""
+async def run_forum_ai_round(store, user_id, *, max_posts=None) -> dict:
+    """跑一轮 AI 自主发言，返回 {"posts": 新帖数, "replies": 回帖数}。opt-in 门禁不过返回全 0。"""
     bound = store.for_user(user_id)
 
     # 1) 前置门禁：opt-in 总开关 + 全板当日剩余配额
     settings = bound.get_forum_settings()
     if not settings.get("ai_enabled"):
-        return 0
+        return {"posts": 0, "replies": 0}
     daily_cap = int(settings.get("daily_cap", 20) or 20)
     board_today = bound.get_forum_board_daily_total()
     upper = _DEFAULT_ROUND_POSTS if max_posts is None else int(max_posts)
     budget = min(daily_cap - board_today, upper)
     if budget <= 0:
-        return 0
+        return {"posts": 0, "replies": 0}
 
     # 2) 选角色：未禁言且今日 <20，随机（近似「最久未发言」，避免同角色刷屏）
     candidates = [rk for rk in selectable_role_keys(store, user_id)
                   if bound.get_forum_daily_count(rk) < _ROLE_DAILY_CAP]
     if not candidates:
-        return 0
+        return {"posts": 0, "replies": 0}
     random.shuffle(candidates)
 
     # 3) 背景数据（best-effort，只经 for_user(板主)）
     context = _board_context(bound)
 
-    posted = 0
+    posts = replies = 0
     for role_key in candidates:
-        if posted >= budget:
+        if posts + replies >= budget:
             break
         try:
             body, target = await _generate(store, bound, user_id, role_key, context)
@@ -88,12 +88,13 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None) -> int:
             rid = bound.create_forum_reply(target["id"], "ai", body,
                                            author_role_key=role_key, content_hash=h)
             _publish(user_id, "reply_created", post_id=target["id"], reply_id=rid)
+            replies += 1
         else:
             pid = bound.create_forum_post("ai", body, author_role_key=role_key, content_hash=h)
             _publish(user_id, "post_created", post=bound.get_forum_post(pid))
+            posts += 1
         bound.incr_forum_daily_count(role_key)
-        posted += 1
-    return posted
+    return {"posts": posts, "replies": replies}
 
 
 async def _generate(store, bound, user_id, role_key, context):

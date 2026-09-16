@@ -223,8 +223,8 @@ async def run_ai(user: dict = Depends(get_current_user)):
     if not store.is_forum_ai_enabled():  # 默认关：直接空转，不导入 F5
         return {"posted": 0, "reason": "AI 自主发帖未开启（forum_settings.ai_enabled=0）"}
     from bottleneck_hunter.watchlist.forum_ai import run_forum_ai_round  # F5，惰性
-    posted = await run_forum_ai_round(store, user["sub"])
-    return {"posted": posted}
+    r = await run_forum_ai_round(store, user["sub"])
+    return {"posted": r["posts"] + r["replies"], **r}  # posted=总数（兼容旧前端），另拆 posts/replies
 
 
 # ── 实时推送 ──────────────────────────────────────────────

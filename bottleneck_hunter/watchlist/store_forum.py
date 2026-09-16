@@ -48,16 +48,19 @@ class _ForumMixin:
     ) -> list[dict]:
         conds, params = [], ()
         if not include_deleted:
-            conds.append("deleted = 0")
+            conds.append("p.deleted = 0")
         if role_key:
-            conds.append("author_role_key = ?")
+            conds.append("p.author_role_key = ?")
             params = params + (role_key,)
-        base = "SELECT * FROM forum_posts"
+        # reply_count：LEFT JOIN 聚合未软删回帖数，让前端「💬 回帖」直接显示条数（否则回帖埋在展开层里看不见）。
+        # 用 JOIN+GROUP BY 而非相关子查询：子查询自带的 WHERE 会骗过 _user_filter 的 " WHERE " 检测。
+        base = ("SELECT p.*, COUNT(r.id) AS reply_count FROM forum_posts p "
+                "LEFT JOIN forum_replies r ON r.post_id = p.id AND r.deleted = 0")
         if conds:
             base += " WHERE " + " AND ".join(conds)
-        base += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        base += " GROUP BY p.id ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?"
         params = params + (int(limit), int(offset))
-        q, p = self._user_filter(base, params)
+        q, p = self._user_filter(base, params, table="p")  # table 别名→p.user_id 过滤（插到 GROUP BY 前）
         conn = self._connect()
         try:
             return [dict(r) for r in conn.execute(q, p).fetchall()]

@@ -45,8 +45,8 @@ def bound(tmp_path):
 def test_disabled_by_default_returns_zero(bound, monkeypatch):
     _patch_model(monkeypatch)
     _force_post(monkeypatch)
-    posted = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice"))
-    assert posted == 0
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice"))
+    assert r == {"posts": 0, "replies": 0}
     assert bound.list_forum_posts() == []  # 默认 ai_enabled=0：空转不落库
 
 
@@ -54,8 +54,8 @@ def test_posts_and_counts_when_enabled(bound, monkeypatch):
     _patch_model(monkeypatch)
     _force_post(monkeypatch)
     bound.set_forum_settings(ai_enabled=True)
-    posted = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=2))
-    assert posted == 2
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=2))
+    assert r == {"posts": 2, "replies": 0}  # _force_post → 只发帖
     posts = bound.list_forum_posts()
     assert len(posts) == 2
     assert all(p["author_type"] == "ai" and p["author_role_key"] in FORUM_ROLE_KEYS for p in posts)
@@ -67,8 +67,8 @@ def test_board_daily_cap_limits_round(bound, monkeypatch):
     _patch_model(monkeypatch)
     _force_post(monkeypatch)
     bound.set_forum_settings(ai_enabled=True, daily_cap=1)
-    posted = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=5))
-    assert posted == 1  # budget=min(cap-已发, 上限)=1
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=5))
+    assert r == {"posts": 1, "replies": 0}  # budget=min(cap-已发, 上限)=1
     assert bound.get_forum_board_daily_total() == 1
 
 
@@ -76,8 +76,8 @@ def test_content_gate_skips_without_counting(bound, monkeypatch):
     _patch_model(monkeypatch, text="你就是个傻子")  # 命中人身攻击正则
     _force_post(monkeypatch)
     bound.set_forum_settings(ai_enabled=True)
-    posted = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3))
-    assert posted == 0
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3))
+    assert r == {"posts": 0, "replies": 0}
     assert bound.list_forum_posts() == []
     assert bound.get_forum_board_daily_total() == 0  # 违规不计配额
 
@@ -88,8 +88,8 @@ def test_banned_roles_excluded(bound, monkeypatch):
     bound.set_forum_settings(ai_enabled=True)
     for rk in FORUM_ROLE_KEYS:
         bound.set_forum_role_banned(rk, True)
-    posted = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3))
-    assert posted == 0  # 全禁言 → 无候选
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3))
+    assert r == {"posts": 0, "replies": 0}  # 全禁言 → 无候选
 
 
 def test_replies_to_existing_post(bound, monkeypatch):
@@ -99,8 +99,9 @@ def test_replies_to_existing_post(bound, monkeypatch):
     monkeypatch.setattr(forum_ai.random, "choice", lambda seq: seq[0])
     bound.set_forum_settings(ai_enabled=True)
     pid = bound.create_forum_post("user", "我看多这只票，逻辑是产能瓶颈缓解。")
-    posted = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=1))
-    assert posted == 1
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=1))
+    assert r == {"posts": 0, "replies": 1}  # _force reply → 只回帖
     replies = bound.list_forum_replies(pid)
     assert len(replies) == 1 and replies[0]["author_type"] == "ai"
-    assert len(bound.list_forum_posts()) == 1  # 只回帖，未新增帖
+    posts = bound.list_forum_posts()
+    assert len(posts) == 1 and posts[0]["reply_count"] == 1  # 未新增帖，且该帖 reply_count 计到 1
