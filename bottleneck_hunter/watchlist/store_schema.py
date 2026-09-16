@@ -771,6 +771,61 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at TEXT NOT NULL, user_id TEXT DEFAULT '', market TEXT DEFAULT 'us_stock',
     FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
 );
+-- ── 互动留言系统（每用户一个私有留言板；板主=user_id，严格隔离，跨板不可见） ──
+CREATE TABLE IF NOT EXISTS forum_posts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,                 -- 板主（隔离键，_user_filter 自动附加）
+    author_type     TEXT NOT NULL DEFAULT 'ai' CHECK(author_type IN ('user','ai')),
+    author_role_key TEXT DEFAULT '',               -- AI 帖=角色 key(如 committee_value)；用户帖=''
+    title           TEXT DEFAULT '',
+    body            TEXT NOT NULL,
+    ticker          TEXT DEFAULT '',               -- 可选：关联标的
+    content_hash    TEXT DEFAULT '',               -- 规范化正文哈希，去重用（由 forum_moderation 计算）
+    comments_closed INTEGER DEFAULT 0,             -- 管理员关评
+    deleted         INTEGER DEFAULT 0,             -- 软删除（保留行可审计）
+    created_at      TEXT NOT NULL                  -- UTC ISO
+);
+CREATE TABLE IF NOT EXISTS forum_replies (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,
+    post_id         INTEGER NOT NULL,
+    author_type     TEXT NOT NULL DEFAULT 'ai' CHECK(author_type IN ('user','ai')),
+    author_role_key TEXT DEFAULT '',
+    body            TEXT NOT NULL,
+    content_hash    TEXT DEFAULT '',
+    deleted         INTEGER DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY(post_id) REFERENCES forum_posts(id) ON DELETE CASCADE
+);
+-- AI 人性化身份 override（每板每角色一行；未建行=读 forum_identity.DEFAULT_IDENTITIES 默认值）
+CREATE TABLE IF NOT EXISTS forum_ai_identities (
+    user_id          TEXT NOT NULL,
+    role_key         TEXT NOT NULL,
+    display_name     TEXT DEFAULT '',
+    gender           TEXT DEFAULT '',
+    age              TEXT DEFAULT '',              -- TEXT：容纳空/区间，不强制 int
+    persona_identity TEXT DEFAULT '',             -- 身份设定（如"二十年基本面老将"）
+    personality      TEXT DEFAULT '',
+    bio              TEXT DEFAULT '',
+    banned           INTEGER DEFAULT 0,            -- 管理员禁言该角色
+    updated_at       TEXT DEFAULT '',
+    PRIMARY KEY (user_id, role_key)
+);
+-- AI 每日发言配额计数（day=北京自然日 _today()；每角色≤20 硬护栏 + 全板 SUM<daily_cap）
+CREATE TABLE IF NOT EXISTS forum_ai_daily (
+    user_id     TEXT NOT NULL,
+    role_key    TEXT NOT NULL,
+    day         TEXT NOT NULL,
+    post_count  INTEGER DEFAULT 0,
+    PRIMARY KEY (user_id, role_key, day)
+);
+-- 每用户留言板设置（opt-in：AI 自主发帖默认关）
+CREATE TABLE IF NOT EXISTS forum_settings (
+    user_id     TEXT PRIMARY KEY,
+    ai_enabled  INTEGER DEFAULT 0,
+    daily_cap   INTEGER DEFAULT 20,
+    updated_at  TEXT DEFAULT ''
+);
 """
 
 CREATE_INDEXES = """
@@ -809,6 +864,9 @@ CREATE INDEX IF NOT EXISTS idx_sim_positions_account ON sim_positions(account_id
 CREATE INDEX IF NOT EXISTS idx_inst_holders_ticker ON institutional_holders(ticker, date DESC);
 CREATE INDEX IF NOT EXISTS idx_analyst_ratings_ticker ON analyst_ratings(ticker, date DESC);
 CREATE INDEX IF NOT EXISTS idx_vip_imports_user ON vip_imports(user_id, market, account_ref, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_forum_posts_board ON forum_posts(user_id, deleted, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_forum_posts_role ON forum_posts(user_id, author_role_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_forum_replies_post ON forum_replies(user_id, post_id, deleted, created_at);
 """
 
 MIGRATIONS: list[str] = [

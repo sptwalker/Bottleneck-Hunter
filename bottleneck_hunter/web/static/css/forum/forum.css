@@ -1,0 +1,94 @@
+/* 互动留言系统样式 —— 抽屉复用 .drawer-*（见 decision.css），此处只加 forum 专属类。全部走主题 token。 */
+
+/* ── 讨论区抽屉 ─────────────────────────────────────── */
+.forum-panel { display: flex; flex-direction: column; max-width: 720px; }
+.forum-sub { color: var(--text-dim); font-size: 12px; margin: 0 0 12px; }
+
+.forum-compose {
+  display: grid; gap: 8px; padding: 12px; margin-bottom: 14px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+}
+.forum-compose-row { display: flex; gap: 8px; }
+.forum-compose-row .forum-input { flex: 1; }
+.forum-input {
+  width: 100%; box-sizing: border-box; padding: 7px 10px; font: inherit;
+  color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.forum-input:focus { outline: none; border-color: var(--accent); }
+textarea.forum-input { resize: vertical; min-height: 60px; }
+.forum-compose-actions { display: flex; justify-content: flex-end; }
+
+.forum-list { display: flex; flex-direction: column; gap: 12px; }
+.forum-empty { color: var(--text-dim); font-size: 13px; text-align: center; padding: 18px 8px; }
+
+.forum-post {
+  padding: 12px 14px; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.forum-post-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.forum-post-title { font-weight: 600; margin: 6px 0 2px; }
+.forum-post-body { white-space: pre-wrap; word-break: break-word; line-height: 1.55; margin: 4px 0 0; }
+.forum-post-actions { display: flex; gap: 14px; margin-top: 8px; }
+
+.forum-badge {
+  font-size: 11px; padding: 1px 7px; border-radius: 10px; font-weight: 600;
+  background: var(--surface); color: var(--text-dim); border: 1px solid var(--border);
+}
+.forum-badge-ai { background: var(--accent); color: #fff; border-color: transparent; }
+.forum-badge-me { background: var(--success); color: #fff; border-color: transparent; }
+.forum-badge-muted { color: var(--text-dim); }
+.forum-badge-ban { background: var(--danger); color: #fff; border-color: transparent; }
+.forum-ticker { font-size: 12px; color: var(--accent); font-weight: 600; }
+.forum-time { color: var(--text-dim); font-size: 11px; margin-left: auto; }
+
+.forum-link {
+  background: none; border: none; padding: 0; cursor: pointer; font: inherit;
+  font-size: 12px; color: var(--accent);
+}
+.forum-link:hover { color: var(--accent-hover); text-decoration: underline; }
+.forum-danger { color: var(--danger); }
+.forum-danger:hover { color: var(--danger); }
+
+/* ── 回帖 ───────────────────────────────────────────── */
+.forum-replies {
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.forum-reply { display: flex; align-items: baseline; gap: 6px; font-size: 13px; flex-wrap: wrap; }
+.forum-reply-body { flex: 1; white-space: pre-wrap; word-break: break-word; }
+.forum-reply-compose { display: flex; gap: 8px; margin-top: 4px; }
+.forum-reply-compose .forum-reply-input { flex: 1; }
+
+/* ── 系统配置中心：AI角色属性配置页签 ───────────────── */
+.forum-cfg-settings {
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 12px 14px; margin-bottom: 16px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+}
+.forum-cfg-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.forum-input-num { width: 72px; padding: 5px 8px; font: inherit; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.forum-settings-status { color: var(--text-dim); font-size: 12px; margin-left: auto; }
+
+.forum-roles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.forum-id-card {
+  padding: 12px 14px; background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.forum-id-card.is-banned { opacity: 0.72; border-color: var(--danger); }
+.forum-id-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.forum-id-role { font-size: 12px; color: var(--text-dim); }
+.forum-id-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.forum-id-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-dim); }
+.forum-id-field-wide { grid-column: 1 / -1; }
+.forum-id-field input, .forum-id-field textarea {
+  font: inherit; font-size: 13px; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; resize: vertical;
+}
+.forum-id-field input:focus, .forum-id-field textarea:focus { outline: none; border-color: var(--accent); }
+.forum-id-actions { display: flex; gap: 10px; margin-top: 12px; }
+
+@media (max-width: 520px) {
+  .forum-id-grid { grid-template-columns: 1fr; }
+}

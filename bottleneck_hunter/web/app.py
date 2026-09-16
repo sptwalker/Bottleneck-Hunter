@@ -383,6 +383,10 @@ def create_app() -> FastAPI:
     from bottleneck_hunter.web.vip_api import set_store as vip_set_store
     vip_set_store(_wl_store)
     app.include_router(vip_router, prefix="/api/vip")
+    from bottleneck_hunter.web.forum_api import router as forum_router
+    from bottleneck_hunter.web.forum_api import set_store as forum_set_store
+    forum_set_store(_wl_store)
+    app.include_router(forum_router, prefix="/api/forum")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

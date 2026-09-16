@@ -15,6 +15,7 @@ import { initAIConfig } from './ai-config.js';
 import { initAutoUpdate } from './auto-update.js';
 import { initDataReport } from './data-report.js';
 import { initAdmin } from './admin.js';
+import { initForum } from './forum.js';
 
 /* ── Global state ────────────────────────────────────── */
 window.appState = {
@@ -173,6 +174,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initAIConfig();
   initAutoUpdate();
   initDataReport();
+  initForum();
 
   document.querySelectorAll('.nav-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {

@@ -1772,6 +1772,31 @@ async def job_system_watchdog() -> None:
             _oplog(uid, "系统守卫巡检", detail=summary, result="success")
 
 
+async def job_forum_ai_round() -> None:
+    """论坛 AI 自主发言（opt-in，低频）：每板 gating 于 forum_settings.ai_enabled，每轮 ≤3 帖。
+
+    ponytail: 只受管理员全局总开关 + 每板自身 ai_enabled 两道门，不挂 auto_update 分类
+    （§十三「不引入配置系统」）。故用 _iter_users()（category=None）遍历，不走 eligibility/category 门。
+    """
+    from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
+    if not is_global_enabled(_auth_store):
+        return
+    for uid, store, _budget in _iter_users():
+        if not uid:
+            continue  # 论坛按真实用户板隔离，无全局板（单用户模式无 sub→跳过）
+        try:
+            bound = store.for_user(uid)
+            if not bound.is_forum_ai_enabled():
+                continue
+            from bottleneck_hunter.watchlist.forum_ai import run_forum_ai_round
+            posted = await run_forum_ai_round(bound, uid, max_posts=3)
+            if posted:
+                _oplog(uid, "论坛AI发言", detail=f"本轮发帖 {posted} 篇")
+        except Exception as e:
+            logger.error("Forum AI round (user=%s) failed: %s", uid[:8], e)
+            _oplog(uid, "论坛AI发言", error=str(e))
+
+
 _JOB_SPECS = [
     ("us_price_premarket",     job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US pre-market price update"),
     ("us_price_postmarket",    job_price_update,        {"market": "us_stock"}, _TZ_CN        , "daily",    "US post-market price update"),
@@ -1805,6 +1830,7 @@ _JOB_SPECS = [
     ("resting_limit_poll",     job_poll_resting_orders, {},                     None,           "interval", "Resting limit-order fill poll"),
     ("mail_ingest_poll",       job_poll_imap,           {},                     None,           "interval", "Forwarded bank-email ingest poll"),
     ("gangtise_catalyst",      job_gangtise_catalyst,   {},                     None,           "interval", "Gangtise calendar/announcement catalyst feed"),
+    ("forum_ai_round",         job_forum_ai_round,      {},                     None,           "interval", "Forum AI autonomous posting (opt-in, low-freq)"),
     ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_CN        , "weekly",   "US full refresh (data+decision)"),
     ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
     ("system_watchdog",        job_system_watchdog,     {},                     _TZ_CN,         "everyday", "System watchdog (silent-failure guard)"),
@@ -1854,6 +1880,7 @@ def list_job_categories() -> dict[str, str]:
         "resting_limit_poll": "daily_decision",  # 挂单撮合，随自动决策开关
         "mail_ingest_poll": "",  # 系统级银行邮件轮询，仅受管理员全局总开关
         "gangtise_catalyst": "",  # 系统级 Gangtise 催化剂补给，仅受管理员全局总开关
+        "forum_ai_round": "",  # 论坛 AI 自主发言：受管理员全局总开关 + 每板 forum_settings.ai_enabled，无 auto_update 分类
         "us_full_refresh": "full_refresh", "cn_full_refresh": "full_refresh",
         "model_calibration": "",
         "model_capability_refresh": "",
@@ -1900,6 +1927,7 @@ def list_job_labels() -> dict[str, dict]:
         "resting_limit_poll":  {"label": "挂单撮合轮询",           "desc": "开市时段按限价尝试成交，到期自动取消", "tz": "轮询", "freq": "每小时"},
         "mail_ingest_poll":    {"label": "银行邮件自动解读",       "desc": "拉取转发邮件，附件入库+正文进待确认队列", "tz": "轮询", "freq": "每小时"},
         "gangtise_catalyst":   {"label": "Gangtise 催化剂补给",    "desc": "财报日历+公告 → 观察池标的催化剂（幂等）", "tz": "轮询", "freq": "每日"},
+        "forum_ai_round":      {"label": "论坛 AI 自主发言",       "desc": "各板 opt-in 开启后，AI 角色低频自主发帖/回帖（每轮≤3）", "tz": "轮询", "freq": "每隔N小时"},
         "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "system_watchdog":     {"label": "系统守卫巡检",           "desc": "每日巡检周期任务是否静默失败，超期即主动补跑并报告", "tz": "北京", "freq": "每日"},

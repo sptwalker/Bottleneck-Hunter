@@ -19,6 +19,7 @@ from bottleneck_hunter.watchlist.store_base import _DEFAULT_DB, _get_db_lock
 from bottleneck_hunter.watchlist.store_budget import _BudgetMixin
 from bottleneck_hunter.watchlist.store_committee import _CommitteeMixin
 from bottleneck_hunter.watchlist.store_decision import _DecisionMixin
+from bottleneck_hunter.watchlist.store_forum import _ForumMixin
 from bottleneck_hunter.watchlist.store_i18n import _I18nMixin
 from bottleneck_hunter.watchlist.store_intel import _IntelMixin
 from bottleneck_hunter.watchlist.store_market_data import _MarketDataMixin
@@ -58,10 +59,12 @@ logger = logging.getLogger(__name__)
 # 注：financial_documents 在 auth.db(AuthStore) 手写 user_id 过滤、不经本 store，故不在此列。
 # ponytail: 用表名正则兜底检测——零调用点改动即可抓漏绑定；\b 词边界确保 positions 不误命中 sim_positions；
 #   表名 distinctive，误报可忽略，且上层多处 try/except 会把误报安全降级为空结果，绝不反向泄露。
+# forum_* 私有留言板同属按 user_id 隔离的敏感表（A 板不可见 B 板），漏 .for_user() 的越权读同样致命，
+# 故一并纳入 fail-closed。forum_\w+ 一条覆盖现有及未来全部 forum 表（forum 无全局行、无共享用法，不误伤）。
 _VIP_OWNED_TABLE_RE = re.compile(
     r"\b(?:positions|instruments|transactions|vip_accounts|vip_imports|"
     r"vip_derivative_terms|vip_advisory|vip_reports|vip_projections|"
-    r"vip_account_log|chat_sessions|chat_messages)\b",
+    r"vip_account_log|chat_sessions|chat_messages|forum_\w+)\b",
     re.IGNORECASE,
 )
 
@@ -79,6 +82,7 @@ class WatchlistStore(
     _ResearchSnapshotMixin,
     _AIModelsMixin,
     _OpLogMixin,
+    _ForumMixin,
     _I18nMixin,
 ):
     BLOCK_MARKER_SYSTEM = "[系统拦截]"

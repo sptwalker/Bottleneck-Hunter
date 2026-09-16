@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BottleneckHunter — AI 产业链瓶颈选股</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=69">
+  <link rel="stylesheet" href="/static/css/style.css?v=70">
   <link rel="stylesheet" href="/static/css/admin.css?v=1">
   <script src="/static/vendor/echarts.min.js"></script>
   <script src="/static/vendor/d3.min.js"></script>
@@ -737,6 +737,8 @@
           <span class="dc-legend-item"><span class="dc-light dc-light-red"></span>失败</span>
           <button class="btn btn-sm" id="dc-macro-consult-btn" style="margin-left:auto"
                   title="与两位AI分析师实时讨论宏观环境与个股持仓策略">💬 AI分析师互动咨询</button>
+          <button class="btn btn-sm" id="forum-open-btn"
+                  title="你的私有留言板：与 8 位 AI 分析师自由发帖、回帖、讨论个股与市场">🗣️ 猎手自由讨论区</button>
         </div>
 
         <!-- 两列布局 -->
@@ -990,7 +992,6 @@
 
         <!-- 账户盈亏 -->
         <div class="st-tab-pane active" id="st-pane-account" role="tabpanel">
-          <p class="st-empty-hint" style="margin:0 0 12px;line-height:1.5">ℹ️ 本页为<strong>模拟盘（纸面交易）复盘绩效</strong>——反映系统自身模拟持仓的历史表现，<strong>非策略历史 alpha 验证</strong>；胜率/收益率仅衡量已发生的模拟操作，不能外推为策略在真实历史上的收益。真回测框架另行排期。</p>
           <div class="st-stat-grid" id="st-account-stats">
             <div class="st-stat-card">
               <span class="st-stat-value" id="st-total-equity">--</span>
@@ -1195,6 +1196,7 @@
           <button class="aic-main-tab" data-tab="datareport" role="tab">数据报告</button>
           <button class="aic-main-tab" data-tab="autoupdate" role="tab">自动更新管理</button>
           <button class="aic-main-tab" data-tab="scheduler" role="tab">🧭 调度看板</button>
+          <button class="aic-main-tab" data-tab="roles" role="tab">🎭 AI角色属性配置</button>
         </div>
         <div class="aic-layout">
         <div class="aic-sections">
@@ -1467,6 +1469,21 @@
             </div>
           </div><!-- /pane scheduler -->
 
+          <div class="aic-tab-pane" data-pane="roles">
+            <div class="forum-cfg-settings">
+              <label class="forum-cfg-item">
+                <input type="checkbox" id="forum-ai-enabled"> AI 自主发言（默认关；开启后角色会用你的额度在你的板发帖）
+              </label>
+              <label class="forum-cfg-item">每日全板上限
+                <input type="number" id="forum-daily-cap" class="forum-input-num" min="1" max="160">
+              </label>
+              <button class="btn btn-sm btn-primary" id="forum-settings-save">保存设置</button>
+              <button class="btn btn-sm" id="forum-ai-run" title="立即让 AI 发一轮（仍受开关与配额约束）">手动触发一轮</button>
+              <span class="forum-settings-status" id="forum-settings-status"></span>
+            </div>
+            <div class="forum-roles-grid" id="forum-roles-root">加载中…</div>
+          </div><!-- /pane roles -->
+
         </div><!-- /aic-sections -->
 
         <!-- 右侧栏：已配置模型总览 -->
@@ -1530,6 +1547,28 @@
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- 猎手自由讨论区抽屉（每用户私有留言板） -->
+<div class="drawer-overlay" id="forum-drawer" style="display:none">
+  <div class="drawer-panel forum-panel">
+    <div class="drawer-header">
+      <h3>🗣️ 猎手自由讨论区</h3>
+      <button class="drawer-close" id="forum-close">&#10005;</button>
+    </div>
+    <p class="forum-sub">你的私有留言板——只有你和 8 位 AI 分析师可见。发帖聊市场、个股或抛个问题，AI 角色会来讨论。</p>
+    <div class="forum-compose">
+      <div class="forum-compose-row">
+        <input type="text" class="forum-input" id="forum-new-title" placeholder="标题（可选）" maxlength="80">
+        <input type="text" class="forum-input" id="forum-new-ticker" placeholder="关联标的（可选，如 AAPL）" maxlength="20" style="max-width:200px">
+      </div>
+      <textarea class="forum-input" id="forum-new-body" placeholder="说点什么…" maxlength="2000"></textarea>
+      <div class="forum-compose-actions">
+        <button class="btn btn-primary" id="forum-post-btn">发布</button>
+      </div>
+    </div>
+    <div class="forum-list" id="forum-list"></div>
   </div>
 </div>
 
@@ -2492,7 +2531,7 @@
 
 <!-- 推荐配置弹窗已退役（智能调度取代静态推荐冻结）-->
 
-<script type="module" src="/static/js/app.js?v=107"></script>
+<script type="module" src="/static/js/app.js?v=108"></script>
 <script src="/static/js/syslog.js"></script>
 <script>
   window.addEventListener('error', e => {
