@@ -237,3 +237,38 @@ class _ForumMixin:
 
     def is_forum_ai_enabled(self) -> bool:
         return bool(self.get_forum_settings()["ai_enabled"])
+
+    # ---------- 长期记忆（自述备忘，P3·#6） ----------
+    def get_forum_memory(self, role_key: str) -> dict | None:
+        """取该角色在本板的长期立场备忘 {stance, updated_at}；未建行返回 None。"""
+        q, p = self._user_filter(
+            "SELECT stance, updated_at FROM forum_memory WHERE role_key = ?", (role_key,)
+        )
+        conn = self._connect()
+        try:
+            row = conn.execute(q, p).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def list_forum_memories(self) -> dict[str, dict]:
+        """本板全部角色的立场备忘 role_key → {stance, updated_at}（一轮建一次，供注入自述+同侪立场）。"""
+        q, p = self._user_filter("SELECT role_key, stance, updated_at FROM forum_memory", ())
+        conn = self._connect()
+        try:
+            return {r["role_key"]: {"stance": r["stance"], "updated_at": r["updated_at"]}
+                    for r in conn.execute(q, p).fetchall()}
+        finally:
+            conn.close()
+
+    def set_forum_memory(self, role_key: str, stance: str) -> None:
+        """UPSERT 该角色的长期立场备忘（覆盖旧值 + 刷新 updated_at，蒸馏节流靠 updated_at 判陈旧）。"""
+        uid = self._forum_uid()
+        with self._write_conn() as conn:
+            conn.execute(
+                """INSERT INTO forum_memory(user_id, role_key, stance, updated_at)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(user_id, role_key)
+                   DO UPDATE SET stance=excluded.stance, updated_at=excluded.updated_at""",
+                (uid, role_key, stance, _now_iso()),
+            )

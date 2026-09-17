@@ -1576,6 +1576,15 @@ MIGRATIONS: list[str] = [
         market      TEXT DEFAULT 'us_stock'
     )""",
     "CREATE INDEX IF NOT EXISTS idx_mail_pending_status ON vip_mail_confirm_pending(user_id, market, status, created_at DESC)",
+    # 论坛长期记忆（P3·#6 自述备忘）：每板每角色一行，第一人称长期立场，节流蒸馏、注入摘要。
+    # 非 A×B 观点矩阵——每行都是角色对「自己」的自述，其他角色只是读它、不代写（见方案 P3）。
+    """CREATE TABLE IF NOT EXISTS forum_memory (
+        user_id    TEXT NOT NULL,
+        role_key   TEXT NOT NULL,
+        stance     TEXT DEFAULT '',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, role_key)
+    )""",
 ]
 
 

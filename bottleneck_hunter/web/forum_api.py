@@ -55,6 +55,32 @@ def _publish(uid: str, event: str, **payload) -> None:
     _broadcaster.publish(uid, {"type": event, **payload})
 
 
+def _maybe_trigger_ai_round(store: WatchlistStore, uid: str, *, post_id: int | None,
+                            body: str, require_mention: bool) -> None:
+    """用户回帖/点名即时触发一轮 AI 自主发言（P2 · fire-and-forget，结果经 SSE 回推）。
+
+    AI 未开启则空转；F5 惰性导入（F4 不硬依赖 F5）。触发轮预算小、硬顶仍是每日 daily_cap；
+    AI 发言经 store 直写、不回打本 API，故无「AI 触发 AI」自激环。create_task 复制当前请求
+    上下文（含板主身份 ContextVar），后台轮仍用板主自己的 Key 与预算。
+    """
+    if not store.is_forum_ai_enabled():
+        return
+    from bottleneck_hunter.watchlist.forum_ai import resolve_mentions, run_forum_ai_round  # F5，惰性
+    at_roles = resolve_mentions(store, uid, body)
+    if require_mention and not at_roles:
+        return  # 新帖只有点名了角色才惊动 AI；普通新帖不触发
+    trigger = {"post_id": post_id, "at_roles": tuple(at_roles), "reply_excerpt": body}
+    task = asyncio.create_task(run_forum_ai_round(store, uid, max_posts=3, trigger=trigger))
+    task.add_done_callback(_log_round_task)
+
+
+def _log_round_task(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except Exception as e:  # noqa: BLE001 — 后台触发轮异常只记日志，不影响已返回的用户请求
+        logger.warning("Forum AI 即时触发轮失败: %s", e)
+
+
 # ── 请求体 ────────────────────────────────────────────────
 class PostCreate(BaseModel):
     body: str
@@ -98,6 +124,7 @@ async def create_post(req: PostCreate, user: dict = Depends(get_current_user)):
                                   content_hash=content_hash(req.body))
     post = store.get_forum_post(pid)
     _publish(user["sub"], "post_created", post=post)
+    _maybe_trigger_ai_round(store, user["sub"], post_id=pid, body=req.body, require_mention=True)
     return post
 
 
@@ -148,6 +175,7 @@ async def create_reply(post_id: int, req: ReplyCreate, user: dict = Depends(get_
         raise HTTPException(status_code=400, detail=reason)
     rid = store.create_forum_reply(post_id, "user", req.body, content_hash=content_hash(req.body))
     _publish(user["sub"], "reply_created", post_id=post_id, reply_id=rid)
+    _maybe_trigger_ai_round(store, user["sub"], post_id=post_id, body=req.body, require_mention=False)
     return {"reply_id": rid}
 
 

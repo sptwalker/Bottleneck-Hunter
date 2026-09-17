@@ -1789,7 +1789,7 @@ async def job_forum_ai_round() -> None:
             if not bound.is_forum_ai_enabled():
                 continue
             from bottleneck_hunter.watchlist.forum_ai import run_forum_ai_round
-            r = await run_forum_ai_round(bound, uid, max_posts=3)
+            r = await run_forum_ai_round(bound, uid, max_posts=3, distill=True)  # 仅调度轮蒸馏立场备忘(#6)
             if r["posts"] or r["replies"]:
                 _oplog(uid, "论坛AI发言", detail=f"本轮发帖 {r['posts']} 篇、回帖 {r['replies']} 条")
         except Exception as e:
