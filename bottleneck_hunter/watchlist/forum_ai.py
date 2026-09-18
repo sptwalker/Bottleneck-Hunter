@@ -29,9 +29,11 @@ from __future__ import annotations
 import logging
 import random
 import re
+from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 
 from bottleneck_hunter.watchlist.forum_identity import (
+    FOCUS_PROFILES,
     FORUM_ROLE_KEYS,
     get_identity,
     selectable_role_keys,
@@ -61,6 +63,10 @@ _CTX_TAGS = 12            # 观察池标签展示数（B：双市场交错取样
 _SATURATION_POSTS = 30    # A：算话题饱和度回看的近期帖数
 _SATURATION_MIN = 3       # A：某标的被提及≥该次数即视为「已被反复讨论」
 _SATURATION_TOP = 6       # A：饱和提示只列最高频的前几只，别刷屏
+_LENS_SNAPSHOT_K = 15     # D：contrarian/uzi/risk 只对前 K 只(按 composite_score)查快照，控成本（调参旋钮）
+
+# D 方案：一轮算一次的共享基座 + 逐角色镜片所需的原料，避免 8×list_all/8×饱和扫描。
+_BoardCtx = namedtuple("_BoardCtx", ("base", "entries", "saturated", "cat_map"))
 
 # 轻量决策协议：让角色看完摘要后自主选择，而非旧版抛硬币强定发帖/回帖。
 _DECIDE_RULES = (
@@ -119,7 +125,7 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, di
         random.shuffle(candidates)         # 随机近似「最久未发言」，避免同角色刷屏
 
     # 3) 背景数据 + 角色名映射 + 长期记忆（best-effort，只经 for_user(板主)）
-    context = _board_context(bound)
+    board = _board_context_base(bound)  # D：共享基座一轮算一次；逐角色镜片在 _generate 里套
     names = _name_map(store, user_id)
     try:
         memories = bound.list_forum_memories()  # role_key → {stance, updated_at}：注入自述 + 同侪立场
@@ -136,7 +142,7 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, di
         if posts + replies >= budget or attempts >= attempt_cap:
             break
         kind, pid, body = await _act_once(store, bound, user_id, role_key,
-                                          context, names, memories, trigger, can_convene)
+                                          board, names, memories, trigger, can_convene)
         if kind == "reply":
             replies += 1
             acted.add(role_key)
@@ -151,7 +157,7 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, di
     # 5) 召集扇出（#8）：把议题定向请给尚未发言的其他角色（受当日剩余配额约束、不递归）
     if convene:
         cp, cr = await _run_convene(store, bound, user_id, convene, candidates, acted,
-                                    context, names, memories)
+                                    board, names, memories)
         posts += cp
         replies += cr
 
@@ -162,7 +168,7 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, di
     return {"posts": posts, "replies": replies}
 
 
-async def _act_once(store, bound, user_id, role_key, context, names, memories, trigger, can_convene):
+async def _act_once(store, bound, user_id, role_key, board, names, memories, trigger, can_convene):
     """一个角色走完 观察→决策→行动：生成 → 三闸（去重/内容/配额）→ 落库 → 计数 → SSE。
 
     返回 (kind, pid, body)：kind ∈ {"post","reply",None}；None＝PASS/空/被闸拦（不发言、不烧配额）。
@@ -170,7 +176,7 @@ async def _act_once(store, bound, user_id, role_key, context, names, memories, t
     """
     try:
         body, target = await _generate(store, bound, user_id, role_key,
-                                       context, names, memories, trigger, can_convene)
+                                       board, names, memories, trigger, can_convene)
     except Exception as e:  # noqa: BLE001 — 单角色生成失败不拖垮整轮
         logger.warning("Forum AI 生成失败 (role=%s): %s", role_key, e)
         return None, None, ""
@@ -199,7 +205,7 @@ async def _act_once(store, bound, user_id, role_key, context, names, memories, t
 
 
 async def _run_convene(store, bound, user_id, convene, candidates, acted,
-                       context, names, memories) -> tuple[int, int]:
+                       board, names, memories) -> tuple[int, int]:
     """把召集议题定向请给尚未发言的其他角色（每人一次自主决策，可 PASS）。返回 (新增帖, 新增回帖)。
 
     仅顶层轮触发；被邀角色 can_convene=False，不会再次召集（无递归）。名额 = min(_CONVENE_INVITES,
@@ -215,7 +221,7 @@ async def _run_convene(store, bound, user_id, convene, candidates, acted,
     conv_trigger = {"post_id": pid, "at_roles": (), "reply_excerpt": topic, "convene": True}
     cp = cr = 0
     for rk in invitees:
-        kind, _, _ = await _act_once(store, bound, user_id, rk, context, names, memories,
+        kind, _, _ = await _act_once(store, bound, user_id, rk, board, names, memories,
                                      conv_trigger, can_convene=False)
         if kind == "reply":
             cr += 1
@@ -324,19 +330,22 @@ def _priority_roles(bound, trigger, candidates) -> list[str]:
     return out
 
 
-async def _generate(store, bound, user_id, role_key, context, names,
+async def _generate(store, bound, user_id, role_key, board, names,
                     memories=None, trigger=None, can_convene=False):
     """观察→决策→行动：拼角色专属摘要（含长期记忆注入），模型自主选择回帖 [#号] / 原创 / PASS。
 
     返回 (body, target_post|None)：body 空表示 PASS（不发言、不烧配额）；
     target 非空表示回复该帖，否则原创发帖。can_convene=True 时额外提供「召集」协议项。单次 LLM 调用。
+    board 是 _BoardCtx（共享基座 + entries/饱和集/催化剂映射）：此处套逐角色镜片（D 方案软分工）。
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
     from bottleneck_hunter.llm_clients import factory
 
     identity = get_identity(store, user_id, role_key)
-    digest, targets = _build_role_digest(bound, role_key, names, trigger, memories)
+    deep_seg, focus_line = _role_lens(bound, role_key, board.entries, board.saturated, board.cat_map)
+    context = board.base + ("\n" + deep_seg if deep_seg else "")
+    digest, targets = _build_role_digest(bound, role_key, names, trigger, memories, focus_line)
 
     system = identity.system_preamble()
     if context:
@@ -379,13 +388,14 @@ def _parse_decision(raw, targets):
     return body[:2000], None
 
 
-def _build_role_digest(bound, role_key, names, trigger=None, memories=None):
+def _build_role_digest(bound, role_key, names, trigger=None, memories=None, focus_line=None):
     """拼给该角色看的留言区摘要 + 可回帖目标表 {帖号: 帖}。
 
     展示近 _DIGEST_POSTS 条帖（带回帖数、标注「你自己」/「已关评」），注入长期立场备忘
     （自己的 + 同侪的，#6），再附本角色最近 _OWN_RECENT 条自述回顾（#1 记得自己发过什么）。
     targets 只含「他人所发、未关评」的帖——即可被 [#帖号] 回复的对象；自己的帖与已关评帖只作上下文。
     触发态下若本角色正是被点名/被回复/被召集对象，顶部加一句高亮，并把该帖塞进 targets（放行回到自己帖）。
+    focus_line（D 方案）：非空则追加「你的关注域」一行软分工提示，把话题往本角色镜片拉。
     """
     try:
         posts = bound.list_forum_posts(limit=_DIGEST_POSTS)
@@ -416,6 +426,8 @@ def _build_role_digest(bound, role_key, names, trigger=None, memories=None):
         own = []
     if own:
         digest += "\n\n【你最近发过】" + "；".join(_oneline(p.get("body"))[:50] for p in own)
+    if focus_line:  # D：软分工提示，追加在最后一行
+        digest += "\n\n" + focus_line
     return digest[:_DIGEST_CAP], targets
 
 
@@ -538,11 +550,12 @@ def _saturated_tickers(bound, entries) -> dict[str, int]:
     return dict(ranked[:_SATURATION_TOP])
 
 
-def _board_context(bound) -> str:
-    """拼板主自己的市场背景：L1 宏观 + 双市场平衡观察池 + 近期催化剂 + 反重复提示 + 抽一只深挖。
+def _board_context_base(bound) -> _BoardCtx:
+    """一轮算一次的共享基座：L1 宏观 + 双市场平衡观察池 + 近期催化剂 + 反重复提示（不含深挖）。
 
-    B：观察池按 market 交错取样、深挖池排除饱和标的并优先催化剂标的（破「只聊 top-12 高分那批
-    美股 + 单只反复」）。C：注入随时间变化的催化剂/事件供追新话题。A：把饱和标的显式点出让 AI 换角度。
+    深挖种子改为逐角色（_role_lens）——D 方案的软分工。返回 _BoardCtx，把 entries/饱和集/
+    催化剂标的→impact 映射一并带出，供 _role_lens 复用，避免 8×list_all / 8× 饱和扫描。
+    B：观察池按 market 交错取样。C：注入随时间变化的催化剂/事件。A：显式点出已被反复讨论的票。
     全 best-effort，任何一步失败都不影响其余。
     """
     lines: list[str] = []
@@ -562,7 +575,7 @@ def _board_context(bound) -> str:
 
     saturated = _saturated_tickers(bound, entries)  # A
 
-    cat_tickers: set[str] = set()  # C：催化剂标的集合，回喂 B 深挖加权
+    cat_map: dict[str, str] = {}  # C：催化剂标的 → impact_level，回喂 B/D 深挖加权与 risk 镜片
     try:
         cats = bound.get_recent_catalysts()
     except Exception:  # noqa: BLE001
@@ -571,11 +584,11 @@ def _board_context(bound) -> str:
         cbits = []
         for c in cats[:6]:
             tk = (c.get("ticker") or "").strip()
+            lvl = c.get("impact_level") or ""
             if tk:
-                cat_tickers.add(tk)
+                cat_map[tk] = lvl
             title = _oneline(c.get("title"))[:24]
             date = (c.get("expected_date") or "")[:10]
-            lvl = c.get("impact_level") or ""
             cbits.append(" ".join(x for x in (tk, date, title) if x) + (f"（{lvl}）" if lvl else ""))
         if cbits:
             lines.append("近期催化剂/事件（可据此发起新话题，别都盯着老几只）：" + "；".join(cbits))
@@ -601,22 +614,113 @@ def _board_context(bound) -> str:
         if tags:
             lines.append("板主观察池：" + "、".join(tags))
 
-        # B：深挖池 = 全量排除饱和；有近催化剂者优先。破「random.choice(entries[:12])」单只反复。
-        # ponytail: 无状态随机 + 排除饱和 + 催化剂加权已够破锁；若观察发现仍集中再加「上次深挖」轮换游标。
-        pool = [e for e in entries if e.get("ticker") and e.get("ticker") not in saturated] or \
-               [e for e in entries if e.get("ticker")]
-        hot = [e for e in pool if e.get("ticker") in cat_tickers]
-        pick_from = hot or pool
-        if pick_from:
-            seg = _ticker_background(bound, random.choice(pick_from))
-            if seg:
-                lines.append(seg)
-
     if saturated:  # A：显式点出已聊烂的标的，配合 _DECIDE_RULES 让 AI 换角度或 PASS
         bits = "、".join(f"{tk}×{n}" for tk, n in saturated.items())
         lines.append("近期已被反复讨论（换个角度或换只票，别扎堆）：" + bits)
 
-    return "\n".join(lines)[:_CTX_CAP]
+    return _BoardCtx("\n".join(lines)[:_CTX_CAP], entries, saturated, cat_map)
+
+
+def _fresh_pool(entries, saturated) -> list[dict]:
+    """有 ticker 且未被反复讨论的候选；全被饱和则退回全部有 ticker 的（别选空）。"""
+    pool = [e for e in entries if e.get("ticker") and e.get("ticker") not in saturated]
+    return pool or [e for e in entries if e.get("ticker")]
+
+
+def _role_lens(bound, role_key, entries, saturated, cat_map):
+    """D 方案·逐角色镜片：返回 (deep_dive_seg, focus_line)。
+
+    focus_line 追加到 digest 末尾（软分工提示）；deep_dive_seg 是该角色专属深挖票的背景段
+    （拼到共享基座后面）。deep_dive=False 的角色（macro/consensus）不给单股种子——macro 改给
+    板块聚合。选票缺数据时按用户拍板的降级路径兜底，绝不在此拉实时行情。
+    """
+    prof = FOCUS_PROFILES.get(role_key)
+    pool = _fresh_pool(entries, saturated)
+    if prof is None:  # 未配镜片：退回 B 的「全池排除饱和 + 催化剂优先」
+        hot = [e for e in pool if e.get("ticker") in cat_map]
+        pick = random.choice(hot or pool) if pool else None
+        return (_ticker_background(bound, pick) if pick else ""), ""
+    focus_line = "【你的关注域】" + prof.focus
+    if not prof.deep_dive:
+        seg = _sector_digest(entries) if role_key == "L1_macro" else ""
+        return seg, focus_line
+    entry = _pick_for_role(bound, prof.pick, pool, cat_map)
+    seg = _ticker_background(bound, entry) if entry else ""
+    return seg, focus_line
+
+
+def _pick_for_role(bound, strategy, pool, cat_map):
+    """按角色策略从候选池挑一只深挖票；缺数据即降级，返回 entry 或 None。"""
+    if not pool:
+        return None
+    if strategy == "value":  # 估值/防御：偏低 composite_score
+        ranked = sorted(pool, key=lambda e: e.get("composite_score") or 0.0)
+        return random.choice(ranked[:max(3, len(ranked) // 2)])
+    if strategy == "growth":  # 成长赛道：科技/新能源 sector
+        kws = ("半导体", "芯片", "新能源", "电子", "科技", "AI", "算力", "光伏", "电池", "软件")
+        hot = [e for e in pool if any(k in (e.get("sector") or "") for k in kws)]
+        return random.choice(hot or pool)
+    if strategy == "risk":  # 下行风险：高冲击催化剂优先 → 大跌 → 全池
+        crit = [e for e in pool if cat_map.get(e.get("ticker")) in ("critical", "high")]
+        if crit:
+            return random.choice(crit)
+        drop = _extreme_by_snapshot(bound, pool, "change_pct", want_max=False)
+        return drop or random.choice(pool)
+    if strategy == "contrarian":  # 情绪反面：涨跌幅/RSI 极值；缺快照→池本就已排除饱和(天然反选冷门)
+        ext = _extreme_by_snapshot(bound, pool, "change_pct", want_abs=True)
+        return ext or random.choice(pool)
+    if strategy == "technical":  # 技术/资金流：放量优先；缺快照→催化剂→全池
+        vol = _extreme_by_snapshot(bound, pool, "volume", want_max=True)
+        if vol:
+            return vol
+        hot = [e for e in pool if e.get("ticker") in cat_map]
+        return random.choice(hot or pool)
+    if strategy == "holdings":  # 顾问：板主实际持仓票；空仓→高分优质
+        try:
+            held = {(p.get("ticker") or "") for p in bound.get_sim_positions()}
+        except Exception:  # noqa: BLE001
+            held = set()
+        mine = [e for e in pool if e.get("ticker") in held]
+        if mine:
+            return random.choice(mine)
+        ranked = sorted(pool, key=lambda e: e.get("composite_score") or 0.0, reverse=True)
+        return ranked[0] if ranked else None
+    return random.choice(pool)  # default / 未知策略
+
+
+def _extreme_by_snapshot(bound, pool, field, *, want_max=True, want_abs=False):
+    """在前 _LENS_SNAPSHOT_K 只(按 composite_score)里按快照 field 取极值的 entry；全缺快照→None。
+
+    # ponytail: 只查前 K 只，避免每轮对全池逐票查快照；A 股常缺快照→自然跳过，缺价降级见调用方。
+    """
+    cand = sorted(pool, key=lambda e: e.get("composite_score") or 0.0, reverse=True)[:_LENS_SNAPSHOT_K]
+    best = None
+    best_val = None
+    for e in cand:
+        try:
+            snap = bound.get_latest_snapshot(e.get("ticker") or "")
+        except Exception:  # noqa: BLE001
+            snap = None
+        if not snap or snap.get(field) is None:
+            continue
+        val = snap[field]
+        val = abs(val) if want_abs else val
+        if best_val is None or (val > best_val if want_max else val < best_val):
+            best_val, best = val, e
+    return best
+
+
+def _sector_digest(entries) -> str:
+    """macro 镜片：观察池按 sector 聚合分布（不给单股种子），供其从板块轮动切入。"""
+    counts: dict[str, int] = {}
+    for e in entries:
+        sec = (e.get("sector") or "").strip()
+        if sec:
+            counts[sec] = counts.get(sec, 0) + 1
+    if not counts:
+        return ""
+    top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:8]
+    return "板块分布（供你看轮动，不必盯单只）：" + "、".join(f"{s}×{n}" for s, n in top)
 
 
 def _ticker_background(bound, entry) -> str:

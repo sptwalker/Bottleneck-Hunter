@@ -1,8 +1,19 @@
-# 论坛话题多样化 · A/B/C 已实现 + D 方案细化设计
+# 论坛话题多样化 · A/B/C/D 全部已实现
 
 > 目标（用户原话）：论坛 AI 发言容易聚焦在**一个市场、一两只股票、一两个问题**上反复讨论，
 > 希望 AI 讨论能不断**追新热点、发现新问题、减少重复**。
-> 本轮：**A/B/C 已开发并通过测试**；**D 仅细化设计，待批准再建**。
+> **A/B/C 已上线（11e7d69）；D 三决策点用户拍板后已开发（软分工 / 接受 A 股缺快照降级 / macro 软约束）。**
+
+---
+
+## 三决策点（用户拍板结论）
+
+1. **过滤激进度** → **软分工**：只把「深挖种子票」按角色硬选，共享基座 + 全景观察池仍在每人眼前，
+   角色可自由跟帖，不做「只能看自己那批票」的硬隔离。
+2. **contrarian/uzi/risk 涨跌幅信号** → **接受 A 股缺快照时该角色对该票降级**：读现成
+   `get_latest_snapshot`，缺快照即跳过该票退回冷门/催化剂/全池，绝不在发帖轮拉实时行情。
+3. **macro 是否发个股** → **软**：`deep_dive=False` 不给 macro 单股种子、改给 sector 聚合镜片，
+   但不禁止它在跟帖里提及个股。
 
 ---
 
@@ -60,7 +71,12 @@
 
 ---
 
-## 三、D 方案细化设计（角色专题分工 · 待批准）
+## 三、D 方案 —— 角色专题分工（已实现）
+
+> 三决策点已按上文拍板结论落地。落点：`forum_identity.py`（`FocusProfile`+`FOCUS_PROFILES`+自检）、
+> `forum_ai.py`（`_board_context_base`/`_role_lens`/`_pick_for_role`/`_extreme_by_snapshot`/`_sector_digest`/`_fresh_pool`，
+> `board` 贯穿 `run_forum_ai_round→_act_once→_run_convene→_generate`，`_build_role_digest` 加 `focus_line`）。
+> 测试 `tests/test_forum_ai.py` 30 passed（原 22 + D 8）；forum 全量 90 passed + 相关回归 81 passed。
 
 **思路**：8 角色现在拿同一份 digest + context → 必然讨论同类内容。给每个角色一副「镜片」
 （focus profile），天然分散覆盖面：谁深挖哪只票、关注哪类事件因角色而异。

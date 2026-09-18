@@ -100,6 +100,34 @@ DEFAULT_IDENTITIES: dict[str, Identity] = {
 FORUM_ROLE_KEYS: tuple[str, ...] = tuple(DEFAULT_IDENTITIES)
 
 
+@dataclass(frozen=True)
+class FocusProfile:
+    """角色的「镜片」（D 方案·话题多样化）：决定它深挖哪只票、digest 里提示关注什么。
+
+    focus：注入 digest 末尾的一行「你的关注域」提示（软分工，不硬隔离——角色仍能跟帖回应他人）。
+    pick：深挖选票策略键，对应 forum_ai._role_lens 里的纯函数分支；deep_dive=False 时忽略。
+    deep_dive：False＝不给单股种子（macro 改给板块聚合、consensus 只用共享基座做整合）。
+    """
+
+    focus: str
+    pick: str = "default"
+    deep_dive: bool = True
+
+
+# 8 角色镜片（D 方案 §四.D.4；键必须 == role_key 且是 DEFAULT_IDENTITIES 子集，导入即自检）。
+# 软分工：只把「深挖种子票」按角色硬选，共享基座与全景观察池仍在每人眼前（用户拍板：过滤取软）。
+FOCUS_PROFILES: dict[str, FocusProfile] = {
+    "committee_value": FocusProfile("估值与现金流、安全边际，偏爱被低估的防御型标的", "value"),
+    "committee_growth": FocusProfile("行业渗透率与成长赛道，关注高增长空间的科技/新能源标的", "growth"),
+    "committee_risk": FocusProfile("下行风险、回撤与潜在爆雷，盯住高冲击催化剂与大跌标的", "risk"),
+    "committee_contrarian": FocusProfile("市场情绪的反面、超买超卖与拥挤交易，专挑没人聊的冷门", "contrarian"),
+    "committee_consensus": FocusProfile("各方分歧与一致预期，做整合提炼而非另起炉灶", deep_dive=False),
+    "L1_macro": FocusProfile("板块轮动与宏观周期，从行业分布切入而非盯单只个股", deep_dive=False),
+    "vip_advisor": FocusProfile("与板主实际持仓相关的风险与配置调整", "holdings"),
+    "watchlist_uzi": FocusProfile("技术面信号、量能与资金流，用指标与数据说话", "technical"),
+}
+
+
 def _self_check() -> None:
     """导入即自检：默认人设的键必须都在 ROLE_REGISTRY，且键与 Identity.role_key 一致。"""
     unknown = set(DEFAULT_IDENTITIES) - set(ROLE_REGISTRY)
@@ -108,6 +136,11 @@ def _self_check() -> None:
     bad = [k for k, v in DEFAULT_IDENTITIES.items() if k != v.role_key]
     if bad:
         raise RuntimeError(f"DEFAULT_IDENTITIES 键与 Identity.role_key 不一致: {bad}")
+    # D：焦点镜片必须与 8 入驻角色一一对应，漏配/错配报错而非静默（复刻上面的自检纪律）
+    if set(FOCUS_PROFILES) != set(DEFAULT_IDENTITIES):
+        miss = set(DEFAULT_IDENTITIES) - set(FOCUS_PROFILES)
+        extra = set(FOCUS_PROFILES) - set(DEFAULT_IDENTITIES)
+        raise RuntimeError(f"FOCUS_PROFILES 与入驻角色不匹配：缺 {sorted(miss)} 多 {sorted(extra)}")
 
 
 _self_check()

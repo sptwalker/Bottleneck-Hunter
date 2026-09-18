@@ -270,7 +270,7 @@ def test_board_context_balances_both_markets(bound, monkeypatch):
     bound.add({"ticker": "MSFT", "company_name": "Microsoft", "market": "US", "tier": "track", "composite_score": 97})
     bound.add({"ticker": "600519", "company_name": "Moutai", "company_name_cn": "贵州茅台",
                "market": "A", "tier": "track", "composite_score": 50})
-    ctx = forum_ai._board_context(bound)
+    ctx = forum_ai._board_context_base(bound).base
     assert "板主观察池" in ctx
     assert "600519.SS" in ctx  # 分数最低的 A 股靠交错采样进入，证明市场平衡
     assert "NVDA" in ctx
@@ -282,7 +282,7 @@ def test_board_context_injects_catalysts(bound, monkeypatch):
     eid = bound.add({"ticker": "TSLA", "company_name": "Tesla", "market": "US", "tier": "track"})
     future = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%d")
     bound.create_catalyst(eid, "TSLA", "产销数据发布", expected_date=future, impact_level="high")
-    ctx = forum_ai._board_context(bound)
+    ctx = forum_ai._board_context_base(bound).base
     assert "近期催化剂/事件" in ctx
     assert "TSLA" in ctx and "产销数据发布" in ctx
 
@@ -293,7 +293,7 @@ def test_board_context_shows_saturation_hint(bound, monkeypatch):
     bound.add({"ticker": "NVDA", "company_name": "Nvidia", "market": "US", "tier": "track"})
     for _ in range(forum_ai._SATURATION_MIN):
         bound.create_forum_post("ai", "NVDA 估值太高了。", author_role_key="committee_value")
-    ctx = forum_ai._board_context(bound)
+    ctx = forum_ai._board_context_base(bound).base
     assert "换个角度或换只票" in ctx and "NVDA" in ctx
 
 
@@ -304,3 +304,74 @@ def test_get_recent_catalysts_cross_market(bound):
     bound.create_catalyst(eid, "600519.SS", "分红除权", expected_date=future)
     cats = bound.get_recent_catalysts()
     assert any(c["ticker"] == "600519.SS" for c in cats)
+
+
+# —— D 方案：逐角色镜片（软分工）——
+
+def _entries():
+    """纯 dict 观察池样本，直喂 D 的选票纯函数（不落库、免建仓）。"""
+    return [
+        {"ticker": "LOW1", "sector": "食品饮料", "composite_score": 1.0},
+        {"ticker": "LOW2", "sector": "食品饮料", "composite_score": 2.0},
+        {"ticker": "LOW3", "sector": "食品饮料", "composite_score": 3.0},
+        {"ticker": "CHIP", "sector": "半导体", "composite_score": 90.0},
+        {"ticker": "HIGH1", "sector": "银行", "composite_score": 91.0},
+        {"ticker": "HIGH2", "sector": "银行", "composite_score": 92.0},
+    ]
+
+
+def test_pick_value_prefers_low_score(bound):
+    """value 老陈偏爱低估：从 composite_score 低位挑，不碰最高分那批。"""
+    pick = forum_ai._pick_for_role(bound, "value", _entries(), {})
+    assert pick["composite_score"] <= 3.0
+
+
+def test_pick_growth_prefers_tech_sector(bound):
+    """growth Vera 只在科技/新能源赛道里挑。"""
+    pick = forum_ai._pick_for_role(bound, "growth", _entries(), {})
+    assert pick["ticker"] == "CHIP"
+
+
+def test_pick_holdings_uses_positions(bound, monkeypatch):
+    """vip_advisor Linda 深挖板主实际持仓票。"""
+    monkeypatch.setattr(bound, "get_sim_positions", lambda *a, **k: [{"ticker": "HIGH1"}])
+    pick = forum_ai._pick_for_role(bound, "holdings", _entries(), {})
+    assert pick["ticker"] == "HIGH1"
+
+
+def test_pick_holdings_empty_degrades_to_top(bound, monkeypatch):
+    """空仓→退高分优质标的，不崩。"""
+    monkeypatch.setattr(bound, "get_sim_positions", lambda *a, **k: [])
+    pick = forum_ai._pick_for_role(bound, "holdings", _entries(), {})
+    assert pick["composite_score"] == 92.0
+
+
+def test_pick_technical_prefers_high_volume(bound, monkeypatch):
+    """uzi 阿泽按放量挑：快照 volume 最大者胜。"""
+    vols = {"CHIP": 5, "HIGH1": 9, "HIGH2": 3}
+    monkeypatch.setattr(bound, "get_latest_snapshot",
+                        lambda tk: {"volume": vols[tk]} if tk in vols else None)
+    pick = forum_ai._pick_for_role(bound, "technical", _entries(), {})
+    assert pick["ticker"] == "HIGH1"
+
+
+def test_role_lens_macro_no_single_stock(bound):
+    """macro David 不给单股种子，改给板块聚合分布 + 关注域提示。"""
+    seg, focus = forum_ai._role_lens(bound, "L1_macro", _entries(), {}, {})
+    assert "板块分布" in seg and "半导体" in seg
+    assert focus.startswith("【你的关注域】")
+
+
+def test_role_lens_consensus_no_deep_seg(bound):
+    """consensus 明哥不深挖，只靠共享基座整合，deep_seg 为空但仍有关注域。"""
+    seg, focus = forum_ai._role_lens(bound, "committee_consensus", _entries(), {}, {})
+    assert seg == "" and focus.startswith("【你的关注域】")
+
+
+def test_role_lens_degrades_without_snapshot(bound, monkeypatch):
+    """contrarian 缺快照不崩：退回冷门池随机，仍产出深挖段。"""
+    monkeypatch.setattr(bound, "get_latest_snapshot", lambda tk: None)
+    monkeypatch.setattr(forum_ai, "_ticker_background",
+                        lambda b, e: f"BG:{e['ticker']}" if e else "")
+    seg, focus = forum_ai._role_lens(bound, "committee_contrarian", _entries(), {}, {})
+    assert seg.startswith("BG:") and focus.startswith("【你的关注域】")
