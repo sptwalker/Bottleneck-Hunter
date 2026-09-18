@@ -12,8 +12,9 @@ import pytest
 from bottleneck_hunter.vip import ingest
 
 _DIR = os.environ.get("CITI_SAMPLE_DIR", "")
-_NEW = "全部-仓盘_06_Aug_2026_10_09_15.pdf"
-_OLD = "全部-仓盘_24_Jul_2026_08_58_40.pdf"
+_NEW = "全部-仓盘_06_Aug_2026_10_09_15.pdf"   # `截⾄ <date>` 版式
+_OLD = "全部-仓盘_24_Jul_2026_08_58_40.pdf"   # 紧凑无 `截⾄` 版式（块列更少，同为资产级别行布局）
+_SEP = "全部-仓盘_18_Sep_2026_11_06_31.pdf"   # 裸日期无 `截⾄` 版式（市场价格截止日为裸日期）
 
 
 def _parse(fn: str):
@@ -66,9 +67,38 @@ def test_citi_new_layout_categories():
     assert len(st.cash_balances) >= 1 and st.total_cash_usd > 0
 
 
-# ── 旧版式(≤7/24)不回归：仍抽 18 只 ──────────────────────────────────
-def test_citi_old_layout_no_regression():
+# ── 紧凑无 `截⾄` 版式(7/24)：块列比 8/06 少(无账户种类/当前值/应计/日期行)，仍分类别抽全 ──
+# 注：此文件早前被误当「不含衍生品的旧版式」；实含 5 MLI+2 累加器+4 PE+3 贷款，此前因结构性产品/
+# 期权块无 Ticker/ISIN 被旧固定偏移路径静默丢弃。以「变化率%」行为版式不变锚后与 8/06、9/18 同抽取。
+def test_citi_compact_layout():
     st = _parse(_OLD)
     assert len(st.holdings) == 18, [h.ticker for h in st.holdings]
-    assert len(st.derivative_terms) == 0  # 旧仓盘不含衍生品块
-    assert sum(h.market_value_usd for h in st.holdings) > 20_000_000
+    assert sum(h.market_value_usd for h in st.holdings) > 20_000_000  # 量级 ~2231 万美元
+    # 持仓无「零市值/数量=1」的错解残留（紧凑版列偏移错位的典型症状）
+    assert not [h.ticker for h in st.holdings if h.market_value_usd == 0 or h.quantity == 1.0]
+    # 衍生品：5 MLI + 2 累加器（此前静默丢弃，现正确落库）
+    fam = [d["product_family"] for d in st.derivative_terms]
+    assert fam.count("equity_mli_booster") == 5, fam
+    assert fam.count("equity_accumulator") == 2, fam
+    acc = [d for d in st.derivative_terms if d["product_family"] == "equity_accumulator"]
+    assert all(d["terms"]["market_value_usd"] < 0 for d in acc), acc  # 累加器负 MTM 保留
+    assert {d["underlying_symbol"] for d in acc} == {"NVIDIA", "TESLA"}, acc
+    assert len(st.account_summary.get("private_equity") or []) == 4
+    assert (st.account_summary.get("loan_outstanding_usd") or 0) > 0
+
+
+# ── 裸日期无 `截⾄` 版式(9/18)：市场价格截止日为裸日期(如 `17 Sep 2026`)，同分类别抽全 ──
+def test_citi_bare_date_layout():
+    st = _parse(_SEP)
+    assert len(st.holdings) == 19, [h.ticker for h in st.holdings]
+    assert not [h.ticker for h in st.holdings if h.market_value_usd == 0 or h.quantity == 1.0]
+    fam = [d["product_family"] for d in st.derivative_terms]
+    assert fam.count("equity_mli_booster") == 6, fam
+    assert fam.count("equity_accumulator") == 2, fam
+    # 非美元持仓正确折算：700.HK 记本地币 HKD、EUR 债记 EUR，_usd 为正
+    by_tk = {h.ticker: h for h in st.holdings}
+    assert by_tk["700"].nominal_ccy == "HKD" and by_tk["700"].market_value_usd > 0
+    assert any(h.nominal_ccy == "EUR" and h.market_value_usd > 0 for h in st.holdings)
+    assert len(st.account_summary.get("private_equity") or []) == 4
+    assert (st.account_summary.get("loan_outstanding_usd") or 0) > 0
+    assert st.total_cash_usd > 0 and st.period_end == "2026-09-18"

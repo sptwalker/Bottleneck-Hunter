@@ -299,6 +299,8 @@ _POSITION_NOISE = {
     "平均或单位成本", "总成本基准", "未实现盈/(亏)", "未实现盈/(亏)%", "资产级别 - 全部持仓",
     "资产级别 -  全部持仓", "应⽤的筛选器： ⽆应⽤的筛选器",
 }
+# 花旗仓盘块内「资产级别」行值域（新版式据此分类别；也作裸日期版式的块锚）
+_CITI_ASSET_RE = re.compile(r"^(股票|商品|固定收益|其他资产/结构性产品|其他资产/股票期权|私募股权|现⾦/投资现⾦|负债)$")
 
 
 def _parse_equities(pages: list[str]) -> tuple[list[EquityHolding], float | None]:
@@ -469,10 +471,29 @@ def _parse_citi_position_report(pages: list[str], filename: str, content_hash: s
             report_per_usd = ra[1] / la[1]
             break
 
+    # 无 `截⾄` 版式(紧凑版 ≤7/24、裸日期版 2026-09)：上面预扫落空。以「变化率%」行为版式不变锚，
+    # 从任一「本地币=USD」块的市值对(％行前倒数第 2 对金额)反推 CNY-per-USD，供早于首个 USD 块
+    # 的非美元现金(HKD/EUR)块折算。
+    if report_per_usd is None:
+        for a in anchors:
+            nxt = anchors[anchors.index(a) + 1] if a != anchors[-1] else len(lines)
+            data = lines[a:nxt]
+            ai = next((k for k, x in enumerate(data) if _CITI_ASSET_RE.match(x)), None)
+            if ai is None:
+                continue
+            pi = next((k for k, x in enumerate(data) if k < ai and x.endswith("%")), None)
+            amts = [amt for amt in (_currency_amount(data[k]) for k in range(pi or 0)) if amt]
+            if len(amts) < 4:
+                continue
+            ra, la = amts[-4], amts[-3]
+            if la[0] == "USD" and la[1] > 0 and ra[0] == report_ccy:
+                report_per_usd = ra[1] / la[1]
+                break
+
     # 资产级别值域（新版式 +15 列）——据此分类别
     _STOCK_ASSET = ("股票", "商品", "固定收益")
     _STRUCTURED_ASSET = ("其他资产/结构性产品", "其他资产/股票期权")
-    _ASSET_RE = re.compile(r"^(股票|商品|固定收益|其他资产/结构性产品|其他资产/股票期权|私募股权|现⾦/投资现⾦|负债)$")
+    _ASSET_RE = _CITI_ASSET_RE
     # 块内 "平均单位成本原值 ISIN"（如 `6.74875 US02079K3059`）
     _COST_ISIN_RE = re.compile(r"([\d,.]+)\s+(US[0-9A-Z]{10})")
     _MLI_DESC_RE = re.compile(r"(\d+)\s*MTH\s+USD\s+(.+?)\s+MLI", re.I)
@@ -507,8 +528,8 @@ def _parse_citi_position_report(pages: list[str], filename: str, content_hash: s
         company = " ".join(company_lines).strip()
         company_upper = company.upper()
 
-        # ── 新版式（2026-08+）：块内含 `截⾄` 行 → 语义列抽取，分类别落库 ──
-        if any(x.startswith("截⾄") for x in data):
+        # ── 新版式（2026-08+）：块内含 `截⾄` 行或「资产级别」行 → 语义列抽取，分类别落库 ──
+        if any(x.startswith("截⾄") for x in data) or any(_CITI_ASSET_RE.match(x) for x in data):
             nv = _parse_citi_position_block_new(data, desc_block, symbol, report_ccy,
                                                 report_per_usd, period)
             if nv is None:
@@ -625,47 +646,81 @@ def _parse_citi_position_block_new(data: list[str], desc_block: list[str], symbo
       资产级别行(股票/固定收益/…/负债) 决定分类去向
       现金类：本地币金额即现金余额（无 symbol/数量/成本）
     """
-    # 市值：`截⾄` 行前一对金额（+2 报告币 CNY / +1 本地币，如 `CNY 8,284,430.83` / `$1,227,550.41`）
+    # 市值：`截⾄` 版式取 `截⾄` 行前一对金额；裸日期版式(2026-09，市场价格截止日为裸日期无 `截⾄` 前缀)
+    # 以「资产级别」行为锚往前偏移（应计利息浮动只落在市值之前，故从锚往前的 -8/-7/-3 稳定）。
     mv_nominal = mv_usd = 0.0
     ccy = "USD"
-    mkt_date_idx = next((k for k, x in enumerate(data) if x.startswith("截⾄")), None)
-    if mkt_date_idx is None:
-        return None
-    local_amt = _currency_amount(data[mkt_date_idx - 1]) if mkt_date_idx - 1 >= 0 else None
-    report_amt = _currency_amount(data[mkt_date_idx - 2]) if mkt_date_idx - 2 >= 0 else None
-    if report_amt and local_amt and local_amt[0] == "USD" and local_amt[1] > 0:
-        report_per_usd = report_amt[1] / local_amt[1]
-    if local_amt:
-        ccy = local_amt[0]
-        mv_nominal = local_amt[1]
-    mv_usd = _position_usd_value(report_amt, local_amt, report_ccy, report_per_usd)
-
-    # 数量：`截⾄` 行后第一个纯数字行
-    qty: float | None = None
-    for k in range(mkt_date_idx + 1, min(mkt_date_idx + 8, len(data))):
-        v = _num(data[k])
-        if v is not None:
-            qty = v
-            break
-
-    # 成本/ISIN：块内 `数字 ISIN`
     cost_usd = None
     isin = ""
-    _COST_ISIN_RE = re.compile(r"([\d,.]+)\s+(US[0-9A-Z]{10})")
-    for x in data:
-        m = _COST_ISIN_RE.search(x)
-        if m:
-            cost_nom = _num(m.group(1))
-            isin = m.group(2)
-            if cost_nom and mv_usd and mv_nominal:
-                cost_usd = round(cost_nom * (mv_usd / mv_nominal), 2)
-            break
+    qty: float | None = None
+    mkt_date_idx = next((k for k, x in enumerate(data) if x.startswith("截⾄")), None)
+    if mkt_date_idx is not None:
+        local_amt = _currency_amount(data[mkt_date_idx - 1]) if mkt_date_idx - 1 >= 0 else None
+        report_amt = _currency_amount(data[mkt_date_idx - 2]) if mkt_date_idx - 2 >= 0 else None
+        if report_amt and local_amt and local_amt[0] == "USD" and local_amt[1] > 0:
+            report_per_usd = report_amt[1] / local_amt[1]
+        if local_amt:
+            ccy = local_amt[0]
+            mv_nominal = local_amt[1]
+        mv_usd = _position_usd_value(report_amt, local_amt, report_ccy, report_per_usd)
+
+        # 数量：`截⾄` 行后第一个纯数字行
+        for k in range(mkt_date_idx + 1, min(mkt_date_idx + 8, len(data))):
+            v = _num(data[k])
+            if v is not None:
+                qty = v
+                break
+
+        # 成本/ISIN：块内 `数字 ISIN`（截⾄ 版式此数字即平均单位成本原值）
+        _COST_ISIN_RE = re.compile(r"([\d,.]+)\s+(US[0-9A-Z]{10})")
+        for x in data:
+            m = _COST_ISIN_RE.search(x)
+            if m:
+                cost_nom = _num(m.group(1))
+                isin = m.group(2)
+                if cost_nom and mv_usd and mv_nominal:
+                    cost_usd = round(cost_nom * (mv_usd / mv_nominal), 2)
+                break
+    else:
+        # 无 `截⾄` 前缀版式(紧凑版 ≤7/24 与裸日期版 2026-09)：块前列数随版式浮动(9 vs 14)，
+        # 固定偏移不可靠。以「变化率%」行为版式不变锚：其前倒数第 2 对金额=市值(倒数第 1 对=当日
+        # 变化，恒在含 0.00)，其后首个数字=名义单位。据此避开 当前值/应计利息 浮动列，两版式同路径。
+        asset_idx = next((k for k, x in enumerate(data) if _CITI_ASSET_RE.match(x)), None)
+        if asset_idx is None:
+            return None
+        pct_idx = next((k for k, x in enumerate(data) if k < asset_idx and x.endswith("%")), None)
+        amts = [a for a in (_currency_amount(data[k]) for k in range(pct_idx or 0)) if a]
+        report_amt, local_amt = (amts[-4], amts[-3]) if len(amts) >= 4 else (None, None)
+        if report_amt and local_amt and local_amt[0] == "USD" and local_amt[1] > 0:
+            report_per_usd = report_amt[1] / local_amt[1]
+        if local_amt:
+            ccy = local_amt[0]
+            mv_nominal = local_amt[1]
+        mv_usd = _position_usd_value(report_amt, local_amt, report_ccy, report_per_usd)
+        if pct_idx is not None:
+            for k in range(pct_idx + 1, asset_idx):
+                v = _num(data[k])
+                if v is not None:
+                    qty = v
+                    break
+        # 此版式 `数字 ISIN` 行的数字是汇率(非成本)，只取 ISIN；成本用「总成本基准」对
+        # （资产级别行之后首个 报告币/本地币 金额对），勿把汇率当成本静默写坏 PnL。
+        for x in data:
+            mi = re.search(r"\b(US[0-9A-Z]{10})\b", x)
+            if mi:
+                isin = mi.group(1)
+                break
+        for p in range(asset_idx + 2, len(data) - 1):
+            ra = _currency_amount(data[p])
+            la = _currency_amount(data[p + 1])
+            if ra and la and ra[0] == report_ccy and la[1] != 0:
+                cost_usd = _position_usd_value(ra, la, report_ccy, report_per_usd)
+                break
 
     # 资产级别行
-    _ASSET_RE = re.compile(r"^(股票|商品|固定收益|其他资产/结构性产品|其他资产/股票期权|私募股权|现⾦/投资现⾦|负债)$")
     kind = ""
     for x in data:
-        if _ASSET_RE.match(x):
+        if _CITI_ASSET_RE.match(x):
             kind = x
             break
     if kind == "现⾦/投资现⾦":
