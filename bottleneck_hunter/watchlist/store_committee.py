@@ -355,6 +355,35 @@ class _CommitteeMixin:
         finally:
             conn.close()
 
+    def get_recent_catalysts(self, days_ahead: int = 14, days_back: int = 7, limit: int = 8) -> list[dict]:
+        """论坛发帖取「近期热点事件」用：即将发生（pending/monitoring 且 expected_date 在未来
+        days_ahead 内）+ 近期已触发（triggered 且 updated_at 在过去 days_back 内），按最近活动排序。
+
+        与 get_upcoming_catalysts 的区别：额外带「已触发」以贴合「发现新问题」。市场未绑定时
+        （论坛店 _market=''）_filtered 跳过市场过滤 → 跨市场取，正是留言板想要的。
+        """
+        conn = self._connect()
+        try:
+            now = datetime.now(timezone.utc)
+            ahead = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+            back = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S")
+            q, p = self._filtered(
+                """SELECT ct.*, w.company_name FROM catalyst_tracking ct
+                   LEFT JOIN watchlist w ON ct.entry_id = w.id
+                   WHERE (
+                       (ct.status IN ('pending','monitoring')
+                        AND ct.expected_date IS NOT NULL AND ct.expected_date <= ?)
+                       OR (ct.status = 'triggered' AND ct.updated_at >= ?)
+                   )
+                   ORDER BY COALESCE(ct.updated_at, ct.created_at) DESC""",
+                (ahead, back),
+                table="ct",
+            )
+            rows = conn.execute(q, p).fetchall()
+            return [dict(r) for r in rows][:limit]
+        finally:
+            conn.close()
+
     def expire_past_catalysts(self) -> int:
         conn = self._connect()
         try:

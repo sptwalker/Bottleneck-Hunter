@@ -8,6 +8,7 @@ stub 通过 monkeypatch factory.get_models_for_role 注入：返回纯正文 →
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -230,3 +231,76 @@ def test_convene_not_triggered_on_directed_round(bound, monkeypatch):
     r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3, trigger=trig))
     assert r["posts"] + r["replies"] == 1  # 只有被点名者发了一帖，无召集扇出
 
+
+# ---------- 话题多样化：A 反重复 / B 双市场采样 / C 催化剂驱动 ----------
+
+
+def test_saturated_tickers_flags_repeated_latin(bound):
+    """A：同一 latin ticker 被刷够 _SATURATION_MIN 次 → 判定为已被反复讨论。"""
+    bound.add({"ticker": "NVDA", "company_name": "Nvidia", "market": "US", "tier": "track"})
+    for _ in range(forum_ai._SATURATION_MIN):
+        bound.create_forum_post("ai", "NVDA 又新高了，估值真的贵。", author_role_key="committee_value")
+    sat = forum_ai._saturated_tickers(bound, bound.list_all())
+    assert sat.get("NVDA", 0) >= forum_ai._SATURATION_MIN
+
+
+def test_saturated_tickers_matches_cjk_name(bound):
+    """A：帖子只提中文名（不写代码）也能命中该标的（CJK 子串匹配）。"""
+    bound.add({"ticker": "600519", "company_name": "Kweichow Moutai",
+               "company_name_cn": "贵州茅台", "market": "A", "tier": "track"})
+    for _ in range(forum_ai._SATURATION_MIN):
+        bound.create_forum_post("ai", "贵州茅台的护城河还在吗？", author_role_key="committee_value")
+    sat = forum_ai._saturated_tickers(bound, bound.list_all())
+    assert "600519.SS" in sat
+
+
+def test_saturated_tickers_ignores_sparse(bound):
+    """A：提及不足阈值不算饱和，别误伤正常讨论。"""
+    bound.add({"ticker": "NVDA", "company_name": "Nvidia", "market": "US", "tier": "track"})
+    bound.create_forum_post("ai", "NVDA 看一眼。", author_role_key="committee_value")
+    assert forum_ai._saturated_tickers(bound, bound.list_all()) == {}
+
+
+def test_board_context_balances_both_markets(bound, monkeypatch):
+    """B：即便美股分数全面更高，A 股仍应在观察池露出（双市场交错，不再只取 top 高分那批）。"""
+    monkeypatch.setattr(forum_ai, "_ticker_background", lambda *a, **k: "")
+    monkeypatch.setattr(forum_ai, "_CTX_TAGS", 2)  # 收窄展示位，逼出「若按分数截断 A 股会被挤掉」
+    bound.add({"ticker": "NVDA", "company_name": "Nvidia", "market": "US", "tier": "track", "composite_score": 99})
+    bound.add({"ticker": "AAPL", "company_name": "Apple", "market": "US", "tier": "track", "composite_score": 98})
+    bound.add({"ticker": "MSFT", "company_name": "Microsoft", "market": "US", "tier": "track", "composite_score": 97})
+    bound.add({"ticker": "600519", "company_name": "Moutai", "company_name_cn": "贵州茅台",
+               "market": "A", "tier": "track", "composite_score": 50})
+    ctx = forum_ai._board_context(bound)
+    assert "板主观察池" in ctx
+    assert "600519.SS" in ctx  # 分数最低的 A 股靠交错采样进入，证明市场平衡
+    assert "NVDA" in ctx
+
+
+def test_board_context_injects_catalysts(bound, monkeypatch):
+    """C：近期催化剂注入背景块，供 AI 追新话题。"""
+    monkeypatch.setattr(forum_ai, "_ticker_background", lambda *a, **k: "")
+    eid = bound.add({"ticker": "TSLA", "company_name": "Tesla", "market": "US", "tier": "track"})
+    future = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%d")
+    bound.create_catalyst(eid, "TSLA", "产销数据发布", expected_date=future, impact_level="high")
+    ctx = forum_ai._board_context(bound)
+    assert "近期催化剂/事件" in ctx
+    assert "TSLA" in ctx and "产销数据发布" in ctx
+
+
+def test_board_context_shows_saturation_hint(bound, monkeypatch):
+    """A+背景：饱和标的显式点名提示，配合决策规则让 AI 换角度。"""
+    monkeypatch.setattr(forum_ai, "_ticker_background", lambda *a, **k: "")
+    bound.add({"ticker": "NVDA", "company_name": "Nvidia", "market": "US", "tier": "track"})
+    for _ in range(forum_ai._SATURATION_MIN):
+        bound.create_forum_post("ai", "NVDA 估值太高了。", author_role_key="committee_value")
+    ctx = forum_ai._board_context(bound)
+    assert "换个角度或换只票" in ctx and "NVDA" in ctx
+
+
+def test_get_recent_catalysts_cross_market(bound):
+    """C：论坛店 _market='' → get_recent_catalysts 跨市场取到 A 股催化剂。"""
+    eid = bound.add({"ticker": "600519", "company_name_cn": "贵州茅台", "market": "A", "tier": "track"})
+    future = (datetime.now(timezone.utc) + timedelta(days=5)).strftime("%Y-%m-%d")
+    bound.create_catalyst(eid, "600519.SS", "分红除权", expected_date=future)
+    cats = bound.get_recent_catalysts()
+    assert any(c["ticker"] == "600519.SS" for c in cats)

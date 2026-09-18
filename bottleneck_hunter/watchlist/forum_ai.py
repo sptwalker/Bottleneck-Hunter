@@ -57,13 +57,19 @@ _MEMORY_DISTILL_POSTS = 8  # 蒸馏时回看该角色近期几条自述
 _MEMORY_CAP = 200         # 单条立场备忘字数上限（注入与落库都截断）
 _PEER_STANCE_CAP = 40     # 注入同侪立场时每条截断（省 token）
 _CONVENE_INVITES = 3      # 一次召集最多请几位其他角色（另受当日剩余配额约束）
+_CTX_TAGS = 12            # 观察池标签展示数（B：双市场交错取样，不再只露 top-12 高分那批）
+_SATURATION_POSTS = 30    # A：算话题饱和度回看的近期帖数
+_SATURATION_MIN = 3       # A：某标的被提及≥该次数即视为「已被反复讨论」
+_SATURATION_TOP = 6       # A：饱和提示只列最高频的前几只，别刷屏
 
 # 轻量决策协议：让角色看完摘要后自主选择，而非旧版抛硬币强定发帖/回帖。
 _DECIDE_RULES = (
     "\n\n请以你自己的身份和视角，决定这一步怎么参与：\n"
     "· 想回应上面某条帖：正文最开头写 [#帖号]（例：[#12]），再写你的回复，120 字内；\n"
     "· 有新的原创观点想发：直接写正文，围绕市场或某只标的，150 字内；\n"
-    "· 此刻没什么特别想说的：只输出 PASS 四个字母。"
+    "· 此刻没什么特别想说的：只输出 PASS 四个字母。\n"
+    "· 尽量追新：优先聊还没被反复讨论的标的、新角度，或背景里刚冒出来的催化剂/事件；"
+    "若只是把已经聊烂的话题再重复一遍，宁可 PASS。"
 )
 _CONVENE_RULE = (
     "\n· 想召集大家一起讨论某个议题：发原创帖，正文最开头写「召集：<一句话议题>」，"
@@ -485,8 +491,60 @@ def _name_map(store, user_id) -> dict:
     return out
 
 
+def _count_mentions(blob: str, needle: str) -> int:
+    """latin/数字代码用词边界，CJK 名用子串——避免 "GM" 命中 "programming"、中文名少字误命中。"""
+    if not needle:
+        return 0
+    if re.fullmatch(r"[A-Za-z0-9.\-]+", needle):
+        return len(re.findall(rf"\b{re.escape(needle)}\b", blob, re.IGNORECASE))
+    return blob.count(needle)
+
+
+def _saturated_tickers(bound, entries) -> dict[str, int]:
+    """A：近期被反复讨论的标的 → {ticker: 提及次数}，只留出现≥_SATURATION_MIN 的前 _SATURATION_TOP 只。
+
+    拉近 _SATURATION_POSTS 帖，对观察池已知 ticker + 中英文名做匹配计数。
+    # ponytail: 启发式计数（子串/词边界），非主题级 NLP 聚类；真要按「问题/话题」去重再上 embedding。
+    """
+    try:
+        posts = bound.list_forum_posts(limit=_SATURATION_POSTS)
+    except Exception:  # noqa: BLE001
+        return {}
+    if not posts or not entries:
+        return {}
+    known: list[tuple[str, str]] = []  # (ticker, 匹配用 needle)
+    for e in entries:
+        tk = (e.get("ticker") or "").strip()
+        if not tk:
+            continue
+        needles = {tk}  # set 去重：A 股 company_name 常与 company_name_cn 相同，避免同名双计成假饱和
+        for nm in (e.get("company_name_cn"), e.get("company_name")):
+            nm = (nm or "").strip()
+            if len(nm) >= 2:
+                needles.add(nm)
+        known.extend((tk, n) for n in needles)
+    if not known:
+        return {}
+    blob = " ".join(_oneline(p.get("body")) for p in posts)
+    counts: dict[str, int] = {}
+    for tk, needle in known:
+        n = _count_mentions(blob, needle)
+        if n:
+            counts[tk] = counts.get(tk, 0) + n
+    ranked = sorted(
+        ((tk, n) for tk, n in counts.items() if n >= _SATURATION_MIN),
+        key=lambda kv: kv[1], reverse=True,
+    )
+    return dict(ranked[:_SATURATION_TOP])
+
+
 def _board_context(bound) -> str:
-    """拼板主自己的市场背景：L1 宏观 + 观察池标的清单 + 抽一只的深度背景。全 best-effort。"""
+    """拼板主自己的市场背景：L1 宏观 + 双市场平衡观察池 + 近期催化剂 + 反重复提示 + 抽一只深挖。
+
+    B：观察池按 market 交错取样、深挖池排除饱和标的并优先催化剂标的（破「只聊 top-12 高分那批
+    美股 + 单只反复」）。C：注入随时间变化的催化剂/事件供追新话题。A：把饱和标的显式点出让 AI 换角度。
+    全 best-effort，任何一步失败都不影响其余。
+    """
     lines: list[str] = []
     try:
         from bottleneck_hunter.vip.advisory import format_macro_for_prompt
@@ -501,19 +559,63 @@ def _board_context(bound) -> str:
         entries = bound.list_all() or []
     except Exception:  # noqa: BLE001
         entries = []
+
+    saturated = _saturated_tickers(bound, entries)  # A
+
+    cat_tickers: set[str] = set()  # C：催化剂标的集合，回喂 B 深挖加权
+    try:
+        cats = bound.get_recent_catalysts()
+    except Exception:  # noqa: BLE001
+        cats = []
+    if cats:
+        cbits = []
+        for c in cats[:6]:
+            tk = (c.get("ticker") or "").strip()
+            if tk:
+                cat_tickers.add(tk)
+            title = _oneline(c.get("title"))[:24]
+            date = (c.get("expected_date") or "")[:10]
+            lvl = c.get("impact_level") or ""
+            cbits.append(" ".join(x for x in (tk, date, title) if x) + (f"（{lvl}）" if lvl else ""))
+        if cbits:
+            lines.append("近期催化剂/事件（可据此发起新话题，别都盯着老几只）：" + "；".join(cbits))
+
     if entries:
-        tags = []
-        for e in entries[:12]:
-            tk = e.get("ticker")
-            if not tk:
-                continue
-            sec = (e.get("sector") or "").strip()
-            tags.append(f"{tk}（{sec}）" if sec else tk)
+        # B：按 market 分组交错取样，双市场都露出，不再只取前 12 高分（多为美股）
+        by_market: dict[str, list[dict]] = {}
+        for e in entries:
+            by_market.setdefault(e.get("market") or "", []).append(e)
+        pools = [lst[:] for lst in by_market.values()]  # 各市场已按分数倒序，round-robin 取各自最优
+        tags: list[str] = []
+        while pools and len(tags) < _CTX_TAGS:
+            for pool in pools:
+                if not pool or len(tags) >= _CTX_TAGS:
+                    continue
+                e = pool.pop(0)
+                tk = e.get("ticker")
+                if not tk:
+                    continue
+                sec = (e.get("sector") or "").strip()
+                tags.append(f"{tk}（{sec}）" if sec else tk)
+            pools = [pl for pl in pools if pl]
         if tags:
             lines.append("板主观察池：" + "、".join(tags))
-        seg = _ticker_background(bound, random.choice(entries[:12]))
-        if seg:
-            lines.append(seg)
+
+        # B：深挖池 = 全量排除饱和；有近催化剂者优先。破「random.choice(entries[:12])」单只反复。
+        # ponytail: 无状态随机 + 排除饱和 + 催化剂加权已够破锁；若观察发现仍集中再加「上次深挖」轮换游标。
+        pool = [e for e in entries if e.get("ticker") and e.get("ticker") not in saturated] or \
+               [e for e in entries if e.get("ticker")]
+        hot = [e for e in pool if e.get("ticker") in cat_tickers]
+        pick_from = hot or pool
+        if pick_from:
+            seg = _ticker_background(bound, random.choice(pick_from))
+            if seg:
+                lines.append(seg)
+
+    if saturated:  # A：显式点出已聊烂的标的，配合 _DECIDE_RULES 让 AI 换角度或 PASS
+        bits = "、".join(f"{tk}×{n}" for tk, n in saturated.items())
+        lines.append("近期已被反复讨论（换个角度或换只票，别扎堆）：" + bits)
+
     return "\n".join(lines)[:_CTX_CAP]
 
 
