@@ -276,6 +276,7 @@ class WatchlistStore(
             self._migrate_experience_cards_widen_scope(conn)
             self._migrate_experience_cards_fts(conn)
             self._migrate_focus_reports_history(conn)
+            self._migrate_forum_daily_cap_default(conn)
             # 初始化默认预算配置
             conn.execute(
                 "INSERT OR IGNORE INTO budget_config(key, value) VALUES (?, ?)",
@@ -636,6 +637,19 @@ class WatchlistStore(
             logger.info("company_profiles 已折叠进共享桶 __shared__（每 ticker 保留最新一条）")
         except sqlite3.OperationalError as e:
             logger.warning("company_profiles 共享折叠失败（可忽略）: %s", e)
+
+    def _migrate_forum_daily_cap_default(self, conn) -> None:
+        """留言板 daily_cap 默认值从 20 收紧到 8（语义已由「每日」改为「近 6 小时」）。
+
+        只降不升：<=8 的行原样保留（用户显式设的 5 不该被抬到 8）；>8 的压到 8。
+        幂等（第二次跑无行可改）。用户仍可在设置里自行调回更大值。
+        """
+        try:
+            cur = conn.execute("UPDATE forum_settings SET daily_cap = 8 WHERE daily_cap > 8")
+            if cur.rowcount:
+                logger.info("forum_settings.daily_cap 已从 >8 收紧到 8（%d 行）", cur.rowcount)
+        except sqlite3.OperationalError as e:  # 表未建（极早期库）
+            logger.warning("forum_settings.daily_cap 收紧跳过: %s", e)
 
     def _table_cols(self, conn, table: str) -> set[str]:
         try:

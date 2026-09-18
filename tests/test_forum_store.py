@@ -148,10 +148,10 @@ def test_daily_quota_isolated(alice, bob):
 
 # ── 板设置：默认∪覆盖 ─────────────────────────────────────
 def test_settings_default_and_override(alice):
-    assert alice.get_forum_settings() == {"ai_enabled": 0, "daily_cap": 20}
+    assert alice.get_forum_settings() == {"ai_enabled": 0, "daily_cap": 8}
     assert alice.is_forum_ai_enabled() is False
     alice.set_forum_settings(ai_enabled=True)
-    assert alice.get_forum_settings() == {"ai_enabled": 1, "daily_cap": 20}  # 只改一项，另项保留默认
+    assert alice.get_forum_settings() == {"ai_enabled": 1, "daily_cap": 8}  # 只改一项，另项保留默认
     assert alice.is_forum_ai_enabled() is True
     alice.set_forum_settings(daily_cap=5)
     assert alice.get_forum_settings() == {"ai_enabled": 1, "daily_cap": 5}
@@ -159,4 +159,15 @@ def test_settings_default_and_override(alice):
 
 def test_settings_isolated(alice, bob):
     alice.set_forum_settings(ai_enabled=True, daily_cap=3)
-    assert bob.get_forum_settings() == {"ai_enabled": 0, "daily_cap": 20}
+    assert bob.get_forum_settings() == {"ai_enabled": 0, "daily_cap": 8}
+
+
+def test_cap_clamp_migration_only_lowers(db):
+    """存量 daily_cap>8 的行在构造 Store 时被收紧到 8；已 <=8 的行原样保留（只降不升）。"""
+    big = WatchlistStore(db).for_user("big")
+    small = WatchlistStore(db).for_user("small")
+    big.set_forum_settings(ai_enabled=True, daily_cap=20)
+    small.set_forum_settings(ai_enabled=True, daily_cap=5)
+    WatchlistStore(db)  # 重新构造即触发 _migrate_forum_daily_cap_default
+    assert WatchlistStore(db).for_user("big").get_forum_settings()["daily_cap"] == 8
+    assert WatchlistStore(db).for_user("small").get_forum_settings()["daily_cap"] == 5

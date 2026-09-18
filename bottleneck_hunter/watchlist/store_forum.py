@@ -19,7 +19,7 @@ from bottleneck_hunter.watchlist.store_base import _now_iso, _today
 _FORUM_IDENTITY_COLS = ("display_name", "gender", "age", "persona_identity", "personality", "bio")
 
 # forum_settings 缺行时的回退（opt-in：AI 自主发帖默认关；daily_cap＝近 6 小时全板发言上限）
-_FORUM_DEFAULT_SETTINGS = {"ai_enabled": 0, "daily_cap": 20}
+_FORUM_DEFAULT_SETTINGS = {"ai_enabled": 0, "daily_cap": 8}
 
 
 class _ForumMixin:

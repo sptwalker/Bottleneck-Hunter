@@ -124,7 +124,7 @@ def test_ban_unban_role(client):
 
 # ── 板设置 ────────────────────────────────────────────────
 def test_settings_defaults_and_update(client):
-    assert client.get("/api/forum/settings").json() == {"ai_enabled": 0, "daily_cap": 20}
+    assert client.get("/api/forum/settings").json() == {"ai_enabled": 0, "daily_cap": 8}
     resp = client.put("/api/forum/settings", json={"daily_cap": 10, "ai_enabled": True})
     assert resp.json() == {"ai_enabled": 1, "daily_cap": 10}
 

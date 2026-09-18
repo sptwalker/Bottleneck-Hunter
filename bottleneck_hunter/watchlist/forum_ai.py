@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 _ROLE_DAILY_CAP = 20      # 每角色每日硬护栏（与 forum_moderation 一致）
 _DEFAULT_ROUND_POSTS = 3  # 单轮默认上限（低频控成本）；scheduler 传 3，手动触发不传时同值
 _QUOTA_WINDOW_H = 6       # 板级配额滚动窗口（小时）：全板近 6h ≤ forum_settings.daily_cap
+_FORUM_WINDOW_CAP = 8     # 窗口上限回退值（与 store_forum._FORUM_DEFAULT_SETTINGS 一致）：6h 全板 ≤8 条
 _QUIET_FROM = 2           # 静默窗起（北京小时，含）：02:00–08:00 不主动发言（被动回应除外）
 _QUIET_TO = 8             # 静默窗止（北京小时，不含）
 _PENDING_MIN_AGE_MIN = 10  # 用户发帖后至少隔这么久才回应（「不一定马上回」，但不至于石沉大海）
@@ -137,7 +138,7 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, di
     # 3) 自主轮：静默窗 + 滚动窗口配额
     if in_quiet_window():
         return {"posts": 0, "replies": replies_done}
-    cap = int(settings.get("daily_cap", 20) or 20)
+    cap = int(settings.get("daily_cap", _FORUM_WINDOW_CAP) or _FORUM_WINDOW_CAP)
     remaining = cap - bound.get_forum_recent_total(_QUOTA_WINDOW_H)
     upper = _DEFAULT_ROUND_POSTS if max_posts is None else int(max_posts)
     budget = min(remaining, upper)
@@ -307,7 +308,7 @@ async def _run_convene(store, bound, user_id, convene, candidates, acted,
     滚动窗口剩余额度)，故整轮发言量仍以板级窗口上限封顶。
     """
     pid, topic = convene
-    cap = int(bound.get_forum_settings().get("daily_cap", 20) or 20)
+    cap = int(bound.get_forum_settings().get("daily_cap", _FORUM_WINDOW_CAP) or _FORUM_WINDOW_CAP)
     remaining = cap - bound.get_forum_recent_total(_QUOTA_WINDOW_H)
     max_invites = min(_CONVENE_INVITES, remaining)
     if max_invites <= 0:

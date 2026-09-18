@@ -214,7 +214,7 @@ async function loadSettings() {
   try {
     const s = await jfetch('/settings');
     $('forum-ai-enabled').checked = !!s.ai_enabled;
-    $('forum-daily-cap').value = s.daily_cap ?? 20;
+    $('forum-daily-cap').value = s.daily_cap ?? 8;
   } catch (e) { toast(e.message || '设置加载失败', 'error'); }
 }
 
@@ -222,7 +222,7 @@ async function saveSettings() {
   try {
     await jput('/settings', {
       ai_enabled: $('forum-ai-enabled').checked,
-      daily_cap: Number($('forum-daily-cap').value) || 20,
+      daily_cap: Number($('forum-daily-cap').value) || 8,
     });
     setCfgStatus('已保存');
   } catch (e) { toast(e.message || '保存失败', 'error'); }

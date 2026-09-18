@@ -75,4 +75,4 @@ def test_ban_isolated(alice, bob):
 def test_settings_isolated(alice, bob):
     alice.put("/api/forum/settings", json={"daily_cap": 1})
     assert alice.get("/api/forum/settings").json()["daily_cap"] == 1
-    assert bob.get("/api/forum/settings").json()["daily_cap"] == 20  # bob 仍是默认
+    assert bob.get("/api/forum/settings").json()["daily_cap"] == 8  # bob 仍是默认
