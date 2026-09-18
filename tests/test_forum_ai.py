@@ -133,6 +133,28 @@ def test_parse_decision_variants():
     assert tgt is None and body == "这是一条原创观点"
 
 
+def test_split_title_variants():
+    """标题拆分：命中首行「标题：…」→ (标题, 正文)；无标题行 → ("", 原文)；超长截断 60 字。"""
+    assert forum_ai._split_title("标题：现金流被低估\n我觉得这只票值得看。") == ("现金流被低估", "我觉得这只票值得看。")
+    assert forum_ai._split_title("标题：全角冒号也行\n正文在此") == ("全角冒号也行", "正文在此")
+    assert forum_ai._split_title("没有标题行的纯正文") == ("", "没有标题行的纯正文")
+    assert forum_ai._split_title("召集：大家来聊聊") == ("", "召集：大家来聊聊")  # 召集帖不被误当标题
+    long_title = "标" * 80
+    assert len(forum_ai._split_title(f"标题：{long_title}\n正文")[0]) == 60
+
+
+def test_ai_original_post_stores_title(bound, monkeypatch):
+    """AI 原创帖同轮生成「标题：…\\n正文」→ 落库标题独立、正文剥离标题行。"""
+    _patch_model(monkeypatch, text="标题：现金流被低估的老票\n我觉得这只票的现金流被低估了，估值有修复空间。")
+    _fix_order(monkeypatch)
+    bound.set_forum_settings(ai_enabled=True)
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=1))
+    assert r == {"posts": 1, "replies": 0}
+    post = bound.list_forum_posts()[0]
+    assert post["title"] == "现金流被低估的老票"
+    assert "标题" not in post["body"] and post["body"].startswith("我觉得")
+
+
 # ── P2：即时触发 / @提及 / 关注自己帖的回帖 ─────────────────────────────
 def test_resolve_mentions(bound):
     """@提及解析：role_key 直呼与昵称都命中、同角色去重、未知@与板主忽略（#7 触发前置）。"""

@@ -72,7 +72,8 @@ _BoardCtx = namedtuple("_BoardCtx", ("base", "entries", "saturated", "cat_map"))
 _DECIDE_RULES = (
     "\n\n请以你自己的身份和视角，决定这一步怎么参与：\n"
     "· 想回应上面某条帖：正文最开头写 [#帖号]（例：[#12]），再写你的回复，120 字内；\n"
-    "· 有新的原创观点想发：直接写正文，围绕市场或某只标的，150 字内；\n"
+    "· 有新的原创观点想发：先写一行「标题：<一句话概括，20 字内>」，换行后再写正文，"
+    "围绕市场或某只标的，150 字内；\n"
     "· 此刻没什么特别想说的：只输出 PASS 四个字母。\n"
     "· 尽量追新：优先聊还没被反复讨论的标的、新角度，或背景里刚冒出来的催化剂/事件；"
     "若只是把已经聊烂的话题再重复一遍，宁可 PASS。"
@@ -81,12 +82,21 @@ _CONVENE_RULE = (
     "\n· 想召集大家一起讨论某个议题：发原创帖，正文最开头写「召集：<一句话议题>」，"
     "系统会请另外几位分析师来聊这个议题（每天有限额，别滥用）。"
 )
-_DECIDE_TAIL = "\n对观点不对人、口语化，别硬凑。只输出正文（或 PASS），不要标题、不要署名、不要 markdown。"
+_DECIDE_TAIL = "\n对观点不对人、口语化，别硬凑。回帖或 PASS 时不要写标题；不要署名、不要 markdown。"
 
 _PASS_RE = re.compile(r"^\s*pass[\s.。!！]*$", re.IGNORECASE)   # 纯 PASS（容忍尾随标点/空白）
 _REF_RE = re.compile(r"^\s*\[?\s*#\s*(\d+)\s*\]?\s*")           # [#12] / #12 / [12] 皆容忍
 _MENTION_RE = re.compile(r"@(\w{1,20})")  # @昵称 / @role_key（\w 默认含中日韩，非匹配 token 后续自然落空）
 _CONVENE_RE = re.compile(r"^\s*召集[:：]\s*(.+)", re.S)  # 原创帖以「召集：议题」开头 → 触发扇出（P3·#8）
+_TITLE_RE = re.compile(r"^\s*标题[:：]\s*([^\n]+)\n(.*)", re.S)  # 原创帖首行「标题：…」→ 拆出标题与正文
+
+
+def _split_title(text):
+    """原创帖拆标题：命中首行「标题：…」→ (标题<=60字, 正文)；无标题行 → ("", 原文)。"""
+    m = _TITLE_RE.match(text)
+    if not m:
+        return "", text.strip()
+    return m.group(1).strip()[:60], m.group(2).strip()
 
 
 async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, distill=False) -> dict:
@@ -182,6 +192,11 @@ async def _act_once(store, bound, user_id, role_key, board, names, memories, tri
         return None, None, ""
     if not body:  # PASS 或空输出：不发言、不烧配额
         return None, None, ""
+    title = ""
+    if target is None:  # 原创帖才拆标题；回帖/召集帖不取（召集「召集：」开头不命中 _TITLE_RE）
+        title, body = _split_title(body)
+        if not body:  # 只有标题没正文 → 无效，不发
+            return None, None, ""
     # 落库前三闸：任一不过跳过且不计配额（去重/违规/超额不该烧额度）
     if is_duplicate(store, user_id, role_key, body):
         return None, None, ""
@@ -198,7 +213,7 @@ async def _act_once(store, bound, user_id, role_key, board, names, memories, tri
         _publish(user_id, "reply_created", post_id=target["id"], reply_id=rid)
         bound.incr_forum_daily_count(role_key)
         return "reply", int(target["id"]), body
-    pid = bound.create_forum_post("ai", body, author_role_key=role_key, content_hash=h)
+    pid = bound.create_forum_post("ai", body, author_role_key=role_key, title=title, content_hash=h)
     _publish(user_id, "post_created", post=bound.get_forum_post(pid))
     bound.incr_forum_daily_count(role_key)
     return "post", int(pid), body
