@@ -1,9 +1,11 @@
 """F3 · 论坛管理规则三闸（forum_moderation）测试。
 
 覆盖：normalize/content_hash 去标点大小写、去重（完全同/近似/按角色/用户不判重/隔离）、
-内容规则（空/超长/攻击词拒，金融术语放行）、配额（角色硬上限/全板 cap/角色独立/隔离）。
+内容规则（空/超长/攻击词拒，金融术语放行）、配额（角色硬上限/全板 6h 滚动窗口/窗口滑动释放/隔离）。
 全部显式传 tmp db_path，绝不依赖 WATCHLIST_DB（见 [[project-watchlist-db-path-not-env]]）。
 """
+
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -108,9 +110,20 @@ def test_check_quota_role_hard_cap(alice):
 def test_check_quota_board_cap(alice):
     alice.set_forum_settings(daily_cap=5)
     for rk in ("committee_value", "committee_growth", "committee_risk", "committee_contrarian", "committee_consensus"):
-        alice.incr_forum_daily_count(rk, n=1)  # 5 个角色各 1，无人到 20，但全板到 5
-    ok, reason = check_quota(alice, "alice", "L1_macro")  # L1_macro 今日 0，但全板已满
-    assert ok is False and "配额" in reason
+        alice.incr_forum_event(rk)  # 5 个角色各 1（流水记时），无人到 20，但全板近 6h 到 5
+    ok, reason = check_quota(alice, "alice", "L1_macro")  # L1_macro 今日 0，但窗口已满
+    assert ok is False and "上限" in reason
+
+
+def test_check_quota_window_is_rolling(alice):
+    """窗口是滚动的：把流水时间戳推老 7 小时，配额即释放（日配额做不到这点）。"""
+    alice.set_forum_settings(daily_cap=1)
+    alice.incr_forum_event("L1_macro")
+    assert check_quota(alice, "alice", "vip_advisor")[0] is False
+    old = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat(timespec="seconds")
+    with alice._write_conn() as conn:
+        conn.execute("UPDATE forum_ai_events SET created_at = ?", (old,))
+    assert check_quota(alice, "alice", "vip_advisor")[0] is True  # 7h 前的发言不占窗口
 
 
 def test_check_quota_ok_when_under(alice):
@@ -120,6 +133,6 @@ def test_check_quota_ok_when_under(alice):
 
 def test_check_quota_isolated(alice, bob):
     alice.set_forum_settings(daily_cap=1)
-    alice.incr_forum_daily_count("L1_macro", n=1)
-    assert check_quota(alice, "alice", "vip_advisor")[0] is False  # alice 全板已满
+    alice.incr_forum_event("L1_macro")
+    assert check_quota(alice, "alice", "vip_advisor")[0] is False  # alice 窗口已满
     assert check_quota(bob, "bob", "L1_macro")[0] is True  # bob 不受影响

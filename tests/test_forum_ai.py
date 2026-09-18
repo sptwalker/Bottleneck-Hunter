@@ -118,6 +118,116 @@ def test_replies_to_existing_post(bound, monkeypatch):
     assert len(posts) == 1 and posts[0]["reply_count"] == 1  # 未新增帖，且该帖 reply_count 计到 1
 
 
+# ---------- 分时段限额 / 静默窗 / 延迟回应（用户关切：别一开局就把额度烧光） ----------
+
+
+def test_window_quota_blocks_after_cap(bound, monkeypatch):
+    """滚动窗口配额：全板近 6h 已达上限 → 本轮自主发言为 0（但轮次不报错）。"""
+    _patch_model(monkeypatch)
+    _fix_order(monkeypatch)
+    bound.set_forum_settings(ai_enabled=True, daily_cap=2)
+    for rk in FORUM_ROLE_KEYS[:2]:
+        bound.incr_forum_event(rk)  # 窗口内已有 2 条（别角色发过）
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3))
+    assert r == {"posts": 0, "replies": 0}
+    assert bound.get_forum_board_daily_total() == 0  # 一条都没新发
+
+
+def test_window_quota_releases_after_rolling_out(bound, monkeypatch):
+    """窗口滚动：把流水时间戳推老 7 小时 → 额度释放，本轮照常发。
+
+    这是相对旧「日配额」的关键差异：日配额下这些发言会一直卡到次日零点。
+    """
+    _patch_model(monkeypatch)
+    _fix_order(monkeypatch)
+    bound.set_forum_settings(ai_enabled=True, daily_cap=2)
+    for rk in FORUM_ROLE_KEYS[:2]:
+        bound.incr_forum_event(rk)
+    old = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat(timespec="seconds")
+    with bound._write_conn() as conn:
+        conn.execute("UPDATE forum_ai_events SET created_at = ?", (old,))
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=2))
+    assert r == {"posts": 2, "replies": 0}
+
+
+def test_quiet_window_skips_autonomous_round(bound, monkeypatch):
+    """静默窗（北京 02–08）：定时自主轮直接空转，不发言也不报错。"""
+    _patch_model(monkeypatch)
+    _fix_order(monkeypatch)
+    bound.set_forum_settings(ai_enabled=True)
+    monkeypatch.setattr(forum_ai, "in_quiet_window", lambda: True)
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3))
+    assert r == {"posts": 0, "replies": 0}
+    assert bound.list_forum_posts() == []
+
+
+def _backdate_pending(bound, post_id, minutes=11):
+    """把待办入队时间往前推，模拟「这帖已经等够了」——不必真等 10 分钟。"""
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    with bound._write_conn() as conn:
+        conn.execute("UPDATE forum_ai_pending SET created_at = ? WHERE post_id = ?", (ts, post_id))
+
+
+def test_quiet_window_still_answers_user_post(bound, monkeypatch):
+    """静默窗内用户发的帖照样被回应（用户诉求优先于「板内安静」）。"""
+    bound.set_forum_settings(ai_enabled=True)
+    pid = bound.create_forum_post("user", "夜深了，闲聊一句：这只票的产能瓶颈怎么看？")
+    bound.add_forum_pending(pid)
+    _backdate_pending(bound, pid)
+    _patch_model(monkeypatch, text=f"[#{pid}] 我倾向明年上半年缓解，但要看新产线爬坡节奏。")
+    _fix_order(monkeypatch)
+    monkeypatch.setattr(forum_ai, "in_quiet_window", lambda: True)
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3))
+    assert r == {"posts": 0, "replies": 1}  # 只有回应，没有自主帖
+    assert len(bound.list_forum_replies(pid)) == 1
+
+
+def test_pending_reply_not_counted_against_quota(bound, monkeypatch):
+    """被动回应不占配额：窗口已满时仍能回用户帖，且流水不增（否则回帖会挤掉自主额度）。"""
+    bound.set_forum_settings(ai_enabled=True, daily_cap=1)
+    bound.incr_forum_event("L1_macro")  # 窗口已满
+    pid = bound.create_forum_post("user", "我发一帖，等你们回应。")
+    bound.add_forum_pending(pid)
+    _backdate_pending(bound, pid)
+    _patch_model(monkeypatch, text=f"[#{pid}] 收到，我补一句：这票的订单能见度还行。")
+    _fix_order(monkeypatch)
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=3))
+    assert r == {"posts": 0, "replies": 1}
+    assert bound.get_forum_recent_total(6) == 1  # 仍只有原先那 1 条
+    assert bound.list_forum_pending() == []  # 回应后出队
+
+
+def test_pending_waits_for_min_age(bound, monkeypatch):
+    """「不一定马上回」：入队未满 10 分钟的帖本轮不碰，且不出队（留给后续轮次）。
+
+    先用满滚动窗口把自主轮额度清零：自主轮本来也能自己去回这条新帖，
+    那样就分不清回应来自待办队列还是自主轮，断言也就没有鉴别力了。
+    """
+    bound.set_forum_settings(ai_enabled=True, daily_cap=1)
+    bound.incr_forum_event("L1_macro")  # 窗口占满 → 自主轮 budget=0
+    pid = bound.create_forum_post("user", "刚发的帖，先别急着回。")
+    bound.add_forum_pending(pid)
+    _patch_model(monkeypatch, text=f"[#{pid}] 来了。")
+    _fix_order(monkeypatch)
+    r = asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=1))
+    assert r == {"posts": 0, "replies": 0}
+    assert len(bound.list_forum_pending()) == 1  # 还在队列里等下一次轮
+    assert len(bound.list_forum_replies(pid)) == 0
+
+
+def test_pending_dropped_even_on_pass(bound, monkeypatch):
+    """角色 PASS 也算「看过」：出队，避免同一帖每轮反复打扰。"""
+    bound.set_forum_settings(ai_enabled=True)
+    pid = bound.create_forum_post("user", "这帖大概会被 PASS。")
+    bound.add_forum_pending(pid)
+    _backdate_pending(bound, pid)
+    _patch_model(monkeypatch, text="PASS")
+    _fix_order(monkeypatch)
+    asyncio.run(forum_ai.run_forum_ai_round(bound, "alice", max_posts=1))
+    assert bound.list_forum_pending() == []
+    assert len(bound.list_forum_replies(pid)) == 0
+
+
 def test_parse_decision_variants():
     """决策协议解析器：PASS / [#号] / 非法号退化 / 纯原创，四路都对（新逻辑唯一门禁）。"""
     targets = {7: {"id": 7}}

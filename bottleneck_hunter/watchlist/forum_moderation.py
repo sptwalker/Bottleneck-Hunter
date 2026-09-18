@@ -26,6 +26,7 @@ _DUP_THRESHOLD = 0.9  # 归一化后相似度 ≥ 此值视为复读
 _MAX_BODY = 8000  # 正文字数上限（信任边界输入校验，非风格约束）
 # 配额
 _ROLE_HARD_CAP = 20  # 每角色每日硬护栏（方案：AI ≤20 篇/天）
+_QUOTA_WINDOW_H = 6  # 板级配额的滚动窗口（小时）：全板近 6h ≤ forum_settings.daily_cap
 
 # 归一化：去掉所有非「字母/数字/CJK」字符（空白、标点、下划线、emoji），再小写。
 # \W 在 Unicode 下不匹配 CJK/字母数字，故中文被保留、标点空白被删。
@@ -85,12 +86,12 @@ def check_content(body: str) -> tuple[bool, str]:
 
 
 def check_quota(store: WatchlistStore, user_id: str, role_key: str) -> tuple[bool, str]:
-    """AI 配额闸：角色今日 <20 硬护栏，且全板今日发言 SUM < daily_cap。返回 (是否通过, 原因)。"""
+    """AI 配额闸：角色今日 <20 硬护栏，且全板近 6 小时发言数 < 窗口上限。返回 (是否通过, 原因)。"""
     bound = store.for_user(user_id)
     role_today = bound.get_forum_daily_count(role_key)
     if role_today >= _ROLE_HARD_CAP:
         return False, f"角色今日发言已达硬上限 {_ROLE_HARD_CAP}"
     cap = bound.get_forum_settings()["daily_cap"]
-    if bound.get_forum_board_daily_total() >= cap:
-        return False, f"全板今日发言已达配额 {cap}"
+    if bound.get_forum_recent_total(_QUOTA_WINDOW_H) >= cap:
+        return False, f"全板近 {_QUOTA_WINDOW_H} 小时发言已达上限 {cap}"
     return True, ""

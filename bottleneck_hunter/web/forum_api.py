@@ -56,19 +56,30 @@ def _publish(uid: str, event: str, **payload) -> None:
 
 
 def _maybe_trigger_ai_round(store: WatchlistStore, uid: str, *, post_id: int | None,
-                            body: str, require_mention: bool) -> None:
-    """用户回帖/点名即时触发一轮 AI 自主发言（P2 · fire-and-forget，结果经 SSE 回推）。
+                            body: str) -> None:
+    """用户发帖/回帖 → 记一条待回应；点名（@角色）则额外即时开一轮（P2 · fire-and-forget）。
 
-    AI 未开启则空转；F5 惰性导入（F4 不硬依赖 F5）。触发轮预算小、硬顶仍是每日 daily_cap；
-    AI 发言经 store 直写、不回打本 API，故无「AI 触发 AI」自激环。create_task 复制当前请求
-    上下文（含板主身份 ContextVar），后台轮仍用板主自己的 Key 与预算。
+    两条路对应两种诉求：
+    - 普通发帖/回帖：只入队（forum_ai_pending），由后续 AI 轮次择机挑一条回应。**不即时、不占配额**
+      ——一发言就秒回显得机械，且并发回帖会在瞬间烧光全板额度、之后一整天板内无话（用户关切）。
+    - 点名（@角色）：即时开一轮，被点名的角色当场决定回不回。这是明确召唤，延迟就是失礼。
+      该轮发言同样不计配额。
+
+    AI 未开启则只入队、不开轮；F5 惰性导入（F4 不硬依赖 F5）。AI 发言经 store 直写、不回打本 API，
+    故无「AI 触发 AI」自激环。create_task 复制当前请求上下文（含板主身份 ContextVar），后台轮仍
+    用板主自己的 Key 与预算。
     """
     if not store.is_forum_ai_enabled():
         return
     from bottleneck_hunter.watchlist.forum_ai import resolve_mentions, run_forum_ai_round  # F5，惰性
     at_roles = resolve_mentions(store, uid, body)
-    if require_mention and not at_roles:
-        return  # 新帖只有点名了角色才惊动 AI；普通新帖不触发
+    if not at_roles:
+        if post_id:  # 无点名：入队等 AI 择机回应，绝不即时、绝不占配额
+            try:
+                store.add_forum_pending(post_id)
+            except Exception as e:  # noqa: BLE001 — 入队失败不该让用户发帖失败
+                logger.warning("Forum AI 待办入队失败 (post=%s): %s", post_id, e)
+        return
     trigger = {"post_id": post_id, "at_roles": tuple(at_roles), "reply_excerpt": body}
     task = asyncio.create_task(run_forum_ai_round(store, uid, max_posts=3, trigger=trigger))
     task.add_done_callback(_log_round_task)
@@ -124,7 +135,7 @@ async def create_post(req: PostCreate, user: dict = Depends(get_current_user)):
                                   content_hash=content_hash(req.body))
     post = store.get_forum_post(pid)
     _publish(user["sub"], "post_created", post=post)
-    _maybe_trigger_ai_round(store, user["sub"], post_id=pid, body=req.body, require_mention=True)
+    _maybe_trigger_ai_round(store, user["sub"], post_id=pid, body=req.body)
     return post
 
 
@@ -175,7 +186,7 @@ async def create_reply(post_id: int, req: ReplyCreate, user: dict = Depends(get_
         raise HTTPException(status_code=400, detail=reason)
     rid = store.create_forum_reply(post_id, "user", req.body, content_hash=content_hash(req.body))
     _publish(user["sub"], "reply_created", post_id=post_id, reply_id=rid)
-    _maybe_trigger_ai_round(store, user["sub"], post_id=post_id, body=req.body, require_mention=False)
+    _maybe_trigger_ai_round(store, user["sub"], post_id=post_id, body=req.body)
     return {"reply_id": rid}
 
 

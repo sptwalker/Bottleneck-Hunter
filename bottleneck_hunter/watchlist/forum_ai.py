@@ -31,6 +31,7 @@ import random
 import re
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from bottleneck_hunter.watchlist.forum_identity import (
     FOCUS_PROFILES,
@@ -49,6 +50,11 @@ logger = logging.getLogger(__name__)
 
 _ROLE_DAILY_CAP = 20      # 每角色每日硬护栏（与 forum_moderation 一致）
 _DEFAULT_ROUND_POSTS = 3  # 单轮默认上限（低频控成本）；scheduler 传 3，手动触发不传时同值
+_QUOTA_WINDOW_H = 6       # 板级配额滚动窗口（小时）：全板近 6h ≤ forum_settings.daily_cap
+_QUIET_FROM = 2           # 静默窗起（北京小时，含）：02:00–08:00 不主动发言（被动回应除外）
+_QUIET_TO = 8             # 静默窗止（北京小时，不含）
+_PENDING_MIN_AGE_MIN = 10  # 用户发帖后至少隔这么久才回应（「不一定马上回」，但不至于石沉大海）
+_PENDING_PER_ROUND = 3    # 每轮最多回应几条待办用户帖（不计数，纯粹控单轮成本）
 _CTX_CAP = 1600           # 背景数据注入上限（字符）
 _DIGEST_POSTS = 12        # 摘要展示的近期帖数（观察面比旧版「只看 1 条」宽）
 _OWN_RECENT = 3           # 额外回顾自己最近发过的帖（#1 记得自己发过什么）
@@ -99,31 +105,50 @@ def _split_title(text):
     return m.group(1).strip()[:60], m.group(2).strip()
 
 
+def in_quiet_window() -> bool:
+    """当前是否处于北京时区静默窗（_QUIET_FROM ≤ 时 < _QUIET_TO）。只拦定时自主轮，不拦被动回应。"""
+    h = datetime.now(ZoneInfo("Asia/Shanghai")).hour
+    return _QUIET_FROM <= h < _QUIET_TO
+
+
 async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, distill=False) -> dict:
     """跑一轮 AI 自主发言，返回 {"posts": 新帖数, "replies": 回帖数}。opt-in 门禁不过返回全 0。
 
     trigger 非空＝由用户回帖/点名即时触发（P2）：被 @ 的角色与被回复帖的原作者优先发言，
     其摘要顶部高亮「这条冲你来的」；无定向对象则随机一位回应、单帖封顶。普通调度轮 trigger=None，
     选角随机、并放行「召集」（#8）与记忆蒸馏（#6，distill=True 时）。
+
+    两道节奏闸（只拦自主轮，不拦被动回应）：
+    - 静默窗：北京 02:00–08:00 不主动发言（用户在睡觉时板内安静，也省下夜间调用）。
+    - 滚动窗口配额：全板近 _QUOTA_WINDOW_H 小时自主发言 ≤ forum_settings.daily_cap，替代原日配额。
+      日配额管不了节奏（20 条可能前 2 小时烧光、之后一整天无话），滚动窗口天然分时。
     """
     bound = store.for_user(user_id)
 
-    # 1) 前置门禁：opt-in 总开关 + 全板当日剩余配额
+    # 1) 前置门禁：opt-in 总开关
     settings = bound.get_forum_settings()
     if not settings.get("ai_enabled"):
         return {"posts": 0, "replies": 0}
-    daily_cap = int(settings.get("daily_cap", 20) or 20)
-    board_today = bound.get_forum_board_daily_total()
-    upper = _DEFAULT_ROUND_POSTS if max_posts is None else int(max_posts)
-    budget = min(daily_cap - board_today, upper)
-    if budget <= 0:
-        return {"posts": 0, "replies": 0}
 
-    # 2) 选角色：未禁言且今日 <20
+    # 2) 先办「待回应的用户帖」：不占配额、不受静默窗限制——用户发帖就该被回复，只是不秒回。
+    #    放在闸之前：夜里用户发帖照样会有回应，而自主发言被静默窗挡住（用户视角：我的帖有回应，板内安静）。
+    replies_done = await _drain_pending(store, bound, user_id, max_posts=max_posts)
+
+    # 3) 自主轮：静默窗 + 滚动窗口配额
+    if in_quiet_window():
+        return {"posts": 0, "replies": replies_done}
+    cap = int(settings.get("daily_cap", 20) or 20)
+    remaining = cap - bound.get_forum_recent_total(_QUOTA_WINDOW_H)
+    upper = _DEFAULT_ROUND_POSTS if max_posts is None else int(max_posts)
+    budget = min(remaining, upper)
+    if budget <= 0:
+        return {"posts": 0, "replies": replies_done}
+
+    # 4) 选角色：未禁言且今日 <20
     candidates = [rk for rk in selectable_role_keys(store, user_id)
                   if bound.get_forum_daily_count(rk) < _ROLE_DAILY_CAP]
     if not candidates:
-        return {"posts": 0, "replies": 0}
+        return {"posts": 0, "replies": replies_done}
     if trigger:
         priority = _priority_roles(bound, trigger, candidates)
         if priority:
@@ -134,7 +159,7 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, di
     else:
         random.shuffle(candidates)         # 随机近似「最久未发言」，避免同角色刷屏
 
-    # 3) 背景数据 + 角色名映射 + 长期记忆（best-effort，只经 for_user(板主)）
+    # 4) 背景数据 + 角色名映射 + 长期记忆（best-effort，只经 for_user(板主)）
     board = _board_context_base(bound)  # D：共享基座一轮算一次；逐角色镜片在 _generate 里套
     names = _name_map(store, user_id)
     try:
@@ -143,7 +168,7 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, di
         memories = {}
     can_convene = trigger is None  # 召集仅顶层轮发起：触发轮本身就是扇出，不再二次召集（防递归）
 
-    # 4) 逐角色 观察→决策→行动；PASS 不占 budget 却仍烧一次调用，故另设尝试上限防空转
+    # 5) 逐角色 观察→决策→行动；PASS 不占 budget 却仍烧一次调用，故另设尝试上限防空转
     posts = replies = 0
     acted: set[str] = set()
     convene: tuple[int, str] | None = None
@@ -164,25 +189,68 @@ async def run_forum_ai_round(store, user_id, *, max_posts=None, trigger=None, di
                 if m:
                     convene = (pid, _oneline(m.group(1))[:120])
 
-    # 5) 召集扇出（#8）：把议题定向请给尚未发言的其他角色（受当日剩余配额约束、不递归）
+    # 6) 召集扇出（#8）：把议题定向请给尚未发言的其他角色（受滚动窗口剩余额度约束、不递归）
     if convene:
         cp, cr = await _run_convene(store, bound, user_id, convene, candidates, acted,
                                     board, names, memories)
         posts += cp
         replies += cr
 
-    # 6) 记忆蒸馏（#6）：仅调度轮，每轮至多为一位陈旧角色更新自述备忘（单次 LLM 调用）
+    # 7) 记忆蒸馏（#6）：仅调度轮，每轮至多为一位陈旧角色更新自述备忘（单次 LLM 调用）
     if distill:
         await _maybe_distill_memory(store, bound, user_id, memories)
 
-    return {"posts": posts, "replies": replies}
+    return {"posts": posts, "replies": replies_done + replies}
 
 
-async def _act_once(store, bound, user_id, role_key, board, names, memories, trigger, can_convene):
+async def _drain_pending(store, bound, user_id, *, max_posts=None) -> int:
+    """回应用户发出的待办帖（每帖至多让一位角色回一次）。返回本轮回应条数。
+
+    不占配额、不受静默窗限制——用户发帖是有限的，其诉求正是「只要我发帖 AI 就有概率回」，
+    所以「概率」体现在选角与角色自主 PASS，而不是省额度。回应后出队（PASS 也出队，避免同一帖
+    每轮反复打扰；用户再回一帖会重新入队）。
+    """
+    limit = _PENDING_PER_ROUND if max_posts is None else min(_PENDING_PER_ROUND, int(max_posts))
+    try:
+        pending = bound.list_forum_pending(min_age_min=_PENDING_MIN_AGE_MIN, limit=limit)
+    except Exception as e:  # noqa: BLE001 — 队列读失败不该拖垮整轮
+        logger.warning("Forum AI 待办队列读取失败: %s", e)
+        return 0
+    if not pending:
+        return 0
+    board = _board_context_base(bound)
+    names = _name_map(store, user_id)
+    try:
+        memories = bound.list_forum_memories()
+    except Exception:  # noqa: BLE001
+        memories = {}
+    candidates = [rk for rk in selectable_role_keys(store, user_id)
+                  if bound.get_forum_daily_count(rk) < _ROLE_DAILY_CAP]
+    done = 0
+    for item in pending:
+        pid = int(item["post_id"])
+        bound.drop_forum_pending(pid)  # 先出队：无论回不回都不再重复挑这帖
+        post = _safe_post(bound, pid)
+        if not post or not candidates:
+            continue
+        role_key = random.choice(candidates)
+        trig = {"post_id": pid, "at_roles": (), "reply_excerpt": _oneline(post.get("body"))[:200]}
+        kind, _, _ = await _act_once(store, bound, user_id, role_key, board, names, memories,
+                                     trig, can_convene=False, count=False, skip_quota=True)
+        if kind in ("reply", "post"):
+            done += 1
+    return done
+
+
+async def _act_once(store, bound, user_id, role_key, board, names, memories, trigger, can_convene,
+                    count=True, skip_quota=False):
     """一个角色走完 观察→决策→行动：生成 → 三闸（去重/内容/配额）→ 落库 → 计数 → SSE。
 
     返回 (kind, pid, body)：kind ∈ {"post","reply",None}；None＝PASS/空/被闸拦（不发言、不烧配额）。
     body 供上层识别「召集：」以触发扇出。单次 LLM 调用，成本与旧版持平。
+
+    count=False 用于「被动回应用户」：发言照常落库，但不计配额（用户发起量本就有限，且其诉求
+    正是「我发帖 AI 就该回」）。skip_quota=True 同时跳过配额闸——被动回应不受静默窗与窗口上限约束。
     """
     try:
         body, target = await _generate(store, bound, user_id, role_key,
@@ -203,20 +271,32 @@ async def _act_once(store, bound, user_id, role_key, board, names, memories, tri
     ok, _ = check_content(body)
     if not ok:
         return None, None, ""
-    ok, _ = check_quota(store, user_id, role_key)
-    if not ok:
-        return None, None, ""
+    if not skip_quota:
+        ok, _ = check_quota(store, user_id, role_key)
+        if not ok:
+            return None, None, ""
     h = content_hash(body)
     if target is not None:
         rid = bound.create_forum_reply(target["id"], "ai", body,
                                        author_role_key=role_key, content_hash=h)
         _publish(user_id, "reply_created", post_id=target["id"], reply_id=rid)
-        bound.incr_forum_daily_count(role_key)
+        _count(bound, role_key, "reply", count)
         return "reply", int(target["id"]), body
     pid = bound.create_forum_post("ai", body, author_role_key=role_key, title=title, content_hash=h)
     _publish(user_id, "post_created", post=bound.get_forum_post(pid))
-    bound.incr_forum_daily_count(role_key)
+    _count(bound, role_key, "post", count)
     return "post", int(pid), body
+
+
+def _count(bound, role_key, kind, count):
+    """记一次自主发言：日粒度计数（每角色硬护栏用）+ 时间戳流水（滚动窗口配额用）。
+
+    count=False 时两者都不记——被动回应不占配额（含滚动窗口，否则回应用户也会挤掉自主发言的额度）。
+    """
+    if not count:
+        return
+    bound.incr_forum_daily_count(role_key)
+    bound.incr_forum_event(role_key, kind)
 
 
 async def _run_convene(store, bound, user_id, convene, candidates, acted,
@@ -224,11 +304,11 @@ async def _run_convene(store, bound, user_id, convene, candidates, acted,
     """把召集议题定向请给尚未发言的其他角色（每人一次自主决策，可 PASS）。返回 (新增帖, 新增回帖)。
 
     仅顶层轮触发；被邀角色 can_convene=False，不会再次召集（无递归）。名额 = min(_CONVENE_INVITES,
-    当日剩余配额)，故整轮发言量仍以板级 daily_cap 封顶。
+    滚动窗口剩余额度)，故整轮发言量仍以板级窗口上限封顶。
     """
     pid, topic = convene
-    daily_cap = int(bound.get_forum_settings().get("daily_cap", 20) or 20)
-    remaining = daily_cap - bound.get_forum_board_daily_total()
+    cap = int(bound.get_forum_settings().get("daily_cap", 20) or 20)
+    remaining = cap - bound.get_forum_recent_total(_QUOTA_WINDOW_H)
     max_invites = min(_CONVENE_INVITES, remaining)
     if max_invites <= 0:
         return 0, 0

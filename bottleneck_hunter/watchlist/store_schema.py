@@ -819,6 +819,23 @@ CREATE TABLE IF NOT EXISTS forum_ai_daily (
     post_count  INTEGER DEFAULT 0,
     PRIMARY KEY (user_id, role_key, day)
 );
+-- AI 发言流水（每次 AI 自主发言一行，UTC 时间戳）。滚动窗口配额由它算（近 6h 全板 ≤ daily_cap）：
+-- 日粒度的 forum_ai_daily 给不了日内节奏，故另记流水。只记「自主轮」发言，被动回应用户不计入。
+CREATE TABLE IF NOT EXISTS forum_ai_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    role_key    TEXT NOT NULL,
+    kind        TEXT DEFAULT '',   -- post / reply
+    created_at  TEXT NOT NULL      -- UTC ISO（比对用 _now_iso 口径）
+);
+-- 待回应队列：用户发帖/回帖落库即入队，由后续 AI 轮次择机回应（不即时、不计配额）。
+-- 解决「用户一发言就秒回 + 秒回量冲垮全板配额」：AI 只标记待办，稍后主动挑一条回应，并删行。
+CREATE TABLE IF NOT EXISTS forum_ai_pending (
+    post_id     INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
+    created_at  TEXT NOT NULL,     -- UTC ISO，入队时刻（供「至少隔 N 分钟再回」的最小延迟）
+    PRIMARY KEY (post_id)
+);
 -- 每用户留言板设置（opt-in：AI 自主发帖默认关）
 CREATE TABLE IF NOT EXISTS forum_settings (
     user_id     TEXT PRIMARY KEY,

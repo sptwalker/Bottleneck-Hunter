@@ -11,12 +11,14 @@ forum 表只有 user_id、无 market（留言板跨市场共用），故读用 _
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from bottleneck_hunter.watchlist.store_base import _now_iso, _today
 
 # 用户可编辑的身份字段（banned 走 set_forum_role_banned；user_id/role_key 绑定注册表不可改）
 _FORUM_IDENTITY_COLS = ("display_name", "gender", "age", "persona_identity", "personality", "bio")
 
-# forum_settings 缺行时的回退（opt-in：AI 自主发帖默认关，全板日配额 20）
+# forum_settings 缺行时的回退（opt-in：AI 自主发帖默认关；daily_cap＝近 6 小时全板发言上限）
 _FORUM_DEFAULT_SETTINGS = {"ai_enabled": 0, "daily_cap": 20}
 
 
@@ -208,6 +210,73 @@ class _ForumMixin:
             return int(conn.execute(q, p).fetchone()["total"])
         finally:
             conn.close()
+
+    # ---------- 滚动窗口配额（近 N 小时全板发言数）----------
+    # 日粒度配额（forum_ai_daily）管不了日内节奏：20 条可能在前 2 小时烧光，之后一整天板内无话。
+    # 故另记带时间戳的流水（forum_ai_events），配额改按「近 6 小时全板 ≤ cap」的滚动窗口判：
+    # 跨带边界不会漏放（23:59 发满、00:01 仍受限），且天然分时——这是替代日配额的那道闸。
+    def get_forum_recent_total(self, hours: int = 6) -> int:
+        """近 N 小时全板 AI 发言条数（滚动窗口，含帖与回帖）。"""
+        since = (datetime.now(timezone.utc) - timedelta(hours=int(hours))).isoformat(timespec="seconds")
+        q, p = self._user_filter(
+            "SELECT COUNT(*) AS n FROM forum_ai_events WHERE created_at > ?", (since,))
+        conn = self._connect()
+        try:
+            return int(conn.execute(q, p).fetchone()["n"])
+        finally:
+            conn.close()
+
+    def incr_forum_event(self, role_key: str, kind: str = "post") -> None:
+        """记一次 AI 自主发言（滚动窗口配额的计数来源）。"""
+        uid = self._forum_uid()
+        with self._write_conn() as conn:
+            conn.execute(
+                "INSERT INTO forum_ai_events(user_id, role_key, kind, created_at) VALUES(?,?,?,?)",
+                (uid, role_key, kind, _now_iso()),
+            )
+            # 顺手清 30 天前的流水：窗口只看 6h，老行纯积压（无到期任务，读时轻扫即可）
+            conn.execute("DELETE FROM forum_ai_events WHERE created_at < ?",
+                         ((datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec="seconds"),))
+
+    # ---------- 待回应队列（用户发帖 → AI 择机回应，不即时、不计配额）----------
+    def add_forum_pending(self, post_id: int) -> None:
+        """用户发帖/回帖后入队，等后续 AI 轮次挑一条回应（幂等：同帖只留一行）。"""
+        uid = self._forum_uid()
+        with self._write_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO forum_ai_pending(post_id, user_id, created_at) VALUES(?,?,?)",
+                (int(post_id), uid, _now_iso()),
+            )
+
+    def list_forum_pending(self, *, min_age_min: int = 0, limit: int = 5) -> list[dict]:
+        """待回应的帖（最老优先），并可要求「入队已满 min_age_min 分钟」以错开秒回。
+
+        min_age_min=0 表示不过滤（不是「早于本秒」——时间戳是秒精度，那样会把
+        同一秒内刚入队的帖也筛掉）。要求时长时用严格小于 + 多减 1 秒的 floor，
+        否则「<= now-min_age」会让同一秒入队的帖蒙混过关。
+        """
+        if int(min_age_min) > 0:
+            floor = (datetime.now(timezone.utc)
+                     - timedelta(minutes=int(min_age_min), seconds=1)).isoformat(timespec="seconds")
+            q, p = self._user_filter(
+                "SELECT post_id, created_at FROM forum_ai_pending WHERE created_at < ? "
+                "ORDER BY created_at ASC LIMIT ?", (floor, int(limit)))
+        else:
+            q, p = self._user_filter(
+                "SELECT post_id, created_at FROM forum_ai_pending "
+                "ORDER BY created_at ASC LIMIT ?", (int(limit),))
+        conn = self._connect()
+        try:
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def drop_forum_pending(self, post_id: int) -> None:
+        """回应（或放弃）后出队。"""
+        uid = self._forum_uid()
+        with self._write_conn() as conn:
+            conn.execute("DELETE FROM forum_ai_pending WHERE post_id = ? AND user_id = ?",
+                         (int(post_id), uid))
 
     # ---------- 每用户板设置 ----------
     def get_forum_settings(self) -> dict:

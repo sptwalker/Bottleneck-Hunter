@@ -133,3 +133,45 @@ def test_settings_defaults_and_update(client):
 def test_ai_run_disabled_by_default(client):
     resp = client.post("/api/forum/ai/run")
     assert resp.status_code == 200 and resp.json()["posted"] == 0
+
+
+# ── 触发分流：普通发帖只入队、@点名才即时开轮 ───────────────
+def test_plain_post_enqueues_instead_of_instant_reply(client, store, monkeypatch):
+    """普通发帖不再即时触发轮次（否则秒回显得机械、并发回帖还会瞬间烧光全板额度）。"""
+    calls = []
+    monkeypatch.setattr("bottleneck_hunter.watchlist.forum_ai.run_forum_ai_round",
+                        lambda *a, **kw: calls.append(kw) or _noop_round())
+    store.for_user("alice").set_forum_settings(ai_enabled=True)
+    pid = client.post("/api/forum/posts", json={"body": "我看多这只票，逻辑是产能瓶颈缓解。"}).json()["id"]
+    assert calls == []  # 没有即时开轮
+    pending = store.for_user("alice").list_forum_pending(min_age_min=0)
+    assert [int(r["post_id"]) for r in pending] == [pid]  # 但进了待办队列
+
+
+def test_mention_still_triggers_instant_round(client, store, monkeypatch):
+    """@点名是明确召唤，延迟就是失礼：仍然即时开一轮（且该轮不计配额）。"""
+    seen = []
+
+    async def _fake_round(s, uid, **kw):
+        seen.append(kw)
+        return {"posts": 0, "replies": 0}
+
+    monkeypatch.setattr("bottleneck_hunter.watchlist.forum_ai.run_forum_ai_round", _fake_round)
+    store.for_user("alice").set_forum_settings(ai_enabled=True)
+    body = f"@{DEFAULT_IDENTITIES['committee_value'].display_name} 这只票的产能瓶颈你怎么看？"
+    pid = client.post("/api/forum/posts", json={"body": body}).json()["id"]
+    assert len(seen) == 1  # 即时开轮
+    assert seen[0]["trigger"]["post_id"] == pid and seen[0]["trigger"]["at_roles"]
+    assert store.for_user("alice").list_forum_pending(min_age_min=0) == []  # 点名的不入队（当场处理）
+
+
+def test_ai_disabled_does_not_enqueue(client, store, monkeypatch):
+    """AI 关着时连待办都不记：免得开开关关在队列里堆一批陈年旧帖。"""
+    monkeypatch.setattr("bottleneck_hunter.watchlist.forum_ai.run_forum_ai_round",
+                        lambda *a, **kw: _noop_round())
+    client.post("/api/forum/posts", json={"body": "AI 还没开的时候发的帖，不该入队。"})
+    assert store.for_user("alice").list_forum_pending(min_age_min=0) == []
+
+
+async def _noop_round():
+    return {"posts": 0, "replies": 0}
