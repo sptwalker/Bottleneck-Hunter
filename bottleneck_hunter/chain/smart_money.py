@@ -19,6 +19,7 @@ try:
 except ImportError:
     yf = None  # type: ignore[assignment]
 
+from . import fetch_budget
 from .models import MarketRegion, SmartMoneySignal, SupplierInfo
 
 logger = logging.getLogger(__name__)
@@ -168,22 +169,53 @@ def _track_astock(code_6: str) -> SmartMoneySignal:
     return signal
 
 
-def _track_us_stock(ticker: str) -> SmartMoneySignal:
-    """同步获取美股聪明钱信号。"""
+def _load_us_smart_money_bundle(ticker: str, stock, info: dict) -> dict:
+    """取聪明钱链所需的 Yahoo 数据（`.info` 由调用方经共享缓存传入，不在此重复取）。
+
+    此前机构持仓/内部人交易/分析师评级/`.info` 四处在一个 `throttle()` 槽位里连打，
+    且 `.info` 与财务链重复。现合并为「一次取数 + 轮内共享」：同一只票只产生 1 次请求，
+    两条链各自命中缓存。分项独立 try：某一项失败只丢那一项（与改动前容错语义一致）。
+    """
+    bundle: dict = {"info": info, "inst": None, "insider": None, "recs": None}
+
+    def _grab(key: str, fn, label: str) -> None:
+        try:
+            bundle[key] = fn()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"{label}获取失败 ({ticker}): {e}")
+
+    _grab("inst", lambda: stock.institutional_holders, "机构持仓")
+    _grab("insider", lambda: stock.insider_transactions, "内部人交易")
+    _grab("recs", lambda: stock.recommendations, "分析师评级")
+    return bundle
+
+
+def _track_us_stock(ticker: str) -> SmartMoneySignal | None:
+    """同步获取美股聪明钱信号。**一次取数都没成功则返回 None**，交给批量层计入失败。
+
+    ponytail: 与 financial_data._fetch_us_financial 同一处伪装——外层 `except` 兜住 429 后
+    照样 `return signal`（`smart_money_score=5.0` 的中性壳），于是「253 家只成功 85 家」在
+    日志里记成「85/253 成功, 0 失败」。中性 5.0 与「真的没信号」不可区分，会用假数据参与评分。
+    """
     signal = SmartMoneySignal()
     details: list[str] = []
     score = 5.0
+    got_anything = False
 
     try:
+        from bottleneck_hunter.chain.quotes_cache import get as _cache_get
         from bottleneck_hunter.data_provider import yf_gate
         yf_gate.throttle()  # 全局限速：聪明钱查询也均匀错峰打 Yahoo
         stock = yf.Ticker(ticker)
-        info = stock.info or {}
+        # us_info 与财务链共用同一缓存键——两条链并行跑同一批 ticker，各打一遍等于凭空翻倍等待
+        info = _cache_get("us_info", ticker, lambda: stock.info or {}) or {}
+        bundle = _cache_get("us_smart_money", ticker, lambda: _load_us_smart_money_bundle(ticker, stock, info))
         yf_gate.observe(None)
+        got_anything = True
 
         # 1) 机构持仓 — 按机构数量区分
         try:
-            inst = stock.institutional_holders
+            inst = bundle.get("inst")
             if inst is not None and not inst.empty:
                 n_inst = len(inst)
                 signal.institution_count = n_inst
@@ -198,7 +230,7 @@ def _track_us_stock(ticker: str) -> SmartMoneySignal:
 
         # 2) 内部人交易
         try:
-            insider = stock.insider_transactions
+            insider = bundle.get("insider")
             if insider is not None and not insider.empty:
                 recent = insider.head(10)
                 buy_count = 0
@@ -222,7 +254,7 @@ def _track_us_stock(ticker: str) -> SmartMoneySignal:
 
         # 3) 分析师评级趋势
         try:
-            recs = stock.recommendations
+            recs = bundle.get("recs")
             if recs is not None and not recs.empty:
                 recent_recs = recs.tail(5)
                 grade_map = {"strong buy": 2, "buy": 1, "hold": 0, "sell": -1, "strong sell": -2}
@@ -266,13 +298,21 @@ def _track_us_stock(ticker: str) -> SmartMoneySignal:
         except Exception:
             pass
         logger.warning(f"yfinance 聪明钱数据获取失败 ({ticker}): {e}")
+        # 与财务链共用同一份降级计数：两条链各失败一次就记两次，分母（attempted）只数财务链发起数，
+        # 所以取数全灭时比率可以 >1——这是有意的，它表达的是「这一轮有多少次取数是白跑的」。
+        try:
+            from bottleneck_hunter.chain.financial_data import _note_yf_degraded
+            _note_yf_degraded(ticker, f"聪明钱取数失败: {e}")
+        except Exception:  # noqa: BLE001
+            pass
+        return None  # 空壳中性分不许冒充成功——那正是「0 失败」的来源
 
     signal.smart_money_score = round(min(10.0, max(0.0, score)), 1)
     signal.details = details
     if signal.signal_direction == "neutral":
         signal.signal_direction = "bullish" if score >= 6.5 else "bearish" if score <= 3.5 else "neutral"
 
-    return signal
+    return signal if got_anything else None
 
 
 def _extract_astock_code(ticker: str) -> str | None:
@@ -309,25 +349,60 @@ async def track_smart_money(supplier: SupplierInfo) -> SmartMoneySignal | None:
             return None
 
 
+def _global_rate_limited_skip() -> bool:
+    """闸门已熔断 → 本次不再打 Yahoo（快速降级为「无数据」，而非睡 30s 再失败）。"""
+    try:
+        from bottleneck_hunter.data_provider import yf_gate
+        return yf_gate.is_tripped()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _budgeted_track(supplier: SupplierInfo) -> SmartMoneySignal | None:
+    """带总预算的单票取数：预算用尽则不再发起，直接返回 None（计入失败）。
+
+    与 financial_data._budgeted_fetch 同构——两条链共用同一个 Phase 2 取数预算，
+    谁先到点谁停，余下时间留给评估环节而不是继续撞 Yahoo。
+    """
+    if fetch_budget.expired():
+        return None
+    return await track_smart_money(supplier)
+
+
 async def track_batch(suppliers: list[SupplierInfo]) -> tuple[dict[str, SmartMoneySignal], list[str]]:
-    """批量获取聪明钱信号。返回 ({ticker: SmartMoneySignal}, [failed_tickers])，失败的自动重试一次。"""
+    """批量获取聪明钱信号。返回 ({ticker: SmartMoneySignal}, [failed_tickers])，失败的自动重试一次。
+
+    ponytail: 原实现把全部协程建好后**串行 await**，名字叫 batch 实则零并发（还触发
+    "coroutine was never awaited" 警告）；改为 asyncio.gather 真并发，限流交给
+    track_smart_money 内的 _SEMAPHORE(4) 与 yf_gate 全局节流。第二轮重试照旧，但闸门熔断
+    或取数预算用尽（`fetch_budget`）时跳过——那时重试只是把注定失败的一轮再打一遍。
+    """
     results: dict[str, SmartMoneySignal] = {}
     failed_suppliers: list[SupplierInfo] = []
 
-    tasks = {s.ticker: (s, track_smart_money(s)) for s in suppliers}
-    for ticker, (supplier, coro) in tasks.items():
-        signal = await coro
-        if signal is not None:
-            results[ticker] = signal
+    sigs = await asyncio.gather(*[_budgeted_track(s) for s in suppliers])
+    for supplier, sig in zip(suppliers, sigs, strict=True):
+        if sig is not None:
+            results[supplier.ticker] = sig
         else:
             failed_suppliers.append(supplier)
+    budget_hit = fetch_budget.expired()
 
     if failed_suppliers:
-        logger.info(f"聪明钱数据重试: {len(failed_suppliers)} 个失败的 ticker")
-        for s in failed_suppliers:
-            signal = await track_smart_money(s)
-            if signal is not None:
-                results[s.ticker] = signal
+        if budget_hit:
+            logger.warning(
+                f"聪明钱数据跳过重试: 取数总预算用尽，{len(failed_suppliers)} 个 ticker 直接降级为无数据"
+            )
+        elif _global_rate_limited_skip():
+            logger.warning(
+                f"聪明钱数据跳过重试: Yahoo 限流熔断中，{len(failed_suppliers)} 个 ticker 直接降级为无数据"
+            )
+        else:
+            logger.info(f"聪明钱数据重试: {len(failed_suppliers)} 个失败的 ticker")
+            retries = await asyncio.gather(*[track_smart_money(s) for s in failed_suppliers])
+            for s, sig in zip(failed_suppliers, retries, strict=True):
+                if sig is not None:
+                    results[s.ticker] = sig
 
     failed_tickers = [s.ticker for s in failed_suppliers if s.ticker not in results]
     logger.info(f"聪明钱数据批量获取完成: {len(results)}/{len(suppliers)} 成功, {len(failed_tickers)} 失败")

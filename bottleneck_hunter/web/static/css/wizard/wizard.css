@@ -1936,6 +1936,13 @@
   flex-wrap: wrap;
 }
 .p2-warn-tickers { font-weight: 600; color: #d97706; }
+/* 系统性取数降级（数据源限流导致大面积失败）——比零星缺数据严重，用红色区分 */
+.p2-data-warning--severe {
+  background: rgba(220, 38, 38, 0.1);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: #b91c1c;
+  font-weight: 600;
+}
 .btn-warn-refetch {
   background: #f59e0b;
   color: #fff;

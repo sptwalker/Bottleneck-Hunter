@@ -1053,7 +1053,7 @@ function handlePhase2Event(data, progress) {
     resetP2Selection();
     state.failedTickers = data.failed_tickers || [];
 
-    renderPhase2Table(data.scorecards, state.failedTickers);
+    renderPhase2Table(data.scorecards, state.failedTickers, data.yf_degraded || null);
     showP2WeightCtrl();
     _updateP2Progress(100, '筛选完成');
     loadWizardHistory();   // 环节完成即刷新首页"最近分析"列表（供应商数等随之更新）
@@ -1979,7 +1979,7 @@ async function loadWizardAnalysis(analysisId) {
     if (p2 && p2.scorecards?.length) {
       state.phase2 = p2;
       state.failedTickers = p2.failed_tickers || [];
-      renderPhase2Table(p2.scorecards, state.failedTickers);
+      renderPhase2Table(p2.scorecards, state.failedTickers, p2.yf_degraded || null);
       showP2WeightCtrl();
 
       const statsEl = document.getElementById('wiz-p2-stats');
@@ -2366,7 +2366,10 @@ document.addEventListener('click', async (e) => {
     const result = await resp.json();
     mergeRefetchedData(state.phase2.scorecards, result);
     state.failedTickers = result.still_failed || [];
-    renderPhase2Table(state.phase2.scorecards, state.failedTickers);
+    // 补拉跑完即重新判定：全补齐了（still_failed 为空）说明原先的「系统性降级」已被修复，
+    // 把标记清成 null 让红条消失，避免数据已回来还挂着限流警告。
+    renderPhase2Table(state.phase2.scorecards, state.failedTickers,
+                      state.failedTickers.length === 0 ? null : undefined);
     if (state.failedTickers.length === 0) {
       logMsg('数据补拉成功，所有缺失数据已恢复', 'done');
     } else {

@@ -106,9 +106,10 @@ class TestTrackUsStock:
 
     @patch("bottleneck_hunter.chain.smart_money.yf")
     def test_all_fail(self, mock_yf):
+        # ponytail: 这里原本断言中性壳 smart_money_score == 5.0，正是「85/253 成功, 0 失败」的来源——
+        # 取数全灭却返回一个可评分的对象，批量层只能记成成功。新语义：一次没取到就返回 None。
         mock_yf.Ticker.side_effect = Exception("yfinance down")
-        signal = _track_us_stock("AAPL")
-        assert signal.smart_money_score == 5.0
+        assert _track_us_stock("AAPL") is None
 
 
 class TestTrackSmartMoney:

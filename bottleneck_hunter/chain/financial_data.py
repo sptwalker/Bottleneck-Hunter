@@ -18,11 +18,37 @@ try:
 except ImportError:
     yf = None  # type: ignore[assignment]
 
+from . import fetch_budget
 from .models import FinancialSnapshot, FinancialTrend, MarketRegion, QuarterlyDataPoint, SupplierInfo
 
 logger = logging.getLogger(__name__)
 
 _SEMAPHORE = asyncio.Semaphore(4)
+
+# 美股 Yahoo 路径的降级统计（本进程累计）：熔断/限流跳过的票不再假装「取到了空数据」。
+# 事故复盘：253 家候选全被 429 打回，但结尾仍报「0 失败」，把系统性故障藏成了「数据就是空的」。
+_YF_DEGRADED = 0
+_YF_ATTEMPTED = 0
+
+
+def yf_degraded_stats() -> dict[str, int]:
+    """本进程累计的 Yahoo 降级统计：尝试数 / 被限流跳过数，供 SSE 进度与结果页展示。"""
+    return {"attempted": _YF_ATTEMPTED, "degraded": _YF_DEGRADED}
+
+
+def _note_yf_degraded(ticker: str, reason: str) -> None:
+    """记一次「没拿到真实数据」——计数 + 记名，让降级在进度与结果页可见，而非静默。"""
+    global _YF_DEGRADED
+    _YF_DEGRADED += 1
+    logger.warning(f"财务数据降级 ({ticker}): {reason}")
+
+
+def reset_yf_degraded_stats() -> None:
+    """清零降级计数——每轮 Phase 2 取数开始时调用，使 `yf_degraded_stats()` 的报告口径
+    严格等于「本轮」，而不是把历史轮次的失败累计进来（进程级常驻会跨轮串味）。"""
+    global _YF_DEGRADED, _YF_ATTEMPTED
+    _YF_DEGRADED = 0
+    _YF_ATTEMPTED = 0
 
 
 def _compute_trend(quarters: list[QuarterlyDataPoint]) -> FinancialTrend:
@@ -365,16 +391,60 @@ def _fetch_astock_financial(code_6: str) -> FinancialSnapshot:
 # 美股：yfinance
 # ---------------------------------------------------------------------------
 
-def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
-    """同步拉取美股财务数据。"""
+def _load_us_financial_bundle(ticker: str) -> dict:
+    """一次性取全财务链所需的 Yahoo 数据，供本轮缓存共享。
+
+    此前这三份数据在一个 `throttle()` 槽位里连打三次（`.info` / `quarterly_financials` /
+    `history`），另加聪明钱链再打一遍 `.info`——一只票 4 次请求。合并成一次取数后，同一只票
+    只产生 1 次请求，且财务链与聪明钱链各自命中缓存、互不重复。分项独立 try：
+    某一项失败只丢那一项，不拖垮整票（与改动前各 `try` 块的容错语义一致）。
+    """
+    stock = yf.Ticker(ticker)
+    bundle: dict = {"info": {}, "quarterly": None, "hist": None, "err": None}
+    try:
+        bundle["info"] = stock.info or {}
+    except Exception as e:  # noqa: BLE001
+        # .info 是整条链的根数据，失败记进 err 由调用方 observe 给熔断器并放弃本票
+        bundle["err"] = e
+    try:
+        bundle["quarterly"] = stock.quarterly_financials
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"yfinance 季度数据获取失败 ({ticker}): {e}")
+    try:
+        bundle["hist"] = stock.history(period="6mo")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"yfinance 日线数据获取失败 ({ticker}): {e}")
+    return bundle
+
+
+def _fetch_us_financial(ticker: str) -> FinancialSnapshot | None:
+    """同步拉取美股财务数据。**一个字段都没拿到时返回 None**，交给批量层计入失败。
+
+    ponytail: 此前外层 `except` 兜住取数失败后照样 `return snap`（全 None 的空壳），调用方
+    看到的是「取到了快照」，于是「253 家全被 429 打回」在报告里变成「0 失败」——事故里
+    最隐蔽的一层伪装。空 `snap` 与「有数据」在下游无法区分，所以这里必须用 None 显式表达失败。
+    """
+    global _YF_ATTEMPTED
     snap = FinancialSnapshot(data_source="yfinance")
+    got_anything = False
+    _YF_ATTEMPTED += 1  # 只要批量层试着取这只票就进分母（含被闸门拦下的）——口径是「本轮想取多少家」
 
     try:
+        from bottleneck_hunter.chain.quotes_cache import get as _cache_get
         from bottleneck_hunter.data_provider import yf_gate
         yf_gate.throttle()  # 全局限速：反向/刷新的美股财务查询也均匀错峰打 Yahoo
-        stock = yf.Ticker(ticker)
-        info = stock.info or {}
+        # 与聪明钱链共享本轮取数：同一只票两条链都要 .info，此前各打一遍等于凭空翻倍等待
+        bundle = _cache_get("us_financial", ticker, lambda: _load_us_financial_bundle(ticker))
+        if bundle.get("err") is not None:
+            yf_gate.observe(bundle["err"])   # 命中 429 → 闸门自适应退避/熔断
+            _note_yf_degraded(ticker, f"取数失败: {bundle['err']}")
+            raise bundle["err"]
+        info = bundle.get("info") or {}
         yf_gate.observe(None)
+        if not info:
+            _note_yf_degraded(ticker, "返回空 .info")
+        else:
+            got_anything = True
 
         snap.revenue_yi = _safe_float(info.get("totalRevenue"), 1e-8)
         snap.revenue_yoy_pct = _safe_float(info.get("revenueGrowth"), 100)
@@ -412,9 +482,9 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
         if fiscal:
             snap.report_date = datetime.fromtimestamp(fiscal).strftime("%Y-%m-%d")
 
-        # 多季度趋势数据
+        # 多季度趋势数据（本轮已随 bundle 取回，不再单独打 Yahoo）
         try:
-            qf = stock.quarterly_financials
+            qf = bundle.get("quarterly")
             if qf is not None and not qf.empty:
                 quarters: list[QuarterlyDataPoint] = []
                 for col_date in list(qf.columns)[:8]:
@@ -444,9 +514,9 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
         except Exception as e:
             logger.debug(f"yfinance 季度数据获取失败 ({ticker}): {e}")
 
-        # 日线数据 → 成交量动量 + 涨幅
+        # 日线数据 → 成交量动量 + 涨幅（本轮已随 bundle 取回，不再单独打 Yahoo）
         try:
-            hist = stock.history(period="6mo")
+            hist = bundle.get("hist")
             if hist is not None and len(hist) >= 20:
                 vols = hist["Volume"].tolist()
                 cls_prices = hist["Close"].tolist()
@@ -467,9 +537,21 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot:
             yf_gate.observe(e)  # 命中 429 → 闸门自适应退避
         except Exception:
             pass
+        try:
+            from bottleneck_hunter.data_provider import yf_gate
+            _limit_exc: tuple = (yf_gate.RateLimited,)
+        except Exception:  # noqa: BLE001
+            _limit_exc = ()
+        if _limit_exc and isinstance(e, _limit_exc):
+            # 熔断/限流：闸门压根没放行，本次没发起取数，降级计数留给调用方按 skipped 口径记
+            logger.debug(f"yfinance 取数被闸门拦下 ({ticker}): {e}")
+            return None
         logger.warning(f"yfinance 数据获取失败 ({ticker}): {e}")
+        _note_yf_degraded(ticker, f"取数异常: {e}")
+        return None
 
-    return snap
+    # 全 None 的空壳不许当成功返回——那正是「0 失败」的来源
+    return snap if got_anything else None
 
 
 # ---------------------------------------------------------------------------
@@ -552,28 +634,59 @@ async def fetch_financial_snapshot(supplier: SupplierInfo, user_id: str = "") ->
             return None
 
 
+def _rate_limited_skip() -> bool:
+    """闸门已熔断 → 不再发起重试（快速降级为「无数据」，而非再睡一轮退避）。"""
+    try:
+        from bottleneck_hunter.data_provider import yf_gate
+        return yf_gate.is_tripped()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _budgeted_fetch(supplier: SupplierInfo, user_id: str) -> FinancialSnapshot | None:
+    """带总预算的单票取数：预算用尽则**不再发起**，直接返回 None（计入失败）。
+
+    在发起前查而不是发起后中断——已在线程里睡的退避杀不掉（`to_thread` + `time.sleep`），
+    能做的只是不再往队列里加新的注定失败的请求。
+    """
+    if fetch_budget.expired():
+        return None
+    return await fetch_financial_snapshot(supplier, user_id)
+
+
 async def fetch_batch(suppliers: list[SupplierInfo], user_id: str = "") -> tuple[dict[str, FinancialSnapshot], list[str]]:
     """批量拉取。返回 ({ticker: FinancialSnapshot}, [failed_tickers])，失败的自动重试一次。
 
     user_id 透传给 hub.fetch，用本用户自己的付费 key，避免跨用户借用（D-1）。
+    总预算（fetch_budget）用尽时停止再发起，把未取到的票计入失败但**保留已取到的部分**。
     """
     results: dict[str, FinancialSnapshot] = {}
     failed_suppliers: list[SupplierInfo] = []
+    budget_hit = False
 
     # 真并发：fetch_financial_snapshot 内部 _SEMAPHORE(4) 负责限流（此前串行 await 使信号量形同虚设）
-    snaps = await asyncio.gather(*[fetch_financial_snapshot(s, user_id) for s in suppliers])
+    snaps = await asyncio.gather(*[_budgeted_fetch(s, user_id) for s in suppliers])
     for supplier, snap in zip(suppliers, snaps):
         if snap is not None:
             results[supplier.ticker] = snap
         else:
             failed_suppliers.append(supplier)
+    if fetch_budget.expired():
+        budget_hit = True
 
-    if failed_suppliers:
+    # 第二轮只重试真正失败的那几个；但若闸门已熔断，重试只是把注定失败的一轮再打一遍
+    # （事故中正是这一轮让请求量翻倍）。失败率过半也不重试——那是系统性问题，不是个票偶发。
+    # 预算用尽同样不重试：剩下的时间该留给评估环节，而不是继续撞 Yahoo。
+    if failed_suppliers and not budget_hit and not _rate_limited_skip() and len(failed_suppliers) * 2 <= len(suppliers):
         logger.info(f"财务数据重试: {len(failed_suppliers)} 个失败的 ticker")
         retries = await asyncio.gather(*[fetch_financial_snapshot(s, user_id) for s in failed_suppliers])
         for s, snap in zip(failed_suppliers, retries):
             if snap is not None:
                 results[s.ticker] = snap
+    elif failed_suppliers:
+        why = ("取数总预算用尽" if budget_hit
+               else "Yahoo 限流熔断中" if _rate_limited_skip() else "失败率过高")
+        logger.warning(f"财务数据跳过重试: {len(failed_suppliers)}/{len(suppliers)} 失败（{why}）")
 
     failed_tickers = [s.ticker for s in failed_suppliers if s.ticker not in results]
     logger.info(f"财务数据批量拉取完成: {len(results)}/{len(suppliers)} 成功, {len(failed_tickers)} 失败")

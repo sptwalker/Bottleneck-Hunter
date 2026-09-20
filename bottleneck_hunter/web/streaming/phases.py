@@ -6,6 +6,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import AsyncGenerator
 
+from bottleneck_hunter.chain import fetch_budget
 from bottleneck_hunter.chain.bottleneck import BottleneckAnalyzer
 from bottleneck_hunter.chain.catalyst import CatalystAnalyzer
 from bottleneck_hunter.chain.decomposer import ChainDecomposer
@@ -330,6 +331,26 @@ async def stream_phase1(
                run_count=locals().get("_run_count", 0), completed_phases=1, **phase1_data)
 
 
+def _yf_degraded_payload() -> dict:
+    """美股取数降级统计（本进程累计）——供 SSE 与结果页显式标注「有多少票没拿到真实数据」。
+
+    事故教训：253 家候选全被 429 打回，报告仍写「0 失败」，把系统性故障伪装成「数据就是空的」。
+    取不到数据本身可以接受（评估会走降级分支），但**必须可见**。
+    """
+    try:
+        from bottleneck_hunter.chain.financial_data import yf_degraded_stats
+        st = yf_degraded_stats()
+    except Exception:  # noqa: BLE001
+        return {}
+    attempted, degraded = st.get("attempted", 0), st.get("degraded", 0)
+    if not attempted:
+        return {}
+    ratio = round(degraded / attempted, 3)
+    return {"attempted": attempted, "degraded": degraded, "ratio": ratio,
+            # 超过三成取数失败就算系统性问题，值得在页面上明说而不是埋在日志里
+            "severe": ratio >= 0.3}
+
+
 def _load_phase1_from_db(store, analysis_id: str) -> dict | None:
     """（保留旧名，转调共享实现）Phase1 缓存未命中时从 DB 回读重建。"""
     from bottleneck_hunter.web.phase_rehydrate import load_phase1_from_db
@@ -359,6 +380,17 @@ async def stream_phase2(
     from bottleneck_hunter.chain.models import BottleneckReport, ChainGraph
 
     logger.info("[stream-phase2] 启动 | provider=%s | model=%s | analysis_id=%s", provider, model, analysis_id)
+
+    # 本轮取数状态复位：轮内共享的 .info 缓存清空（轮间不串，见 quotes_cache 文档），
+    # 熔断计数清零但保留自适应间隔（上轮退避到 30s 说明确实在限流，别立刻回到 3s 再撞一遍）。
+    try:
+        from bottleneck_hunter.chain import quotes_cache
+        from bottleneck_hunter.data_provider import yf_gate
+        quotes_cache.reset()
+        fetch_budget.reset()  # 计时归零——取数环节真正开始时才 start()，避免把前置步骤算进预算
+        yf_gate.reset_for_new_run()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[stream-phase2] 取数状态复位跳过: %s", e)
 
     p1 = phase_cache.get_phase(analysis_id, 1)
     if not p1:
@@ -453,7 +485,7 @@ async def stream_phase2(
         yield _sse("error", step="supplier_search", message=str(e))
         return
 
-    # ── 财务 + 聪明钱（并行） ──
+    # ── 财务 + 聪明钱（并行，带总预算） ──
     financial_map = {}
     smart_money_map = {}
     failed_tickers = []
@@ -461,13 +493,34 @@ async def stream_phase2(
         all_suppliers = [s for sl in supplier_map.values() for s in sl]
         if all_suppliers:
             yield _sse("step_start", step="financial_fetch", index=1, message=STEP_LABELS["financial_fetch"])
-            fin_task = fetch_batch(all_suppliers, getattr(store, "_user_id", ""))
-            sm_task = smart_money_batch(all_suppliers)
-            (financial_map, fin_failed), (smart_money_map, sm_failed) = await asyncio.gather(fin_task, sm_task)
+            # 清零本轮降级计数：统计口径严格等于「这一轮」，不把历史轮次的失败累计进来
+            try:
+                from bottleneck_hunter.chain.financial_data import reset_yf_degraded_stats
+                reset_yf_degraded_stats()
+            except Exception:  # noqa: BLE001
+                pass
+            # 开一个总预算：取数是「有则更好」的增强环节，不该无限期拖住整轮。批量入口在每个
+            # ticker 取数前查一次预算，到点即停止再发起并**正常返回已到手的部分**——用协作式
+            # 预算而非 wait_for，是因为 wait_for 取消外层 await 会连已取到的结果一起丢掉。
+            fetch_budget.start()
+            (financial_map, fin_failed), (smart_money_map, sm_failed) = await asyncio.gather(
+                fetch_batch(all_suppliers, getattr(store, "_user_id", "")),
+                smart_money_batch(all_suppliers),
+            )
+            if fin_failed or sm_failed:
+                logger.warning(
+                    f"[stream-phase2] 取数收尾: 财务 {len(financial_map)}/{len(all_suppliers)}, "
+                    f"聪明钱 {len(smart_money_map)}/{len(all_suppliers)}, 用时 {fetch_budget.elapsed():.0f}s"
+                )
             failed_tickers = list(set(fin_failed + sm_failed))
-            yield _sse("step_done", step="financial_fetch", index=1,
-                       result={"fetched": len(financial_map), "smart_money": len(smart_money_map),
-                               "failed_tickers": failed_tickers})
+            result = {"fetched": len(financial_map), "smart_money": len(smart_money_map),
+                      "failed_tickers": failed_tickers,
+                      "total": len(all_suppliers),
+                      "elapsed_sec": round(fetch_budget.elapsed(), 1)}
+            deg = _yf_degraded_payload()
+            if deg:
+                result["yf_degraded"] = deg
+            yield _sse("step_done", step="financial_fetch", index=1, result=result)
     except Exception as e:
         logger.exception("Phase2 financial fetch failed")
         yield _sse("step_done", step="financial_fetch", index=1, result={}, error=str(e))
@@ -649,6 +702,15 @@ async def stream_phase2(
         "failed_tickers": failed_tickers,
         "completed_phases": 2,
     }
+    # 取数降级显式入档：本页分数有多少是在「没拿到财务数据」的前提下算出来的，必须可见。
+    _deg = _yf_degraded_payload()
+    if _deg:
+        phase2_data["yf_degraded"] = _deg
+        if _deg.get("severe"):
+            logger.warning(
+                f"[stream-phase2] 本轮取数降级严重: {_deg['degraded']}/{_deg['attempted']} "
+                f"({_deg['ratio']:.0%}) 未取得真实数据，评分可信度受限"
+            )
     phase_cache.set_phase(analysis_id, 2, phase2_data)
 
     if store:

@@ -15,6 +15,7 @@ let radarChart = null;
 let barChart = null;
 let stackChart = null;
 let _p4LastArgs = null;   // 最近一次 renderPhase4Table 入参，供返回视图时重渲染刷新观察池标签
+let _p2Degraded = null;   // 本轮 Yahoo 取数降级统计（后端 phase2_data.yf_degraded），无则 null
 
 // 若 Phase4 表已渲染过，用缓存入参重渲染——观察池增删后标签保持最新（不残留"已在观察池"）
 export function refreshPhase4Watchlist() {
@@ -153,12 +154,14 @@ function _sortIndicator(field) {
     : '<span class="sort-arrow sort-arrow--active">↑</span>';
 }
 
-export function renderPhase2Table(scorecards, failedTickers) {
+export function renderPhase2Table(scorecards, failedTickers, degraded) {
   const container = document.getElementById('wiz-p2-table');
   if (!container) return;
 
   _p2Scorecards = scorecards;
   _p2FailedTickers = failedTickers || [];
+  // 未显式传入（历史回看路径）则保留上一次的值；显式传 null 表示本轮无降级
+  if (degraded !== undefined) _p2Degraded = degraded;
 
   if (_p2Selected.size === 0 && scorecards.length > 0) {
     scorecards.forEach(sc => { const t = _getTicker(sc); if (t) _p2Selected.add(t); });
@@ -172,6 +175,14 @@ export function renderPhase2Table(scorecards, failedTickers) {
 
   let html = '';
   const failed = _p2FailedTickers;
+  // 系统性取数降级（超三成本轮取数失败）单独醒目提示：此时分数是在缺数据的前提下算出来的，
+  // 与「个别票补不到」不是一个量级的问题，不能只混在下面的 ticker 清单里。
+  if (_p2Degraded && _p2Degraded.severe) {
+    html += `<div class="p2-data-warning p2-data-warning--severe">
+      <span>⛔ 本轮共有 ${_p2Degraded.degraded}/${_p2Degraded.attempted} 次取数未取得真实数据
+      （${Math.round(_p2Degraded.ratio * 100)}%），多为数据源限流；下方评分可信度受限，建议稍后重试补拉。</span>
+    </div>`;
+  }
   if (failed.length > 0) {
     html += `<div class="p2-data-warning">
       <span>⚠ 以下 ${failed.length} 家企业的部分财务/市场数据获取失败，评分可能不准确：</span>

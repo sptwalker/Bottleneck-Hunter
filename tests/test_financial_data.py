@@ -174,13 +174,13 @@ class TestFetchUS:
 
     @patch("bottleneck_hunter.chain.financial_data.yf")
     def test_empty_info(self, mock_yf):
+        # ponytail: 这里原本断言「空 .info 也返回一个 data_source='yfinance' 的空壳」，全 None 的空壳与
+        # 「真的取到了但字段为空」在下游无法区分，于是全灭一轮在报告里成了「0 失败」。新语义：没字段即 None。
         mock_ticker = MagicMock()
         mock_ticker.info = {}
         mock_yf.Ticker.return_value = mock_ticker
 
-        snap = _fetch_us_financial("XXXX")
-        assert snap.data_source == "yfinance"
-        assert snap.revenue_yi is None
+        assert _fetch_us_financial("XXXX") is None
 
 
 class TestFetchSnapshot:
