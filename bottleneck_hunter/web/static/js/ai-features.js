@@ -251,6 +251,38 @@ function showMeetingExport() {
   if (b) b.style.display = '';
 }
 
+/**
+ * 清空圆桌会议面板 —— 切换到新分析时必须调用。
+ *
+ * 圆桌面板是纯前端状态（气泡、结果卡、参会者），后端只把结果存进本分析的
+ * result_json["meeting_result"]。重置分析时若不显式清空，上一场分析的圆桌记录
+ * 会原样留在页面上，看起来就像「新分析里已经有会议记录、而且讨论的是别的公司」。
+ */
+export function resetMeetingPanel() {
+  state.meetingResult = null;
+  state.meetingParticipants = null;
+
+  const transcript = document.getElementById('meeting-transcript');
+  if (transcript) transcript.style.display = 'none';
+  const messages = document.getElementById('meeting-messages');
+  if (messages) messages.innerHTML = '';
+  const resultDiv = document.getElementById('meeting-result');
+  if (resultDiv) { resultDiv.style.display = 'none'; resultDiv.innerHTML = ''; }
+  const statusEl = document.getElementById('meeting-status');
+  if (statusEl) statusEl.textContent = '';
+  const exportBtn = document.getElementById('btn-export-meeting');
+  if (exportBtn) exportBtn.style.display = 'none';
+  const preflightStatus = document.getElementById('preflight-status');
+  if (preflightStatus) preflightStatus.textContent = '';
+  document.querySelectorAll('.meeting-role-status').forEach(el => {
+    el.textContent = '';
+    el.className = 'meeting-role-status';
+  });
+  const btn = document.getElementById('btn-start-meeting');
+  if (btn) { btn.textContent = '启动会议'; btn.disabled = true; }
+  document.getElementById('ai-meeting-card')?.classList.remove('meeting-active');
+}
+
 export function exportMeeting() {
   const m = state.meetingResult;
   if (!m || !(m.final_ranking && m.final_ranking.length)) { toast('暂无圆桌会议结果可导出'); return; }

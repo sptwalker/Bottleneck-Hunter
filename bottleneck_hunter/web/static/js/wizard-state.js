@@ -28,6 +28,9 @@ export const state = {
   p4NeedsUpdate: false,
   aiReports: {},
   autoMode: false,
+  // 圆桌会议（Phase 4.5）—— 显式声明，切换分析时由 resetMeetingPanel() 清空
+  meetingResult: null,
+  meetingParticipants: null,
 };
 window.wizardState = state;
 

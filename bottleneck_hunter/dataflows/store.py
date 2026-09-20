@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from bottleneck_hunter.chain.picks import canonical_picks, picks_top_n_from_config, ticker_of
+
 logger = logging.getLogger(__name__)
 
 # 数据目录锚定到仓库根 data/（或 BH_DATA_DIR 覆盖），绝不用 CWD 相对路径。
@@ -493,18 +495,12 @@ class AnalysisStore:
         result = record["result_json"]
         result["cross_validations"] = cross_validations
 
-        # 重新计算 top_picks
-        top_picks = []
+        # 重新计算 top_picks（统一口径，见 chain/picks.py）
         scorecards = result.get("supplier_scorecards", [])
-        for cv in cross_validations:
-            if cv.get("consensus") in ("pass", "concern"):
-                top_picks.append(cv.get("ticker", ""))
-        if not top_picks:
-            for sc in scorecards[:5]:
-                score = sc.get("overall_score", 0)
-                ticker = sc.get("supplier", {}).get("ticker", sc.get("ticker", ""))
-                if score >= 6 and ticker:
-                    top_picks.append(ticker)
+        top_picks = canonical_picks(
+            scorecards,
+            top_n=picks_top_n_from_config(result.get("scoring_config")),
+        )
         result["top_picks"] = top_picks
 
         with self._connect() as conn:
@@ -559,8 +555,13 @@ class AnalysisStore:
         cross_validations: list[dict] | None = None,
         max_market_cap_yi: float | None = None,
         scoring_config: dict | None = None,
+        picks_pool: list[str] | None = None,
     ) -> bool:
-        """更新指定记录的供应商评估和交叉验证结果。"""
+        """更新指定记录的供应商评估和交叉验证结果。
+
+        picks_pool：参与 top_picks 评选的 ticker 白名单。Phase 3 用户勾选子集时传入，
+        避免最终推荐名单里混进用户没勾选、却仍被写回 supplier_scorecards 的公司。
+        """
         record = self.get(analysis_id)
         if not record:
             return False
@@ -572,17 +573,15 @@ class AnalysisStore:
         if scoring_config is not None:
             result["scoring_config"] = scoring_config
 
-        top_picks = []
-        cv_list = result.get("cross_validations", [])
-        for cv in cv_list:
-            if cv.get("consensus") in ("pass", "concern"):
-                top_picks.append(cv.get("ticker", ""))
-        if not top_picks:
-            for sc in supplier_scorecards[:5]:
-                score = sc.get("overall_score", 0)
-                ticker = sc.get("supplier", {}).get("ticker", sc.get("ticker", ""))
-                if score >= 6 and ticker:
-                    top_picks.append(ticker)
+        pool = supplier_scorecards
+        if picks_pool is not None:
+            wanted = set(picks_pool)
+            pool = [sc for sc in supplier_scorecards if ticker_of(sc) in wanted]
+
+        top_picks = canonical_picks(
+            pool,
+            top_n=picks_top_n_from_config(result.get("scoring_config")),
+        )
         result["top_picks"] = top_picks
 
         supplier_count = len(supplier_scorecards)

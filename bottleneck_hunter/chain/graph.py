@@ -19,6 +19,7 @@ from bottleneck_hunter.chain.models import (
     MarketRegion,
     ScreeningResult,
 )
+from bottleneck_hunter.chain.picks import DEFAULT_MIN_SCORE, canonical_picks
 from bottleneck_hunter.chain.supplier_eval import SupplierEvaluator
 from bottleneck_hunter.chain.supplier_search import SupplierSearcher
 
@@ -230,17 +231,9 @@ async def run_screening(
     if final_state.get("error"):
         raise RuntimeError(f"Screening failed: {final_state['error']}")
 
-    # Determine top picks from fact_check gate
-    top_picks = []
+    # Determine top picks from fact_check gate（统一口径，见 chain/picks.py）
     scorecards = final_state.get("supplier_scorecards", [])
-
-    # 过滤掉 REJECT,按 final_score 排序取 top 5
-    passed = [sc for sc in scorecards if sc.fact_check_recommendation != "REJECT"]
-    passed.sort(key=lambda sc: sc.final.final_score if sc.final else sc.overall_score, reverse=True)
-
-    for sc in passed[:5]:
-        if sc.overall_score >= 5:
-            top_picks.append(sc.supplier.ticker)
+    top_picks = canonical_picks(scorecards, top_n=5, min_score=DEFAULT_MIN_SCORE)
 
     return ScreeningResult(
         sector=sector,

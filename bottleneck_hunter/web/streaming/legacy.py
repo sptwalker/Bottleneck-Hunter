@@ -13,6 +13,7 @@ from bottleneck_hunter.chain.cross_validation import CrossValidator
 from bottleneck_hunter.chain.decomposer import ChainDecomposer
 from bottleneck_hunter.chain.financial_data import fetch_batch
 from bottleneck_hunter.chain.models import MarketRegion, ScreeningResult
+from bottleneck_hunter.chain.picks import DEFAULT_MIN_SCORE, canonical_picks
 from bottleneck_hunter.chain.report import generate_report
 from bottleneck_hunter.chain.smart_money import track_batch as smart_money_batch
 from bottleneck_hunter.chain.supplier_eval import AlphaScorer, FinalScorer, SupplierEvaluator
@@ -343,15 +344,8 @@ async def stream_screening(config, store=None) -> AsyncGenerator[dict, None]:
         yield _sse("error", step="cross_validate", message=str(e))
         return
 
-    # Determine top picks
-    top_picks = []
-    for cv in validations:
-        if cv.consensus_score >= 5:
-            top_picks.append(cv.ticker)
-    if not top_picks:
-        for sc in scorecards[:5]:
-            if sc.overall_score >= 5:
-                top_picks.append(sc.supplier.ticker)
+    # Determine top picks（统一口径，见 chain/picks.py）
+    top_picks = canonical_picks(scorecards, top_n=5, min_score=DEFAULT_MIN_SCORE)
 
     # Save report
     report_path = ""

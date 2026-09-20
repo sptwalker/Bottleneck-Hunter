@@ -12,6 +12,7 @@ from bottleneck_hunter.chain.catalyst import CatalystAnalyzer
 from bottleneck_hunter.chain.decomposer import ChainDecomposer
 from bottleneck_hunter.chain.financial_data import fetch_batch
 from bottleneck_hunter.chain.models import MarketRegion
+from bottleneck_hunter.chain.picks import passed_top
 from bottleneck_hunter.chain.smart_money import track_batch as smart_money_batch
 from bottleneck_hunter.chain.supplier_eval import AlphaScorer, FinalScorer, SupplierEvaluator
 from bottleneck_hunter.chain.supplier_search import SupplierSearcher
@@ -777,20 +778,46 @@ async def stream_phase4(
 
     scorecards = [SupplierScorecard(**d) for d in p2["scorecards"]]
 
-    # 用 final_score 排序（如果有），否则用 overall_score
-    def sort_key(sc):
-        if sc.final:
-            return sc.final.final_score
-        return sc.overall_score
-    scorecards.sort(key=sort_key, reverse=True)
+    # 与 Phase 3 评选共用同一份名单：先把 Phase 3 勾选/排名过的 ticker 取出来
+    # （缓存优先、DB 回读兜底），再按统一口径排序取前 top_n。
+    # 这样「交叉验证的公司」与「上一阶段筛选的公司」永远是同一批。
+    p3 = phase_cache.get_phase(analysis_id, 3)
+    if not p3 and store:
+        try:
+            rec = store.get(analysis_id)
+            rj = (rec or {}).get("result_json", {}) or {}
+            ranked_db = rj.get("ranked_results") or []
+            if ranked_db:
+                p3 = {"ranked_results": ranked_db}
+        except Exception:
+            logger.warning("[stream-phase4] Phase 3 回读失败，回退为全量 scorecards", exc_info=True)
 
-    # 过滤掉 REJECT(事实核查硬门)
-    passed_scorecards = [sc for sc in scorecards if sc.fact_check_recommendation != "REJECT"]
-    top_scorecards = passed_scorecards[:top_n]
+    ranked_tickers: list[str] = []
+    if p3:
+        for r in p3.get("ranked_results") or []:
+            sc_d = r.get("scorecard") or {}
+            t = ((sc_d.get("supplier") or {}).get("ticker")) or sc_d.get("ticker") or ""
+            if t and t not in ranked_tickers:
+                ranked_tickers.append(t)
 
-    if not top_scorecards:
+    if ranked_tickers:
+        wanted = set(ranked_tickers)
+        selected = [sc for sc in scorecards if sc.supplier.ticker in wanted]
+    else:
+        # 没有 Phase 3 记录（历史分析/直接跑 Phase 4）→ 退回全量，按统一口径排序
+        selected = list(scorecards)
+
+    if not selected:  # pragma: no cover - 理论不可达，防御
+        yield _sse("error", step="init", message="Phase 3 评选名单为空，请先完成评选")
+        return
+
+    # 按统一口径排序（final_score 优先，缺失用 overall_score），并在 top_n 处截断
+    scorecards = passed_top(selected, top_n=top_n)
+
+    if not scorecards:
         yield _sse("error", step="fact_check_review", message="所有候选均被事实核查拦截(REJECT)")
         return
+    top_scorecards = scorecards
 
     yield _sse("step_start", step="fact_check_review", index=0,
                message=f"正在汇总 top {len(top_scorecards)} 家的事实核查结果...")

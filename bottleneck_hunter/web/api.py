@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.auth.dependencies import get_current_user
+from bottleneck_hunter.chain.picks import sort_key as picks_sort_key
 from bottleneck_hunter.chain.supplier_eval import FinalScorer
 from bottleneck_hunter.web import phase_cache
 from bottleneck_hunter.web.streaming import (
@@ -306,6 +307,8 @@ class ScoringConfig(BaseModel):
 class Phase3Request(BaseModel):
     analysis_id: str
     scoring_config: ScoringConfig = Field(default_factory=ScoringConfig)
+    # 前端 Phase 2 表格里勾选的公司；为空表示全量参与评选
+    selected_tickers: list[str] = Field(default_factory=list)
 
 
 class Phase4Request(BaseModel):
@@ -402,7 +405,18 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
     w_q = req.scoring_config.quality_weight
     w_a = req.scoring_config.alpha_weight
     top_n = req.scoring_config.top_n
+
+    # 与前端一致：只对勾选的公司评分排名；未勾选（空列表）则全量参与
+    if req.selected_tickers:
+        selected = set(req.selected_tickers)
+        scorecards = [sc for sc in scorecards if sc.supplier.ticker in selected]
+        if not scorecards:
+            raise HTTPException(status_code=400, detail="勾选的公司不在本次入围名单中")
+
     FinalScorer.score_all(scorecards, w_q=w_q, w_a=w_a)
+
+    # 统一排序键：final_score（推荐分），缺失则用 overall_score（见 chain/picks.py）
+    scorecards.sort(key=picks_sort_key, reverse=True)
 
     top_scorecards = scorecards[:top_n]
     ranked = []
@@ -424,6 +438,11 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
         })
 
     scoring_cfg = {"quality_weight": w_q, "alpha_weight": w_a, "top_n": top_n}
+    # 记录本次实际参评的公司：历史记录恢复时据此还原同一份名单，
+    # 否则会用全量 scorecards 重排，恢复出来的排名和当初看到的不一致。
+    evaluated = [sc.supplier.ticker for sc in scorecards]
+    if len(evaluated) < len(p2["scorecards"]):
+        scoring_cfg["evaluated_tickers"] = evaluated
     # NaN/Inf（多来自缺失财务数据的 float 字段）会让 JSON 序列化 500。
     # 与 SSE 各阶段一致，在返回/入库前统一清洗为 null（复用 _common._sanitize）。
     from bottleneck_hunter.web.streaming._common import _sanitize
@@ -435,9 +454,13 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
 
     if store:
         try:
+            # top_picks 只从本次真正参与评选的那批里选：用户勾了子集时，
+            # update_suppliers 会把全量入围名单写回去，若不显式约束，
+            # 最终推荐名单就会混进用户根本没勾选的公司。
             store.update_suppliers(
                 req.analysis_id, _sanitize([sc.model_dump() for sc in scorecards]),
                 scoring_config=scoring_cfg,
+                picks_pool=[sc.supplier.ticker for sc in scorecards],
             )
             store.set_completed_phases(req.analysis_id, 3)
         except Exception:
@@ -829,6 +852,11 @@ async def restore_history(analysis_id: str, user: dict = Depends(get_current_use
 
         # ── Phase 3: 从已保存的 scorecards 重建排名和图表数据 ──
         scoring_config = result.get("scoring_config", {"quality_weight": 0.5, "alpha_weight": 0.5})
+        # 当初只对勾选子集评的选，恢复时也只重排这批，保证名单与当初一致
+        evaluated_tickers = set(scoring_config.get("evaluated_tickers") or [])
+        if evaluated_tickers:
+            scorecards = [sc for sc in scorecards
+                          if (sc.get("supplier") or {}).get("ticker") in evaluated_tickers]
         ranked = []
         for sc in scorecards:
             final = sc.get("final") or {}

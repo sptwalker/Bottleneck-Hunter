@@ -24,6 +24,7 @@ async def stream_roundtable(
     """Phase 4.5: AI 投研圆桌会议。"""
     from bottleneck_hunter.chain.meeting_data import MeetingDataFetcher
     from bottleneck_hunter.chain.models import CrossValidationReport, SupplierScorecard
+    from bottleneck_hunter.chain.picks import passed_top
     from bottleneck_hunter.chain.roundtable import RoundtableMeeting
 
     p1 = phase_cache.get_phase(analysis_id, 1)
@@ -68,15 +69,19 @@ async def stream_roundtable(
         yield _sse("meeting_error", message="未配置验证模型")
         return
 
-    scorecards = [SupplierScorecard(**d) for d in p2["scorecards"]]
+    all_scorecards = [SupplierScorecard(**d) for d in p2["scorecards"]]
     cv_reports = [CrossValidationReport(**d) for d in p4.get("validations", [])]
 
-    def sort_key(sc):
-        if sc.final:
-            return sc.final.final_score
-        return sc.overall_score
-    scorecards.sort(key=sort_key, reverse=True)
-    scorecards = scorecards[:10]
+    # 圆桌只讨论 Phase 4 交叉验证通过的那批公司（保持「筛选→评选→验证→圆桌」同一份名单）。
+    # 没有 Phase 4 名单时退回按统一口径排序的 top 10，避免与上游口径分叉。
+    p4_tickers = [r.get("ticker", "") for r in (p4.get("recommendations") or []) if r.get("ticker")]
+    if p4_tickers:
+        wanted = set(p4_tickers)
+        scorecards = [sc for sc in all_scorecards if sc.supplier.ticker in wanted]
+    else:
+        scorecards = []
+    if not scorecards:
+        scorecards = passed_top(all_scorecards, top_n=10)
 
     chain_data = p1.get("chain") if p1 else None
     bottleneck_reports = (p1.get("top_reports") or p1.get("all_reports")) if p1 else None

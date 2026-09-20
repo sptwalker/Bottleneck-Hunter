@@ -8,7 +8,7 @@ import { toast } from './utils/toast.js';
 import { onProvidersChange, getProviders } from './settings.js';
 import { state, logMsg, clearLog, getScoreColor, scoreNeedsDarkText, SCORE_COLORS, getMainModel, formatMarkdown } from './wizard-state.js';
 import { readSSEStream } from './sse.js';
-import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, exportMeeting, MEETING_ROLES } from './ai-features.js';
+import { buildMeetingSetup, startMeeting, handleMeetingEvent, enableMeetingButton, restoreMeeting, runPreflight, toggleAiInterp, generateAiReport, fetchAiInterp, updateTriggerBtn, exportMeeting, resetMeetingPanel, MEETING_ROLES } from './ai-features.js';
 import { openDrawer, closeDrawer } from './drawer.js';
 
 // 市值上限：美股用美元、A股用人民币；推荐默认值 美股300亿 / A股500亿
@@ -249,6 +249,10 @@ function resetForNewAnalysis() {
   if (p4Prog) p4Prog.innerHTML = '';
   const p4Timer = document.getElementById('p4-timer');
   if (p4Timer) p4Timer.style.display = 'none';
+
+  // 圆桌会议面板：清空全部气泡/结果卡/状态/导出按钮。
+  // 不清就会出现「新分析里已有上一场的会议记录、讨论的却是别的公司」。
+  resetMeetingPanel();
 
   clearLog();
   updateSidebarStatus();
@@ -1185,6 +1189,9 @@ function runPhase3(wQ, wA) {
     body: JSON.stringify({
       analysis_id: state.analysisId,
       scoring_config: { quality_weight: wQ, alpha_weight: wA, top_n: topN },
+      // 把用户实际勾选的名单发给服务端：服务端按同一份子集评分排名，
+      // 否则它会用全量重排、落库的排名与界面显示的不是同一批公司。
+      selected_tickers: [...selected],
     }),
   }).then(() => {
     if ((state.config.completed_phases || 0) < 3) {
@@ -2001,7 +2008,15 @@ async function loadWizardAnalysis(analysisId) {
       const wQ = p3.scoring_config?.quality_weight ?? 0.4;
       const wA = p3.scoring_config?.alpha_weight ?? 0.6;
       const topN = p3.scoring_config?.top_n ?? 5;
-      const allRanked = recalcPhase3(state.phase2.scorecards, wQ, wA);
+      // 只重算当时真正入选的那批（ranked_results 里的 ticker），不用全量重排：
+      // 否则恢复出来的名单会混进当次没勾选的公司，与落库的 top_picks 对不上。
+      const rankedTickers = new Set(
+        (p3.ranked_results || []).map(r => r.supplier?.ticker || r.ticker || '').filter(Boolean)
+      );
+      const pool = rankedTickers.size > 0
+        ? state.phase2.scorecards.filter(sc => rankedTickers.has(sc.supplier?.ticker || sc.ticker || ''))
+        : state.phase2.scorecards;
+      const allRanked = recalcPhase3(pool, wQ, wA);
       const ranked = allRanked.slice(0, topN);
       state.phase3 = { ranked_results: ranked, scoring_config: p3.scoring_config };
       renderPhase3Table(ranked, openPhaseDrawer);
