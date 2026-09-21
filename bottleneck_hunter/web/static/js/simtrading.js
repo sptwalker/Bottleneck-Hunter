@@ -13,6 +13,7 @@ const stState = {
   loading: false,
   market: 'us_stock',
   chartEquity: null,
+  chartPositions: null,
   equityDays: 30,
   tradesPage: 0,
   tradesLimit: 50,
@@ -226,6 +227,7 @@ async function loadPositionsTab() {
 }
 
 function renderPositions(positions) {
+  renderPositionsChart(positions);
   const tbody = document.getElementById('st-positions-body');
   const empty = document.getElementById('st-positions-empty');
   if (!tbody) return;
@@ -252,6 +254,42 @@ function renderPositions(positions) {
       `<td>${deleteBtn}</td>` +
       `</tr>`;
   }).join('');
+}
+
+// 持仓比例环形图：按市值分片（已清仓/0市值不入图），tooltip 显示市值+占比
+function renderPositionsChart(positions) {
+  const container = document.getElementById('st-positions-chart');
+  if (!container) return;
+  const held = (positions || []).filter(p => (p.market_value || 0) > 0);
+  if (!held.length) { container.style.display = 'none'; return; }
+  container.style.display = '';
+  if (typeof echarts === 'undefined') {
+    container.innerHTML = '<p class="st-empty-hint">图表库未加载，请刷新重试</p>';
+    return;
+  }
+  // getInstanceByDom 兜底：容器若曾被 innerHTML 覆盖，旧实例已失效需重新 init
+  if (!stState.chartPositions || stState.chartPositions.isDisposed?.()) {
+    stState.chartPositions = echarts.getInstanceByDom(container) || echarts.init(container);
+  }
+  const data = held
+    .map(p => ({ name: p.ticker, value: Number(p.market_value) || 0, weight: p.weight_pct }))
+    .sort((a, b) => b.value - a.value);
+  stState.chartPositions.setOption({
+    tooltip: {
+      trigger: 'item',
+      formatter: p => `${p.name}<br/>市值: $${fmtNum(p.value, 2)}<br/>占比: ${fmtNum(p.percent, 1)}%`,
+    },
+    legend: { type: 'scroll', bottom: 0, textStyle: { fontSize: 11 } },
+    series: [{
+      type: 'pie', radius: ['40%', '68%'], center: ['50%', '46%'],
+      avoidLabelOverlap: true,
+      itemStyle: { borderColor: '#fff', borderWidth: 2 },
+      label: { formatter: '{b} {d}%', fontSize: 11 },
+      data,
+    }],
+  });
+  // 视图刚从 display:none 切出时容器可能仍是 0 宽，下一帧按真实尺寸重算，免得首次切入空白
+  requestAnimationFrame(() => stState.chartPositions?.resize());
 }
 
 async function loadPositionHistory(ticker) {
@@ -606,5 +644,6 @@ export function initSimTrading() {
   // 图表resize
   window.addEventListener('resize', () => {
     stState.chartEquity?.resize();
+    stState.chartPositions?.resize();
   });
 }

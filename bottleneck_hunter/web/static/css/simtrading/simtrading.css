@@ -175,6 +175,11 @@
   padding: 16px;
 }
 
+/* 持仓比例环形图：与下方表格留出间距，无持仓时 JS 置 display:none */
+.st-pos-chart {
+  margin-bottom: 16px;
+}
+
 /* ── 表格 ── */
 .st-table {
   width: 100%;
