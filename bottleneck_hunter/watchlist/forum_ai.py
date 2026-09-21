@@ -773,7 +773,8 @@ def _pick_for_role(bound, strategy, pool, cat_map):
         return random.choice(hot or pool)
     if strategy == "holdings":  # 顾问：板主实际持仓票；空仓→高分优质
         try:
-            held = {(p.get("ticker") or "") for p in bound.get_sim_positions()}
+            _dc = bound.get_sim_account()
+            held = {(p.get("ticker") or "") for p in bound.get_sim_positions(_dc.get("id"))}
         except Exception:  # noqa: BLE001
             held = set()
         mine = [e for e in pool if e.get("ticker") in held]

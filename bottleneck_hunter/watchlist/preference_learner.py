@@ -32,7 +32,8 @@ def learn_preferences(store: WatchlistStore) -> dict[str, str]:
     preferences: dict[str, str] = {}
 
     # ── 1. 收集交易和执行计划数据 ──
-    trades = store.get_sim_trades(limit=200)
+    _dc_id = store.get_sim_account().get("id")
+    trades = store.get_sim_trades(limit=200, account_id=_dc_id)
     feedback = store.get_rejection_patterns(limit=200)
     entries = store.list_all()
 

@@ -1408,7 +1408,8 @@ _SELL_FAMILY = {"sell", "reduce", "trim", "close"}
 def _recent_executed_by_ticker(store, days=EXECUTION_COOLDOWN_DAYS) -> dict[str, list[dict]]:
     """返回 {ticker: [{side, shares, date}]}，仅含近 days 天已执行的 sim_trades。"""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    trades = store.get_sim_trades(limit=200)
+    _dc_id = store.get_sim_account().get("id")
+    trades = store.get_sim_trades(limit=200, account_id=_dc_id)
     out = {}
     for t in trades:
         ticker = t.get("ticker")
@@ -2303,16 +2304,39 @@ async def run_daily_decision(
 
     # Step 3.5: pre_l4 质量门控
     l4_blocked = False
+    l4_block_reason = ""
     if scope in ("l3l4", "full"):
         try:
             from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
 
             async for evt in run_quality_checks(store, "pre_l4"):
                 yield evt
+                d = evt.get("data", {}) if isinstance(evt.get("data"), dict) else {}
                 if evt.get("event") == "quality_check_block":
                     l4_blocked = True
+                    l4_block_reason = str(d.get("reason") or d.get("message") or "质量门红灯")
         except Exception as e:
             logger.warning("pre_l4 质量门控失败: %s", e)
+
+    # 质量门红灯＝本次 L4 零产出的明确原因。落一条 operation_log，让「被闸门拦下」在日志里
+    # 留下痕迹 —— 此前只发 SSE，容器一重启证据全丢，事后根本分不清「被拦」和「没跑」。
+    if l4_blocked:
+        try:
+            uid = getattr(store, "_user_id", "") or ""
+            if uid:
+                from bottleneck_hunter.web.oplog import record_operation
+
+                record_operation(
+                    uid, "质量门阻断 L4",
+                    # category=error 是为了让它进推送白名单（_PUSH_CATEGORIES），用户能立刻看到被拦；
+                    # result=partial 表达「跑完了但没产出」，与真异常 fail 区分。
+                    category="error",
+                    detail=f"{market}：pre_l4 质量门红灯，未生成任何新建执行方案。原因：{l4_block_reason}"[:300],
+                    result="partial", market=market,
+                    meta={"stage": "pre_l4", "reason": l4_block_reason},
+                )
+        except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响决策
+            logger.debug("质量门阻断留痕失败: %s", e)
 
     # Step 4: L4 执行方案（质量门 red 时阻断新建执行计划，避免在数据严重过期/超限下下单；
     #          A1 硬止损已生成的卖出计划不受影响，仍进入投委会）

@@ -529,21 +529,30 @@ class _SimTradingMixin:
             cur = conn.execute(q, p)
             return cur.rowcount > 0
 
-    def get_sim_trades(self, ticker: str | None = None, limit: int = 50) -> list[dict]:
+    def get_sim_trades(self, ticker: str | None = None, limit: int = 50, account_id: str | None = None) -> list[dict]:
         conn = self._connect()
         try:
-            if ticker:
+            if ticker and account_id:
+                q, p = self._filtered(
+                    "SELECT * FROM sim_trades WHERE ticker = ? AND account_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (ticker, account_id, limit),
+                )
+            elif ticker:
                 q, p = self._filtered(
                     "SELECT * FROM sim_trades WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
                     (ticker, limit),
                 )
-                rows = conn.execute(q, p).fetchall()
+            elif account_id:
+                q, p = self._filtered(
+                    "SELECT * FROM sim_trades WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (account_id, limit),
+                )
             else:
                 q, p = self._filtered(
                     "SELECT * FROM sim_trades ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 )
-                rows = conn.execute(q, p).fetchall()
+            rows = conn.execute(q, p).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()

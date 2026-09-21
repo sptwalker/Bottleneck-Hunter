@@ -72,7 +72,7 @@ async def get_equity_history(days: int = 30, market: str = "us_stock", user: dic
     store = _user_store(user).for_market(market)
     account = store.get_sim_account()
     initial = account.get("initial_capital", 100000)
-    trades = store.get_sim_trades(limit=10000)
+    trades = store.get_sim_trades(limit=10000, account_id=account.get("id"))
 
     from collections import defaultdict
     daily_cash_flow = defaultdict(float)
@@ -124,7 +124,8 @@ async def delete_position(position_id: str, user: dict = Depends(get_current_use
 async def get_position_trades(ticker: str, limit: int = 50, market: str = "us_stock",
                               user: dict = Depends(get_current_user)):
     store = _user_store(user).for_market(market)
-    trades = store.get_sim_trades(ticker=ticker, limit=limit)
+    account = store.get_sim_account()
+    trades = store.get_sim_trades(ticker=ticker, limit=limit, account_id=account.get("id"))
     return {"trades": trades}
 
 
@@ -138,7 +139,8 @@ async def get_trades(ticker: str | None = None, side: str | None = None,
                      market: str = "us_stock",
                      user: dict = Depends(get_current_user)):
     store = _user_store(user).for_market(market)
-    trades = store.get_sim_trades(ticker=ticker, limit=limit)
+    account = store.get_sim_account()
+    trades = store.get_sim_trades(ticker=ticker, limit=limit, account_id=account.get("id"))
     if side:
         trades = [t for t in trades if t.get("side") == side]
     return {"trades": trades}

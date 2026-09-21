@@ -99,6 +99,7 @@ async def run_quality_checks(
     """
     checks = []
     warnings = []
+    red_detail: list[str] = []
 
     entries = store.list_all()
     if not entries:
@@ -123,6 +124,8 @@ async def run_quality_checks(
         msg = f"数据过期: {', '.join(stale_tickers[:5])}"
         severity = "red" if len(stale_tickers) > len(entries) / 2 else "yellow"
         warnings.append({"type": "data_freshness", "severity": severity, "message": msg})
+        if severity == "red":
+            red_detail.append(f"行情过期 {len(stale_tickers)}/{len(entries)} 只（{', '.join(stale_tickers[:3])}）")
 
     # P2.3 上游决策层 staleness 守卫（L1/L2 过期则警告）
     if stage in ("pre_l3", "pre_l4"):
@@ -185,17 +188,32 @@ async def run_quality_checks(
         try:
             account = store.get_sim_account()
             if account:
-                positions = store.get_sim_positions()
+                # 必须按 account_id 取持仓：sim_positions 同用户同市场下同时躺着「决策中心自有模拟盘」
+                # 与多只 VIP 真实券商账户，不过滤就会拿 VIP 的持仓市值去除以决策中心的权益，
+                # 权重虚高（实测虚报到 68%~255%）→ 仓位集中度误判红灯 → L4 被永久阻断。
+                positions = store.get_sim_positions(account.get("id"))
                 total = account.get("total_equity", 0) or account.get("current_capital", 100000)
                 if total > 0:
                     for pos in positions:
                         weight = pos.get("market_value", 0) / total * 100
+                        if weight > 100:
+                            # 单只持仓超过账户总权益＝分子分母不是同一账户（串味）或估值异常，
+                            # 这种量级不可能是真实集中度，直接判为异常而非红灯，避免又一轮静默阻断。
+                            logger.warning(
+                                "仓位检查数据异常已忽略：账户 %s 标的 %s 权重 %.1f%%（>100%%）",
+                                account.get("id"), pos.get("ticker", "?"), weight,
+                            )
+                            continue
                         if weight > 20:
                             warnings.append({
                                 "type": "position_concentration",
                                 "severity": "red" if weight > 30 else "yellow",
                                 "message": f"{pos.get('ticker', '?')} 仓位 {weight:.1f}% 超过 20% 上限",
                             })
+                            if weight > 30:
+                                red_detail.append(f"{pos.get('ticker', '?')}({weight:.1f}%)")
+            else:
+                logger.debug("仓位检查跳过：无模拟账户")
         except Exception as e:
             logger.debug("仓位检查跳过: %s", e)
 
@@ -217,6 +235,8 @@ async def run_quality_checks(
         yield _sse(event, stage=stage,
                     severity=max_severity,
                     warnings=warnings,
+                    reason=(f"仓位集中度：{'、'.join(red_detail[:5])}" if red_detail else
+                            next((w["message"] for w in warnings if w["severity"] == "red"), "")),
                     message=f"[{stage}] {len(warnings)} 项质量预警")
 
     for w in warnings:

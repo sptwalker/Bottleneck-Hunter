@@ -392,7 +392,7 @@ def _recalc_account(store: WatchlistStore, account_id: str) -> None:
     initial = account.get("initial_capital", 100000)
     total_return_pct = round((total_equity / initial - 1) * 100, 2) if initial else 0.0
 
-    trades = store.get_sim_trades(limit=10000)
+    trades = store.get_sim_trades(limit=10000, account_id=account_id)
     total_trades = len(trades)
 
     sell_trades = [t for t in trades if t.get("side") == "sell"]

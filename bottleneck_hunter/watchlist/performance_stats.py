@@ -18,7 +18,8 @@ class PerformanceCalculator:
 
     def compute_overview(self) -> dict:
         """总览指标：总交易数、胜率、总收益率、平均持仓天数、最佳/最差交易"""
-        trades = self._store.get_sim_trades(limit=10000)
+        _dc_id = self._store.get_sim_account().get("id")
+        trades = self._store.get_sim_trades(limit=10000, account_id=_dc_id)
         reviews = self._store.get_auto_reviews(limit=10000)
 
         sell_trades = [t for t in trades if t.get("side") == "sell"]
@@ -65,7 +66,7 @@ class PerformanceCalculator:
     def compute_monthly_series(self, months: int = 6) -> list[dict]:
         """近 N 月绩效序列"""
         reviews = self._store.get_auto_reviews(limit=10000)
-        trades = self._store.get_sim_trades(limit=10000)
+        trades = self._store.get_sim_trades(limit=10000, account_id=self._store.get_sim_account().get("id"))
 
         monthly: dict[str, list] = defaultdict(list)
         for r in reviews:
@@ -106,7 +107,7 @@ class PerformanceCalculator:
         """最大回撤（从权益曲线计算）"""
         account = self._store.get_sim_account()
         initial = account.get("initial_capital", 100000)
-        trades = self._store.get_sim_trades(limit=10000)
+        trades = self._store.get_sim_trades(limit=10000, account_id=account.get("id"))
 
         daily_cf: dict[str, float] = defaultdict(float)
         for t in trades:
@@ -157,7 +158,7 @@ class PerformanceCalculator:
                 by_ticker[ticker].append(r.get("return_pct", 0))
 
         if not by_ticker:
-            trades = self._store.get_sim_trades(limit=10000)
+            trades = self._store.get_sim_trades(limit=10000, account_id=self._store.get_sim_account().get("id"))
             buy_trades = [t for t in trades if t.get("side") == "buy"]
             for t in trades:
                 if t.get("side") == "sell":

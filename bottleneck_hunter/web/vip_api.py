@@ -581,7 +581,7 @@ async def get_account_log(market: str = "us_stock", account_ref: str = "",
                           user: dict = Depends(require_vip_unlocked)):
     """账户日志：逐条自动推算 / 校准 / 异常 / 结算记录（供账户日志窗口渲染）。"""
     wl = _wl(user, market)
-    return {"log": wl.list_account_log(account_ref=account_ref, event_type=event_type, limit=limit)}
+    return {"log": wl.list_account_log(account_ref=_resolve_ref(wl, account_ref), event_type=event_type, limit=limit)}
 
 
 @router.get("/account/staleness")
@@ -592,7 +592,7 @@ async def get_account_staleness(market: str = "us_stock", account_ref: str = "",
 
     from bottleneck_hunter.vip import portfolio
     wl = _wl(user, market)
-    ref = (account_ref or "").strip()
+    ref = _resolve_ref(wl, account_ref)
 
     # 最近一次真值校准日：positions 有非零持仓 → 取其 MAX(as_of_date)；
     # 纯衍生品账户(positions 空)→ 回落最新结单期末日(与价值曲线锚点同源)。
@@ -852,6 +852,7 @@ async def list_reports(market: str = "us_stock", limit: int = 20,
     payload_json.data_anchors)；current_anchors 为当前最新锚点，前端据此判"有更新数据即过期"。
     """
     wl = _wl(user, market)
+    account_ref = _resolve_ref(wl, account_ref)
     conn = wl._connect()
     try:
         q, p = wl._filtered(

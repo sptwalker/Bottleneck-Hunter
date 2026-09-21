@@ -44,8 +44,9 @@ def _resolve(store, account_ref: str) -> str:
     if hasattr(store, "resolve_vip_account_ref"):
         try:
             return store.resolve_vip_account_ref(account_ref)
-        except Exception:  # noqa: BLE001 —— 无账户/多账户未指定时，退回原值（走默认档）
-            pass
+        except ValueError as e:
+            if "多个账户" in str(e):
+                raise  # 多账户未指定时必须报错，不能静默落到默认档（会串味）
     return (account_ref or "").strip()
 
 
