@@ -14,6 +14,7 @@ const stState = {
   market: 'us_stock',
   chartEquity: null,
   chartPositions: null,
+  chartAccount: null,
   equityDays: 30,
   tradesPage: 0,
   tradesLimit: 50,
@@ -221,6 +222,12 @@ async function loadPositionsTab() {
     const positions = data.positions || [];
     stState.positions = positions;
     renderPositions(positions);
+    // 现金取账户余额（/positions 不含现金），best-effort：拿不到就退化成纯持仓饼图
+    let cash = stState.account?.cash_balance;
+    if (cash == null) {
+      try { cash = (await stFetch('/account')).account?.cash_balance; } catch { cash = null; }
+    }
+    renderAccountChart(positions, cash);
   } catch (e) {
     console.error('加载持仓失败:', e);
   }
@@ -290,6 +297,43 @@ function renderPositionsChart(positions) {
   });
   // 视图刚从 display:none 切出时容器可能仍是 0 宽，下一帧按真实尺寸重算，免得首次切入空白
   requestAnimationFrame(() => stState.chartPositions?.resize());
+}
+
+// 账户配置饼图：各持仓市值 + 现金，展示整个账户的资产分布（含现金仓位）
+function renderAccountChart(positions, cash) {
+  const container = document.getElementById('st-account-chart');
+  if (!container) return;
+  const held = (positions || []).filter(p => (p.market_value || 0) > 0);
+  const cashVal = Number(cash) || 0;
+  // 无任何资产（无持仓且现金拿不到/为 0）时隐藏
+  if (!held.length && cashVal <= 0) { container.style.display = 'none'; return; }
+  container.style.display = '';
+  if (typeof echarts === 'undefined') {
+    container.innerHTML = '<p class="st-empty-hint">图表库未加载，请刷新重试</p>';
+    return;
+  }
+  if (!stState.chartAccount || stState.chartAccount.isDisposed?.()) {
+    stState.chartAccount = echarts.getInstanceByDom(container) || echarts.init(container);
+  }
+  const data = held
+    .map(p => ({ name: p.ticker, value: Number(p.market_value) || 0 }))
+    .sort((a, b) => b.value - a.value);
+  if (cashVal > 0) data.push({ name: '现金', value: cashVal, itemStyle: { color: '#94a3b8' } });
+  stState.chartAccount.setOption({
+    tooltip: {
+      trigger: 'item',
+      formatter: p => `${p.name}<br/>金额: $${fmtNum(p.value, 2)}<br/>占比: ${fmtNum(p.percent, 1)}%`,
+    },
+    legend: { type: 'scroll', bottom: 0, textStyle: { fontSize: 11 } },
+    series: [{
+      type: 'pie', radius: '68%', center: ['50%', '46%'],
+      avoidLabelOverlap: true,
+      itemStyle: { borderColor: '#fff', borderWidth: 2 },
+      label: { formatter: '{b} {d}%', fontSize: 11 },
+      data,
+    }],
+  });
+  requestAnimationFrame(() => stState.chartAccount?.resize());
 }
 
 async function loadPositionHistory(ticker) {
@@ -645,5 +689,6 @@ export function initSimTrading() {
   window.addEventListener('resize', () => {
     stState.chartEquity?.resize();
     stState.chartPositions?.resize();
+    stState.chartAccount?.resize();
   });
 }

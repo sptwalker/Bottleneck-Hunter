@@ -180,6 +180,28 @@
   margin-bottom: 16px;
 }
 
+/* 双饼图：桌面并排，窄屏自动堆叠 */
+.st-pos-charts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.st-pos-chart-box {
+  flex: 1 1 300px;
+  min-width: 0;
+}
+.st-pos-chart-box .st-pos-chart {
+  margin-bottom: 0;
+}
+.st-pos-chart-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--st-text-muted, #64748b);
+  margin-bottom: 8px;
+  text-align: center;
+}
+
 /* ── 表格 ── */
 .st-table {
   width: 100%;
