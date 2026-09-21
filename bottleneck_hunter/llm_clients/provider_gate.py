@@ -9,6 +9,9 @@ provider_gate（本模块）：**认证失败/限流严重** → 在配置中心
 - 认证失败(密钥无效)      → 1 击即禁（disabled_auth）
 - 频率限制/额度不足        → _RL_WINDOW 内累计 _RL_STRIKES 次才禁（disabled_ratelimit），躲开偶发限流
 - 请求超时                → _TIMEOUT_WINDOW 内累计 _TIMEOUT_STRIKES(3) 次才禁（disabled_timeout），躲开偶发抖动
+- 请求错误(400/404/422)   → _BADREQ_WINDOW 内累计 _BADREQ_STRIKES(3) 次才禁（disabled_badrequest）：
+                            确定性客户端错误（参数非法/模型不存在/不支持）重试必再失败，阈值躲开
+                            偶发单请求超长，节点级全撞则沉默出局，不再每轮白撞刷屏（如 kimi-k3 拒 temperature）
 - 成功                    → 清该节点的 strike 计数（不动持久禁用，那须人工/测试恢复）
 
 恢复：
@@ -33,24 +36,29 @@ _AUTH_REASON = "认证失败(密钥无效)"      # 必须与 fallback.classify_r
 _RL_REASON = "频率限制/额度不足"
 _TIMEOUT_REASON = "请求超时"            # 同上：与 classify_reason 完全一致
 _ARREARS_REASON = "余额欠费"            # 同上：与 classify_reason 完全一致
+_BADREQ_REASON = "请求错误"            # 同上：确定性 4xx 客户端错误（参数/模型/特性不支持）
 _STATUS_AUTH = "disabled_auth"
 _STATUS_RL = "disabled_ratelimit"
 _STATUS_TIMEOUT = "disabled_timeout"
 _STATUS_ARREARS = "disabled_arrears"
+_STATUS_BADREQ = "disabled_badrequest"
 
 _RL_STRIKES = 5        # 限流达此次数才判「严重」→ 禁用
 _RL_WINDOW = 600.0     # 秒：strike 计数滑窗（超窗的旧 strike 丢弃）
 _TIMEOUT_STRIKES = 3   # 超时达此次数（用户指定：3 次以上）→ 禁用
 _TIMEOUT_WINDOW = 600.0
+_BADREQ_STRIKES = 3    # 确定性请求错误达此次数 → 禁用（阈值躲开偶发单请求超长/瞬时坏 payload）
+_BADREQ_WINDOW = 600.0
 _CACHE_TTL = 30.0      # 秒：is_disabled/disabled_info 进程内缓存 TTL
 
 # 禁用态展示标签 / 须过流量测试才恢复的状态（认证仅重存 key 即恢复；限流+超时+欠费须测试）
 _STATUS_LABEL = {_STATUS_AUTH: "密钥失效", _STATUS_RL: "限流严重",
-                 _STATUS_TIMEOUT: "超时频发", _STATUS_ARREARS: "余额欠费"}
-_TEST_REQUIRED = (_STATUS_RL, _STATUS_TIMEOUT, _STATUS_ARREARS)
+                 _STATUS_TIMEOUT: "超时频发", _STATUS_ARREARS: "余额欠费",
+                 _STATUS_BADREQ: "请求错误频发"}
+_TEST_REQUIRED = (_STATUS_RL, _STATUS_TIMEOUT, _STATUS_ARREARS, _STATUS_BADREQ)
 
 _lock = threading.Lock()
-# strike 时间戳滑窗，按类别隔离：(uid, provider, cat) → [monotonic, ...]，cat ∈ {"rl","to"}
+# strike 时间戳滑窗，按类别隔离：(uid, provider, cat) → [monotonic, ...]，cat ∈ {"rl","to","br"}
 # 分类隔离确保 2 次超时 + 3 次限流不会相加误触发某一阈值。
 _strikes: dict[tuple, list] = {}
 # 禁用态缓存：(uid, provider) → (expire_monotonic, info|None)
@@ -86,7 +94,7 @@ def _clear_strikes(uid: str, provider: str) -> None:
     """清该节点全部类别的 strike 计数（成功/禁用/解除时调）。"""
     p = _norm(provider)
     with _lock:
-        for cat in ("rl", "to"):
+        for cat in ("rl", "to", "br"):
             _strikes.pop((uid or "", p, cat), None)
 
 
@@ -249,6 +257,12 @@ def record_result(uid: str, provider: str, ok: bool, reason: str = "", model: st
         if _bump_strike(uid, p, "to", _TIMEOUT_WINDOW, _TIMEOUT_STRIKES):
             _do_disable(uid, p, _STATUS_TIMEOUT, reason, f"{_TIMEOUT_WINDOW:.0f}s 内超时 {_TIMEOUT_STRIKES}+ 次", model=model)
         return
+    if reason == _BADREQ_REASON:
+        # 确定性 4xx：重试必再失败。阈值躲开偶发单请求超长；节点级全撞则沉默出局，
+        # 须重配（如换支持 temperature 的模型）+ 过流量测试恢复。
+        if _bump_strike(uid, p, "br", _BADREQ_WINDOW, _BADREQ_STRIKES):
+            _do_disable(uid, p, _STATUS_BADREQ, reason, f"{_BADREQ_WINDOW:.0f}s 内请求错误 {_BADREQ_STRIKES}+ 次", model=model)
+        return
     # 其它原因（连接/服务端 5xx 等）不升级为持久禁用——交给 health.py 的临时冷却即可
 
 
@@ -351,6 +365,26 @@ def _selfcheck() -> None:
         assert is_disabled("u1", "kimi")
         assert clear("u1", "kimi")                # 过流量测试后 clear 清除
         assert not is_disabled("u1", "kimi")
+
+        # 请求错误(确定性 4xx)：未达阈值不禁，达 _BADREQ_STRIKES(3) 才禁；非硬死；须过流量测试
+        _reset_for_test()
+        for _ in range(_BADREQ_STRIKES - 1):
+            record_result("u1", "kimi", False, _BADREQ_REASON, model="kimi-k3")
+        assert not is_disabled("u1", "kimi"), "未达请求错误阈值不应禁"
+        record_result("u1", "kimi", False, _BADREQ_REASON, model="kimi-k3")   # 第 _BADREQ_STRIKES 次
+        assert is_disabled("u1", "kimi") and disabled_info("u1", "kimi")["status"] == _STATUS_BADREQ
+        assert "kimi-k3" in (disabled_info("u1", "kimi").get("detail") or ""), "失败模型名须落进 detail"
+        assert not is_hard_disabled("u1", "kimi")   # 请求错误=非硬死（绝境可重试）
+        assert not clear_auth_disable("u1", "kimi"), "请求错误禁用不因重存 key 而清"
+        assert clear("u1", "kimi")
+        assert not is_disabled("u1", "kimi")
+        # 成功重置请求错误计数
+        _reset_for_test()
+        for _ in range(_BADREQ_STRIKES - 1):
+            record_result("u1", "kimi", False, _BADREQ_REASON)
+        record_result("u1", "kimi", True)          # 成功清零
+        record_result("u1", "kimi", False, _BADREQ_REASON)
+        assert not is_disabled("u1", "kimi"), "成功后应重新计数"
 
         # 欠费：1 击即禁；但须过流量测试才恢复（重存 key 不清，与认证不同）
         _reset_for_test()

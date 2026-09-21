@@ -170,6 +170,11 @@ def classify_reason(exc: Exception) -> str:
         return "服务端错误"
     if "timeout" in msg or "timed out" in msg:
         return "请求超时"
+    # 确定性客户端错误（400/404/422：参数非法/模型不存在/不支持特性）——重试必再失败。
+    # 须与前面的认证(401/403)/欠费(402)/限流(429) 分支区分：那些各有专门处置，
+    # 落到这里的 4xx 是「请求本身错」，不该当可自愈的偶发异常每轮白撞刷屏，交熔断阈值沉默出局。
+    if isinstance(status, int) and status in (400, 404, 422):
+        return "请求错误"
     return "调用异常"
 
 
@@ -354,9 +359,12 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
                               user_id: str = "", temperature: float = 0.3) -> list:
     """构造备选候选列表（不含主模型）：**当前用户**的主模型 provider 前置，其后接用户全部已注册
     provider + 应急链；仅取当前用户已配 KEY、未被该用户熔断、且不同于主模型的 provider
-    （严格用户级隔离）。不再查全局 is_active（管理员禁用不阻断他人）；不再只提供硬编码应急链——
-    否则主模型失效时，用户配的其它 provider 无法被自动替换。候选以 max_retries=0 构造（快速失败，
-    单次尝试 + 内部硬超时 + 立即切换，消灭对挂死节点的重复等待）。"""
+    （严格用户级隔离）。不再只提供硬编码应急链——否则主模型失效时，用户配的其它 provider 无法被
+    自动替换。候选以 max_retries=0 构造（快速失败，单次尝试 + 内部硬超时 + 立即切换，消灭对挂死
+    节点的重复等待）。
+    管理员在配置中心禁用(is_active=0)的 provider **排除出自动替换池**：那是「平台下线该节点」的意思，
+    系统不该把请求自动切到已下线的节点。（区别于用户「显式主模型」——那走 create_llm 直路，不查
+    is_active，仍尊重用户的显式选择；「管理员禁用不阻断他人」只护显式选型，不护自动兜底目标。）"""
     # 延迟导入避免与 factory 循环依赖
     from bottleneck_hunter.auth.current_user import get_current_user_id
     from bottleneck_hunter.llm_clients import provider_gate
@@ -364,6 +372,7 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
         _FALLBACK_CHAIN,
         _user_has_llm_key,
         create_llm,
+        is_provider_active,
         list_custom_provider_ids,
         resolve_primary_for_user,
         resolve_provider_model,
@@ -386,6 +395,8 @@ def build_fallback_candidates(primary_provider: str, primary_model: str,
             continue
         seen.add(provider)
         if provider_gate.is_disabled(uid, provider):  # 跳过认证失效/限流严重被该用户持久禁用的节点
+            continue
+        if not is_provider_active(provider):  # 管理员在配置中心禁用(is_active=0)的节点：不作自动替换目标
             continue
         if not _user_has_llm_key(provider, uid):  # 严格：只用当前用户自己配了 KEY 的备选
             continue
@@ -439,7 +450,39 @@ def _selfcheck() -> None:
     assert classify_reason(Exception("Your credit balance is too low")) == "余额欠费"
     assert classify_reason(Exception("This organization has been disabled due to arrearage")) == "余额欠费"
     assert classify_reason(Exception("rate limit exceeded")) == "频率限制/额度不足"
+    _selfcheck_admin_disabled_excluded()
     print("fallback selfcheck OK; reason=", notes[0]["reason"], "replaced=", notes[0]["replaced"])
+
+
+def _selfcheck_admin_disabled_excluded() -> None:
+    """assert：管理员在配置中心禁用(is_active=0)的 provider 不得进自动替换候选池。"""
+    from bottleneck_hunter.auth import current_user
+    from bottleneck_hunter.llm_clients import factory, provider_gate
+    saved = {k: getattr(factory, k) for k in
+             ("_user_has_llm_key", "list_custom_provider_ids", "resolve_provider_model",
+              "resolve_primary_for_user", "create_llm")}
+    saved_uid = current_user.get_current_user_id
+    saved_disabled = provider_gate.is_disabled
+    saved_inactive = set(factory._INACTIVE_PROVIDERS)
+    try:
+        factory.set_provider_status(["baddie"])          # baddie 被管理员禁用(is_active=0)
+        factory._user_has_llm_key = lambda p, u="": True
+        factory.list_custom_provider_ids = lambda: ["baddie", "goodie"]
+        factory.resolve_provider_model = lambda p, u="": "model-x"
+        factory.resolve_primary_for_user = lambda u="": ""
+        factory.create_llm = lambda *a, **k: object()    # dummy llm，不真连
+        current_user.get_current_user_id = lambda: "u1"
+        provider_gate.is_disabled = lambda u, p: False    # 排除熔断影响，只验 is_active 门
+        out = build_fallback_candidates("someprimary", "m", user_id="u1")
+        provs = [c[1] for c in out]
+        assert "baddie" not in provs, ("管理员禁用节点不该进自动替换池", provs)
+        assert "goodie" in provs, ("未禁用节点应仍可作备选", provs)
+    finally:
+        for k, v in saved.items():
+            setattr(factory, k, v)
+        current_user.get_current_user_id = saved_uid
+        provider_gate.is_disabled = saved_disabled
+        factory.set_provider_status(saved_inactive)
 
 
 if __name__ == "__main__":

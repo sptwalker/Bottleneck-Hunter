@@ -312,6 +312,19 @@ def create_llm(
     return FallbackChatModel(candidates=[(llm, pid, resolved_model), *backups])
 
 
+# 「推理型」模型只接受默认 temperature=1：显式下发 0.3 会被 HTTP 400 拒
+# （kimi-k 系列 / OpenAI o1–o4 / gpt-5 推理档，Moonshot 报 "invalid temperature:
+# only 1 is allowed for this model"）。命中即剔除 temperature，交服务端默认值。
+# ponytail: 静态族名匹配；新推理模型来了在此补一项即可。漏网的会被 provider_gate
+#           的确定性 400 熔断兜住（沉默出局而非每轮白撞），非致命。
+_TEMPERATURE_LOCKED = ("kimi-k", "kimi-thinking", "gpt-5", "o1-", "o3-", "o4-")
+
+
+def _rejects_custom_temperature(model: str) -> bool:
+    m = (model or "").lower()
+    return any(pat in m for pat in _TEMPERATURE_LOCKED)
+
+
 def _create_raw_llm(
     provider: str,
     model: str,
@@ -338,6 +351,10 @@ def _create_raw_llm(
         key = _resolve_user_llm_key(provider, uid)
     if not model:
         model = resolve_provider_model(provider, user_id)
+    # 推理型模型拒绝自定义 temperature → 剔除，交服务端默认（见 _TEMPERATURE_LOCKED）。
+    # 覆盖主模型(create_llm 直建)与全部备选(build_fallback_candidates 也走本函数)——单点即全链。
+    if _rejects_custom_temperature(model):
+        kwargs.pop("temperature", None)
     resolved_base = base_url or resolve_provider_base_url(provider, user_id)
 
     # 无 KEY 且非 KEYLESS provider（如 ollama）→ 严格失败，不兜底

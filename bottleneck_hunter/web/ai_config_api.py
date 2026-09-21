@@ -247,7 +247,8 @@ async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
             info = provider_gate.disabled_info(uid, provider)
             if info:
                 label = {"disabled_auth": "密钥失效", "disabled_ratelimit": "限流严重",
-                         "disabled_timeout": "超时频发", "disabled_arrears": "余额欠费"}.get(
+                         "disabled_timeout": "超时频发", "disabled_arrears": "余额欠费",
+                         "disabled_badrequest": "请求错误频发"}.get(
                     info.get("status", ""), "异常")
                 resp["warn"] = (f"连通正常，但该节点仍处于「{label}」禁用中，决策链暂不会调用它。"
                                 f"请点「测试并恢复」通过流量测试后才会解除禁用。")
