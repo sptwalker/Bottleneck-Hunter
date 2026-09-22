@@ -1077,6 +1077,31 @@ async def run_deviation_check(
         prompt_template = _load_prompt("decision_deviation_check")
         # B7: 确定性计算偏离度，代替 LLM 心算；注入数值让 LLM 只做叙述与优先级
         drift = _compute_deviation_drift(store, plan.get("result_json", {}), account, positions, market)
+
+        # P0-1 扩张侧信号（只算不拦、纯观测）：实际权益低于 regime 权益下限时，量化"配置不足"缺口。
+        # 与收缩侧的天花板校验(validate_against_regime)对称，先让缺口在偏离报告/日志里可见，
+        # 供后续缺口驱动器(P0-2)消费。ponytail: 观测阶段不下任何单，确认缺口计算准确再接执行。
+        underweight_gap: dict = {}
+        try:
+            from bottleneck_hunter.watchlist.constraint_validator import compute_underweight_gap
+            _macro = store.get_latest_macro_strategy()
+            if _macro:
+                _mj = _macro.get("result_json", {}) or {}
+                _bounds = get_allocation_bounds(
+                    _mj.get("regime", "sideways"),
+                    _mj.get("risk_appetite", "balanced"),
+                    _mj.get("regime_confidence", 5),
+                )
+                underweight_gap = compute_underweight_gap(account, positions, _bounds)
+                if underweight_gap.get("underweight"):
+                    logger.info(
+                        "L2 偏离：权益配置不足 实际 %.1f%% < 下限 %s%%，缺口 %.1fpct，可部署 %.0f",
+                        underweight_gap["equity_pct"], underweight_gap["equity_min"],
+                        underweight_gap["gap_pct"], underweight_gap["deployable_cash"],
+                    )
+        except Exception:
+            logger.debug("underweight gap 计算跳过", exc_info=True)
+
         prompt = (
             prompt_template.replace("{strategic_plan}", json.dumps(plan.get("result_json", {}), ensure_ascii=False))
             .replace("{computed_drift}", json.dumps(drift, ensure_ascii=False))
@@ -1113,6 +1138,7 @@ async def run_deviation_check(
             action="deviation_check",
             rebalance_needed=rebalance_needed,
             deviation_pct=drift["max_abs_drift_pct"],
+            underweight_gap=underweight_gap,
             commentary=result.get("commentary", ""),
             message=f"L2 偏离检查完成：{'需要调仓' if rebalance_needed else '在容忍范围内'}（最大偏离 {drift['max_abs_drift_pct']}%）",
         )

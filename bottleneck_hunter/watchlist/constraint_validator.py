@@ -512,3 +512,54 @@ def validate_against_regime(
         logger.warning("Regime 约束校验失败 %s: %s", plan.get("id", "?"), "; ".join(result.violations))
 
     return result
+
+
+def compute_underweight_gap(
+    account: dict,
+    positions: list[dict],
+    regime_bounds: dict,
+) -> dict:
+    """扩张侧信号（P0-1，只算不拦）：实际权益低于 regime 权益下限时，量化"配置不足"缺口。
+
+    与 validate_against_regime 的天花板校验对称——后者拦"买超上限"，本函数产出
+    "距下限还差 N%、可部署 M 元"的信号，供缺口驱动器(P0-2)/偏离报告消费。
+    纯确定性、组合级（不依赖任何单笔买入计划），不触发拦截、不改任何卖出逻辑。
+    """
+    gap = {
+        "underweight": False,
+        "equity_pct": 0.0,
+        "equity_min": 0.0,
+        "gap_pct": 0.0,
+        "cash_pct": 0.0,
+        "cash_max": 0.0,
+        "deployable_cash": 0.0,
+    }
+    if not regime_bounds:
+        return gap
+
+    total_equity = account.get("total_equity") or account.get("current_capital", 100000)
+    if total_equity <= 0:
+        return gap
+
+    position_value = sum(p.get("market_value", 0) or 0 for p in positions)
+    equity_pct = position_value / total_equity * 100
+    cash_balance = account.get("cash_balance", 0) or 0
+    cash_pct = cash_balance / total_equity * 100
+
+    equity_min = regime_bounds.get("equity_min", 0)
+    cash_max = regime_bounds.get("cash_max", 100)
+
+    gap["equity_pct"] = round(equity_pct, 2)
+    gap["equity_min"] = equity_min
+    gap["cash_pct"] = round(cash_pct, 2)
+    gap["cash_max"] = cash_max
+
+    if equity_pct < equity_min:
+        gap_pct = equity_min - equity_pct
+        # 缺口名义金额受可用现金封顶——不可能部署超过手头现金。deployable_cash 是驱动器的实际弹药。
+        gap_dollars = gap_pct / 100 * total_equity
+        gap["underweight"] = True
+        gap["gap_pct"] = round(gap_pct, 2)
+        gap["deployable_cash"] = round(min(gap_dollars, cash_balance), 2)
+
+    return gap
