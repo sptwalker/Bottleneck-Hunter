@@ -679,12 +679,17 @@ def get_job_statuses() -> list[dict]:
 # SSE drain helper (for background scheduled jobs)
 # ---------------------------------------------------------------------------
 
-async def _drain_sse(gen: AsyncGenerator) -> bool:
+async def _drain_sse(gen: AsyncGenerator, summary: dict | None = None) -> bool:
     """消费 SSE AsyncGenerator 到底，仅记录关键事件。
 
     返回 had_fatal：本次是否出现「无可用 LLM」致命中断（整条决策链因 LLM 全不可用而未产出）。
     决策类 job 据此把假成功心跳翻成 error → 触发守卫超期/异常补跑（否则静默 success 掩盖停摆，
     正是生产 57 天冻结事故的第二根因）。非决策类 caller 忽略返回值即可，行为不变。
+
+    summary：可选，传入 `decision_report.empty_summary()` 的 dict 时，会把本轮决策的终态事实
+    （L4 是否产出 / 是否被质量门红灯阻断 / L4 提前返回的原话）就地累加进去，供
+    `decision_report.report_daily_decision` 生成「每日决策回执」——否则用户只能看到一条
+    success，分不清「正常运行但没操作」和「被闸门拦下没产出」。
     """
     had_fatal = False
     async for evt in gen:
@@ -696,6 +701,13 @@ async def _drain_sse(gen: AsyncGenerator) -> bool:
                 continue
         if isinstance(data, dict):
             event_type = data.get("event", evt.get("event", ""))
+            if summary is not None:
+                try:
+                    from bottleneck_hunter.watchlist.decision_report import summarize_event
+
+                    summarize_event({**data, "event": event_type}, summary)
+                except Exception:  # noqa: BLE001 —— 回执统计绝不拖垮决策
+                    pass
             if "error" in event_type:
                 logger.warning("Scheduled task SSE error: %s", data)
                 if "无可用 LLM" in str(data.get("error", "")):
@@ -732,10 +744,18 @@ async def job_macro_update() -> None:
 
 
 async def job_daily_decision(market: str = "us_stock") -> None:
-    """每日自动决策：运行完整 L1→L4→投委会流程（多用户）。"""
+    """每日自动决策：运行完整 L1→L4→投委会流程（多用户）。
+
+    ponytail: 跑完必须落一条「每日决策回执」（report_daily_decision），因为本函数原先只把
+    「无可用 LLM」当失败，导致「质量门红灯阻断 L4」「无 L3 战术计划」等零产出形态一律记成
+    success +「N 只标的完成 L1→L4+投委会」，用户看到 success 却连续多日没有任何执行方案
+    （生产实测：美股 L4 因此静默停摆多日）。回执里「✅ 运行正常·本次无操作」与「⛔ 被阻断」
+    文案刻意不同，就是让这两件事不可能再被看混。
+    """
     # ponytail: had_fatal 须循环外累积、末尾统一抛错——若在 per-user try 内 raise，会被本函数
     # 自己的 except 立刻吞掉，job 心跳恒 success，守卫「据 error 心跳补跑」机制形同虚设（曾如此）。
     fatal_users: list[str] = []
+    blocked_users: list[str] = []
     for uid, store, budget in _iter_users("daily_decision"):
         try:
             by_market = store.get_tickers_by_market()
@@ -746,17 +766,33 @@ async def job_daily_decision(market: str = "us_stock") -> None:
             label = f"user={uid[:8]}" if uid else "global"
             logger.info("Daily decision (%s/%s) starting for %d tickers", market, label, len(tickers))
             from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
-            had_fatal = await _drain_sse(run_daily_decision(store, budget, scope="full", market=market))
+            from bottleneck_hunter.watchlist.decision_report import (
+                empty_summary,
+                report_daily_decision,
+            )
+
+            summary = empty_summary()
+            had_fatal = await _drain_sse(
+                run_daily_decision(store, budget, scope="full", market=market), summary
+            )
             if had_fatal:
                 # 决策链无可用 LLM＝该用户未完成刷新：记 oplog + 标记，待循环末尾统一抛错（勿在此 raise）。
                 fatal_users.append(label)
                 _oplog(uid, "日常决策", market=market, error=f"{market} 决策链无可用 LLM")
                 continue
             logger.info("Daily decision (%s/%s) completed", market, label)
-            _oplog(uid, "日常决策", market=market, detail=f"{len(tickers)} 只标的完成 L1→L4+投委会")
+            # 每日决策回执：区分「跑了但没操作」「被质量门阻断」「没跑到 L4」，不再一律记 success。
+            report_daily_decision(uid, market, summary, ticker_count=len(tickers))
+            if summary.get("quality_blocked"):
+                blocked_users.append(label)
         except Exception as e:
             logger.error("Daily decision (%s/user=%s) failed: %s", market, uid[:8] if uid else "global", e)
             _oplog(uid, "日常决策", market=market, error=str(e))
+    if blocked_users:
+        # 质量门红灯＝本次未产出任何新建执行方案。**刻意不抛错**：红灯是「数据过期/仓位超限」
+        # 这类正常守卫，抛错会触发守卫补跑而补跑同样被拦，只会刷屏；但必须留痕，
+        # 否则运维在心跳里看不到「已连续 N 天被阻断」。
+        logger.warning("日常决策被质量门阻断（%s）：用户 %s", market, ", ".join(blocked_users))
     if fatal_users:
         # 各用户已各自跑完（隔离保留），但存在「无 LLM 未完成」→ 抛错置 job 心跳 error，守卫下轮补跑。
         raise RuntimeError(f"日常决策未完成：{market} 决策链无可用 LLM（用户 {', '.join(fatal_users)}）")

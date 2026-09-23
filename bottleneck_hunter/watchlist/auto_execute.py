@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncGenerator
 
@@ -32,6 +33,17 @@ def _sse(event: str, **data) -> dict:
     return {"event": event, "data": {"event": event, **data}}
 
 
+def _is_mandate_exception(ex: dict) -> bool:
+    """该执行计划是否标了「越过 L2 目标授权」（P0-4 机会驱动）——这类必须人工确认。"""
+    rj = ex.get("result_json") or {}
+    if isinstance(rj, str):  # 防御：某些读路径可能给原始字符串
+        try:
+            rj = json.loads(rj)
+        except (ValueError, TypeError):
+            return False
+    return bool(rj.get("mandate_exception"))
+
+
 async def auto_execute_pending(store, market: str) -> AsyncGenerator[dict, None]:
     """把当前市场所有待确认执行计划逐条自动成交（confirm+execute 同一条闭环）。
 
@@ -41,12 +53,22 @@ async def auto_execute_pending(store, market: str) -> AsyncGenerator[dict, None]
     from bottleneck_hunter.watchlist.trade_executor import confirm_and_execute
 
     pending = store.get_pending_executions()
+    # P0-4：机会驱动越过 L2 目标授权的计划必须人工确认——自动执行对它一律让路，永远不免确认。
+    # 这是护栏的最后一道：护栏①~③ 都在 L3/L4 生成侧，只有这里能拦住「开关一开就全自动成交」。
+    exceptions = [ex for ex in pending if _is_mandate_exception(ex)]
+    pending = [ex for ex in pending if not _is_mandate_exception(ex)]
     if not pending:
+        if exceptions:
+            yield _sse("auto_execute_skipped", layer="auto_execute",
+                       count=len(exceptions),
+                       message=f"{len(exceptions)} 条越线计划需人工确认，已跳过自动执行")
         return
 
     yield _sse("auto_execute_start", layer="auto_execute",
                count=len(pending),
-               message=f"已开启自动执行：{len(pending)} 条待确认操作免人工确认直接成交…")
+               exception_count=len(exceptions),
+               message=f"已开启自动执行：{len(pending)} 条待确认操作免人工确认直接成交…"
+                       + (f"（另 {len(exceptions)} 条越线计划留待人工确认）" if exceptions else ""))
 
     done = rested = failed = 0
     for ex in pending:

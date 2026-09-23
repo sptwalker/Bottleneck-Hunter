@@ -163,6 +163,17 @@ def _upstream_age_days(created_at: str) -> float | None:
         return None
 
 
+def _days_until_date(date_str: str | None) -> float | None:
+    """目标日期距今天数（负=已过）；空/不可解析 → None（=无催化剂，不臆测）。"""
+    if not date_str:
+        return None
+    try:
+        d = datetime.fromisoformat(str(date_str)[:10]).date()
+    except (ValueError, TypeError):
+        return None
+    return (d - datetime.now(timezone.utc).date()).days
+
+
 def _decision_provenance(prompts, models, market, layer, tickers=None) -> dict:
     """给决策产出打 provenance（prompt 哈希 + 实际模型 + 快照日 + 市场/层），嵌进 result_json（零表迁移）。
 
@@ -1094,8 +1105,10 @@ async def run_deviation_check(
                 )
                 underweight_gap = compute_underweight_gap(account, positions, _bounds)
                 if underweight_gap.get("underweight"):
+                    # 带账户标识：多账户同机跑时，光看缺口/金额无法分辨是哪本账（此前只能靠金额量级猜）
                     logger.info(
-                        "L2 偏离：权益配置不足 实际 %.1f%% < 下限 %s%%，缺口 %.1fpct，可部署 %.0f",
+                        "L2 偏离[%s/%s/账户 %s]：权益配置不足 实际 %.1f%% < 下限 %s%%，缺口 %.1fpct，可部署 %.0f",
+                        market, account.get("account_ref") or "sim", account.get("id"),
                         underweight_gap["equity_pct"], underweight_gap["equity_min"],
                         underweight_gap["gap_pct"], underweight_gap["deployable_cash"],
                     )
@@ -1146,6 +1159,154 @@ async def run_deviation_check(
     except Exception as e:
         logger.exception("L2 偏离检查失败")
         yield _sse("decision_error", layer="L2", error=str(e))
+
+
+# ─────────────────────────────────────────────────────────
+# L2 缺口驱动器（P0-2）：扩张侧确定性补仓
+# ─────────────────────────────────────────────────────────
+
+# 单轮最多补的缺口比例（步长）。防一次性梭哈，同时让"分批建仓"这个现实旋钮可调。
+# 缺口 30pct、步长 1/3 → 每轮最多把权益抬 10pct，约 3 轮收敛到下限带内。
+_GAP_STEP_FRACTION = float(_os.getenv("BH_GAP_STEP_FRACTION", "0.3333"))
+
+
+def _plan_gap_fills(account: dict, positions: list[dict], bounds: dict, core_holdings: list[dict],
+                    market: str) -> list[dict]:
+    """P0-2 核心（纯函数，无 DB/LLM）：算"缺口该补哪些票、各补多少钱"。
+
+    三条安全旋钮：① 仅 equity_pct < equity_min 时触发（收敛后自然停）；② 单轮最多补
+    _GAP_STEP_FRACTION 倍缺口（步长上限，防梭哈）；③ 每票不超过 L2 目标权重 + 只用可用现金。
+    返回 [{"ticker","amount","action","target_weight_pct","current_weight_pct"}]，按缺口倒序。
+    """
+    from bottleneck_hunter.watchlist.constraint_validator import compute_underweight_gap
+
+    gap = compute_underweight_gap(account, positions, bounds)
+    if not gap.get("underweight"):
+        return []  # 权益已回到下限之上 → 无缺口，驱动器不动作（收敛判据）
+
+    equity = float(account.get("total_equity") or account.get("current_capital") or 0)
+    cash = float(account.get("cash_balance") or 0)
+    if equity <= 0 or cash <= 0:
+        return []
+    step_cap = gap["gap_pct"] / 100 * equity * _GAP_STEP_FRACTION
+    budget = min(gap["deployable_cash"], step_cap)
+
+    # 持仓市值归一化比对（600519 与 600519.SS 同票），与 L3 的口径一致
+    held = {normalize_ticker(p.get("ticker", ""), market) for p in positions if p.get("ticker")}
+
+    # 低配核心票：L2 给了目标权重、但实际权重还没到 → 按差额倒序，先补最缺的
+    cur_by_ticker: dict[str, float] = {}
+    for p in positions:
+        if p.get("ticker"):
+            k = normalize_ticker(p["ticker"], market)
+            cur_by_ticker[k] = cur_by_ticker.get(k, 0.0) + float(p.get("market_value") or 0)
+    wants = []
+    for s in core_holdings or []:
+        tk = (s or {}).get("ticker", "")
+        tw = float((s or {}).get("target_weight_pct") or 0)
+        if not tk or tw <= 0:
+            continue
+        cur_w = cur_by_ticker.get(normalize_ticker(tk, market), 0.0) / equity * 100
+        if tw - cur_w > 0.5:  # 差距 <0.5pct 视为已达标，不产零头单
+            wants.append((tw - cur_w, tk, tw, cur_w))
+    if not wants:
+        return []
+    wants.sort(reverse=True)
+
+    # 按缺口比例分摊本轮预算，同时受"补到目标权重"与剩余现金封顶
+    total_short = sum(w[0] for w in wants)
+    fills, left = [], cash
+    for short_pct, tk, tw, cur_w in wants:
+        amount = min(budget * (short_pct / total_short), (tw - cur_w) / 100 * equity, left)
+        if amount < equity * 0.005:  # 单票不足权益 0.5% 的碎单无意义，留给下一轮
+            continue
+        fills.append({
+            "ticker": tk,
+            "amount": amount,
+            "action": "add" if normalize_ticker(tk, market) in held else "buy",
+            "target_weight_pct": tw,
+            "current_weight_pct": cur_w,
+        })
+        left -= amount
+    return fills
+
+
+def _generate_gap_driven_plans(store, market: str, strategic: dict) -> list[dict]:
+    """P0-2 缺口驱动器：把"配置不足"落成今日战术计划（返回新计划 id 列表）。
+
+    动机：整条链的扩张力（建仓到目标）此前只有 L3 的逐票 opt-in，LLM 不给买信号时现金就永远趴着。
+    本函数在 L3 之后补一层确定性扩张力——实际权益低于 regime 下限且有现金时，按 L2 的 core 目标权重
+    对低配核心票产 add/buy 战术计划，再交回 L4 走既有的 sizing + 合规 + 投委会（本函数不下任何单，
+    也不碰风控：现金硬顶、单票上限、熔断、投委会否决全在 L4 原样生效）。
+    """
+    from bottleneck_hunter.watchlist.constraint_validator import compute_underweight_gap
+    from bottleneck_hunter.watchlist.regime_mapper import get_allocation_bounds
+
+    macro = store.get_latest_macro_strategy()
+    if not macro:
+        return []
+    # 上游陈旧：连"确定性补仓"也停（P1-2 口径——陈旧时扩张侧一致停摆，且在日志里记账）。
+    # LLM 那层已因陈旧 return，这里补上驱动器不被剩下的代码路径绕过。
+    for _label, _plan in (("L2 组合策略", strategic), ("L1 宏观策略", macro)):
+        _age = _upstream_age_days(_plan.get("created_at", ""))
+        if _age is None or _age > _STALE_UPSTREAM_DAYS:
+            logger.warning("缺口驱动跳过：上游 %s 陈旧（%s 天），不在陈旧数据上补仓", _label, _age)
+            return []
+    mj = macro.get("result_json", {}) or {}
+    bounds = get_allocation_bounds(mj.get("regime", "sideways"), mj.get("risk_appetite", "balanced"),
+                                   mj.get("regime_confidence", 5))
+    account = store.get_sim_account()
+    positions = store.get_sim_positions(account.get("id"))
+    core = (strategic.get("result_json", {}).get("stock_selection", {}) or {}).get("core_holdings", [])
+    fills = _plan_gap_fills(account, positions, bounds, core, market)
+    if not fills:
+        return []
+    gap = compute_underweight_gap(account, positions, bounds)  # fills 非空 ⇒ 必然 underweight
+    equity = float(account.get("total_equity") or account.get("current_capital") or 0) or 1.0
+
+    entry_map = {e["ticker"]: e["id"] for e in store.list_all()}
+    plan_ids, deployed = [], 0.0
+    for f in fills:
+        tp = {
+            "ticker": f["ticker"],
+            "action": f["action"],
+            "urgency": "this_week",
+            "entry_plan": {
+                "ideal_price": None,
+                "split_strategy": f"缺口驱动：单轮至多补 {_GAP_STEP_FRACTION:.0%} 缺口，分批建仓",
+            },
+            "exit_plan": {},
+            "catalyst_watch": [],
+            "risk_assessment": {
+                "confidence": 6,
+                "key_risk": "缺口驱动为配置修正，非个股择时；买点由 L4 按现价定",
+            },
+            "reasoning": (
+                f"L2 缺口驱动：实际权益 {gap['equity_pct']:.1f}% 低于 regime 下限 {gap['equity_min']}%，"
+                f"该票目标权重 {f['target_weight_pct']:.1f}% / 现 {f['current_weight_pct']:.1f}%，"
+                f"本轮拟补 {f['amount']:,.0f}"
+            ),
+            # 供 L4 的建仓侧门禁识别（P0-3）：这笔买是"补配置"，不是 LLM 的择时主张
+            "gap_driven": True,
+            "_planned_amount": round(f["amount"], 2),
+        }
+        tp["_provenance"] = _decision_provenance(["gap_driver"], [], market, "L3", [f["ticker"]])
+        binding = save_stage_snapshot(store, "L3", {"gap_driven": True, "gap": gap, "fills": fills})
+        plan_ids.append(
+            store.create_tactical_plan(
+                strategic_plan_id=strategic["id"], entry_id=entry_map.get(f["ticker"], ""),
+                ticker=f["ticker"], plan_date=_today(), result_json=tp, **binding,
+            )
+        )
+        deployed += f["amount"]
+    logger.info(
+        "L2 缺口驱动[%s/账户 %s]：权益 %.1f%% < 下限 %s%%，缺口 %.1fpct，"
+        "本轮补 %d 只共 %.0f（步长上限 %.0f），权益将升至约 %.1f%%",
+        market, account.get("id"), gap["equity_pct"], gap["equity_min"], gap["gap_pct"],
+        len(plan_ids), deployed, gap["deployable_cash"] * _GAP_STEP_FRACTION,
+        gap["equity_pct"] + deployed / equity * 100,
+    )
+    return plan_ids
 
 
 # ─────────────────────────────────────────────────────────
@@ -1408,12 +1569,33 @@ async def run_tactical_plans(
             )
             plan_ids.append(plan_id)
 
+        # L2 缺口驱动器（P0-2）：在 LLM 的逐票择时之外补一层确定性的"把钱配回去"。
+        # 放在清理/写入之后——驱动器自己的计划不能被 delete_tactical_plans_by_date 清掉。
+        gap_ids = _generate_gap_driven_plans(store, market, strategic)
+
+        # 机会/信念驱动器（P0-4）：与缺口驱动互补的另一股扩张力——缺口驱动止于 L2 目标权重（修正），
+        # 本驱动器可越过目标权重去抓高信念机会（阿尔法）。产出的计划一律带 mandate_exception 标记，
+        # 必须经投委会/人工确认，绝不自动执行（见 run_daily_decision 的自动执行步骤）。
+        try:
+            opp_ids = _generate_opportunity_driven_plans(store, market, strategic)
+        except Exception as e:  # noqa: BLE001 —— 机会驱动是增益层，失败不该中断当日决策
+            logger.warning("机会驱动失败，本轮无机会驱动计划: %s", e)
+            opp_ids = []
+
+        notes = []
+        if gap_ids:
+            notes.append(f"缺口驱动补仓 {len(gap_ids)} 只")
+        if opp_ids:
+            notes.append(f"机会驱动 {len(opp_ids)} 只（待确认）")
+        gap_note = f"（含{'、'.join(notes)}）" if notes else ""
         yield _sse(
             "decision_done",
             layer="L3",
-            plan_count=len(plan_ids),
+            plan_count=len(plan_ids) + len(gap_ids) + len(opp_ids),
+            gap_driven_count=len(gap_ids),
+            opportunity_driven_count=len(opp_ids),
             priority_ranking=result.get("priority_ranking", []),
-            message=f"L3 战术计划已生成：{len(plan_ids)} 只股票",
+            message=f"L3 战术计划已生成：{len(plan_ids)} 只股票{gap_note}",
         )
 
     except Exception as e:
@@ -1478,6 +1660,288 @@ _EXECUTABLE_ACTIONS = ("buy", "add", "sell", "reduce")
 # L4 最小建仓权重：低于此权重的 buy/add 会被代码顶到此仓位（B 兜底），
 # 根除「$1M 账户买 5 股 MU=0.44%」这类 LLM 拍脑袋的零头仓。
 _MIN_BUILD_WEIGHT_PCT = 3.0
+
+
+def _conviction_score(expected_return_pct: float, catalyst_days_left: int | None,
+                      catalyst_impact: str = "", composite_score: float = 0.0) -> float:
+    """P0-4 信念分（纯函数，0~1）：机会驱动器的唯一门槛依据，全部来自现成数据、零新增 LLM。
+
+    三个来源加权：① 场景期望上行（`create_scenario_valuation` 已按概率加权存好的 expected_return_pct）
+    ② 催化剂临近度×影响力（越近越强，>30 天衰减到 0）③ 观察池综合评分（弱信号，权重最低）。
+    阈值与档位的对应关系写在 _OPPORTUNITY_TIERS：分数越高，允许的越线缓冲越大（到硬顶为止）。
+
+    ponytail: 权重是拍的先验（期望上行主导、催化剂次之），不是拟合出来的——回测校准前别当最优解，
+    但三个输入方向都对（上行越高/催化剂越近越强/评分越高 → 越敢买），先跑起来再调。
+    """
+    # ① 期望上行：0% 得 0 分，+40% 及以上满分
+    up = max(0.0, min(1.0, float(expected_return_pct or 0) / 40.0))
+    # ② 催化剂：临近度 × 影响力；刚发生(days_left<0)少量衰减，不当作新催化
+    prox = 0.0
+    if catalyst_days_left is not None:
+        d = catalyst_days_left
+        prox = max(0.0, min(1.0, 1.0 - d / 30.0)) if d >= 0 else max(0.0, 1.0 - abs(d) / 30.0) * 0.5
+    imp = {"critical": 1.0, "high": 0.75, "medium": 0.45, "low": 0.2}.get((catalyst_impact or "").lower(), 0.45)
+    event = prox * imp
+    # ③ 综合评分：0~100 → 0~1
+    comp = max(0.0, min(1.0, float(composite_score or 0) / 100.0))
+    return round(up * 0.5 + event * 0.3 + comp * 0.2, 4)
+
+
+# 机会驱动器档位：信念分下限 → (本轮可补到的目标权重上限, 单轮单票加仓金额上限占权益比)
+# 越线缓冲**只对单票有效**：账户级 equity_max 由 validate_against_regime 硬拦，这里不碰。
+_OPPORTUNITY_TIERS = (
+    (0.75, 8.0, 0.04),  # 顶档：可越过 L2 目标权重至 8%，单轮最多吃进 4% 权益
+    (0.6, 6.0, 0.02),   # 中档
+    (0.45, 4.0, 0.01),  # 低档：只是"顺手把好球补到 4%"
+)
+# 单轮机会驱动器占总权益的上限（防中等信念的票叠成一次性满仓）
+_OPPORTUNITY_ROUND_CAP = float(_os.getenv("BH_OPPORTUNITY_ROUND_CAP", "0.06"))
+
+
+def _opportunity_tier(score: float) -> tuple[float, float] | None:
+    """信念分 → (目标权重上限%, 单轮金额上限占权益比)。低于最低档 → None（不产意图）。"""
+    for floor, target_pct, step_pct in _OPPORTUNITY_TIERS:
+        if score >= floor:
+            return target_pct, step_pct
+    return None
+
+
+def _plan_opportunity_fills(account: dict, positions: list[dict], valuations: dict[str, dict],
+                            catalysts: dict[str, dict], composites: dict[str, float],
+                            market: str) -> list[dict]:
+    """P0-4 核心（纯函数，无 DB/LLM）：信念足够高的票 → 追加买入意图（可越 L2 目标权重、不越硬顶）。
+
+    与缺口驱动器（P0-2）的分工：那边是均值回归（补到目标就停），这边是阿尔法（敢超过目标）。
+    三条边界：① 只对已有估值数据的票动作（没有信念依据就不出手）；② 越线只发生在"L2 目标权重"
+    这一维（档位上限），单票硬上限(单票 max_single_pct)、账户 equity_max、现金、熔断全部照旧——
+    它们由 L4 既有校验与投委会执行，本函数只产出意图、不下任何单；③ 单轮总额受
+    _OPPORTUNITY_ROUND_CAP 与可用现金双封顶。
+    返回 [{"ticker","amount","action","target_weight_pct","current_weight_pct","score","tier_pct","reason"}]。
+    """
+    equity = float(account.get("total_equity") or account.get("current_capital") or 0)
+    cash = float(account.get("cash_balance") or 0)
+    if equity <= 0 or cash <= 0:
+        return []
+
+    cur_by_ticker: dict[str, float] = {}
+    for p in positions:
+        if p.get("ticker"):
+            k = normalize_ticker(p["ticker"], market)
+            cur_by_ticker[k] = cur_by_ticker.get(k, 0.0) + float(p.get("market_value") or 0)
+
+    budget = equity * _OPPORTUNITY_ROUND_CAP
+    out: list[dict] = []
+    for tk_raw, v in (valuations or {}).items():
+        tk = normalize_ticker(tk_raw, market)
+        # 与持仓/归一化的键对齐后再取值（估值表单存 600519 而持仓存 600519.SS 时也要命中）
+        cur_val = cur_by_ticker.get(tk, 0.0)
+        cat = (catalysts or {}).get(tk)
+        score = _conviction_score(
+            v.get("expected_return_pct") or 0,
+            cat.get("days_left") if cat else None,
+            (cat or {}).get("impact_level", ""),
+            composites.get(tk, 0.0),
+        )
+        tier = _opportunity_tier(score)
+        if not tier:
+            continue
+        tier_target_pct, step_pct = tier
+        cur_w = cur_val / equity * 100
+        if cur_w >= tier_target_pct:
+            continue  # 已达档位允许的目标权重 → 不再追高（同一信念不无限加）
+        amount = min(budget, tier_target_pct / 100 * equity - cur_val, step_pct * equity, cash)
+        if amount < equity * 0.005:  # 不足权益 0.5% 的碎单无意义
+            continue
+        out.append({
+            "ticker": tk_raw,
+            "amount": amount,
+            "action": "add" if cur_val > 0 else "buy",
+            "target_weight_pct": tier_target_pct,
+            "current_weight_pct": round(cur_w, 2),
+            "score": score,
+            "tier_pct": tier_target_pct,
+            "reason": (cat or {}).get("title", ""),
+        })
+        budget -= amount
+        cash -= amount
+    out.sort(key=lambda f: f["score"], reverse=True)  # 信念最高的先补
+    return out
+
+
+def _generate_opportunity_driven_plans(store, market: str, strategic: dict) -> list[dict]:
+    """P0-4 机会/信念驱动器：把"高信念机会"落成今日战术计划（返回新计划 id 列表）。
+
+    与缺口驱动器的区别：缺口驱动止于 L2 目标权重（修正力），本驱动器可**超过**目标权重
+    （阿尔法），但硬上限（单票 max_single_pct、权益 equity_max、现金、熔断）一个都不碰——
+    越线只体现在"单票敢配到档位上限"，超出部分由 L4 既有校验与投委会处置。
+    所有意图都带 `mandate_exception=True`：不是绕过风控，而是把"超出目标授权"显式申报，
+    强制人工确认（L4 自动执行会跳过带此标记的计划）。
+    """
+    macro = store.get_latest_macro_strategy()
+    if not macro:
+        return []
+    for _label, _plan in (("L2 组合策略", strategic), ("L1 宏观策略", macro)):
+        _age = _upstream_age_days(_plan.get("created_at", ""))
+        if _age is None or _age > _STALE_UPSTREAM_DAYS:
+            logger.warning("机会驱动跳过：上游 %s 陈旧（%s 天），不在陈旧数据上追高", _label, _age)
+            return []
+    account = store.get_sim_account()
+    if not account:
+        return []
+    positions = store.get_sim_positions(account.get("id"))
+    valuations = store.get_valuation_map()
+    if not valuations:
+        return []  # 无估值数据 → 无信念依据，不出手
+    try:
+        # limit 放大到 200：get_recent_catalysts 的默认 8 是给论坛发帖挑热点用的，
+        # 这里要覆盖全市场估值票，被截断会让高信念票白白丢掉催化剂分。
+        catalysts = {}
+        for c in store.get_recent_catalysts(days_ahead=30, days_back=14, limit=200):
+            tk = normalize_ticker(c.get("ticker", ""), market)
+            if tk and tk not in catalysts:  # 同票多条取最近一条（已按活动时间倒序）
+                catalysts[tk] = {**c, "days_left": _days_until_date(c.get("expected_date"))}
+    except Exception as e:  # noqa: BLE001 —— 催化剂取数失败不该拖垮驱动器
+        logger.debug("机会驱动催化剂取数失败: %s", e)
+        catalysts = {}
+    composites = {normalize_ticker(e.get("ticker", ""), market): float(e.get("composite_score") or 0)
+                  for e in store.list_all() if e.get("ticker")}
+    fills = _plan_opportunity_fills(account, positions, valuations, catalysts, composites, market)
+    if not fills:
+        return []
+
+    equity = float(account.get("total_equity") or account.get("current_capital") or 0) or 1.0
+    entry_map = {e["ticker"]: e["id"] for e in store.list_all()}
+    # 快照按轮存一次（与缺口驱动器的逐票存法不同）：机会驱动的输入是全市场估值表，逐票重复存同一份
+    # payload 只是把同一张估值表写 N 遍。
+    binding = save_stage_snapshot(store, "L3", {"opportunity_driven": True, "fills": fills})
+    plan_ids = []
+    for f in fills:
+        tp = {
+            "ticker": f["ticker"],
+            "action": f["action"],
+            "urgency": "this_week",
+            "entry_plan": {
+                "ideal_price": None,
+                "split_strategy": f"机会驱动：信念分 {f['score']:.2f}（顶档 {f['tier_pct']:.0f}%），单轮分批",
+            },
+            "exit_plan": {},
+            "catalyst_watch": [f["reason"]] if f["reason"] else [],
+            "risk_assessment": {
+                "confidence": int(round(f["score"] * 10)),
+                "key_risk": "机会驱动可越过 L2 目标权重（止于档位上限与单票硬顶），越线必人工确认",
+            },
+            "reasoning": (
+                f"机会驱动：信念分 {f['score']:.2f}，当前权重 {f['current_weight_pct']:.1f}% "
+                f"→ 档位上限 {f['tier_pct']:.0f}%，本轮拟买 {f['amount']:,.0f}"
+                + (f"；催化：{f['reason']}" if f["reason"] else "")
+            ),
+            # 供 L4 建仓侧门禁识别（复用 P0-3 通道）+ 强制上会标记
+            "opportunity_driven": True,
+            "mandate_exception": True,
+            "_planned_amount": round(f["amount"], 2),
+        }
+        tp["_provenance"] = _decision_provenance(["opportunity_driver"], [], market, "L3", [f["ticker"]])
+        plan_ids.append(
+            store.create_tactical_plan(
+                strategic_plan_id=strategic["id"], entry_id=entry_map.get(f["ticker"], ""),
+                ticker=f["ticker"], plan_date=_today(), result_json=tp, **binding,
+            )
+        )
+    logger.info(
+        "机会驱动[%s/账户 %s]：%d 只信念达标（准入 %d 只估值），本轮拟买 %.0f（单轮上限 %.0f），最高信念 %.2f",
+        market, account.get("id"), len(plan_ids), len(valuations),
+        sum(f["amount"] for f in fills), equity * _OPPORTUNITY_ROUND_CAP,
+        max(f["score"] for f in fills),
+    )
+    return plan_ids
+
+
+def _gap_driven_plans(actionable: list[dict], market: str) -> dict[str, float]:
+    """P0-3/P0-4：挑出本轮来自确定性驱动器（缺口 P0-2 / 机会 P0-4）的战术计划 → {ticker: 封顶金额}。
+
+    只认 L3 自己写的 gap_driven / opportunity_driven 标记，不凭「持仓低配」或「估值上行」推断——
+    否则任何 LLM 想加仓的票都会被豁免建仓侧门禁，豁免面失控。金额缺失/非正时记 0，调用方按 0 处理。
+    market 必须传本市场：`normalize_ticker` 只对 6 位数字码做 A股归一，字母 ticker 原样返回，
+    故跨市场的字面同号（如 A股码 "YYYY" vs 美股 "YYYY"）能被识别并排除——排除即回落到普通门禁，
+    而回落的后果只是「照旧跳过」，不会错放一笔本市场的买入。
+    """
+    out: dict[str, float] = {}
+    for tp in actionable or []:
+        tk = tp.get("ticker", "")
+        rj = tp.get("result_json") or {}
+        if not tk or not (rj.get("gap_driven") or rj.get("opportunity_driven")):
+            continue
+        if normalize_ticker(tk, market) != normalize_ticker(tk, tp.get("market") or market):
+            continue
+        try:
+            out[tk] = max(float(rj.get("_planned_amount") or 0), 0.0)
+        except (TypeError, ValueError):
+            out[tk] = 0.0
+    return out
+
+
+def _opportunity_driven_plans(actionable: list[dict], market: str) -> dict[str, float]:
+    """P0-4：挑出本轮来自机会/信念驱动器的战术计划 → {ticker: 计划金额}。
+
+    与 _gap_driven_plans 平行但语义不同，刻意不复用同一份映射：缺口驱动是「补到 L2 目标权重」
+    （天然有界、不必每次上会），机会驱动是「越过目标授权」（必须每次人工确认）。若混成一个 dict，
+    调用方就再也分不出哪笔需要强制上会——越线的可审计性会丢。
+    """
+    out: dict[str, float] = {}
+    for tp in actionable or []:
+        tk = tp.get("ticker", "")
+        rj = tp.get("result_json") or {}
+        if not tk or not rj.get("opportunity_driven"):
+            continue
+        if normalize_ticker(tk, market) != normalize_ticker(tk, tp.get("market") or market):
+            continue
+        try:
+            out[tk] = max(float(rj.get("_planned_amount") or 0), 0.0)
+        except (TypeError, ValueError):
+            out[tk] = 0.0
+    return out
+
+
+def _l2_target_weights(strategic: dict, market: str) -> dict[str, float]:
+    """{归一 ticker: L2 目标权重%}——判定「是否真的越过了目标授权」的基准线。"""
+    core = ((strategic or {}).get("result_json", {}) or {}).get("stock_selection", {}) or {}
+    out: dict[str, float] = {}
+    for s in core.get("core_holdings", []) or []:
+        tk = (s or {}).get("ticker", "")
+        tw = float((s or {}).get("target_weight_pct") or 0)
+        if tk and tw > 0:
+            out[normalize_ticker(tk, market)] = tw
+    return out
+
+
+def _gap_fill_shares(planned_amount: float, price: float, equity: float,
+                     existing_value: float, cap_pct: float, market: str) -> int:
+    """P0-3：缺口驱动补仓的确定性定股。金额取 min(计划金额, 单股上限剩余空间)。
+
+    与 LLM 路径的 target_shares_for_buy 的差别是**不设 3% 建仓地板**：地板是防 LLM 拍零头仓的，
+    这里的小额是刻意的「分批补到 L2 目标权重」。目标权重由计划金额反推，现有持仓已超该金额时
+    add_value ≤ 0 → 返回 0（收敛判据：补到目标即停，不会天天反复补）。
+    """
+    if price <= 0 or equity <= 0:
+        return 0
+    if existing_value >= planned_amount:
+        # 已补到目标（现有持仓 ≥ 本轮计划补到的金额）→ 不动作。
+        # ponytail: 近似——严格口径应比「现有持仓 ≥ 目标权重×权益」，但目标权重是本轮从零开始
+        # 按缺口比例摊出来的，持仓对应的目标差额正是 _planned_amount，故等价且少一列依赖。
+        return 0
+
+    from bottleneck_hunter.watchlist.position_sizing import _round_lot
+
+    # 只补「计划金额」这一段；单股上限单独再钳一次（两个约束都按扣掉现有持仓的口径算，不重复扣）。
+    planned_room = planned_amount - existing_value
+    cap_room = cap_pct / 100 * equity - existing_value if cap_pct else planned_room
+    amount = round(min(planned_room, cap_room), 2)
+    if amount <= 0 or price <= 0:
+        return 0
+    # 直接走 _round_lot 而非 target_shares_for_buy：本路径刻意不要它的 3% 建仓地板（分批补的小额
+    # 正是要放的）与波动率天花板（缺口驱动的金额已由 L3 封顶）。金额先落整——浮点残差会把「刚好
+    # 补满」算成 5e-11 的尾巴，被 _round_lot 的 int() 截成 0 股而整单作废。
+    return _round_lot(amount / price, market)
 
 
 def _is_executable_plan(ep: dict) -> bool:
@@ -1807,6 +2271,15 @@ async def run_execution_plans(
         existing_tickers = {ep["ticker"] for ep in store.get_pending_executions() if ep.get("ticker")}
         # 挂单中的标的也算「已有计划」，避免对已挂单标的重复生成执行计划
         existing_tickers |= {ep["ticker"] for ep in store.get_resting_executions() if ep.get("ticker")}
+        # P0-3：来自 P0-2 缺口驱动器的补仓意图 → 豁免建仓侧三道门（见下）
+        gap_plans = _gap_driven_plans(actionable, market)
+        # P0-4：来自机会驱动器的越线意图，各自独立（越线须强制上会，见下方 mandate_exception 标记）
+        opp_plans = _opportunity_driven_plans(actionable, market)
+        # 两类驱动都是「有确定金额上限的系统补仓」，不是 LLM 的择时主张 → 共用同一套建仓侧豁免；
+        # 单独一张 dict 只为保留「谁需要上会」的分辨力。
+        driver_plans = {**gap_plans, **opp_plans}
+        # 判定「是否真的越过 L2 目标授权」的基准线（L1/L2 各自的最新计划，单行查询）
+        l2_targets = _l2_target_weights(store.get_latest_strategic_plan() or {}, market)
         batch_tickers = set()
         pending_writes = []
         repair_inputs = []
@@ -1839,7 +2312,7 @@ async def run_execution_plans(
             ticker = ep.get("ticker", "")
             if not ticker:
                 continue
-            if ticker in existing_tickers:
+            if ticker in existing_tickers and ticker not in driver_plans:
                 logger.info("跳过已有 pending 执行计划的 %s", ticker)
                 skipped += 1
                 continue
@@ -1847,7 +2320,10 @@ async def run_execution_plans(
                 logger.info("跳过本批次重复的 %s", ticker)
                 skipped += 1
                 continue
-            if _is_recent_duplicate(ep.get("action", ""), ticker, recent_map):
+            # P0-3：缺口驱动补仓豁免 5 日同向冷却——冷却的初衷是防 LLM 反复择时，而这个意图是
+            # 「配平到 L2 目标权重」，非择时；防刷单靠 P0-2 的步长上限 + 达标即停（缺口归零）。
+            # 机会驱动**不**豁免这道门：它没有「缺口归零」这种天然收敛判据，冷却期是它的主要刹车。
+            if ticker not in gap_plans and _is_recent_duplicate(ep.get("action", ""), ticker, recent_map):
                 logger.info("跳过近期已执行同向操作的 %s (%s)", ticker, ep.get("action"))
                 skipped += 1
                 continue
@@ -1907,25 +2383,55 @@ async def run_execution_plans(
                     _vol = PositionSizer.compute_stock_volatility(_rets)
                 except Exception:
                     _vol = 0.0
-                _sized = target_shares_for_buy(
-                    price=_price,
-                    account_equity=_equity,
-                    existing_value=_existing,
-                    llm_weight_pct=_llm_w,
-                    floor_pct=_MIN_BUILD_WEIGHT_PCT,
-                    cap_pct=float(constraints.get("max_single_position_pct") or 0),
-                    stock_vol=_vol,
-                    market=market,
-                )
-                if _sized <= 0:
-                    # 够不到 3% 下限（加仓已达标 / A股不足一手 / 无价）→ 不开零头仓
-                    logger.info("跳过无法定到 %.0f%% 下限仓位的 %s（已达标/整手/无价）", _MIN_BUILD_WEIGHT_PCT, ticker)
-                    skipped += 1
-                    continue
-                if _sized != int(float(ep.get("shares") or 0)):
+                if ticker in driver_plans:
+                    # P0-3/P0-4：驱动式补仓。金额由 L3 的 _planned_amount 封顶（已含单票剩余空间 +
+                    # 单轮步长/预算 + 现金多重约束）。单股上限在 helper 内再钳一次。
+                    _cap_w = float(constraints.get("max_single_position_pct") or 0)
+                    _gap_amt = driver_plans[ticker]
+                    _sized = _gap_fill_shares(_gap_amt, _price, _equity, _existing, _cap_w, market)
+                    if _sized <= 0:
+                        logger.info("跳过定不到仓位的驱动补仓 %s（无价/整手/已达标）", ticker)
+                        skipped += 1
+                        continue
                     ep["shares"] = _sized
                     ep["estimated_amount"] = round(_sized * _price, 2)
                     ep["_auto_sized"] = True
+                    # P0-4：机会驱动的定股在这里落地——用**实际定出的股数**判是否真越过 L2 目标授权，
+                    # 而不是照抄 L3 的意图。若 L4 的硬校验/降级把仓位压回了目标之内，就不必再打扰人。
+                    if ticker in opp_plans:
+                        _post_w = (_existing + _sized * _price) / _equity * 100 if _equity > 0 else 0.0
+                        _l2_w = l2_targets.get(normalize_ticker(ticker, market), 0.0)
+                        if _post_w > _l2_w + 0.05:  # +0.05pct 容差：躲开浮点噪声造成的假越线
+                            ep["mandate_exception"] = True
+                            ep["mandate_exception_note"] = (
+                                f"机会驱动越过 L2 目标授权：目标 {_l2_w:.1f}% → 执行后 {_post_w:.1f}%"
+                            )
+                    logger.info(
+                        "驱动补仓 %s：%d 股 ≈ %.0f（计划 %.0f，现有持仓 %.0f）",
+                        ticker, _sized, _sized * _price, _gap_amt, _existing,
+                    )
+                else:
+                    _sized = target_shares_for_buy(
+                        price=_price,
+                        account_equity=_equity,
+                        existing_value=_existing,
+                        llm_weight_pct=_llm_w,
+                        floor_pct=_MIN_BUILD_WEIGHT_PCT,
+                        cap_pct=float(constraints.get("max_single_position_pct") or 0),
+                        stock_vol=_vol,
+                        market=market,
+                    )
+                    if _sized <= 0:
+                        # 够不到 3% 下限（加仓已达标 / A股不足一手 / 无价）→ 不开零头仓
+                        logger.info(
+                            "跳过无法定到 %.0f%% 下限仓位的 %s（已达标/整手/无价）", _MIN_BUILD_WEIGHT_PCT, ticker
+                        )
+                        skipped += 1
+                        continue
+                    if _sized != int(float(ep.get("shares") or 0)):
+                        ep["shares"] = _sized
+                        ep["estimated_amount"] = round(_sized * _price, 2)
+                        ep["_auto_sized"] = True
 
             # ── P0.1 前置约束校验 + P2.1 组合 beta 校验 + B1 regime 仓位校验 ──
             def _full_validate(plan_ep):

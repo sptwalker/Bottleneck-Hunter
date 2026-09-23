@@ -355,6 +355,27 @@ class _CommitteeMixin:
         finally:
             conn.close()
 
+    def get_valuation_map(self) -> dict[str, dict]:
+        """{归一 ticker: 最新一条 scenario_valuation}——批量版 get_latest_valuation（避免逐票 N 次查询）。
+
+        P0-4 信念驱动器的输入：一次取全市场最新估值（内含 prob 加权的 expected_return_pct），
+        按 created_at 倒序扫、每票只留第一条即最新。
+        """
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM scenario_valuations ORDER BY created_at DESC",
+            )
+            out: dict[str, dict] = {}
+            for r in conn.execute(q, p).fetchall():
+                d = dict(r)
+                tk = d.get("ticker", "")
+                if tk and tk not in out:
+                    out[tk] = d
+            return out
+        finally:
+            conn.close()
+
     def get_recent_catalysts(self, days_ahead: int = 14, days_back: int = 7, limit: int = 8) -> list[dict]:
         """论坛发帖取「近期热点事件」用：即将发生（pending/monitoring 且 expected_date 在未来
         days_ahead 内）+ 近期已触发（triggered 且 updated_at 在过去 days_back 内），按最近活动排序。
