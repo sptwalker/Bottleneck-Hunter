@@ -788,10 +788,16 @@
                 <h3><span class="dc-light dc-light-gray" id="dc-light-pending"></span>L4 待确认执行 <span class="dc-card-toggle">▼</span></h3>
                 <div class="dc-autoexec-wrap" style="display:flex;align-items:center;gap:8px;margin-left:auto">
                   <span style="font-size:12px;color:var(--muted)" title="关闭：全部人工确认。半授权：投委会通过的待确认操作免人工确认，由决策中心（含夜间定时决策）自动成交，但越过 L2 目标的机会驱动计划仍留人工确认。高授权：连越线计划也一并自动成交。">L4 自动执行</span>
-                  <div class="dc-seg" id="dc-autoexec-seg" role="group" aria-label="L4 自动执行档位">
-                    <button type="button" class="dc-seg-btn" data-level="0">关闭</button>
-                    <button type="button" class="dc-seg-btn" data-level="1">半授权</button>
-                    <button type="button" class="dc-seg-btn" data-level="2">高授权</button>
+                  <div class="dc-auth" id="dc-autoexec-seg" role="group" aria-label="L4 自动执行档位">
+                    <button type="button" class="dc-auth-btn" data-level="0" title="关闭：全部人工确认" aria-label="关闭：全部人工确认">
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6 2.6 3.9v4.2c0 3.1 2.2 5.6 5.4 6.4 3.2-.8 5.4-3.3 5.4-6.4V3.9Z"/><path class="dc-auth-slash" d="M5.2 10.8 10.8 5.2"/></svg>
+                    </button>
+                    <button type="button" class="dc-auth-btn" data-level="1" title="半授权：免人工确认自动成交，越线计划仍需确认" aria-label="半授权：免人工确认自动成交，越线计划仍需确认">
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6 2.6 3.9v4.2c0 3.1 2.2 5.6 5.4 6.4 3.2-.8 5.4-3.3 5.4-6.4V3.9Z"/><path class="dc-auth-fill" d="M8 1.6 2.6 3.9v4.2c0 3.1 2.2 5.6 5.4 6.4Z"/></svg>
+                    </button>
+                    <button type="button" class="dc-auth-btn" data-level="2" title="高授权：越线计划也一并自动成交" aria-label="高授权：越线计划也一并自动成交">
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path class="dc-auth-fill" d="M8 1.6 2.6 3.9v4.2c0 3.1 2.2 5.6 5.4 6.4 3.2-.8 5.4-3.3 5.4-6.4V3.9Z"/></svg>
+                    </button>
                   </div>
                   <span class="dc-badge dc-badge-warn" id="dc-pending-count">0</span>
                 </div>

@@ -622,15 +622,15 @@ function renderPending(executions, opts = {}) {
 const AUTOEXEC_LABEL = { 0: '关闭', 1: '半授权', 2: '高授权' };
 
 function syncAutoExecuteSeg(level) {
-  document.querySelectorAll('#dc-autoexec-seg .dc-seg-btn').forEach(btn => {
+  document.querySelectorAll('#dc-autoexec-seg .dc-auth-btn').forEach(btn => {
     const lv = Number(btn.dataset.level);
     btn.classList.toggle('active', lv === level);
-    btn.classList.toggle('dc-seg-danger', lv === 2);
+    btn.classList.toggle('dc-auth-danger', lv === 2);
   });
 }
 
 async function handleAutoExecuteLevel(e) {
-  const btn = e.target.closest('.dc-seg-btn');
+  const btn = e.target.closest('.dc-auth-btn');
   if (!btn) return;
   const level = Number(btn.dataset.level);
   const prev = dcState.autoExecLevel || 0;
@@ -648,7 +648,7 @@ async function handleAutoExecuteLevel(e) {
   }
 
   const seg = document.getElementById('dc-autoexec-seg');
-  seg?.querySelectorAll('.dc-seg-btn').forEach(b => { b.disabled = true; });
+  seg?.querySelectorAll('.dc-auth-btn').forEach(b => { b.disabled = true; });
   try {
     const res = await dcFetch(`/auto-execute?market=${encodeURIComponent(dcState.market)}`, {
       method: 'PUT',
@@ -663,7 +663,7 @@ async function handleAutoExecuteLevel(e) {
   } catch (err) {
     toast('保存失败：' + err.message, 'error');
   } finally {
-    seg?.querySelectorAll('.dc-seg-btn').forEach(b => { b.disabled = false; });
+    seg?.querySelectorAll('.dc-auth-btn').forEach(b => { b.disabled = false; });
     syncAutoExecuteSeg(dcState.autoExecLevel ?? prev);   // 无论成败都按真实档位回显
   }
 }
