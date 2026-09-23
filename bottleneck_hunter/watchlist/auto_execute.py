@@ -1,7 +1,12 @@
-"""L4 自动执行开关 —— 用户开启后，投委会通过的待确认操作免人工确认直接成交。
+"""L4 自动执行开关（三档）—— 关闭 / 半授权 / 高授权。
+
+- 关闭（0）：投委会通过的待确认操作全部留给你人工确认（默认）。
+- 半授权（1）：免人工确认直接成交，但**越过 L2 目标授权**的机会驱动计划仍然留人工确认。
+- 高授权（2）：连越线计划也一并自动成交。
 
 存储复用 user_preferences 表（key="auto_execute_l4"，已按用户+市场隔离，
 见 store_watchlist.save_preference/get_preference）。与持仓风格 persona 同一套机制。
+取值为数字档位字符串；历史遗留的 "1"/"" 恰好分别等价于半授权/关闭，无需迁移。
 
 覆盖面：挂在 decision_engine 的 run_daily_decision / run_full_refresh 投委会之后，
 故「定时夜间跑批」与「UI 一键决策/全量刷新」两条路径都会在开启时自动成交——
@@ -18,14 +23,45 @@ logger = logging.getLogger(__name__)
 AUTO_EXEC_KEY = "auto_execute_l4"
 AUTO_EXEC_CATEGORY = "auto_execute"
 
+LEVEL_OFF = 0        # 关闭：全部人工确认
+LEVEL_SEMI = 1       # 半授权：免确认，但越线计划仍人工确认
+LEVEL_HIGH = 2       # 高授权：越线计划也自动成交
+MAX_LEVEL = LEVEL_HIGH
+
+
+def get_auto_execute_level(store) -> int:
+    """读取当前用户在该市场的自动执行档位（0~2，默认 0）。
+
+    读路径一律降级（fail-closed）：脏值、越界值（"3"/"-1"）全部当关闭处理——
+    读到的值不可信时宁可多要一次人工确认，绝不因为一个坏值静默提权到自动成交。
+    """
+    raw = str(store.get_preference(AUTO_EXEC_KEY, "") or "").strip()
+    try:
+        lv = int(raw)
+    except ValueError:
+        return LEVEL_OFF
+    return lv if LEVEL_OFF <= lv <= MAX_LEVEL else LEVEL_OFF
+
+
+def set_auto_execute_level(store, level: int) -> None:
+    """写入档位（写路径钳位到合法区间，越界即夹到最近端点）。"""
+    lv = max(LEVEL_OFF, min(MAX_LEVEL, int(level)))
+    store.save_preference(AUTO_EXEC_KEY, str(lv), category=AUTO_EXEC_CATEGORY)
+
 
 def is_auto_execute_enabled(store) -> bool:
-    """读取当前用户在该市场是否开启 L4 自动执行（默认关）。"""
-    return store.get_preference(AUTO_EXEC_KEY, "") == "1"
+    """档位 ≥ 半授权即为「开着」（决定要不要跑自动执行这一轮）。"""
+    return get_auto_execute_level(store) >= LEVEL_SEMI
 
 
 def set_auto_execute(store, enabled: bool) -> None:
-    store.save_preference(AUTO_EXEC_KEY, "1" if enabled else "0", category=AUTO_EXEC_CATEGORY)
+    """布尔兼容入口（老调用方/老前端）：True→半授权，False→关闭。"""
+    set_auto_execute_level(store, LEVEL_SEMI if enabled else LEVEL_OFF)
+
+
+def is_breach_authorized(store) -> bool:
+    """是否授权自动执行「越过 L2 目标」的越线操作（仅高授权档为真）。"""
+    return get_auto_execute_level(store) >= LEVEL_HIGH
 
 
 def _sse(event: str, **data) -> dict:
@@ -53,10 +89,14 @@ async def auto_execute_pending(store, market: str) -> AsyncGenerator[dict, None]
     from bottleneck_hunter.watchlist.trade_executor import confirm_and_execute
 
     pending = store.get_pending_executions()
-    # P0-4：机会驱动越过 L2 目标授权的计划必须人工确认——自动执行对它一律让路，永远不免确认。
-    # 这是护栏的最后一道：护栏①~③ 都在 L3/L4 生成侧，只有这里能拦住「开关一开就全自动成交」。
-    exceptions = [ex for ex in pending if _is_mandate_exception(ex)]
-    pending = [ex for ex in pending if not _is_mandate_exception(ex)]
+    # P0-4：机会驱动越过 L2 目标授权的计划默认必须人工确认——这是护栏的最后一道
+    # （护栏①~③ 都在 L3/L4 生成侧，只有这里能拦住「开关一开就全自动成交」）。
+    # 高授权档才把这道闸打开：越线计划也一并自动成交。
+    if is_breach_authorized(store):
+        exceptions: list[dict] = []
+    else:
+        exceptions = [ex for ex in pending if _is_mandate_exception(ex)]
+        pending = [ex for ex in pending if not _is_mandate_exception(ex)]
     if not pending:
         if exceptions:
             yield _sse("auto_execute_skipped", layer="auto_execute",
@@ -64,10 +104,13 @@ async def auto_execute_pending(store, market: str) -> AsyncGenerator[dict, None]
                        message=f"{len(exceptions)} 条越线计划需人工确认，已跳过自动执行")
         return
 
+    _high = is_breach_authorized(store)
     yield _sse("auto_execute_start", layer="auto_execute",
                count=len(pending),
                exception_count=len(exceptions),
-               message=f"已开启自动执行：{len(pending)} 条待确认操作免人工确认直接成交…"
+               level=LEVEL_HIGH if _high else LEVEL_SEMI,
+               message=f"已开启自动执行（{'高授权：含越线' if _high else '半授权'}）："
+                       f"{len(pending)} 条待确认操作免人工确认直接成交…"
                        + (f"（另 {len(exceptions)} 条越线计划留待人工确认）" if exceptions else ""))
 
     done = rested = failed = 0
@@ -108,7 +151,7 @@ async def auto_execute_pending(store, market: str) -> AsyncGenerator[dict, None]
 
 
 if __name__ == "__main__":
-    # ponytail: 自检 —— 开关读写（默认关 / 写 1 读 True / 写 0 读 False）
+    # ponytail: 自检 —— 三档读写 + 布尔兼容 + 脏值降级
     class _FakeStore:
         def __init__(self):
             self._kv = {}
@@ -118,9 +161,16 @@ if __name__ == "__main__":
             self._kv[key] = value
 
     s = _FakeStore()
+    assert is_auto_execute_enabled(s) is False and is_breach_authorized(s) is False  # 默认关
+    set_auto_execute(s, True)                                                        # 布尔兼容 → 半授权
+    assert get_auto_execute_level(s) == LEVEL_SEMI
+    assert is_auto_execute_enabled(s) is True and is_breach_authorized(s) is False
+    set_auto_execute_level(s, LEVEL_HIGH)
+    assert is_breach_authorized(s) is True
+    set_auto_execute_level(s, 99)                                                    # 越界钳位
+    assert get_auto_execute_level(s) == LEVEL_HIGH
+    set_auto_execute_level(s, LEVEL_OFF)
     assert is_auto_execute_enabled(s) is False
-    set_auto_execute(s, True)
-    assert is_auto_execute_enabled(s) is True
-    set_auto_execute(s, False)
-    assert is_auto_execute_enabled(s) is False
+    s.save_preference(AUTO_EXEC_KEY, "垃圾")                                          # 脏值 → 最保守
+    assert get_auto_execute_level(s) == LEVEL_OFF
     print("auto_execute self-check OK")

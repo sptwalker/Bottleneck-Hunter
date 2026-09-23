@@ -787,11 +787,12 @@
               <div class="dc-card-header">
                 <h3><span class="dc-light dc-light-gray" id="dc-light-pending"></span>L4 待确认执行 <span class="dc-card-toggle">▼</span></h3>
                 <div class="dc-autoexec-wrap" style="display:flex;align-items:center;gap:8px;margin-left:auto">
-                  <span style="font-size:12px;color:var(--muted)" title="开启后：投委会通过的待确认操作免人工确认，由决策中心（含夜间定时决策）自动成交">自动执行</span>
-                  <label class="admin-toggle" id="dc-autoexec-toggle">
-                    <input type="checkbox" id="dc-autoexec-input">
-                    <span class="admin-toggle-slider"></span>
-                  </label>
+                  <span style="font-size:12px;color:var(--muted)" title="关闭：全部人工确认。半授权：投委会通过的待确认操作免人工确认，由决策中心（含夜间定时决策）自动成交，但越过 L2 目标的机会驱动计划仍留人工确认。高授权：连越线计划也一并自动成交。">L4 自动执行</span>
+                  <div class="dc-seg" id="dc-autoexec-seg" role="group" aria-label="L4 自动执行档位">
+                    <button type="button" class="dc-seg-btn" data-level="0">关闭</button>
+                    <button type="button" class="dc-seg-btn" data-level="1">半授权</button>
+                    <button type="button" class="dc-seg-btn" data-level="2">高授权</button>
+                  </div>
                   <span class="dc-badge dc-badge-warn" id="dc-pending-count">0</span>
                 </div>
               </div>

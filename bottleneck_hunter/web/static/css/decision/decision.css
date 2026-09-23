@@ -387,6 +387,50 @@
   min-width: 20px;
 }
 
+/* L4 自动执行三档开关（关闭 / 半授权 / 高授权） */
+.dc-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.dc-seg-btn {
+  padding: 3px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: 0.15s;
+}
+
+.dc-seg-btn + .dc-seg-btn {
+  border-left: 1px solid var(--border);
+}
+
+.dc-seg-btn:hover {
+  color: var(--text);
+  background: oklch(0.5 0 0 / 0.12);
+}
+
+.dc-seg-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* 高授权 = 允许自动执行越线操作，用危险色明确区分于半授权 */
+.dc-seg-btn.active.dc-seg-danger {
+  background: oklch(0.58 0.2 25);
+  color: #fff;
+}
+
+.dc-seg-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
 .dc-badge-info {
   background: oklch(0.55 0.15 250 / 0.2);
   color: oklch(0.7 0.15 250);

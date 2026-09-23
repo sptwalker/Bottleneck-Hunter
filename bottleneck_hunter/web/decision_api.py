@@ -168,28 +168,47 @@ async def save_portfolio_style(style: PortfolioStyle, market: str = "us_stock",
 
 
 class AutoExecuteReq(BaseModel):
-    enabled: bool = False
+    """L4 自动执行档位请求。level: 0=关闭 / 1=半授权 / 2=高授权（含越线）。
+
+    enabled 为向后兼容的布尔入口（老前端/老客户端）：True→半授权，False→关闭。
+    两者都给时以 level 为准。
+    """
+
+    level: int | None = Field(default=None, ge=0, le=2)
+    enabled: bool | None = None
 
 
 @router.get("/auto-execute")
 async def get_auto_execute(market: str = "us_stock", user: dict = Depends(get_current_user)):
-    """读取当前用户在该市场的 L4 自动执行开关状态。"""
-    from bottleneck_hunter.watchlist.auto_execute import is_auto_execute_enabled
+    """读取当前用户在该市场的 L4 自动执行档位。"""
+    from bottleneck_hunter.watchlist.auto_execute import get_auto_execute_level
     store = _user_store(user).for_market(market)
-    return {"enabled": is_auto_execute_enabled(store)}
+    level = get_auto_execute_level(store)
+    return {"level": level, "enabled": level >= 1}
 
 
 @router.put("/auto-execute")
 async def save_auto_execute(req: AutoExecuteReq, market: str = "us_stock",
                             user: dict = Depends(get_current_user)):
-    """保存 L4 自动执行开关（按用户+市场隔离，系统记忆此状态）。
+    """保存 L4 自动执行档位（按用户+市场隔离，系统记忆此状态）。
 
-    开启后决策中心（定时跑批 + UI 一键决策/全量刷新）投委会通过的待确认操作免人工确认直接成交。
+    关闭=全部人工确认；半授权=免人工确认但越线计划仍留人工；高授权=连越线也自动成交。
+    开启后决策中心（定时跑批 + UI 一键决策/全量刷新）投委会通过的计划自动成交。
     """
-    from bottleneck_hunter.watchlist.auto_execute import set_auto_execute
+    from bottleneck_hunter.watchlist.auto_execute import (
+        LEVEL_SEMI,
+        get_auto_execute_level,
+        set_auto_execute_level,
+    )
     store = _user_store(user).for_market(market)
-    set_auto_execute(store, req.enabled)
-    return {"ok": True, "enabled": req.enabled}
+    if req.level is not None:
+        level = req.level
+    elif req.enabled is not None:
+        level = LEVEL_SEMI if req.enabled else 0
+    else:
+        level = get_auto_execute_level(store)  # 空请求 = 不改动
+    set_auto_execute_level(store, level)
+    return {"ok": True, "level": level, "enabled": level >= 1}
 
 
 # ─────────────────────────────────────────────────────────
@@ -870,8 +889,9 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
     except Exception:
         logger.debug("加载投委会概览失败", exc_info=True)
 
-    from bottleneck_hunter.watchlist.auto_execute import is_auto_execute_enabled
-    auto_exec = is_auto_execute_enabled(store)
+    from bottleneck_hunter.watchlist.auto_execute import get_auto_execute_level
+    auto_exec_level = get_auto_execute_level(store)
+    auto_exec = auto_exec_level >= 1
     return {
         "macro_strategy": macro,
         "strategic_plan": strategic,
@@ -884,6 +904,7 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
         "committee_meta": committee_meta,
         "company_names": company_names,
         "auto_execute": auto_exec,
+        "auto_execute_level": auto_exec_level,
         # 自动执行开启时，pending 常被即时消费成 executed，L4 栏改列近期已自动执行，避免空白
         "recent_executed": store.get_recent_executed() if auto_exec else [],
     }

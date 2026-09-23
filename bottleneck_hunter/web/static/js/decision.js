@@ -13,6 +13,7 @@ const dcState = {
   loading: false,           // 跑批互斥锁：runDaily/runFullRefresh/scanCatalysts 专用，loadOverview 绝不碰它
   overviewLoading: false,   // loadOverview 自身的 inflight 标志（与跑批锁解耦）
   market: 'us_stock',
+  autoExecLevel: 0,   // L4 自动执行档位（0 关闭 / 1 半授权 / 2 高授权），由 overview 同步
   marketEpoch: 0,   // 市场切换版本纪元：每次切换自增，异步加载归来校验它以丢弃过期响应（消灭竞态）
   chartAlloc: null,
   chartEquity: null,
@@ -292,10 +293,11 @@ function renderAll(data) {
   renderTactical(data.tactical_plans || []);
   renderPending(data.pending_executions || [], {
     autoExecute: !!data.auto_execute,
+    highAuthorized: (data.auto_execute_level ?? 0) >= 2,
     recentExecuted: data.recent_executed || [],
   });
-  const aeInput = document.getElementById('dc-autoexec-input');
-  if (aeInput) aeInput.checked = !!data.auto_execute;   // 按市场同步开关状态（切市场重载 overview 即刷新）
+  dcState.autoExecLevel = data.auto_execute_level ?? 0;
+  syncAutoExecuteSeg(dcState.autoExecLevel);   // 按市场同步档位（切市场重载 overview 即刷新）
   loadBlocked();
   loadResting();
   // 催化剂：日历视图下不要用列表覆盖(否则 overview 每次返回都把日历清成列表)；
@@ -532,7 +534,7 @@ function renderTactical(plans) {
 /* ── L4 待确认 ────────────────────────────────────── */
 
 function renderPending(executions, opts = {}) {
-  const { autoExecute = false, recentExecuted = [] } = opts;
+  const { autoExecute = false, highAuthorized = false, recentExecuted = [] } = opts;
   const list = document.getElementById('dc-pending-list');
   const countBadge = document.getElementById('dc-pending-count');
 
@@ -540,6 +542,12 @@ function renderPending(executions, opts = {}) {
   if (!list) return;
 
   let html = '';
+
+  // 高授权档：越线操作也会被自动成交，栏内必须常驻提示（不能只靠开关颜色区分）
+  if (highAuthorized) {
+    html += `<div class="dc-pending-detail" style="padding:4px 4px 8px">
+      ⚠ 已开高授权：越线操作（越过 L2 目标权重）也会被自动成交，此处通常为空白。需要逐笔人工把关时请切回「半授权」。</div>`;
+  }
 
   if (executions.length > 0) {
     html += executions.map(ex => {
@@ -557,6 +565,10 @@ function renderPending(executions, opts = {}) {
       if (rj.committee_modified) flags += '<span class="dc-pending-flag dc-flag-committee">投委会调整</span>';
       if (rj.auto_repaired) flags += '<span class="dc-pending-flag dc-flag-repair">自修正</span>';
       if (rj.auto_adjusted) flags += '<span class="dc-pending-flag dc-flag-adjust">已缩量</span>';
+      // 越线（越过 L2 目标权重）：半授权档下这类永远留人工确认，必须一眼看得出
+      if (rj.mandate_exception) {
+        flags += `<span class="dc-pending-flag dc-badge-danger">越线待确认</span>`;
+      }
 
       return `<div class="dc-pending-item" data-plan-id="${escDC(ex.id)}">
         <div class="dc-pending-header">
@@ -605,31 +617,54 @@ function renderPending(executions, opts = {}) {
   list.innerHTML = html;
 }
 
-/* ── L4 自动执行开关 ─────────────────────────────── */
+/* ── L4 自动执行三档（关闭 / 半授权 / 高授权）───────── */
 
-async function handleAutoExecuteToggle(e) {
-  const input = e.target;
-  const enabled = input.checked;
-  // 开启是重大设置：免人工确认自动成交，含夜间定时决策，故二次确认；关闭无需确认。
-  if (enabled) {
+const AUTOEXEC_LABEL = { 0: '关闭', 1: '半授权', 2: '高授权' };
+
+function syncAutoExecuteSeg(level) {
+  document.querySelectorAll('#dc-autoexec-seg .dc-seg-btn').forEach(btn => {
+    const lv = Number(btn.dataset.level);
+    btn.classList.toggle('active', lv === level);
+    btn.classList.toggle('dc-seg-danger', lv === 2);
+  });
+}
+
+async function handleAutoExecuteLevel(e) {
+  const btn = e.target.closest('.dc-seg-btn');
+  if (!btn) return;
+  const level = Number(btn.dataset.level);
+  const prev = dcState.autoExecLevel || 0;
+  if (level === prev) return;
+
+  // 提权是重大设置：免人工确认自动成交，含夜间定时决策，故二次确认；降档无需确认。
+  if (level > prev) {
+    const high = level === 2;
     const ok = await showConfirm(
-      '开启后，投委会通过的待确认操作将【免人工确认】由决策中心自动成交（含每日/每周定时决策，无需你在场）。仅作用于当前市场的模拟账户。确定开启？',
-      { title: 'L4 自动执行', confirmText: '开启自动执行', danger: true });
-    if (!ok) { input.checked = false; return; }
+      high
+        ? '【高授权】投委会通过的待确认操作将免人工确认自动成交，连「越过 L2 目标权重」的机会驱动越线操作也一并自动成交（含每日/每周定时决策，无需你在场）。硬红线（可用现金、单票上限、组合 beta、数据新鲜度）仍然拦截。仅作用于当前市场的模拟账户。确定开启高授权？'
+        : '【半授权】投委会通过的待确认操作将免人工确认自动成交；越过 L2 目标权重的越线操作仍会留给你人工确认（含每日/每周定时决策）。仅作用于当前市场的模拟账户。确定开启？',
+      { title: 'L4 自动执行 · ' + AUTOEXEC_LABEL[level], confirmText: high ? '开启高授权' : '开启半授权', danger: high });
+    if (!ok) return;
   }
-  input.disabled = true;
+
+  const seg = document.getElementById('dc-autoexec-seg');
+  seg?.querySelectorAll('.dc-seg-btn').forEach(b => { b.disabled = true; });
   try {
-    await dcFetch(`/auto-execute?market=${encodeURIComponent(dcState.market)}`, {
+    const res = await dcFetch(`/auto-execute?market=${encodeURIComponent(dcState.market)}`, {
       method: 'PUT',
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify({ level }),
     });
-    if (dcState.overview) dcState.overview.auto_execute = enabled;
-    toast(enabled ? '已开启 L4 自动执行' : '已关闭 L4 自动执行', 'success');
+    dcState.autoExecLevel = res?.level ?? level;
+    if (dcState.overview) {
+      dcState.overview.auto_execute = dcState.autoExecLevel >= 1;
+      dcState.overview.auto_execute_level = dcState.autoExecLevel;
+    }
+    toast(`L4 自动执行已设为「${AUTOEXEC_LABEL[dcState.autoExecLevel]}」`, 'success');
   } catch (err) {
-    input.checked = !enabled;   // 回滚 UI，与服务端保持一致
     toast('保存失败：' + err.message, 'error');
   } finally {
-    input.disabled = false;
+    seg?.querySelectorAll('.dc-seg-btn').forEach(b => { b.disabled = false; });
+    syncAutoExecuteSeg(dcState.autoExecLevel ?? prev);   // 无论成败都按真实档位回显
   }
 }
 
@@ -1199,8 +1234,8 @@ export function initDecision() {
   document.getElementById('dc-blocked-section')?.addEventListener('click', handleBlockedAction);
   document.getElementById('dc-resting-section')?.addEventListener('click', handleRestingAction);
 
-  // L4 自动执行开关：change 存盘；点开关不应触发卡片折叠，故在容器上拦下冒泡
-  document.getElementById('dc-autoexec-input')?.addEventListener('change', handleAutoExecuteToggle);
+  document.getElementById('dc-autoexec-seg')
+    ?.addEventListener('click', handleAutoExecuteLevel);
   document.querySelector('.dc-autoexec-wrap')?.addEventListener('click', (e) => e.stopPropagation());
 
   // 会议日期筛选
