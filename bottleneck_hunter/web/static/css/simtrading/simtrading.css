@@ -202,6 +202,63 @@
   text-align: center;
 }
 
+/* 目标 vs 实际对照条（P2-2）：无 L2 目标时 JS 置 display:none */
+.st-alloc-target {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.st-alloc-target-head {
+  font-weight: 600;
+  color: var(--st-text-muted, #64748b);
+  margin-bottom: 6px;
+  text-align: center;
+}
+.st-alloc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.st-alloc-label {
+  flex: 0 0 28px;
+  color: var(--st-text-muted, #64748b);
+}
+.st-alloc-bar {
+  position: relative;
+  flex: 1 1 60px;
+  min-width: 40px;
+  height: 8px;
+  background: var(--st-bg-soft, #f1f5f9);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.st-alloc-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #3b82f6;
+  border-radius: 4px;
+}
+/* 目标刻度线：实际条上的白色竖线，多/少一眼可见 */
+.st-alloc-bar b {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: #0f172a;
+  transform: translateX(-1px);
+}
+.st-alloc-nums {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.st-alloc-tag {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+@media (max-width: 560px) {
+  .st-alloc-nums { display: none; }  /* 窄屏优先保住条与标签，数值靠 tooltip/条本身 */
+}
+
 /* ── 表格 ── */
 .st-table {
   width: 100%;

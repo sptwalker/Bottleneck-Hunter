@@ -216,21 +216,83 @@ async function loadPerfTickers() {
 
 /* ── 当前持仓 ── */
 async function loadPositionsTab() {
+  const mkt = stState.market;
   try {
     const showZero = document.getElementById('st-show-zero')?.checked ?? true;
     const data = await stFetch(`/positions?include_zero=${showZero}`);
     const positions = data.positions || [];
     stState.positions = positions;
     renderPositions(positions);
-    // 现金取账户余额（/positions 不含现金），best-effort：拿不到就退化成纯持仓饼图
-    let cash = stState.account?.cash_balance;
-    if (cash == null) {
-      try { cash = (await stFetch('/account')).account?.cash_balance; } catch { cash = null; }
-    }
+    // 现金取账户余额（/positions 不含现金），每次现取：stState.account 可能是别的市场/成交前的旧值，
+    // 拿它配本市场持仓会算出假的权益/现金比。拿不到就退化成纯持仓饼图 + 隐藏对照条。
+    let cash;
+    try { cash = (await stFetch('/account')).account?.cash_balance ?? null; } catch { cash = null; }
     renderAccountChart(positions, cash);
+    renderAllocTarget(positions, cash, mkt);
   } catch (e) {
     console.error('加载持仓失败:', e);
   }
+}
+
+// P2-2 目标 vs 实际对照条：拉最新 L2 的 target_allocation，与实际权益/现金比一条，
+// 让"现金超配"（此前只能靠心算两张饼图）一眼可见。纯展示，取不到 L2 / 现金就整块隐藏。
+// mkt＝发起加载时的市场：期间用户切了市场则丢弃本次结果，免得旧市场的慢响应覆盖新市场。
+async function renderAllocTarget(positions, cash, mkt = stState.market) {
+  const el = document.getElementById('st-alloc-target');
+  if (!el) return;
+  let ta = null, stance = '';
+  try {
+    const d = await stFetchDecision('/strategic/latest', mkt);
+    const plan = d.plan || {};
+    let rj = plan.result_json;
+    if (typeof rj === 'string') { try { rj = JSON.parse(rj); } catch { rj = {}; } }
+    rj = rj || {};
+    ta = rj.target_allocation || null;
+    stance = rj.overall_stance || rj.stance || '';
+  } catch { /* 决策 API 不可达/none → 隐藏对照条 */ }
+  if (mkt !== stState.market) return;
+  const tgtEquity = ta && typeof ta.equity_pct === 'number' ? ta.equity_pct : null;
+  if (tgtEquity == null || cash == null) { el.style.display = 'none'; return; }
+
+  const held = (positions || []).filter(p => (p.market_value || 0) > 0);
+  const posVal = held.reduce((s, p) => s + (Number(p.market_value) || 0), 0);
+  const cashVal = Number(cash) || 0;
+  const total = posVal + cashVal;
+  if (total <= 0) { el.style.display = 'none'; return; }
+  const actEquity = posVal / total * 100;
+  const actCash = cashVal / total * 100;
+  const tgtCash = typeof ta.cash_pct === 'number' ? ta.cash_pct : 100 - tgtEquity;
+
+  el.style.display = '';
+  el.innerHTML = `<div class="st-alloc-target-head">目标 vs 实际${stance ? '（' + esc(stance) + '）' : ''}</div>` +
+    allocRow('权益', actEquity, tgtEquity) +
+    allocRow('现金', actCash, tgtCash);
+}
+
+function allocRow(label, actual, target) {
+  const drift = actual - target;
+  // 容忍带 5pct，与 L2 偏离检查的 drift 告警线同口径；超带（无论超配/低配）都是要处理的偏离 → 一律标红
+  const inBand = Math.abs(drift) <= 5;
+  const cls = inBand ? 'st-pnl-zero' : 'st-pnl-neg';
+  const tag = inBand ? '在带内' : (drift > 0 ? `超配 ${fmtNum(drift, 1)}pct` : `低配 ${fmtNum(-drift, 1)}pct`);
+  const w = Math.max(0, Math.min(100, actual));
+  const tw = Math.max(0, Math.min(100, target));
+  return `<div class="st-alloc-row">` +
+    `<span class="st-alloc-label">${label}</span>` +
+    `<span class="st-alloc-bar"><i style="width:${w}%"></i>` +
+    // 目标刻度线：与实际条叠加，一眼看出多/少了几格
+    `<b style="left:${tw}%"></b></span>` +
+    `<span class="st-alloc-nums">实际 ${fmtNum(actual, 1)}% / 目标 ${fmtNum(target, 1)}%</span>` +
+    `<span class="st-alloc-tag ${cls}">${tag}</span>` +
+    `</div>`;
+}
+
+async function stFetchDecision(path, mkt = stState.market) {
+  const resp = await fetch(`/api/decision${path}?market=${mkt}`, {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+  return resp.json();
 }
 
 function renderPositions(positions) {
@@ -692,3 +754,7 @@ export function initSimTrading() {
     stState.chartAccount?.resize();
   });
 }
+
+// 测试专用导出：暴露目标 vs 实际对照条的纯渲染件供 Node 自检驱动。生产代码不引用，零副作用。
+// ponytail: 仅为可测性开的句柄，非公共 API。
+export const __test__ = { allocRow, renderAllocTarget, stState };

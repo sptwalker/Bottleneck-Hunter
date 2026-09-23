@@ -812,6 +812,46 @@ async def run_macro_check(
 # ─────────────────────────────────────────────────────────
 
 
+# P1-1 漂移逃逸阈值：实际权益/现金偏离该 L2 目标超过此幅度 → 日常流程不再只做偏离检查，强制重生成 L2。
+# 15pct 是"目标已失效"的量级（远超 drift 的 5pct 告警线），避免日常小波动就烧一次 L2 算力。
+_DECISION_DRIFT_ESCAPE_PCT = float(_os.getenv("BH_DECISION_DRIFT_ESCAPE_PCT", "15"))
+# 逃逸冷却：L2 不下单，重生成后偏离照旧 → 不设冷却会每轮都重生成。L2 须至少这么"老"才允许逃逸，
+# 即偏离持续期间每天最多重生成一次。
+# ponytail: 固定 20h（≈复用窗口），偏离长期不收敛时仍每天一次 L2 算力；要更省就改成指数退避。
+_DECISION_ESCAPE_MIN_AGE_H = 20.0
+
+
+def _reuse_escape_reason(store: WatchlistStore, plan_rj: dict, market: str) -> dict:
+    """P1-1：L2 逃逸判据。组合实际配置已严重偏离该 L2 目标 → 返回逃逸原因 dict，否则 {}。
+
+    纯确定性读库，不调 LLM。无明确目标(equity_pct/sector_targets 都缺)时返回 {}（无从判偏离，
+    与 _compute_deviation_drift 的 has_target 降级口径一致）。纯现金账户照判——那正是"钱没配出去"的最坏情形。
+    """
+    try:
+        account = store.get_sim_account()
+        if not account:
+            return {}
+        positions = store.get_sim_positions(account.get("id"))
+        drift = _compute_deviation_drift(store, plan_rj, account, positions, market)
+        if drift.get("rebalance_suggested") is None:
+            return {}
+        top = max(
+            (("权益", drift["equity_drift_pct"]), ("现金", drift["cash_drift_pct"])),
+            key=lambda kv: abs(kv[1]),
+        )
+        if abs(top[1]) > _DECISION_DRIFT_ESCAPE_PCT:
+            return {
+                "reason": f"{top[0]}偏离目标 {top[1]:+.1f}pct（实际 {drift['actual_equity_pct']}%权益/"
+                f"{drift['actual_cash_pct']}%现金，目标 {drift['target_equity_pct']}%权益）",
+                "drift_pct": top[1],
+                "threshold_pct": _DECISION_DRIFT_ESCAPE_PCT,
+                "drift": drift,
+            }
+    except Exception:
+        logger.debug("L2 复用逃逸判据计算跳过", exc_info=True)
+    return {}
+
+
 async def run_strategic_plan(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
@@ -2809,8 +2849,27 @@ async def run_daily_decision(
                 async for evt in run_strategic_plan(store, budget, market=market):
                     yield evt
             elif plan:
-                async for evt in run_deviation_check(store, budget, market=market):
-                    yield evt
+                # P1-1 漂移逃逸阀：日常流程对已有 L2 只做偏离检查（不重生成），组合严重偏离目标时
+                # 等于一直拿失效的旧图纸，且静默发生。偏离超阈值 + 冷却已过 → 改为强制重生成 L2。
+                _plan_age = _upstream_age_days(plan.get("created_at", ""))
+                _escape = (
+                    _reuse_escape_reason(store, plan.get("result_json") or {}, market)
+                    if _plan_age is not None and _plan_age * 24 >= _DECISION_ESCAPE_MIN_AGE_H
+                    else {}
+                )
+                if _escape:
+                    logger.info("L2 漂移逃逸[%s]：%s，强制重生成以面对现实组合", market, _escape["reason"])
+                    yield _sse(
+                        "decision_warning",
+                        layer="L2",
+                        message=f"⚠ 组合实际配置已偏离该 L2 目标 {_escape['drift_pct']:+.1f}pct（阈值 "
+                        f"{_escape['threshold_pct']:.0f}pct），不再沿用旧组合策略，强制重生成 L2",
+                    )
+                    async for evt in run_strategic_plan(store, budget, market=market, force=True):
+                        yield evt
+                else:
+                    async for evt in run_deviation_check(store, budget, market=market):
+                        yield evt
         except Exception as e:
             logger.exception("L2 阶段失败")
             yield _sse("decision_error", layer="L2", error=str(e))
@@ -2869,6 +2928,54 @@ async def run_daily_decision(
                 )
         except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响决策
             logger.debug("质量门阻断留痕失败: %s", e)
+
+    # P1-2 缺口未纠正留痕：上游陈旧（L3 已中止）/ pre_l4 红灯时停买是对的（不能盲下单），但扩张侧那笔
+    # "该配没配"也得像"被拦的买"一样在 operation_log 记账 —— 否则事后只看到"买了的被拦"，看不到"没买的欠着"。
+    # （Step -1 行情硬停已提前 return：价格本身不可信时算不出可信缺口，不记。）
+    try:
+        from bottleneck_hunter.watchlist.constraint_validator import compute_underweight_gap
+
+        _acc = store.get_sim_account()
+        _macro = store.get_latest_macro_strategy()
+        _cause = ""
+        if scope in ("l3l4", "full") and _macro:
+            for _label, _p in (("L2", store.get_latest_strategic_plan()), ("L1", _macro)):
+                _a = _upstream_age_days((_p or {}).get("created_at", ""))
+                if _p and (_a is None or _a > _STALE_UPSTREAM_DAYS):
+                    _cause = f"上游 {_label} 陈旧（L3 已中止）"
+                    break
+            if not _cause and l4_blocked:
+                _cause = "pre_l4 质量门红灯"
+        _uncorrected = {}
+        if _acc and _cause:
+            _mj = _macro.get("result_json", {}) or {}
+            _bounds = get_allocation_bounds(
+                _mj.get("regime", "sideways"),
+                _mj.get("risk_appetite", "balanced"),
+                _mj.get("regime_confidence", 5),
+            )
+            _gap = compute_underweight_gap(_acc, store.get_sim_positions(_acc.get("id")), _bounds)
+            if _gap.get("underweight"):
+                _uncorrected = _gap
+        if _uncorrected:
+            uid = getattr(store, "_user_id", "") or ""
+            if uid:
+                from bottleneck_hunter.web.oplog import record_operation
+
+                record_operation(
+                    uid, "缺口未纠正",
+                    category="error",  # 同「质量门阻断」进推送白名单：钱趴着不配是要被看见的偏差
+                    detail=(
+                        f"{market}：{_cause}，本轮未纠正权益配置不足 —— 实际权益 "
+                        f"{_uncorrected['equity_pct']}% < 下限 {_uncorrected['equity_min']}%，"
+                        f"缺口 {_uncorrected['gap_pct']}pct、可部署 {_uncorrected['deployable_cash']:.0f} 元未部署"
+                    )[:300],
+                    result="partial", market=market,
+                    meta={"cause": _cause, "equity_pct": _uncorrected["equity_pct"],
+                          "equity_min": _uncorrected["equity_min"], "gap_pct": _uncorrected["gap_pct"]},
+                )
+    except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响决策
+        logger.debug("缺口未纠正留痕失败: %s", e)
 
     # Step 4: L4 执行方案（质量门 red 时阻断新建执行计划，避免在数据严重过期/超限下下单；
     #          A1 硬止损已生成的卖出计划不受影响，仍进入投委会）

@@ -589,7 +589,10 @@ class _SimTradingMixin:
         delta = amount if op_type == "deposit" else -amount
         new_cash = round(account["cash_balance"] + delta, 2)
         new_initial = round(account.get("initial_capital", 100000) + delta, 2)
-        self.update_sim_account(account_ref=account_ref, cash_balance=new_cash, initial_capital=new_initial)
+        # total_equity 同步平移：不改的话它要等下次成交/重估才更新，期间偏离度/缺口按旧总额算（权益%虚高）
+        new_equity = round((account.get("total_equity") or 0) + delta, 2)
+        self.update_sim_account(account_ref=account_ref, cash_balance=new_cash, initial_capital=new_initial,
+                                total_equity=new_equity)
         self.create_fund_op(account["id"], op_type, amount, note)
         return {"success": True, "cash_balance": new_cash, "initial_capital": new_initial}
 
