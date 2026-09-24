@@ -457,7 +457,8 @@ class _SimTradingMixin:
         conn = self._connect()
         try:
             q, p = self._filtered(
-                "SELECT * FROM sim_positions WHERE account_id = ? AND ticker = ? AND shares > 0",
+                "SELECT * FROM sim_positions WHERE account_id = ? AND ticker = ? AND shares > 0"
+                " ORDER BY updated_at DESC",
                 (account_id, ticker),
             )
             row = conn.execute(q, p).fetchone()
@@ -466,11 +467,18 @@ class _SimTradingMixin:
             conn.close()
 
     def get_sim_position_any(self, account_id: str, ticker: str) -> dict | None:
-        """查找持仓记录（含 shares=0），用于买回复用已有记录。"""
+        """查找持仓记录（含 shares=0），用于买回复用已有记录。
+
+        ★活行优先：物化(导入)把旧持仓清零为墓碑(shares=0)而不删除，同一票于是可能并存
+        「墓碑 + 活行」多行；不加 ORDER BY 时 fetchone 命中哪行由 SQLite 行序决定，
+        _execute_buy 复用墓碑后会出现「两行都 shares>0 → 组合市值重复计数」。
+        按 shares>0 优先、同日再按 updated_at 倒序取最新，把「偶然正确」变成「必然正确」。
+        """
         conn = self._connect()
         try:
             q, p = self._filtered(
-                "SELECT * FROM sim_positions WHERE account_id = ? AND ticker = ?",
+                "SELECT * FROM sim_positions WHERE account_id = ? AND ticker = ?"
+                " ORDER BY shares > 0 DESC, updated_at DESC",
                 (account_id, ticker),
             )
             row = conn.execute(q, p).fetchone()

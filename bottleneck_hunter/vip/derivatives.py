@@ -789,6 +789,10 @@ def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: st
                          is_indicative: bool = False) -> str:
     import json
     import uuid
+
+    # created_at 是「哪条条款更新」的排序键(_current_derivative_rows 取其 MAX)，必须与全库其余时间戳同口径
+    # 走 UTC；此前裸用 datetime.now()(本地时间，比 UTC 早 8 小时)会让新写入的行排序错位。惰性 import 同 _today。
+    from bottleneck_hunter.watchlist.store_base import _now_iso
     account_ref = wl_store.resolve_vip_account_ref(account_ref) if hasattr(wl_store, "resolve_vip_account_ref") else (account_ref or "").strip()
     lot_key = (lot_key or "").strip()  # 同标的多笔头寸判别键；条款单单条路径留空(行为不变)
     # 幂等：重复上传同一文件保留原 id/created_at，但刷新 terms_json/currency——否则 parser 升级
@@ -818,7 +822,7 @@ def save_derivative_term(wl_store, term: DerivativeTerm, *, source_file_name: st
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?{wl_store._user_insert_vals()}{wl_store._market_insert_vals()})""",
             (did, source_file_name, source_file_hash, broker, term.product_family, term.underlying_symbol,
              term.currency, json.dumps(term.terms, ensure_ascii=False), rationale_ref, account_ref, lot_key,
-             int(is_indicative), datetime.now().isoformat())
+             int(is_indicative), _now_iso())
             + wl_store._user_insert_params() + wl_store._market_insert_params(),
         )
     return did

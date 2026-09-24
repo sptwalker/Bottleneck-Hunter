@@ -398,15 +398,30 @@ def _upsert_transaction(wl_store, txn: StatementTransaction, *, source_doc_id: s
 
 def _overwrite_guard(wl_store, account, acct_id, as_of_date, incoming_total, incoming_n, account_ref) -> str:
     """返回非空原因串 = "本次快照不可覆盖 sim 现有账户"。防误读文件用错误数据覆盖好数据的两类：
-    1. 陈旧单：账户已有更新日期(period_end 更晚)的快照 → 不拿旧数据回填 live(旧持仓仍存规范层作历史)。
+    1. 陈旧单：账户已有更新日期(期次更晚)的快照 → 不拿旧数据回填 live(旧持仓仍存规范层作历史)。
     2. 骤降误判：账户已有实质权益且有持仓，本次总值<既有 10% 且持仓数也更少 → 疑似误判券商/部分解析。
     ponytail: 阈值 0.1、且需"值降+数降"同时满足，避免误伤真实大额提取；拿到更多误判样本再校准。
-    (全空快照已由上游 not rows 分支处理，此处不重复；空账户 existing_n=0，两条判定天然不触发，首次导入放行。)
+    (全空快照已由上游 not rows 分支处理，此处不重复。)
+
+    ★纯衍生品账户(持仓全走 vip_derivative_terms、positions 表零行)：上述两条证据源对它**同时失效**——
+    既无 positions 行可判陈旧，existing_n 又恒为 0 使骤降分支永不成立。于是「净值 = 最后上传的那份」，
+    一份最旧的月结单只要上传得最晚就会覆盖当前权益(生产 CMBIS 实测：头条取到 04-30 期而非 07-31 期)。
+    故两条判定各补一个对零持仓账户也成立的证据源：期次(vip_imports.period_end，同 _import_total_series 口径)。
     """
-    if as_of_date:  # 陈旧：存在比本次更晚日期的快照
+    # 1a. 陈旧(直接判据)：本期结单期次**早于**该账户已落库的最新期次 → 拒绝回填 live。
+    # 这是对**零持仓账户**唯一成立的陈旧判据(它们从不往 positions 写行，1b 恒查空)；且必须直接比期次、
+    # 不能绕道 positions。对正常账户结论与 1b 完全一致(旧期结单本就会被 1b 挡下)，故不放松也不新增拦截面。
+    # 注意 vip_imports 的写入(create_vip_import)发生在护栏**之后**(importer.py:76 → :95)，故 latest 纯为"已落库"，
+    # 同一份文件重导(期次相等)不会自锁。
+    latest = _latest_import_period(wl_store, account_ref) if account_ref else ""
+    if latest and as_of_date and as_of_date < latest:
+        return f"stale_snapshot:{as_of_date}"
+    # 1b. 陈旧(持仓判据)：账户已有更新日期的持仓快照。保留原强度——即使期次证据缺失也照常生效。
+    baseline = max([d for d in (latest, as_of_date or "") if d], default="")
+    if baseline:
         conn = wl_store._connect()
         try:
-            where, params = ["as_of_date > ?"], [as_of_date]
+            where, params = ["as_of_date > ?"], [baseline]
             if account_ref:
                 where.append("account_ref = ?")
                 params.append(account_ref)
@@ -418,10 +433,21 @@ def _overwrite_guard(wl_store, account, acct_id, as_of_date, incoming_total, inc
         finally:
             conn.close()
     existing_equity = account.get("total_equity") or 0.0
+    # 注意 get_sim_positions 默认已滤 shares>0 → existing_n 是**活仓**数(墓碑不算)。零持仓账户故恒为 0。
     existing_n = len(wl_store.get_sim_positions(acct_id))
-    if (existing_equity > 0 and existing_n > 0
-            and incoming_total < existing_equity * 0.1 and incoming_n < existing_n):
-        return f"suspected_misparse:total={incoming_total:.0f}<10%_of_{existing_equity:.0f}"
+    if existing_equity <= 0:
+        return ""
+    if existing_n > 0:
+        if incoming_total < existing_equity * 0.1 and incoming_n < existing_n:
+            return f"suspected_misparse:total={incoming_total:.0f}<10%_of_{existing_equity:.0f}"
+        return ""
+    # 2'. 零持仓账户：改看权威净值骤降（本期结单期次比已落库的更新，权益却不足既有 10%）。
+    # 需同时能判定"期次"与"权益"；任一缺失则放行（判不了就不拦，另有导入留痕可查）。
+    if not as_of_date or not baseline:
+        return ""
+    if as_of_date > latest and incoming_total < existing_equity * 0.1:
+        return (f"suspected_misparse:total={incoming_total:.0f}"
+                f"<10%_of_{existing_equity:.0f}_at_newer_period")
     return ""
 
 
@@ -872,24 +898,68 @@ def _external_flows(txns: list[dict]) -> list[dict]:
 
 
 def _current_derivative_rows(wl_store, account_ref: str) -> list[dict]:
-    """账户"当前"结构性产品/衍生品条款：同一 (family, underlying, lot_key) 只取最新一期(MAX created_at)。
+    """账户"当前"结构性产品/衍生品条款。两道口径，缺一不可：
 
-    否则多期结单(如招银 05/06/07 三份月结单)会为同一笔 FCN 落三行，概览持仓与曲线 MTM 三倍虚增。
-    SQLite 保证：GROUP BY 配合 MAX(created_at) 时，其余裸列取自最大行(3.7.11+)。terms 由调用方解析。
+    1. **同期去重**：同一 (family, underlying, lot_key) 只取**期次最新**的那一份结单的行
+       (vip_imports.key_metrics_json.period_end，同源 _import_total_series/_latest_import_period)。
+       此前用 MAX(created_at) 选，等价于"最后上传的那份"——但上传顺序与期次顺序无关：
+       招银 07-07 日报是在 07-31 月报之后才上传的，于是"当前 MTM"取了 07-07 的值。
+    2. **到期剔除**：条款 maturity 早于账户最新期次的，是**已被后一期结单取代**的头寸
+       (招银 04-30 的两笔 CMBIGP 到期 05-15，05-29 结单已列出卖出)，不再计入当前 MTM。
+       ★基准是**账户最新结单期次**而非"今天"：以今天为准会把 07-31 期仍在册的 NVDA
+       (到期 09-04) 一并剔掉，把账户 MTM 清成 0。判据必须相对结单口径。
+    期次关联走 vip_derivative_terms.source_file_hash = vip_imports.file_hash(同为结单 content_hash)。
+    关联不到期次的行(条款单/irf 无对应结单)按原样保留，不臆断其失效。
+    ponytail: 行数在几十条量级，Python 侧折叠比窗口函数更易读；改口径只动本函数。
     """
     import json
     conn = wl_store._connect()
     try:
+        # 期次映射：同 _import_total_series 的口径（结单 content_hash → 期末日）。单独一条查询而非 JOIN：
+        # _user_filter/_market_filter 按字符串位置插过滤条件，嵌套子查询+别名 JOIN 会插错位置。
+        qp, pp = wl_store._filtered(
+            "SELECT file_hash, MAX(json_extract(key_metrics_json,'$.period_end')) AS pe "
+            "FROM vip_imports WHERE account_ref = ? GROUP BY file_hash",
+            (account_ref,), table="vip_imports")
+        period_by_hash = {r["file_hash"]: (r["pe"] or "") for r in conn.execute(qp, pp).fetchall()}
+
         q, p = wl_store._filtered(
-            "SELECT product_family, underlying_symbol, currency, lot_key, terms_json, MAX(created_at) AS _mx "
-            "FROM vip_derivative_terms WHERE account_ref = ? AND is_indicative=0 "
-            "GROUP BY product_family, underlying_symbol, lot_key ORDER BY _mx DESC",
+            "SELECT product_family, underlying_symbol, currency, lot_key, terms_json, "
+            "       source_file_hash, created_at "
+            "FROM vip_derivative_terms WHERE account_ref = ? AND is_indicative = 0 "
+            "ORDER BY created_at DESC",
             (account_ref,), table="vip_derivative_terms")
-        rows = [dict(r) for r in conn.execute(q, p).fetchall()]
+        raw = [dict(r) for r in conn.execute(q, p).fetchall()]
     finally:
         conn.close()
-    for r in rows:
+
+    for r in raw:
+        r["_pe"] = period_by_hash.get(r.get("source_file_hash") or "", "")
+    # 取每个 lot_key "期次最新"的那行；无期次(关联不到结单)的行排最后 → 仅在该 lot_key 无有期次行时才被选中
+    # (保守：不因关联失败而误删)。同期并列时再由 created_at 倒序取最新（原行为）。
+    raw.sort(key=lambda r: (r["_pe"], r["created_at"]), reverse=True)
+
+    picked: dict[tuple, dict] = {}
+    for r in raw:
+        key = (r["product_family"], r["underlying_symbol"], r["lot_key"])
+        picked.setdefault(key, r)
+
+    latest_period = _latest_import_period(wl_store, account_ref)
+    rows, dropped = [], []
+    for r in picked.values():
         r["terms"] = json.loads(r.get("terms_json") or "{}")
+        maturity = str(r["terms"].get("maturity") or "")[:10]
+        # 仅在"能判定"时剔除：无最新期次、或 maturity 非 ISO(如野村旧版 DD.MM.YYYY) → 一律保留。
+        if latest_period and len(maturity) == 10 and maturity[:4].isdigit() and maturity < latest_period:
+            dropped.append(f"{r['underlying_symbol']}:{r['lot_key']}@{maturity}")
+            continue
+        rows.append(r)
+    if dropped:
+        # 不静默：剔除即记一笔(debug 级——本函数在每次页面渲染/报告生成都会走，warn 会刷屏)。
+        import logging
+        logging.getLogger(__name__).debug(
+            "衍生品当期剔除已到期头寸 %d 笔 (acct=%s, 基准期次=%s): %s",
+            len(dropped), account_ref, latest_period, ", ".join(dropped))
     return rows
 
 
