@@ -992,6 +992,123 @@ P1-L 原文要求"到期日已过（`< 今天`）的条款不并入构成"，**�
 
 ---
 
+## 七、第一批（Batch A）修复执行记录（2026-09-25）
+
+**授权来源**：用户指示「**我同意你的修补顺序，3 批都做，每做完一批请全量测试并进行代码审核，然后记录研发文档再继续进行下一批次任务**」——本节即第一批（Batch A）的执行记录。同时援引用户方法学约束：「**这些审计结果不能全盘相信，他们可能会有幻觉，你需要自己实际审计代码逻辑进行验证**」——本节所有结论均经独立复核，**复核中推翻了报告原文的一处判断**（见 7.1）。
+
+**本批范围（六项，全部低风险，无一改变"该买多少"）**：P0-A / P0-B / P0-D / P1-C / P1-D / P1-J。
+
+### 7.0 与报告原方案的差异
+
+| 项 | 文件 | 改动 | 与报告原方案的差异 |
+|---|---|---|---|
+| **P0-A** | `committee.py:1085`、`auto_execute.py:_committee_backed` | 非结论性裁决（`needs_review`/`needs_discussion`/`unknown`）一律 `reject_execution` + SSE `committee_gating`；自动执行侧再加一道**独立**闸门 `_committee_backed()`（fail-closed，读共识失败即不背书） | **比报告多做一层**。报告只要求"非结论不落动作"；实现发现**仅靠 gating 不够**——`restore_execution`（用户 override / 质询改判）会把计划退回 `pending` 而不带回结论，于是"结论已被丢弃的计划"重新变成可自动成交。故 `_committee_backed` **不复用 `status`**，直读 `committee_consensus.final_verdict`。`_regate_after_challenge` 同步补同构兜底。 |
+| **P0-B** | `store_decision.py:616,632,647`、`trade_executor.py`、`scheduler.py` | 新增 `record_execution_failure` / `get_stale_pending_executions` / `expire_stale_pending` + `_STALE_PENDING_DAYS=14` 老化任务；`_record_exec_failure` 写三处留痕（计划计数 / `operation_log` category=error / IM 推送） | **一致**。`expire_stale_pending` 与既有 `expire_execution` **刻意分开**：后者要求 `status='confirmed' AND resting_until 非空`（挂单专用），对裸 `pending` 恒为假——这正是"pending 堆积却无人收尸"的根因。 |
+| **P0-D** | `constraint_validator.py`、`decision_engine.py:2604-2699`、`store_simtrading.py` | 日额度判据由「单笔 vs 总额度」改为「**当日已成交 + 本笔**」；生成期加**影子账本**（`_cash_left`/`_turnover_used` 只存局部变量、**不写库**）；成交期同口径读 `daily_turnover_amount`；`validate_batch` 批内累积（**含失败笔**） | **一致，但踩到一个必须记下的坑**：日换手是**累加量**，逐笔比对在数学上不可能守住。报告验证案 2（10 笔各 5% 权益）实测修复前**全部放行**，累计 50% 权益 vs 上限 30%——**拆得越碎越没上限**。 |
+| **P1-C** | `decision_engine.py:886-923,3076,3185-3190` | 判据抽成 `_uncorrected_gap_cause` / `_record_uncorrected_gap`，`run_daily_decision` 与 `run_full_refresh` **共用一份** | **较报告收紧**。报告要求 `run_full_refresh` 补两条保护；实现改为**抽公共判据**而非复制逻辑（复制会让两条路径的措辞与条件各自漂移）。`run_full_refresh` 路径下"上游陈旧"一支是**死枝而非漏检**——该路径 L1/L2 刚被强制重生成，已在代码注释中写明。 |
+| **P1-D** | `constraint_validator.py:564-615`、`decision_engine.py:943,959` | `compute_underweight_gap` 增 `overweight_cash` / `excess_cash_pct` / `idle_cash`，并**接上消费方**（缺口未纠正留痕里加"现金超配"一侧） | **报告给了二选一（接消费方 或 删），实现选择"接消费方"**。原状是 `cash_max` **零消费方**——即"现金上限"这一侧在诊断里是死的。注意 `underweight` 与 `overweight_cash` 是**各自判定、互不蕴含**的两侧：`sideways/balanced` 的 `equity(40,60) / cash(25,40)` **不互补**，两者可同时为假（如 65/30）。 |
+| **P1-J** | `decision_engine.py:2022,2044` | 跨市场守卫改判 `market` **列** | **报告只说了"修一行"，实际是两处平行判据**（`_gap_driven_plans` 与 `_opportunity_driven_plans`），**只修一条会留下半个空操作**。 |
+
+### 7.1 执行时发现报告方案的一处错误判据（已就地更正）
+
+**P1-J（N-31）原文把守卫写成 `normalize_ticker(tk, market) != normalize_ticker(tk, tp.get("market") or market)`——这是恒假的，等于没有守卫。**
+
+两重证明（任一即可，两条都做了）：
+
+1. **运行实证**：同一个 ticker 拿两个市场参数各归一一次，三种取值组合结果恒相等。
+2. **源码实证**：`inspect.getsource(normalize_ticker)` 去掉 docstring 后，函数体**从不引用它的 `market` 参数**——故任何"用 `normalize_ticker` 比较两个市场"的写法在**语法层**就不可能是真判据。
+
+**修正后的判据是 `normalize_market(tp.get("market")) != normalize_market(market)`**：读 `market` **列**，不读 ticker 形态。这条区别有真实语义——美股执行流程里出现 A 股形态的代码（或反之）时，**以该行的 `market` 列为准**，不得被守卫误伤。
+
+### 7.2 变异测试证据（本批最重要的门禁）
+
+**门禁判据不是"测试通过"，而是"把修复代码改坏，测试必须变红"。** 本批每一处修复都做了变异验证：
+
+| 变异 | 内容 | 结果 |
+|---|---|---|
+| **MUT1** | 摘掉生成期 `daily_turnover_used=` 参数（全部） | **2 failed** ✓ |
+| **MUT2** | 摘掉"本批已放行金额并入已用额度"那行 | **2 failed** ✓ |
+| **MUTJ** | 两条跨市场判据改回旧写法 | **2 failed** ✓ |
+| **MUTA1+MUTA2** | 删掉 P0-A 的`reject_execution` 与 `_committee_backed` 闸门 | **8 failed** ✓ |
+| **MUTB1** | 摘掉失败计数累加 | **3 failed** ✓ |
+| **MUTB2** | 摘掉 reaper 的 `COALESCE(resting_until,'')=''` 子句 | **首次 0 failed → 加固后 2 failed** ✓（见 7.3） |
+| **MUTSELL** | 日额度判据由「已用 + 本笔」改回「本笔」（`if trade_amount > max_turnover: # MUTSELL`） | **首次 0 failed → 加固后 6 failed** ✓（见 7.3.1） |
+
+**MUT1/MUT2 的首次结果值得单独记一笔**：这两处变异**当时全量 2269 条测试无一报警**。原因是既有用例（`TestDailyTurnoverGate` / `TestShadowLedger`）全部**直接调 `validate_execution_plan` / `max_compliant_shares`**——它们只证明"卡口本身算得对"，**没证明"L4 生成期真的问了它"**。参数不在生产路径上，日额度卡口就是个装饰品，且**无人能发现**。故补 `TestGenerationPhaseConsumesTurnover`：走**真实** `run_execution_plans`（真实 store、真实 L1/L2/L3 行、一笔真实 280,000 成交 vs 300,000 日额度、mock LLM 返回超量买单），断言落库被缩到 200 股且 `auto_adjusted is True`。
+
+### 7.3 MUTB2：一次"测试绿着但没测到东西"的实证
+
+MUTB2（摘掉 reaper 的"非挂单"子句）**首次未红**。追查后发现问题**不在生产代码，在测试自己**：
+
+原 `test只收早于cutoff且非挂单的` 把"挂单"那条夹具造成 `status='confirmed'`——**它先被 `status='pending'` 排除了**，于是 `COALESCE(resting_until,'')=''` 这一支**一次都没执行过**。断言绿着，覆盖为零。
+
+**接着查"这个状态在不在生产里可达"，得到的是一个真实缺陷（非防御性分支）**：`pending` 且 `resting_until` 非空**可达**，两条真实路径——
+
+1. 投委会质询改判否决 / 用户 override → `restore_execution` 置 `pending`，**不清**挂单标记；
+2. 挂单成交失败 → `revert_to_pending` 置 `pending`，同样不清。
+
+两处**都是刻意不清**的：`rest_execution` 的"重复调用不重置(避免续期)"是防续期设计，清掉标记会让每轮失败都续出新的 14 天窗口。**代价是这类计划成了孤儿**——reaper 不收它（挂单标记），**挂单轮询也看不见它**（`get_resting_executions` 要求 `confirmed`）。已用脚本实证：`reaper 收不到它: []`、`挂单轮询也看不到它: []`。
+
+**故 `COALESCE(resting_until,'')=''` 是承重子句，不是防御。** 摘掉它等于把挂单扔进收尸队列。夹具已改为走**真实状态机**（`confirm → rest → reject → restore`）构造该状态，MUTB2 随即变红（2 failed）。该孤儿状态本身（`restore_execution` 保留挂单标记）**未在本批改动**——它属"挂单退回人工队列后的收尾"问题，与本批六项无关，已记录待评估。
+
+### 7.3.1 MUTSELL：同一类恒真夹具，这次长在**我自己本批新写的测试**里
+
+7.3 的教训（"夹具让同一函数里更早的一道守卫吞掉了断言"）**在同一个批次里又复发了一次**，而且这次是我自己写的用例。
+
+`test_daily_turnover_gate.py::test_卖单也受日额度约束` 原本这样写：
+
+```python
+v = validate_execution_plan(_plan(500, action="reduce"), ACCOUNT, [], C,
+                            daily_turnover_used=290_000)   # ← positions=[] 是元凶
+assert not v.valid
+```
+
+`positions=[]` 让这个卖单在**更早**的一道硬校验（"无持仓，卖出指令无效"）上就返回了，**第 5 段（日额度）一次都没执行**。探查实证：把 `used` 取 `0` 与取 `290_000`，两次的 violations **逐字节相同**（都是 `['AAA 无持仓，卖出指令无效']`）——`assert not v.valid` 对两者都绿，**这个用例当时覆盖为零**。
+
+加固后（给足持仓 + 先断言"`used=0` 时完全合规"作为前提 + 断言命中"叠加当日已成交"这条**专属**文案），变异实证：把判据改回"单笔 vs 总额度"（`if trade_amount > max_turnover:  # MUTSELL`），**该文件 6 failed / 17 passed / 1 skipped**；加固前它**不会贡献任何一个失败**。
+
+**这是本批最重要的一条过程记录**：恒真夹具不是"别人写的旧代码"的问题，是**夹具与生产代码共用同一函数**时天然会踩的坑——只要夹具的状态让更早的守卫先 return，后面的断言就永远测不到东西，而它**看起来绿着**。故本批所有新用例在提交前都做了"前提断言 + 专属文案断言"两道自检。
+
+### 7.4 过程中发现并修掉的其他真实缺陷
+
+1. **`test_forum_ai.py` 的墙钟依赖**（10 条失败）：用例未隔离 `forum_ai.in_quiet_window`（`_QUIET_FROM=2` / `_QUIET_TO=8` 北京时间），**凌晨跑必红、白天跑必绿**。已加 autouse fixture 固定为 `False`。这是"同一份代码换个时刻跑结果不同"的典型假失败。
+2. **P1-J 的零覆盖**：旧守卫在 39 条测试下改回去**无一报警**——它恒真。
+3. **reaper 用例的恒真夹具**（7.3）。
+4. **`test_卖单也受日额度约束` 的恒真夹具**（7.3.1）——**本批自己新写的**用例，在全量门禁下是绿的，只有逐条重探断言才发现它测不到东西。
+5. **我自己的流程事故（记入以防复发）**：我用 `git checkout -- store_decision.py` 想撤掉一个变异，**而该文件本身就在本批改动集里**——P0-B 的 46 行实现被整段删除。靠 `git status` 显示该文件变干净 + 三处 `grep` 全空才发现，已按此前打印过的 diff 逐字恢复并验证（46 insertions，13 passed）。**教训：绝不 `git checkout --` 本批改动集内的文件；撤变异要用定向替换。（后续 MUTB2 / MUTSELL / MUTREG 的恢复即用此法。）**
+6. **P0-B 新任务漏登记全局时间表**（**代码审核抓到的**，见 7.4.1）。
+
+### 7.4.1 代码审核发现：P0-B 的新任务在管理员时间表里"整条不存在"
+
+`expire_stale_pending` 注册进了 `_JOB_SPECS` / `list_job_categories` / `list_job_labels` **三处，却漏了第四处 `GLOBAL_SCHEDULE_DEFAULTS`**。核实结论：
+
+- **实际影响**：前端时间表界面是**按这份表遍历渲染**的（`auto-update.js:98` `Object.entries(_state.global_schedule)`），故该任务在界面上**整条不出现**；`set_global_schedule` 又按 `if job_id not in GLOBAL_SCHEDULE_DEFAULTS: continue` 过滤，管理员**也无从调它**。这是"半上线"：任务在跑，人看不见、也管不着。已脚本核实：**37 个任务里只有它是缺的**。
+- **一处被我推翻的猜测（记下防止误报）**：我起初推断"表里没有 → 判超期按 6h 兜底 → 被系统守卫误判漏跑并强制补跑"。**实测不成立**：`_make_trigger` 的兜底同样是 6h（`IntervalTrigger(hours=6)`），超期阈值 `_overdue_threshold_hours('interval',6)=18h`，**触发周期与判超期口径一致**，不存在误判补跑。故只补登记值（`{"interval_hours": 6}`，取既有兜底值，**不改变现网行为**）。
+- **已补的护栏**：`test注册表四处齐全` 增加第四处断言，并新增 `test时间表登记与任务表一一对应` **做双向集合比对**（两处清单各写各的、无人比对才是根因）。变异实证 **MUTREG**（删掉该登记行）→ **2 failed** ✓。
+
+### 7.5 门禁结果
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 全量套件（首轮） | `pytest -q` | **2287 passed / 6 skipped / 1 warning，357.24s，exit 0**（2293 collected） |
+| 全量套件（本轮改过测试后复跑） | `pytest -q` | **2287 passed / 6 skipped / 1 warning，357.82s，exit 0** |
+| 全量套件（补 7.4.1 登记 + 新增 `test时间表登记与任务表一一对应` 后终跑） | `pytest -q` | **2288 passed / 6 skipped / 1 warning，353.11s，exit 0** |
+| 第一批关联套件（11 个文件，含本批全部新增/改动测试） | `pytest` | **187 passed / 1 skipped** |
+| **守卫有效性** | 8 轮变异（MUT1/MUT2/MUTJ/MUTA1+2/MUTB1/MUTB2/MUTSELL/MUTREG） | **全部被抓住**（见 7.2 / 7.3 / 7.3.1 / 7.4.1；MUTB2 与 MUTSELL **首次均未红**，加固后方红） |
+| 静态检查 | `ruff check`（**只读**，不加 `--fix`） | 新增/修改的测试文件 **All checks passed!**；`decision_engine.py` 的 3 处（E402/E501/B007）**与 HEAD 基线逐条相同** |
+| 新增测试文件 | `test_exec_failure_trace.py`(15) / `test_gap_uncorrected_shared.py`(13) / `test_daily_turnover_gate.py` 增 2 | 全绿 |
+
+### 7.6 未做的事（明确不做，非遗漏）
+
+- **`restore_execution` 保留挂单标记**（7.3 的孤儿状态）：**只记录、不修**。理由是它属"挂单退回人工队列后如何收尾"的设计问题，与本批六项无关；且两种修法（清标记 / 让轮询也认 pending）各有权衡，需单独定调。
+- **`daily_turnover_amount` 的 `date(created_at,'+8 hours')` 非 sargable**：已在代码注释中标注 **ponytail 天花板**（此写法用不上索引）。当前数据量下无影响，量级上来再换表达式。
+- **P1-A**（扩张力独立执行权）：按既定顺序属第三批，本批未动。
+- **`create_committee_consensus` 的 `rj.get("final_verdict", "approved")` 兜底**（审核发现，**未改**）：缺失 verdict 时落库为 `"approved"`，方向与 P0-A 下游"缺结论即不背书"**相反**。**现状不可达**：唯一调用点（`committee.py:1031`）传的是 `_build_consensus` 的返回值，其三条路径（LLM 成功 / LLM 失败兜底 / 异常兜底）均**显式**写入 `final_verdict`，缺键不可能发生。故不动它——改兜底默认值会影响其它读路径，且无真实触发场景（**YAGNI**）。若将来有第二条写入路径，此处须一并定调。
+- **生产部署与生产证真**：本批改动**尚未提交、尚未上线**，故**无上线后生产证真**（与第六节不同——那节含 6.3 的容器内证真）。待用户批准提交后再补。
+
+---
+
+
 ## 附录 A：生产证真数据（2026-09-23，只读）
 
 **代码上线**：`main@72bc42f`，容器 `bottleneck-hunter` 内 grep 计数——`compute_underweight_gap`=1、`mandate_exception`=4、驱动器函数=4、`缺口未纠正`=3、`_reuse_escape_reason`=2、`simtrading` alloc-target=5。**扩张侧代码确认全部上线。**

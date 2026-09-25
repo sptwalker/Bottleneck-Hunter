@@ -51,11 +51,11 @@ async def test_l4_shared_batch_and_capture_before_writes(tmp_path, monkeypatch, 
     ]}, [])))
     monkeypatch.setattr(validator, "check_account_circuit_breaker", lambda *a: Mock(
         valid=not circuit_breaker, violations=["circuit"] if circuit_breaker else []))
-    monkeypatch.setattr(validator, "validate_execution_plan", lambda ep, *a: Mock(
+    monkeypatch.setattr(validator, "validate_execution_plan", lambda ep, *a, **kw: Mock(
         valid=ep["ticker"] == "AAPL", violations=[] if ep["ticker"] == "AAPL" else ["invalid MSFT"]))
     monkeypatch.setattr(validator, "validate_portfolio_beta", lambda *a: Mock(valid=True))
     monkeypatch.setattr(validator, "validate_against_regime", lambda *a: Mock(valid=True))
-    monkeypatch.setattr(validator, "max_compliant_shares", lambda *a: 0)
+    monkeypatch.setattr(validator, "max_compliant_shares", lambda *a, **kw: 0)
     monkeypatch.setattr(engine, "_repair_execution_plan", lambda *a: None)
     save = Mock(side_effect=ValueError("capture failed") if capture_failure else save_stage_snapshot)
     monkeypatch.setattr(engine, "save_stage_snapshot", save)

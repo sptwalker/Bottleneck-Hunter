@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from bottleneck_hunter.watchlist.snapshot_binding import snapshot_columns
 from bottleneck_hunter.watchlist.store_base import _now_iso
@@ -562,6 +564,35 @@ class _SimTradingMixin:
                 )
             rows = conn.execute(q, p).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def daily_turnover_amount(self, account_id: str = "", market: str = "") -> float:
+        """P0-D（N-22）：本账户「北京当日」已成交金额合计（买卖双向，绝对值口径）。
+
+        日换手是**累加量**，拿单笔比当日总额度在数学上就守不住（10 笔各 5% 权益 → 实测放到 50%）。
+        必须查真实已成交额，判据才能是「已成交 + 本笔 > 上限」。
+
+        当日边界按项目时区约定取 **Asia/Shanghai**（`created_at` 存的是 UTC）：
+        用 `date(created_at, '+8 hours')` 归日，`+8` 是北京固定偏移（无夏令时），不引入新时区。
+        注意该表达式是**非 sargable** 的——`created_at` 上的函数包住列，索引下推不了，走的是
+        sim_trades 全表扫描（ponytail: 量级＝单账户模拟成交，增长到万行再改成落库时写一列
+        trade_day 并对其建索引）。
+        """
+        day_expr = "date(created_at, '+8 hours')"
+        sql = f"SELECT COALESCE(SUM(ABS(amount)), 0) AS s FROM sim_trades WHERE {day_expr} = ?"
+        params: list = [datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")]
+        if account_id:
+            sql += " AND account_id = ?"
+            params.append(account_id)
+        if market:
+            sql += " AND COALESCE(market, '') = ?"
+            params.append(market)
+        conn = self._connect()
+        try:
+            q, p = self._filtered(sql, tuple(params))
+            row = conn.execute(q, p).fetchone()
+            return float((row["s"] if row and row["s"] is not None else 0.0) or 0.0)
         finally:
             conn.close()
 

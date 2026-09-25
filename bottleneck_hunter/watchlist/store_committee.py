@@ -79,6 +79,29 @@ class _CommitteeMixin:
         finally:
             conn.close()
 
+    def get_committee_consensus(self, execution_plan_id: str) -> dict | None:
+        """取某执行计划最近一次投委会共识（无则 None）。P0-A：自动执行前的独立判据。
+
+        投委会 gating 与自动执行是两条路径（后者还能被 revert_to_pending 等状态机操作绕过），
+        故自动执行不能只看 status=pending，必须回读共识里的 final_verdict 亲自背书。
+        """
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM committee_consensus WHERE execution_plan_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (execution_plan_id,),
+            )
+            row = conn.execute(q, p).fetchone()
+            if not row:
+                return None
+            return self._parse_json_fields(
+                dict(row), ("result_json", "vote_detail"),
+                ("consensus_modifications", "final_execution_plan", "key_risks_flagged", "minority_opinions"),
+            )
+        finally:
+            conn.close()
+
     def create_committee_consensus(
         self,
         execution_plan_id: str,

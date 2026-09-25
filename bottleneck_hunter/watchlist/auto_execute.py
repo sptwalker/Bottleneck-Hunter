@@ -80,15 +80,48 @@ def _is_mandate_exception(ex: dict) -> bool:
     return bool(rj.get("mandate_exception"))
 
 
+# 只有这两个裁决构成「投委会背书」，其余（needs_review / needs_discussion / unknown / 空）一律不自动成交。
+_BACKED_VERDICTS = ("approved", "approved_with_modifications")
+
+
+def _committee_backed(store, plan_id: str) -> tuple[bool, str]:
+    """该计划最近一次投委会共识是否背书成交 → (是否背书, 裁决原文)。
+
+    这是自动执行的**独立判据**，不复用 status：status 会被 revert_to_pending 等状态机操作改写，
+    而改写只回滚状态、不带回结论——只看 status 会让「结论已被丢弃的计划」重新变成可自动成交的。
+    """
+    try:
+        consensus = store.get_committee_consensus(plan_id)
+    except Exception as e:  # noqa: BLE001 —— 读共识失败一律按不背书处理（fail-closed）
+        logger.warning("读投委会共识失败 plan_id=%s: %s", plan_id, e)
+        return False, "consensus_read_error"
+    if not consensus:
+        return False, "no_consensus"
+    verdict = (consensus.get("final_verdict") or "").strip() or "unknown"
+    return verdict in _BACKED_VERDICTS, verdict
+
+
 async def auto_execute_pending(store, market: str) -> AsyncGenerator[dict, None]:
     """把当前市场所有待确认执行计划逐条自动成交（confirm+execute 同一条闭环）。
 
-    仅处理 status=pending（投委会已通过、未被拦截/挂单）；逐条独立，单条失败不影响其余。
-    未达限价的计划会由 confirm_and_execute 自动转挂单，不算失败。
+    仅处理 status=pending（投委会已通过、未被拦截/挂单），且**必须回读到投委会背书结论**；
+    逐条独立，单条失败不影响其余。未达限价的计划会由 confirm_and_execute 自动转挂单，不算失败。
     """
     from bottleneck_hunter.watchlist.trade_executor import confirm_and_execute
 
     pending = store.get_pending_executions()
+    # P0-A（N-1）：status=pending 不等于「投委会通过了」——非结论性裁决（法定人数不足/权重持平）
+    # 此前不落动作，计划以 pending 状态滞留，自动执行一开就把它们全部成交。这里补一道独立闸门。
+    unbacked: list[tuple[dict, str]] = []
+    _kept: list[dict] = []
+    for ex in pending:
+        ok, verdict = _committee_backed(store, ex.get("id") or "")
+        if ok:
+            _kept.append(ex)
+        else:
+            unbacked.append((ex, verdict))
+    pending = _kept
+    _all_unbacked = bool(unbacked) and not _kept
     # P0-4：机会驱动越过 L2 目标授权的计划默认必须人工确认——这是护栏的最后一道
     # （护栏①~③ 都在 L3/L4 生成侧，只有这里能拦住「开关一开就全自动成交」）。
     # 高授权档才把这道闸打开：越线计划也一并自动成交。
@@ -97,6 +130,29 @@ async def auto_execute_pending(store, market: str) -> AsyncGenerator[dict, None]
     else:
         exceptions = [ex for ex in pending if _is_mandate_exception(ex)]
         pending = [ex for ex in pending if not _is_mandate_exception(ex)]
+    if unbacked:
+        yield _sse("auto_execute_skipped", layer="auto_execute",
+                   count=len(unbacked), reason="no_committee_backing",
+                   items=[{"ticker": ex.get("ticker", ""), "plan_id": ex.get("id", ""), "verdict": v}
+                          for ex, v in unbacked],
+                   message=f"{len(unbacked)} 条计划无投委会背书结论，已跳过自动执行（须人工复核）")
+        # 用户开着自动执行、结果一笔都没自动成交——这是要人管的偏差，不能只在 SSE 里说一句
+        # （流一断就没了）。落一条 error 级 operation_log 进推送白名单。
+        try:
+            uid = getattr(store, "_user_id", "") or ""
+            if uid and _all_unbacked:
+                from bottleneck_hunter.web.oplog import record_operation
+
+                record_operation(
+                    uid, "自动执行全部跳过",
+                    category="error",
+                    detail=f"{market}：{len(unbacked)} 条待确认计划均无投委会背书结论，"
+                           f"本轮自动执行零成交（须人工复核）"[:300],
+                    result="partial", market=market,
+                    meta={"count": len(unbacked), "reason": "no_committee_backing"},
+                )
+        except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响自动执行
+            logger.debug("自动执行全跳过留痕失败: %s", e)
     if not pending:
         if exceptions:
             yield _sse("auto_execute_skipped", layer="auto_execute",

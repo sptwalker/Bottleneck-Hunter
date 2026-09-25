@@ -1075,6 +1075,23 @@ async def run_committee_review(
                             modifications=mods,
                             message=f"{ticker} 已应用投委会修改: {mods}",
                         )
+            elif verdict_raw != "approved":
+                # P0-A（N-1）：非结论性裁决不得留作「可执行」。needs_review（法定人数不足）/
+                # needs_discussion（权重持平）/ unknown（结果缺失）都意味着投委会没有背书这笔交易，
+                # 此前它们既不否决也不拦，计划以 status=pending 静静躺着，自动执行一开就成交——
+                # 等于「没人拍板」被当成「默认放行」。这里统一拦下，理由带原裁决便于事后追溯。
+                store.reject_execution(
+                    plan_id,
+                    f"{store.BLOCK_MARKER_COMMITTEE} 结论不可背书：{verdict_raw}，须人工复核",
+                )
+                yield _sse(
+                    "committee_gating",
+                    ticker=ticker,
+                    plan_id=plan_id,
+                    action="blocked",
+                    verdict=verdict_raw,
+                    message=f"{ticker} 投委会未给出可背书结论（{verdict_raw}），已移出待确认队列，须人工复核",
+                )
         except Exception as e:
             logger.warning("投委会 gating 动作失败 %s: %s", ticker, e)
 
@@ -1268,7 +1285,17 @@ def _regate_after_challenge(store, plan_id: str, verdict: str, consensus: dict, 
                 store.reject_execution(plan_id, f"{store.BLOCK_MARKER_COMMITTEE} 用户质询后改判否决")
                 return "rejected"
             return "kept_rejected" if status == "rejected" else "noop_not_pending"
-        # 非否决：若此前被投委会否决，恢复为 pending
+        if verdict not in ("approved", "approved_with_modifications"):
+            # P0-A（N-1）同构兜底：质询改票后若落到 needs_review / needs_discussion / unknown，
+            # 同样不构成背书——按否决处理，且**不**恢复此前被否决的计划。
+            if status in ("pending", "confirmed"):
+                store.reject_execution(
+                    plan_id,
+                    f"{store.BLOCK_MARKER_COMMITTEE} 质询后结论不可背书：{verdict}，须人工复核",
+                )
+                return "rejected_not_decisive"
+            return "kept_rejected" if status == "rejected" else "noop_not_pending"
+        # 明确通过：若此前被投委会否决，恢复为 pending
         action = "kept_pending"
         if status == "rejected":
             store.restore_execution(plan_id)

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass, field
 
@@ -151,12 +152,19 @@ def validate_execution_plan(
     account: dict,
     positions: list[dict],
     constraints: dict | None = None,
+    *,
+    daily_turnover_used: float = 0.0,
 ) -> ValidationResult:
     """校验单个执行计划是否满足所有硬性约束。
 
     P0.4 双口径：
     - 校验口径(valid 判定)：用预期价(target_price)，不加最坏滑点
     - 风险预算口径(warning)：用最坏滑点价做压力测试，仅警告不否决
+
+    P0-D（N-22）：`daily_turnover_used` = 该账户「北京当日」已成交金额（生成期还须叠加本批
+    尚未落库的计划金额）。日换手是**累加量**，拿单笔比当日总额度在数学上守不住——实测
+    10 笔各 5% 权益全部放行，单日累计 50% 权益 vs 上限 30%。默认 0 保持旧调用方行为不变
+    （无法取到已成交额时宁可放行，也不误拦真实委托；口径收紧只在能取到时生效）。
     """
     c = {**DEFAULT_CONSTRAINTS, **(constraints or {})}
     result = ValidationResult()
@@ -286,13 +294,21 @@ def validate_execution_plan(
                     f"最坏滑点下现金比例可能跌破下限 {min_cash:.0f}%"
                 )
 
-    # 5. 日交易额度（%口径，需正权益）
+    # 5. 日交易额度（%口径，需正权益）：判据是【当日累计 + 本笔】超上限，不是单笔比总额度。
+    #    逐笔比对是数学上守不住的（换手是累加量）——实测 10 笔各 5% 权益全放行，单日累计 50% vs 上限 30%。
     if total_equity > 0:
         max_turnover = c["max_daily_turnover_pct"] / 100 * total_equity
-        if trade_amount > max_turnover:
-            result.add_violation(
-                f"单笔 {sym}{trade_amount:.0f} 超过日交易额度 {sym}{max_turnover:.0f}"
-            )
+        used = _num(daily_turnover_used)
+        if used + trade_amount > max_turnover:
+            if used > 0:
+                result.add_violation(
+                    f"本笔 {sym}{trade_amount:.0f} 叠加当日已成交 {sym}{used:.0f} 超过日交易额度 "
+                    f"{sym}{max_turnover:.0f}（本笔可用 {sym}{max(0.0, max_turnover - used):.0f}）"
+                )
+            else:
+                result.add_violation(
+                    f"单笔 {sym}{trade_amount:.0f} 超过日交易额度 {sym}{max_turnover:.0f}"
+                )
 
     if not result.valid:
         logger.warning("执行计划 %s 违反约束: %s", plan.get("id", "?"), "; ".join(result.violations))
@@ -305,10 +321,16 @@ def max_compliant_shares(
     account: dict,
     positions: list[dict],
     constraints: dict | None = None,
+    *,
+    daily_turnover_used: float = 0.0,
 ) -> int:
     """P0.3 反推：在所有约束内，该计划最多可买/卖多少股(整数)。
 
     仅对 buy/add 有意义。返回 0 表示无法缩量到合规(如现金不足以买 1 手)。
+
+    P0-D（N-22）：`daily_turnover_used` = 当日已成交额（含本批尚未落库的计划），
+    日额度只按**剩余**额度缩量——否则同轮多笔各按满额缩量，缩完仍是一批注定失败的待确认单。
+    可用现金由 `account["cash_balance"]` 决定，生成期传入影子账本余额即可。
     """
     c = {**DEFAULT_CONSTRAINTS, **(constraints or {})}
     result_json = plan.get("result_json", {})
@@ -352,7 +374,7 @@ def max_compliant_shares(
         _effective_single_trade_cap(c, total_equity),                # 单笔上限(绝对值/权益百分比取大)
         c["max_single_position_pct"] / 100 * total_equity - existing_value,  # 单股占比
         cash - c["min_cash_pct"] / 100 * total_equity,               # 现金下限
-        c["max_daily_turnover_pct"] / 100 * total_equity,            # 日额度
+        c["max_daily_turnover_pct"] / 100 * total_equity - (daily_turnover_used or 0.0),  # 日额度**剩余**
     ]
     # 板块集中度上限：扣除同板块其他持仓后的剩余额度
     if sector:
@@ -372,12 +394,26 @@ def validate_batch(
     account: dict,
     positions: list[dict],
     constraints: dict | None = None,
+    *,
+    daily_turnover_used: float = 0.0,
 ) -> dict[str, ValidationResult]:
-    """批量校验多个执行计划。返回 {plan_id: ValidationResult}。"""
+    """批量校验多个执行计划。返回 {plan_id: ValidationResult}。
+
+    调用方必须传 `daily_turnover_used`（当日已成交额），否则本批计划会各自按满额度放行——
+    批量校验的语义就是「同一天一起下单」，不传等于把 P0-D 的日额度卡口整个跳过。
+    批内逐笔累加：**无论前一笔是否通过**都把金额记进额度，后面的只看到剩余——本函数是
+    「最坏情形预演」，不替调用方猜哪几笔会真正成交；判断谁通过的活由调用方按结果自己收敛。
+    """
     results = {}
+    used = daily_turnover_used or 0.0
     for plan in plans:
         plan_id = plan.get("id", "")
-        results[plan_id] = validate_execution_plan(plan, account, positions, constraints)
+        r = validate_execution_plan(plan, account, positions, constraints, daily_turnover_used=used)
+        results[plan_id] = r
+        rj = plan.get("result_json") if isinstance(plan.get("result_json"), dict) else {}
+        price = plan.get("target_price") or rj.get("target_price") or rj.get("estimated_price") or 0
+        with contextlib.suppress(TypeError, ValueError):
+            used += float(plan.get("shares") or rj.get("shares") or 0) * float(price or 0)
     return results
 
 
@@ -524,14 +560,21 @@ def compute_underweight_gap(
     与 validate_against_regime 的天花板校验对称——后者拦"买超上限"，本函数产出
     "距下限还差 N%、可部署 M 元"的信号，供缺口驱动器(P0-2)/偏离报告消费。
     纯确定性、组合级（不依赖任何单笔买入计划），不触发拦截、不改任何卖出逻辑。
+
+    `underweight` 与 `overweight_cash`（P1-D）是**各自判定、互不蕴含**的两侧：
+    权益下限与现金上限在本 regime 表里不是互补数（如 sideways/balanced 为
+    equity(40,60) / cash(25,40)，40+40=80），故「权益不低配」不等于「现金不超配」。
     """
     gap = {
         "underweight": False,
+        "overweight_cash": False,
         "equity_pct": 0.0,
         "equity_min": 0.0,
         "gap_pct": 0.0,
         "cash_pct": 0.0,
         "cash_max": 0.0,
+        "excess_cash_pct": 0.0,
+        "idle_cash": 0.0,
         "deployable_cash": 0.0,
     }
     if not regime_bounds:
@@ -561,5 +604,14 @@ def compute_underweight_gap(
         gap["underweight"] = True
         gap["gap_pct"] = round(gap_pct, 2)
         gap["deployable_cash"] = round(min(gap_dollars, cash_balance), 2)
+
+    # P1-D：现金超配侧。此前 cash_max 是"算出来没人读"的死字段——比不算更糟，
+    # 会让人以为权益下限已经把现金上限对称化了（实际不是，见 docstring）。
+    # idle_cash 同样受现金封顶：不可能闲置超过手头现金。
+    if cash_pct > cash_max:
+        excess = cash_pct - cash_max
+        gap["overweight_cash"] = True
+        gap["excess_cash_pct"] = round(excess, 2)
+        gap["idle_cash"] = round(min(excess / 100 * total_equity, cash_balance), 2)
 
     return gap

@@ -7,6 +7,7 @@ import pytest
 
 from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.watchlist.store_base import _today
 
 # ─────────────────────────────────────────────────────────
 # 辅助工具
@@ -26,8 +27,7 @@ def store(tmp_path):
         "tier": "track",
     })
 
-    from datetime import datetime, timezone
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = _today()   # 与生产写入侧同一口径（北京），否则北京凌晨断言的是另一天
     s.save_snapshots([{
         "ticker": "AAPL",
         "date": today,
@@ -149,8 +149,7 @@ class TestRunTacticalPlans:
         done_evt = next(e for e in events if e["event"] == "decision_done")
         assert done_evt["data"]["plan_count"] == 1
 
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = _today()
         plans = s.get_tactical_plans_by_date(today)
         assert len(plans) == 1
         assert plans[0]["ticker"] == "AAPL"
@@ -191,8 +190,7 @@ class TestRunExecutionPlans:
     async def test_generates_execution_plan(self, store):
         s, entry_id, macro_id, strat_id = store
 
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = _today()
         s.create_tactical_plan(strat_id, entry_id, "AAPL", today, {
             "action": "buy", "confidence": 8,
             "entry_plan": {"price": 188}, "exit_plan": {"stop_loss": 175},
@@ -220,8 +218,7 @@ class TestRunExecutionPlans:
     async def test_all_hold_skips_l4(self, store):
         s, entry_id, macro_id, strat_id = store
 
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = _today()
         s.create_tactical_plan(strat_id, entry_id, "AAPL", today, {
             "action": "hold", "confidence": 5,
         }, strict=False)
@@ -360,8 +357,7 @@ class TestCommittee:
 class TestStoreCRUD:
     def test_tactical_plan_roundtrip(self, store):
         s, entry_id, macro_id, strat_id = store
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = _today()
 
         plan_id = s.create_tactical_plan(strat_id, entry_id, "AAPL", today, {
             "action": "buy", "confidence": 8,

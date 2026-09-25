@@ -11,6 +11,7 @@ from bottleneck_hunter.watchlist.decision_engine import (
     _gap_driven_plans,
     _gap_fill_shares,
     _is_recent_duplicate,
+    _opportunity_driven_plans,
 )
 
 
@@ -79,6 +80,43 @@ def test_duplicate_gate_still_applies_to_non_gap_plans():
     assert "AAPL" not in _gap_driven_plans([{"ticker": "AAPL", "result_json": {"action": "add"}}], "us_stock")
 
 
+def test_跨市场计划不进本市场驱动集():
+    """P1-J（N-31）：跨市场守卫此前是**空操作**，等于没有守卫。
+
+    病史：判据写成 `normalize_ticker(tk, market) != normalize_ticker(tk, tp.get("market") or market)`
+    —— 同一个 ticker 拿两个市场参数各归一一次，**结果恒相等**，恒假 → 任何市场的计划都放行。
+    A 股计划落进美股执行流程是真实可达的路径（L3 计划表带 market 列），必须真拦。
+
+    （变异实证：把两条判据改回旧写法，全量套件无一报警 —— 本用例是它们的第一个护栏。）
+    """
+    plans = [
+        {"ticker": "AAPL", "market": "a_stock", "result_json": {"gap_driven": True, "_planned_amount": 500}},
+        {"ticker": "600519.SS", "market": "a_stock",
+         "result_json": {"gap_driven": True, "_planned_amount": 700}},
+        {"ticker": "MSFT", "market": "us_stock", "result_json": {"gap_driven": True, "_planned_amount": 900}},
+        # market 缺失：按「本市场」处理（normalize_market(None) == us_stock），不得误伤
+        {"ticker": "NVDA", "result_json": {"gap_driven": True, "_planned_amount": 300}},
+        # 判据是 market 列，**不是** ticker 形态：美股执行流程里出现 A股形态的码，
+        # 只要该行的 market 就是美股，就不该被守卫误伤（反之亦然，见上一行 AAPL）
+        {"ticker": "000001.SZ", "market": "us_stock",
+         "result_json": {"gap_driven": True, "_planned_amount": 100}},
+    ]
+
+    assert _gap_driven_plans(plans, "us_stock") == {"MSFT": 900.0, "NVDA": 300.0, "000001.SZ": 100.0}
+    assert _gap_driven_plans(plans, "a_stock") == {"AAPL": 500.0, "600519.SS": 700.0}
+
+
+def test_机会驱动的跨市场守卫同口径():
+    """两条平行判据曾被写错两次，必须同时钉住 —— 只修一条会留下半个空操作。"""
+    plans = [
+        {"ticker": "AAPL", "market": "a_stock", "result_json": {"opportunity_driven": True, "_planned_amount": 500}},
+        {"ticker": "MSFT", "market": "us_stock", "result_json": {"opportunity_driven": True, "_planned_amount": 900}},
+    ]
+
+    assert _opportunity_driven_plans(plans, "us_stock") == {"MSFT": 900.0}
+    assert _opportunity_driven_plans(plans, "a_stock") == {"AAPL": 500.0}
+
+
 if __name__ == "__main__":
     test_only_gap_driven_plans_exempted()
     test_gap_plan_without_amount_maps_to_zero()
@@ -87,4 +125,6 @@ if __name__ == "__main__":
     test_fill_capped_by_single_position_limit()
     test_fill_a_stock_rounds_to_lot()
     test_duplicate_gate_still_applies_to_non_gap_plans()
+    test_跨市场计划不进本市场驱动集()
+    test_机会驱动的跨市场守卫同口径()
     print("P0-3 缺口驱动放行自检通过")

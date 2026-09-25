@@ -55,6 +55,7 @@ GLOBAL_SCHEDULE_DEFAULTS: dict[str, dict] = {
     "resting_limit_poll":     {"interval_hours": 1},   # 挂单撮合轮询（开市时段每小时）
     "mail_ingest_poll":       {"interval_hours": 1},   # 转发银行邮件轮询（每小时）
     "gangtise_catalyst":      {"interval_hours": 24},  # Gangtise 财报日历/公告催化剂补给（每日一次）
+    "expire_stale_pending":   {"interval_hours": 6},   # P0-B：滞留待确认计划清收（须与 _JOB_SPECS 的 6h 兜底一致）
     "forum_ai_round":         {"interval_hours": 3},   # 论坛 AI 自主发言轮次（opt-in，低频每 3 小时一轮）
     "us_full_refresh":        {"day_of_week": "sun", "hour": 7, "minute": 0},
     "cn_full_refresh":        {"day_of_week": "sun", "hour": 8, "minute": 0},

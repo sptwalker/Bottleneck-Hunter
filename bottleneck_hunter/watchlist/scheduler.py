@@ -1551,6 +1551,54 @@ async def job_poll_resting_orders() -> None:
             logger.error("挂单轮询 (user=%s) failed: %s", uid[:8] if uid else "global", e)
 
 
+# P0-B（N-2）：待确认计划的收尸期。与挂单上限（14 天）对齐——挂单到期会被
+# job_poll_resting_orders 撤掉，而非挂单的 pending 此前**没有任何到期机制**，
+# 失败回滚又会把它滚回 pending，于是同一笔单可以永远躺着、每天重试、无人知晓。
+_STALE_PENDING_DAYS = 14
+
+
+async def job_expire_stale_pending() -> None:
+    """长期滞留的待确认执行计划 → expired，并留痕（区别于「刚生成还没轮到」）。
+
+    只看 pending 且非挂单：挂单有自己的到期轮询（job_poll_resting_orders）。
+    留痕带 attempt_count，让「失败 30 次的僵尸单」在日志里一眼可辨。
+    """
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_STALE_PENDING_DAYS)).isoformat(timespec="seconds")
+    for uid, store, _budget in _iter_users("daily_decision"):
+        try:
+            stale = store.get_stale_pending_executions(cutoff)
+            if not stale:
+                continue
+            for p in stale:
+                reason = (f"[滞留 {_STALE_PENDING_DAYS} 天自动过期] 累计尝试 "
+                          f"{int(p.get('attempt_count') or 0)} 次"
+                          + (f"；最后错误：{p.get('last_error')}" if p.get("last_error") else ""))
+                if not store.expire_stale_pending(p["id"], reason[:300]):
+                    continue
+                try:
+                    from bottleneck_hunter.web.oplog import record_operation
+
+                    record_operation(
+                        uid, "待确认计划滞留过期",
+                        category="error",  # 进推送白名单：定期收尸要能被人看见，否则等于没收
+                        detail=(f"{p.get('market') or ''} {p.get('ticker') or ''} 的 {p.get('action') or ''} "
+                                f"计划滞留超过 {_STALE_PENDING_DAYS} 天未成交，已自动过期。"
+                                f"累计尝试 {int(p.get('attempt_count') or 0)} 次。"
+                                + (f"最后错误：{p.get('last_error')}" if p.get("last_error") else ""))[:300],
+                        result="partial", market=p.get("market") or "",
+                        meta={"plan_id": p["id"], "attempt_count": int(p.get("attempt_count") or 0),
+                              "last_error": p.get("last_error") or ""},
+                    )
+                except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响收尸
+                    logger.debug("滞留过期留痕失败 %s: %s", p.get("id"), e)
+            logger.info("待确认计划收尸 (user=%s): 过期 %d 条",
+                        uid[:8] if uid else "global", len(stale))
+        except Exception as e:
+            logger.error("待确认计划收尸 (user=%s) failed: %s", uid[:8] if uid else "global", e)
+
+
 async def job_poll_imap() -> None:
     """系统级：拉取转发到系统收件箱的银行邮件，解读附件/正文并入库（管理员专用）。"""
     if not _wl_store:
@@ -1870,6 +1918,7 @@ _JOB_SPECS = [
     ("us_full_refresh",        job_full_refresh,        {"market": "us_stock"}, _TZ_CN        , "weekly",   "US full refresh (data+decision)"),
     ("cn_full_refresh",        job_full_refresh,        {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock full refresh (data+decision)"),
     ("system_watchdog",        job_system_watchdog,     {},                     _TZ_CN,         "everyday", "System watchdog (silent-failure guard)"),
+    ("expire_stale_pending",   job_expire_stale_pending, {},                    None,           "interval", "Expire long-stale pending execution plans"),
 ]
 
 
@@ -1922,6 +1971,7 @@ def list_job_categories() -> dict[str, str]:
         "model_capability_refresh": "",
         "llm_key_health": "",   # LLM 节点巡检：按用户 Key 探活，无独立每用户开关（随 model_capability 门控）
         "system_watchdog": "",  # 系统级守卫，仅受管理员全局总开关
+        "expire_stale_pending": "daily_decision",  # 待确认计划收尸，随自动决策开关
     }
 
 
@@ -1967,5 +2017,6 @@ def list_job_labels() -> dict[str, dict]:
         "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "system_watchdog":     {"label": "系统守卫巡检",           "desc": "每日巡检周期任务是否静默失败，超期即主动补跑并报告", "tz": "北京", "freq": "每日"},
+        "expire_stale_pending": {"label": "滞留计划清收",           "desc": "长期未成交的待确认计划自动过期并留痕（含累计失败次数）", "tz": "轮询", "freq": "每隔N小时"},
     }
 

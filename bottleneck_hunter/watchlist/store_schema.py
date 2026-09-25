@@ -1565,6 +1565,10 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE sim_account ADD COLUMN loan_balance REAL DEFAULT 0",
     # ── VIP 衍生品：产品介绍/推介稿标记（非成交持仓）；读路径一律 is_indicative=0 过滤，不计入持仓/报告 ──
     "ALTER TABLE vip_derivative_terms ADD COLUMN is_indicative INTEGER DEFAULT 0",
+    # ── P0-B（N-2）：执行失败留痕计数 + 最后错误。此前失败计划回滚成 pending 后「看起来从没跑过」，
+    #    无计数字段 → 分不清「还没轮到他」和「已经失败 10 次」，pending 永久堆积无人收尸。
+    "ALTER TABLE execution_plans ADD COLUMN attempt_count INTEGER DEFAULT 0",
+    "ALTER TABLE execution_plans ADD COLUMN last_error TEXT DEFAULT ''",
     # ── 转发银行邮件解读管道（管理员专用）：解读记录 + 正文交易待确认队列 ──
     """CREATE TABLE IF NOT EXISTS mail_ingest_log (
         id               TEXT PRIMARY KEY,

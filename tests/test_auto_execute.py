@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from bottleneck_hunter.watchlist.auto_execute import (
     LEVEL_HIGH,
     LEVEL_OFF,
@@ -18,11 +20,13 @@ from bottleneck_hunter.watchlist.auto_execute import (
 
 
 class _KVStore:
-    """最小 store 桩：仅实现偏好读写 + 待确认队列。"""
+    """最小 store 桩：仅实现偏好读写 + 待确认队列 + 投委会共识回读。"""
 
-    def __init__(self, pending=None):
+    def __init__(self, pending=None, verdict="approved"):
         self._kv = {}
         self._pending = pending or []
+        # P0-A 独立判据：默认给「投委会背书」的共识，非背书场景由用例显式覆盖。
+        self._verdict = verdict
 
     def get_preference(self, key, default=""):
         return self._kv.get(key, default)
@@ -32,6 +36,11 @@ class _KVStore:
 
     def get_pending_executions(self):
         return self._pending
+
+    def get_committee_consensus(self, _plan_id):
+        if self._verdict is None:
+            return None
+        return {"final_verdict": self._verdict}
 
 
 class TestSwitch:
@@ -172,3 +181,73 @@ class TestBreachGate:
         set_auto_execute_level(s, LEVEL_OFF)
         assert is_auto_execute_enabled(s) is False      # 调用方的准入判据
         assert is_breach_authorized(s) is False
+
+
+class TestCommitteeBackingGate:
+    """P0-A（N-1）：status=pending 不等于「投委会通过了」——非结论性裁决必须拦住自动执行。
+
+    needs_review（法定人数不足）/ needs_discussion（权重持平）/ unknown（结果缺失）此前都不落动作，
+    计划以 pending 滞留，开关一开就成交 = 把「没人拍板」当成「默认放行」。
+    """
+
+    _P = {"id": "p1", "ticker": "AAPL"}
+
+    @pytest.mark.parametrize("verdict", ["needs_review", "needs_discussion", "unknown"])
+    async def test_non_decisive_verdicts_are_never_auto_executed(self, verdict):
+        s = _KVStore(pending=[dict(self._P)], verdict=verdict)
+        set_auto_execute_level(s, LEVEL_HIGH)  # 连高授权也不放行：背书缺失与授权档位无关
+        cae = AsyncMock(return_value={"status": "confirmed"})
+        with patch("bottleneck_hunter.watchlist.trade_executor.confirm_and_execute", cae):
+            events = await _collect(auto_execute_pending(s, "us_stock"))
+        assert cae.await_count == 0
+        assert [e["event"] for e in events] == ["auto_execute_skipped"]
+        assert events[0]["data"]["reason"] == "no_committee_backing"
+        assert events[0]["data"]["items"][0]["verdict"] == verdict
+
+    async def test_modification_verdict_still_executes(self):
+        """approve_with_modifications 是明确背书，照旧自动成交（不得收紧过头）。"""
+        s = _KVStore(pending=[dict(self._P)], verdict="approved_with_modifications")
+        set_auto_execute_level(s, LEVEL_SEMI)
+        cae = AsyncMock(return_value={"status": "confirmed"})
+        with patch("bottleneck_hunter.watchlist.trade_executor.confirm_and_execute", cae):
+            events = await _collect(auto_execute_pending(s, "us_stock"))
+        assert cae.await_count == 1
+        assert next(e for e in events if e["event"] == "auto_execute_done")["data"]["executed"] == 1
+
+    async def test_missing_consensus_blocks(self):
+        """共识行不存在（如 revert_to_pending 把结论丢了）→ 不背书，不成交。"""
+        s = _KVStore(pending=[dict(self._P)], verdict=None)
+        set_auto_execute_level(s, LEVEL_SEMI)
+        cae = AsyncMock(return_value={"status": "confirmed"})
+        with patch("bottleneck_hunter.watchlist.trade_executor.confirm_and_execute", cae):
+            events = await _collect(auto_execute_pending(s, "us_stock"))
+        assert cae.await_count == 0
+        assert events[0]["data"]["items"][0]["verdict"] == "no_consensus"
+
+    async def test_consensus_read_failure_blocks_fail_closed(self):
+        """读共识抛异常 → 按不背书处理（fail-closed），绝不因为读不到就放行。"""
+        s = _KVStore(pending=[dict(self._P)])
+        set_auto_execute_level(s, LEVEL_SEMI)
+        s.get_committee_consensus = lambda _pid: (_ for _ in ()).throw(RuntimeError("db down"))
+        cae = AsyncMock(return_value={"status": "confirmed"})
+        with patch("bottleneck_hunter.watchlist.trade_executor.confirm_and_execute", cae):
+            events = await _collect(auto_execute_pending(s, "us_stock"))
+        assert cae.await_count == 0
+        assert events[0]["data"]["items"][0]["verdict"] == "consensus_read_error"
+
+    async def test_mixed_queue_keeps_backed_and_skips_unbacked(self):
+        """兜底覆盖：背书计划照成交，非背书计划拦住，互不干扰。"""
+        s = _KVStore(pending=[{"id": "p1", "ticker": "AAPL"}, {"id": "p2", "ticker": "MSFT"}])
+        set_auto_execute_level(s, LEVEL_SEMI)
+
+        def _consensus(pid):
+            return {"final_verdict": "approved" if pid == "p1" else "needs_review"}
+
+        s.get_committee_consensus = _consensus
+        cae = AsyncMock(return_value={"status": "confirmed"})
+        with patch("bottleneck_hunter.watchlist.trade_executor.confirm_and_execute", cae):
+            events = await _collect(auto_execute_pending(s, "us_stock"))
+        assert cae.await_count == 1
+        assert cae.await_args.args[1] == "p1"
+        assert next(e for e in events if e["event"] == "auto_execute_done")["data"]["executed"] == 1
+        assert any(e["event"] == "auto_execute_skipped" for e in events)

@@ -32,6 +32,35 @@ def sane_reprice(new_price: float, ref_price: float, *, lo: float = 0.5, hi: flo
     return lo <= new_price / ref_price <= hi
 
 
+def _record_exec_failure(store: WatchlistStore, plan_id: str, reason: str) -> None:
+    """P0-B（N-2）：成交失败落三处痕迹 —— 计划行计数、operation_log、IM 推送（category=error 在白名单）。
+
+    此前失败只是把状态滚回 pending 就结束了：行看起来跟「刚生成还没轮到」一模一样，
+    operation_log 一个字都没有，容器一重启连日志都没了。于是「同一笔单失败 30 次」
+    和「今天刚建还没跑」在事后完全无法区分，pending 无限堆积也无人告警。
+    """
+    try:
+        store.record_execution_failure(plan_id, reason)
+    except Exception as e:  # noqa: BLE001 —— 计数失败不得影响成交主流程
+        logger.debug("失败计数写入失败 plan_id=%s: %s", plan_id, e)
+    try:
+        uid = getattr(store, "_user_id", "") or ""
+        if not uid:
+            return
+        from bottleneck_hunter.web.oplog import record_operation
+
+        market = getattr(store, "_market", "") or ""
+        record_operation(
+            uid, "执行计划成交失败",
+            category="error",
+            detail=f"{market}：计划 {plan_id} 成交失败 —— {reason}"[:300],
+            result="fail", market=market,
+            meta={"plan_id": plan_id, "reason": reason},
+        )
+    except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响成交主流程
+        logger.debug("成交失败留痕失败 plan_id=%s: %s", plan_id, e)
+
+
 def _demo() -> None:
     # 坏 tick：933→10 必须拦下；正常波动放行；无参考放行；非正价拒绝
     assert sane_reprice(10.0, 933.44) is False
@@ -105,6 +134,7 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
             else:
                 store.reject_execution(plan_id, message)
         logger.warning("拒绝成交 plan_id=%s: %s", plan_id, message)
+        _record_exec_failure(store, plan_id, message)
         return {"error": message, "code": "legacy_unbound" if legacy else "invalid_snapshot_binding",
                 "plan_id": plan_id}
 
@@ -113,13 +143,38 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     from bottleneck_hunter.watchlist.constraint_validator import validate_execution_plan
     positions = store.get_sim_positions(account["id"])
     is_resting = bool(plan.get("resting_until"))
-    validation = validate_execution_plan(plan, account, positions)
+    # P0-D（N-22）：成交期沿用与生成期**同一判据**——传当刻真实已成交额，
+    # 否则会出现「生成期放过、成交期按单笔放行」的错位，日额度形同虚设。
+    # 读失败仍放行（宁可漏拦也不误拦真实成交——成交是用户已经决定的事），但**必须留痕**：
+    # 静默降级会让日换手卡口在无人知情的情况下失效，出了事连"当时闸门是不是坏的"都查不出来。
+    # 只告警不累加本计划的失败计数——读库抖动不是这笔单的错，计进去会被老化 reaper 误清。
+    try:
+        _turnover_used = store.daily_turnover_amount(account.get("id", ""), market)
+    except Exception as e:  # noqa: BLE001 —— 取不到按 0（放行），不误拦真实成交
+        logger.warning("当日已成交额读取失败，日换手卡口本轮放行 plan_id=%s: %s", plan_id, e)
+        try:
+            uid = getattr(store, "_user_id", "") or ""
+            if uid:
+                from bottleneck_hunter.web.oplog import record_operation
+
+                record_operation(
+                    uid, "日换手卡口降级",
+                    category="error",  # 闸门失效要被看见，同「质量门阻断」进推送白名单
+                    detail=f"{market}：当日已成交额读取失败，本轮按 0 放行（日换手上限暂不生效）：{e}"[:300],
+                    result="partial", market=market,
+                    meta={"plan_id": plan_id, "error": str(e)},
+                )
+        except Exception as le:  # noqa: BLE001 —— 留痕失败不得影响成交
+            logger.debug("日换手降级留痕失败 plan_id=%s: %s", plan_id, le)
+        _turnover_used = 0.0
+    validation = validate_execution_plan(plan, account, positions, daily_turnover_used=_turnover_used)
     if not validation.valid:
         if is_resting:
             # 挂单轮询时约束暂不满足（如现金临时不足/占比超限）→ 保持挂单，绝不撤单。
             return {"error": "约束暂不满足，保持挂单", "violations": validation.violations,
                     "resting_hold": True, "plan_id": plan_id}
         store.reject_execution(plan_id, "; ".join(validation.violations))
+        _record_exec_failure(store, plan_id, "约束校验不通过：" + "; ".join(validation.violations))
         return {"error": "约束校验不通过", "violations": validation.violations, "plan_id": plan_id}
 
     action = plan.get("action") or result_json.get("action", "")
@@ -140,6 +195,7 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     snap = store.get_latest_snapshot(ticker)
     real_px = snap.get("close") if snap and snap.get("close") else None
     if not real_px:
+        _record_exec_failure(store, plan_id, f"{ticker} 无真实市价快照，拒绝以 LLM 估价成交")
         return {"error": "无真实市价快照，拒绝以 LLM 估价成交", "plan_id": plan_id,
                 "needs": "price_snapshot", "ticker": ticker}
     # 挂单自动撮合：行情快照过旧(>36h)时不自动成交，等下次刷价再判。手动确认(非挂单)不受此限——用户在场。
@@ -151,6 +207,7 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
     exec_basis = real_px
 
     if not action or not ticker or not shares or not exec_basis:
+        _record_exec_failure(store, plan_id, "执行计划缺少关键字段（action/ticker/shares/price）")
         return {"error": "执行计划缺少关键字段", "plan_id": plan_id}
 
     # 限价单：仅对买卖动作生效、挂单价须为正。买/加仓 市价≤挂单价、卖/减仓 市价≥挂单价 才成交；
@@ -180,11 +237,13 @@ def execute_trade(store: WatchlistStore, plan_id: str) -> dict:
                                market=market, snapshot_id=snapshot_id, strategy_version=strategy_version)
     else:
         store.unclaim_execution(plan_id, prev_resting_until)
+        _record_exec_failure(store, plan_id, f"不支持的操作类型: {action}")
         return {"error": f"不支持的操作类型: {action}", "plan_id": plan_id}
 
     if "error" in result:
         # 成交失败 → 回滚领单，恢复 confirmed(含挂单)，可重试/继续挂单
         store.unclaim_execution(plan_id, prev_resting_until)
+        _record_exec_failure(store, plan_id, str(result.get("error", "")))
         return result
 
     _recalc_account(store, account["id"])
@@ -230,6 +289,7 @@ async def confirm_and_execute(store: WatchlistStore, plan_id: str) -> dict:
             store.revert_to_pending(plan_id)
         except Exception:
             logger.warning("回滚 plan_id=%s 到 pending 失败", plan_id)
+        _record_exec_failure(store, plan_id, f"交易执行异常：{e}")
         return {"status": "exception", "error": str(e)}
     # 未达限价 → 已自动转挂单（不算失败，不回滚 pending）
     if trade_result.get("rested"):

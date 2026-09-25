@@ -38,6 +38,17 @@ def _fix_order(monkeypatch):
     monkeypatch.setattr(forum_ai.random, "shuffle", lambda seq: None)  # 固定角色顺序，确定性
 
 
+@pytest.fixture(autouse=True)
+def _outside_quiet_window(monkeypatch):
+    """把「静默窗」钉死在窗外 —— 否则本文件全部自主轮用例在北京 02:00–08:00 集体变红。
+
+    `in_quiet_window()` 读的是真实北京小时（生产就该如此），但测试跑在什么钟点不由我们决定：
+    夜里跑 CI 会得到 10 条「断言 0 条发言」的假失败，白天跑又全绿——门禁随墙钟变色，
+    等于没门禁。需要静默窗语义的两条用例自己再打一次桩，覆盖本 fixture（后打者胜）。
+    """
+    monkeypatch.setattr(forum_ai, "in_quiet_window", lambda: False)
+
+
 @pytest.fixture
 def bound(tmp_path):
     return WatchlistStore(tmp_path / "forum.db").for_user("alice")

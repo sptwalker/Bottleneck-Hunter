@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from bottleneck_hunter.auth.dependencies import get_current_user
 from bottleneck_hunter.watchlist.store import WatchlistStore
+from bottleneck_hunter.watchlist.store_base import _today  # 北京日期：所有 plan_date 读写的唯一"今天"口径
 from bottleneck_hunter.web import refresh_guard  # 每用户并发闸：决策各重活互斥，防重复触发/断线重发双跑
 
 logger = logging.getLogger(__name__)
@@ -478,8 +479,7 @@ async def generate_tactical(request: Request, market: str = "us_stock", user: di
 @router.get("/tactical/latest")
 async def get_latest_tactical(market: str = "us_stock", user: dict = Depends(get_current_user)):
     store = _user_store(user).for_market(market)
-    from datetime import datetime, timezone
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = _today()  # 必须与写入侧（store_base._today，北京）同一时区，否则凌晨读不到当天计划
     plans = store.get_tactical_plans_by_date(today)
     if not plans:
         return {"plans": [], "message": "今日尚未生成战术计划"}
@@ -800,8 +800,7 @@ async def decision_overview(market: str = "us_stock", user: dict = Depends(get_c
     account = store.get_sim_account()
     positions = store.get_sim_positions(account.get("id"))
 
-    from datetime import datetime, timezone
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = _today()  # 必须与写入侧（store_base._today，北京）同一时区，否则凌晨读不到当天计划
     tactical_plans = store.get_tactical_plans_by_date(today)
 
     # ticker→公司名映射，供前端把 L2 组合(圆环图/持仓表)的股票代码显示为公司名。
@@ -987,9 +986,7 @@ async def get_decision_trace(ticker: str, market: str = "us_stock", user: dict =
         })
 
     # L3 战术
-    from datetime import datetime as _dt
-    from datetime import timezone as _tz
-    today = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+    today = _today()  # 同上：与写入侧同为北京日期
     tactical = store.get_tactical_plan_for_ticker(ticker, today)
     if tactical:
         rj = tactical.get("result_json") or {}

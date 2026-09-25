@@ -8,6 +8,8 @@
 """
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from bottleneck_hunter.watchlist import committee as C
 from bottleneck_hunter.watchlist.committee import QUORUM_MIN, _fallback_consensus
 from bottleneck_hunter.watchlist.decision_engine import (
@@ -146,3 +148,71 @@ async def test_l3_blocks_on_stale_upstream(tmp_path):
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ────────────────────────── (D) P0-A：非结论性裁决必须落动作 ──────────────────────────
+
+async def _run_committee_with_verdict(store, tmp_path, verdict, monkeypatch):
+    """跑一遍 run_committee_review，投委会裁决固定为 verdict，返回执行计划终态。"""
+    async def fake_review(member, execution_plan, context):
+        return {"role": member["role"], "vote": "approve", "confidence": 6}
+
+    async def fake_consensus(reviews, discussion, weights):
+        return {"final_verdict": verdict, "summary": "测试结论",
+                "consensus_modifications": [], "approval_rate": 0.5}
+
+    monkeypatch.setattr(C, "_review_single", fake_review)
+    monkeypatch.setattr(C, "_build_consensus", fake_consensus)
+
+    from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
+    bind = save_stage_snapshot(store, "L4", {"batch": ["AAA"]})
+    # gating 落动作是 UPDATE 真实行，故计划必须先入库（不能只传内存 dict）
+    pid = store.create_execution_plan(
+        "tp1", "", "AAA", {"ticker": "AAA", "action": "buy", "shares": 10},
+        snapshot_id=bind["snapshot_id"], strategy_version=bind["strategy_version"])
+    plan = store.get_execution_plan(pid)
+    plan.update(bind)
+    async for _ in C.run_committee_review(store, [plan], budget=None, market="us_stock"):
+        pass
+    return store.get_execution_plan(pid)
+
+
+@pytest.mark.parametrize("verdict", ["needs_review", "needs_discussion", "unknown"])
+async def test_non_decisive_verdict_rejects_plan(tmp_path, monkeypatch, verdict):
+    """P0-A（N-1）：needs_review/needs_discussion/unknown 不得留作 pending——否则自动执行一开就成交。
+
+    「没人拍板」曾被当成「默认放行」：这三种裁决此前既不否决也不拦，计划以 status=pending 滞留。
+    """
+    store = _store(tmp_path)
+    plan = await _run_committee_with_verdict(store, tmp_path, verdict, monkeypatch)
+    assert plan["status"] == "rejected", verdict
+    assert "结论不可背书" in plan["rejection_reason"]
+    assert verdict in plan["rejection_reason"]
+
+
+async def test_approved_verdict_leaves_plan_pending(tmp_path, monkeypatch):
+    """反向守卫：明确通过的计划必须仍然留在 pending（不得收紧过头把正常单也拦掉）。"""
+    store = _store(tmp_path)
+    plan = await _run_committee_with_verdict(store, tmp_path, "approved", monkeypatch)
+    assert plan["status"] == "pending"
+    assert plan["rejection_reason"] == ""
+
+
+async def test_non_decisive_verdict_is_not_auto_executed(tmp_path, monkeypatch):
+    """端到端：needs_review 的计划走不进自动执行（committee gating + auto_execute 双闸）。"""
+    from bottleneck_hunter.watchlist.auto_execute import LEVEL_SEMI, auto_execute_pending, set_auto_execute_level
+
+    store = _store(tmp_path)
+    set_auto_execute_level(store, LEVEL_SEMI)
+    await _run_committee_with_verdict(store, tmp_path, "needs_review", monkeypatch)
+
+    executed: list[str] = []
+
+    async def fake_cae(_store, plan_id):
+        executed.append(plan_id)
+        return {"status": "confirmed"}
+
+    monkeypatch.setattr("bottleneck_hunter.watchlist.trade_executor.confirm_and_execute", fake_cae)
+    async for _ in auto_execute_pending(store, "us_stock"):
+        pass
+    assert executed == []

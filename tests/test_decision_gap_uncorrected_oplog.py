@@ -74,11 +74,15 @@ def test_缺口未纠正留痕(store):
 
 
 def test_无缺口不留痕(store):
-    """权益已在下限之上（无缺口）时，红灯只记「质量门阻断」，不该凭空多一条缺口记录。"""
+    """两侧都在区间内时，红灯只记「质量门阻断」，不该凭空多一条缺口记录。
+
+    P1-D 起「缺口」含现金超配侧，故这里的账户必须**两侧都合规**才算真的无缺口：
+    bull 的 equity(60,75)/cash(15,25) 不互补，权益 70% 达标时留 30% 现金仍是超配。
+    """
     acct = store.get_sim_account()
     store.update_sim_position(store.get_sim_position(acct["id"], "AAPL")["id"],
-                              current_price=70.0, market_value=70_000.0)
-    store.update_sim_account(cash_balance=30_000.0, total_equity=100_000.0, current_capital=100_000.0)
+                              current_price=75.0, market_value=75_000.0)
+    store.update_sim_account(cash_balance=25_000.0, total_equity=100_000.0, current_capital=100_000.0)
     with (
         patch("bottleneck_hunter.watchlist.decision_engine._ensure_price_freshness", _noop_gen),
         patch("bottleneck_hunter.watchlist.decision_engine._hard_stop_loss_sweep", _noop_gen),

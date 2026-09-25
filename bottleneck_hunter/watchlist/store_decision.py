@@ -613,6 +613,52 @@ class _DecisionMixin:
             cur = conn.execute(q, p)
             return cur.rowcount > 0
 
+    def record_execution_failure(self, plan_id: str, error: str) -> bool:
+        """P0-B（N-2）：某次成交尝试失败 → 累加计数 + 记最后错误。
+
+        失败计划会被 revert_to_pending 滚回 pending，行状态与「刚生成还没轮到」完全一样——
+        没有计数就只能靠猜。有了 attempt_count，pending 老化任务与「失败 N 次」告警才分得清
+        「从未尝试」和「反复失败」。
+        """
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET attempt_count = COALESCE(attempt_count, 0) + 1, "
+                "last_error = ? WHERE id = ?",
+                ((error or "")[:500], plan_id),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
+
+    def get_stale_pending_executions(self, cutoff_iso: str, limit: int = 500) -> list[dict]:
+        """P0-B：长期滞留的待确认计划（早于 cutoff、且非挂单）。供老化任务收尸。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM execution_plans WHERE status = 'pending' "
+                "AND COALESCE(resting_until, '') = '' AND created_at < ? "
+                "ORDER BY created_at LIMIT ?",
+                (cutoff_iso, limit),
+            )
+            rows = conn.execute(q, p).fetchall()
+            return [self._parse_json_fields(dict(r), ("result_json",)) for r in rows]
+        finally:
+            conn.close()
+
+    def expire_stale_pending(self, plan_id: str, reason: str) -> bool:
+        """P0-B：把长期滞留的 pending 计划置为 expired（收尸）。
+
+        与 expire_execution 刻意分开：后者要求 status='confirmed' AND resting_until 非空（挂单专用），
+        对从未成交过的 pending 计划恒为假——这正是「pending 堆积却无人收尸」的根因所在。
+        """
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                "UPDATE execution_plans SET status = 'expired', rejection_reason = ? "
+                "WHERE id = ? AND status = 'pending' AND COALESCE(resting_until, '') = ''",
+                (reason, plan_id),
+            )
+            cur = conn.execute(q, p)
+            return cur.rowcount > 0
+
 
     def reject_execution(self, plan_id: str, reason: str = "") -> bool:
         with self._write_conn() as conn:

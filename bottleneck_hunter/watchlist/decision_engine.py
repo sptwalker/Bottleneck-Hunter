@@ -18,6 +18,7 @@ from collections import Counter
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from bottleneck_hunter.auth.current_user import get_current_user_id
 from bottleneck_hunter.chain.json_utils import extract_json_object
@@ -140,7 +141,14 @@ def _load_prompt(name: str) -> str:
 
 
 def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """「今天」必须是**北京**日期。
+
+    此前按 UTC 取，与 `store_base._today()`（北京）不一致：北京 00:00–08:00 生成 L3 计划时
+    写入 plan_date=UTC 昨日，而同期的读取方（`get_tactical_plans_by_date()` 默认北京今日、
+    `/tactical/latest`、L4 的 `_today()` 取计划）查的是北京今日 → 当场生成当场读不到，
+    用户侧表现为"凌晨跑的战术计划消失"。日期字符串必须与消费侧同一时区。
+    """
+    return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
 
 # (B) L3 上游新鲜度阈值：L1 宏观/L2 组合是【周度】生成（见模块 docstring + scheduler.job_weekly_strategy；
@@ -850,6 +858,106 @@ def _reuse_escape_reason(store: WatchlistStore, plan_rj: dict, market: str) -> d
     except Exception:
         logger.debug("L2 复用逃逸判据计算跳过", exc_info=True)
     return {}
+
+
+# ─────────────────────────────────────────────────────────
+# P1-C：缺口未纠正留痕（run_daily_decision 与 run_full_refresh 共用判据）
+# ─────────────────────────────────────────────────────────
+
+def _gap_deviation(store: WatchlistStore, market: str) -> dict:
+    """读库算出账户相对 regime 区间的**两侧**偏差（只算不拦）：权益不足 / 现金超配。
+
+    P1-C：判断"该配没配"的判据此前只长在 run_daily_decision 里，UI 上"一键全量刷新"
+    这条路径看不到——同一件事两处各写一遍迟早分叉，抽成一份供两条路径调用。
+    """
+    macro = store.get_latest_macro_strategy()
+    account = store.get_sim_account()
+    if not macro or not account:
+        return {}
+    mj = macro.get("result_json", {}) or {}
+    bounds = get_allocation_bounds(
+        mj.get("regime", "sideways"), mj.get("risk_appetite", "balanced"), mj.get("regime_confidence", 5)
+    )
+    from bottleneck_hunter.watchlist.constraint_validator import compute_underweight_gap
+
+    return compute_underweight_gap(account, store.get_sim_positions(account.get("id")), bounds)
+
+
+def _l4_plan_count(evt: dict, prev: int | None) -> int | None:
+    """从 `decision_done` 里取"跑了但没产出"的确证数；只在事件**带 `plan_count`** 时取值。
+
+    L3（`run_tactical_plans` 末尾）与 L4（`run_execution_plans` 末尾）都发带 `plan_count` 的
+    `decision_done`，但 L4 另有两种**不带该字段**的提前返回：无 L3 计划时发 `decision_info`、
+    L3 全持有时的 `decision_done`。按 `.get(...) or 0` 取值会把「没跑到产出那一步」误读成
+    「零产出」，凭空造出一条缺口告警——故只认字段真存在的那一种，其余保持 None（＝没跑到）。
+    """
+    if evt.get("event") != "decision_done":
+        return prev
+    data = evt.get("data", {}) if isinstance(evt.get("data"), dict) else {}
+    return int(data["plan_count"] or 0) if "plan_count" in data else None
+
+
+def _uncorrected_gap_cause(store: WatchlistStore, *, l4_blocked: bool = False,
+                           l4_plan_count: int | None = None) -> str:
+    """本轮扩张侧停摆的原因；正常运行（能补仓且未被拦）返回 ""。
+
+    L1/L2 是周度生成、L3/L4 每日跑，故上游陈旧＝本轮没资格谈补仓；pre_l4 红灯＝L4 被拦；
+    L4 跑完却零产出＝方案层没能把战术计划变成任何可执行单。三种情形都只能停手
+    （不能盲下单），但"该配的钱没配出去"必须留下痕迹。
+
+    `l4_plan_count is None` 表示 L4 没跑到产出那一步（无战术计划/全持有/被拦/未运行），
+    与"跑了但产出 0 条"是两回事，不并为一谈——猜错方向会把「没跑到」写成一条假告警。
+    """
+    macro = store.get_latest_macro_strategy()
+    if not macro:
+        return ""
+    for label, plan in (("L2", store.get_latest_strategic_plan()), ("L1", macro)):
+        age = _upstream_age_days((plan or {}).get("created_at", ""))
+        if plan and (age is None or age > _STALE_UPSTREAM_DAYS):
+            return f"上游 {label} 陈旧（L3 已中止）"
+    if l4_blocked:
+        return "pre_l4 质量门红灯"
+    return "L4 未产出任何新方案" if l4_plan_count == 0 else ""
+
+
+def _record_uncorrected_gap(store: WatchlistStore, market: str, cause: str) -> None:
+    """P1-2 + P1-D 留痕：扩张侧停摆时，把"该配没配 / 钱趴着"记进 operation_log。
+
+    cause 为空（本轮正常运行）时不记——正常运行下现金仍高于上限，那是 L2 图纸本身的保守
+    选择，属于策略而非事故；只有"本来能纠偏却停摆了"才值得进推送白名单打扰用户。
+    P1-D：`cash_max` 此前算出来没人读，比不算更糟（会让人以为权益下限已把现金上限对称化了）。
+    这里给它第一个真实消费方，与 `equity_min` 对称。
+    """
+    if not cause:
+        return
+    uid = getattr(store, "_user_id", "") or ""
+    if not uid:
+        return
+    gap = _gap_deviation(store, market)
+    sides = []
+    if gap.get("underweight"):
+        sides.append(
+            f"权益配置不足 —— 实际权益 {gap['equity_pct']}% < 下限 {gap['equity_min']}%，"
+            f"缺口 {gap['gap_pct']}pct、可部署 {gap['deployable_cash']:.0f} 元未部署"
+        )
+    if gap.get("overweight_cash"):
+        sides.append(
+            f"现金超配 —— 实际现金 {gap['cash_pct']}% > 上限 {gap['cash_max']}%，"
+            f"超出 {gap['excess_cash_pct']}pct、约 {gap['idle_cash']:.0f} 元闲置"
+        )
+    if not sides:
+        return
+    from bottleneck_hunter.web.oplog import record_operation
+
+    record_operation(
+        uid, "缺口未纠正",
+        category="error",  # 同「质量门阻断」进推送白名单：钱趴着不配是要被看见的偏差
+        detail=(f"{market}：{cause}，本轮未纠正配置偏差 —— " + "；".join(sides))[:300],
+        result="partial", market=market,
+        meta={"cause": cause, "equity_pct": gap["equity_pct"], "equity_min": gap["equity_min"],
+              "gap_pct": gap["gap_pct"], "cash_pct": gap["cash_pct"], "cash_max": gap["cash_max"],
+              "excess_cash_pct": gap["excess_cash_pct"]},
+    )
 
 
 async def run_strategic_plan(
@@ -1911,7 +2019,7 @@ def _gap_driven_plans(actionable: list[dict], market: str) -> dict[str, float]:
         rj = tp.get("result_json") or {}
         if not tk or not (rj.get("gap_driven") or rj.get("opportunity_driven")):
             continue
-        if normalize_ticker(tk, market) != normalize_ticker(tk, tp.get("market") or market):
+        if normalize_market(tp.get("market")) != normalize_market(market):
             continue
         try:
             out[tk] = max(float(rj.get("_planned_amount") or 0), 0.0)
@@ -1933,7 +2041,7 @@ def _opportunity_driven_plans(actionable: list[dict], market: str) -> dict[str, 
         rj = tp.get("result_json") or {}
         if not tk or not rj.get("opportunity_driven"):
             continue
-        if normalize_ticker(tk, market) != normalize_ticker(tk, tp.get("market") or market):
+        if normalize_market(tp.get("market")) != normalize_market(market):
             continue
         try:
             out[tk] = max(float(rj.get("_planned_amount") or 0), 0.0)
@@ -2325,6 +2433,20 @@ async def run_execution_plans(
         repair_inputs = []
         # recent_map 已在上方 prompt 构建时计算，此处直接复用（同批生成期间无新成交）
 
+        # ── P0-D（N-22）事前卡口：本批共享的「当天已用额度」影子账本 ──
+        # 两件事此前都缺：① 生成期循环体从不改写 account/positions，每笔都按「买入前满额」校验；
+        # ② 日换手是累加量，逐笔比总额度在数学上守不住（实测 10 笔各 5% 权益 → 单日 50% vs 上限 30%）。
+        # 这里把「当日已真实成交额」当基线，每放行一笔买入就把它加进去，后续计划只按剩余额度缩量/放行。
+        # 纯本地变量、不写库（落库仍由下方 pending_writes 一次性做），不引入半执行状态。
+        _turnover_used = 0.0
+        try:
+            _turnover_used = float(store.daily_turnover_amount(account.get("id", ""), market) or 0.0)
+        except Exception as e:  # noqa: BLE001 —— 取不到就按 0（放行，不误拦真实委托）
+            logger.debug("当日已成交额读取失败，日额度按 0 计: %s", e)
+        _cash_left = float(account.get("cash_balance") or 0.0)
+        if _turnover_used > 0:
+            logger.info("当日已成交额 %s: %.0f（本批计划仅可使用剩余日额度）", market, _turnover_used)
+
         risk_snapshots = {}
         for ticker in {ep.get("ticker", "") for ep in exec_plans if ep.get("action") in ("buy", "add")}:
             try:
@@ -2474,14 +2596,22 @@ async def run_execution_plans(
                         ep["_auto_sized"] = True
 
             # ── P0.1 前置约束校验 + P2.1 组合 beta 校验 + B1 regime 仓位校验 ──
-            def _full_validate(plan_ep):
-                vr = validate_execution_plan(plan_ep, account, positions, constraints)
-                br = validate_portfolio_beta(plan_ep, account, positions, beta_map, constraints)
+            # P0-D：校验口径里账户现金用【影子账本余额】——循环体本身从不改写 account，
+            # 每笔都按「买入前满额现金」过闸，同轮 5 笔大额就都能过（现金下限要到成交期才拦得住，
+            # 代价是一批注定失败的待确认单）。影子余额只影响现金下限这一项判据。
+            _acct_view = {**account, "cash_balance": _cash_left}
+
+            def _full_validate(plan_ep, _view=_acct_view, _used=_turnover_used):
+                # 两个循环变量显式绑定为默认参数：闭包捕获的是【本笔】的影子余额与已用额度，
+                # 而不是循环变量在整轮结束后的最终值（晚绑定会让每笔都按同一口径过闸）。
+                vr = validate_execution_plan(plan_ep, _view, positions, constraints,
+                                             daily_turnover_used=_used)
+                br = validate_portfolio_beta(plan_ep, _view, positions, beta_map, constraints)
                 if not br.valid:
                     vr.violations.extend(br.violations)
                     vr.valid = False
                 # B1: 启用原死代码 validate_against_regime，让 regime 收紧的 equity 上限在 L4 真正生效
-                rr = validate_against_regime(plan_ep, account, positions, alloc_bounds)
+                rr = validate_against_regime(plan_ep, _view, positions, alloc_bounds)
                 if not rr.valid:
                     vr.violations.extend(rr.violations)
                     vr.valid = False
@@ -2510,7 +2640,10 @@ async def run_execution_plans(
 
             if not vres.valid:
                 # ── P0.3 自动降级：缩量到合规（buy/add 缩买量；sell/reduce 缩到持仓，超卖→按实际持仓卖）──
-                n = max_compliant_shares(ep, account, positions, constraints)
+                # P0-D：缩量必须与校验同口径——按【剩余日额度】+【影子账本现金】缩，
+                # 否则同一轮多笔各按满额现金缩量，缩完仍是一批注定在成交期失败的待确认单。
+                n = max_compliant_shares(ep, _acct_view, positions, constraints,
+                                         daily_turnover_used=_turnover_used)
                 if n > 0 and ep.get("action") in ("buy", "add", "sell", "reduce"):
                     ep["shares"] = n
                     price = ep.get("target_price") or ep.get("estimated_price", 0)
@@ -2557,6 +2690,13 @@ async def run_execution_plans(
                     ),
                 )
             )
+            # P0-D：本批已放行、但尚未落库的计划金额也要计入日额度与影子现金，
+            # 否则同轮 10 条各 5% 权益仍会全部通过（每条都看不见彼此）。
+            _amt = float(ep.get("estimated_amount") or 0) or float(ep.get("shares") or 0) * float(
+                ep.get("target_price") or ep.get("estimated_price") or 0)
+            if ep.get("action") in ("buy", "add"):
+                _cash_left -= _amt
+            _turnover_used += _amt
 
         if pending_writes:
             binding = save_stage_snapshot(store, "L4", {**stage_inputs, "repair_inputs": repair_inputs})
@@ -2896,6 +3036,7 @@ async def run_daily_decision(
     # Step 3.5: pre_l4 质量门控
     l4_blocked = False
     l4_block_reason = ""
+    l4_plan_count: int | None = None
     if scope in ("l3l4", "full"):
         try:
             from bottleneck_hunter.watchlist.quality_gate import run_quality_checks
@@ -2932,48 +3073,13 @@ async def run_daily_decision(
     # P1-2 缺口未纠正留痕：上游陈旧（L3 已中止）/ pre_l4 红灯时停买是对的（不能盲下单），但扩张侧那笔
     # "该配没配"也得像"被拦的买"一样在 operation_log 记账 —— 否则事后只看到"买了的被拦"，看不到"没买的欠着"。
     # （Step -1 行情硬停已提前 return：价格本身不可信时算不出可信缺口，不记。）
+    # P1-C：判据已抽成 _uncorrected_gap_cause/_record_uncorrected_gap，与 run_full_refresh 共用一份。
     try:
-        from bottleneck_hunter.watchlist.constraint_validator import compute_underweight_gap
-
-        _acc = store.get_sim_account()
-        _macro = store.get_latest_macro_strategy()
-        _cause = ""
-        if scope in ("l3l4", "full") and _macro:
-            for _label, _p in (("L2", store.get_latest_strategic_plan()), ("L1", _macro)):
-                _a = _upstream_age_days((_p or {}).get("created_at", ""))
-                if _p and (_a is None or _a > _STALE_UPSTREAM_DAYS):
-                    _cause = f"上游 {_label} 陈旧（L3 已中止）"
-                    break
-            if not _cause and l4_blocked:
-                _cause = "pre_l4 质量门红灯"
-        _uncorrected = {}
-        if _acc and _cause:
-            _mj = _macro.get("result_json", {}) or {}
-            _bounds = get_allocation_bounds(
-                _mj.get("regime", "sideways"),
-                _mj.get("risk_appetite", "balanced"),
-                _mj.get("regime_confidence", 5),
+        if scope in ("l3l4", "full"):
+            _record_uncorrected_gap(
+                store, market,
+                _uncorrected_gap_cause(store, l4_blocked=l4_blocked, l4_plan_count=l4_plan_count),
             )
-            _gap = compute_underweight_gap(_acc, store.get_sim_positions(_acc.get("id")), _bounds)
-            if _gap.get("underweight"):
-                _uncorrected = _gap
-        if _uncorrected:
-            uid = getattr(store, "_user_id", "") or ""
-            if uid:
-                from bottleneck_hunter.web.oplog import record_operation
-
-                record_operation(
-                    uid, "缺口未纠正",
-                    category="error",  # 同「质量门阻断」进推送白名单：钱趴着不配是要被看见的偏差
-                    detail=(
-                        f"{market}：{_cause}，本轮未纠正权益配置不足 —— 实际权益 "
-                        f"{_uncorrected['equity_pct']}% < 下限 {_uncorrected['equity_min']}%，"
-                        f"缺口 {_uncorrected['gap_pct']}pct、可部署 {_uncorrected['deployable_cash']:.0f} 元未部署"
-                    )[:300],
-                    result="partial", market=market,
-                    meta={"cause": _cause, "equity_pct": _uncorrected["equity_pct"],
-                          "equity_min": _uncorrected["equity_min"], "gap_pct": _uncorrected["gap_pct"]},
-                )
     except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响决策
         logger.debug("缺口未纠正留痕失败: %s", e)
 
@@ -2989,6 +3095,7 @@ async def run_daily_decision(
         else:
             async for evt in run_execution_plans(store, budget, market=market):
                 yield evt
+                l4_plan_count = _l4_plan_count(evt, l4_plan_count)
 
     # Step 5: 投委会评审
     if scope in ("l3l4", "full"):
@@ -3071,8 +3178,18 @@ async def run_full_refresh(
     async for evt in run_tactical_plans(store, budget, market=market):
         yield evt
 
+    # P1-C：全量刷新路径的缺口未纠正留痕。这里 L1/L2 刚被强制重生成，"上游陈旧"这一支
+    # 天然不可能成立（故 _uncorrected_gap_cause 里那条判据在此是死枝，不是漏检）；本路径
+    # 也不跑 pre_l4 质量门，所以能停摆的原因只剩「L4 跑完却一条方案都没产出」。
+    l4_plan_count: int | None = None
     async for evt in run_execution_plans(store, budget, market=market):
         yield evt
+        l4_plan_count = _l4_plan_count(evt, l4_plan_count)
+
+    try:
+        _record_uncorrected_gap(store, market, _uncorrected_gap_cause(store, l4_plan_count=l4_plan_count))
+    except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响决策
+        logger.debug("全量刷新缺口未纠正留痕失败: %s", e)
 
     pending = store.get_pending_executions()
     if pending:

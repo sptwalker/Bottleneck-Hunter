@@ -119,6 +119,10 @@ def test_confirmation_binding_error_is_business_error(store, monkeypatch, bindin
     from bottleneck_hunter.watchlist.auto_execute import auto_execute_pending
 
     auto_plan = store.create_execution_plan("tactical", "entry", "MSFT", {}, strict=False)
+    # P0-A：自动执行只看「投委会是否背书」这一条独立判据，无背书结论的计划会被直接跳过、
+    # 根本走不到绑定校验。本用例要验的是绑定失败路径，故先补一条背书结论。
+    store.create_committee_consensus(auto_plan, {"final_verdict": "approved"}, strict=False)
+    store.create_committee_consensus(plan_id, {"final_verdict": "approved"}, strict=False)
 
     async def auto_execute():
         return [event async for event in auto_execute_pending(store, "us_stock")]
