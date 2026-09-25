@@ -125,8 +125,9 @@ def test_a_stock_ticker_normalized_against_positions():
 
 def test_top_conviction_blocked_by_single_position_hard_cap():
     """验收②：单票硬上限 3%、顶档信念 → 定股为 0，被硬顶拦死（越线只在"目标权重"维度，硬顶不让）。"""
-    # 权益 10 万，已持 2900（2.9%），硬顶 3% → 只剩 100 元空间
-    shares = _gap_fill_shares(4000.0, 100.0, 100000, 2900.0, 3.0, "us_stock")
+    # 权益 10 万，已持 2900（2.9%），硬顶 3% → 只剩 100 元空间。水位取档位上限之上（8%），
+    # 即「档位允许追高，但硬顶说了算」——水位传 4000 会提前收敛，测不到硬顶这道红线。
+    shares = _gap_fill_shares(4000.0, 100.0, 100000, 2900.0, 3.0, "us_stock", 8000.0)
 
     assert shares == 1  # 只剩 100 元 = 1 股；档位想买 4000 元也顶不动硬顶
     assert shares * 100.0 <= 3000.0 - 2900.0
@@ -134,7 +135,18 @@ def test_top_conviction_blocked_by_single_position_hard_cap():
 
 def test_hard_cap_already_reached_yields_zero():
     """已达硬顶 → 顶档信念也定不到任何股数（无残留空间）。"""
-    assert _gap_fill_shares(4000.0, 100.0, 100000, 3000.0, 3.0, "us_stock") == 0
+    assert _gap_fill_shares(4000.0, 100.0, 100000, 3000.0, 3.0, "us_stock", 8000.0) == 0
+
+
+def test_机会驱动的水位不被L2承诺掐死():
+    """P0-4 的命门：机会驱动**生来就要越过 L2 目标**。若水位被取成 L2 承诺（如 6%），
+    已持 5% 的票距水位只剩 1%，档位想追到 8% 的额度就永远用不上——越线再也发生不了，
+    等于把这个驱动器关掉（这是 L4 调用点必须按 opportunity 分支取水位的原因）。
+    """
+    # 权益 10 万、已持 5000（5%）、硬顶 12%、档位上限 8%（=8000 元）
+    # 水位取档位 8% → 还能补 3000；水位若误取 L2 承诺 6% → 只能补 1000
+    assert _gap_fill_shares(4000.0, 100.0, 100000, 5000.0, 12.0, "us_stock", 8000.0) == 30
+    assert _gap_fill_shares(4000.0, 100.0, 100000, 5000.0, 12.0, "us_stock", 6000.0) == 10
 
 
 def test_no_cash_means_no_intent():

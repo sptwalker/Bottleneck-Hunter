@@ -490,7 +490,15 @@ def validate_against_regime(
     positions: list[dict],
     regime_bounds: dict,
 ) -> ValidationResult:
-    """验证执行计划是否符合当前 regime 的仓位约束。"""
+    """验证执行计划是否符合当前 regime 的仓位约束。
+
+    **`equity_max` 硬拦是设计，不是遗漏**（审计报告 N-30 一次、下一轮又报过一次）：这里的
+    超限直接 invalid，且 `max_compliant_shares` 的可降级项里**不含**账户级 `equity_max` ——
+    即没有"改小到能过"的出路，只能整体被拦。这是有意的：仓位超 regime 上限是**组合级**的
+    风险敞口越线，把它降级成一笔"刚好卡线"的买单，等于用一笔更小的违规去兑现一个已越线的
+    组合状态，比拦住更危险。要合法越线只有一条路——机会驱动的 `mandate_exception`（越线即
+    强制人工确认、绝不自动执行）。**不要**把它加进 limits 列表。
+    """
     result = ValidationResult()
     if not regime_bounds:
         return result
