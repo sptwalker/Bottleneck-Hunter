@@ -374,14 +374,40 @@ def _clamp_target_allocation(result: dict, bounds: dict) -> list[str]:
 
     bounds 来自 get_allocation_bounds：equity_min/equity_max/max_single_pct/beta_limit。
     这是确定性硬约束落地——避免 LLM 给出 equity 99%/单股 40% 后被下游原样放行。
+
+    P1-G（N-14）：类型不对时**不再静默跳过**。原先三处 `isinstance(x, (int,float))` 为假就既不
+    钳、也不告警、也不填默认值——而 LLM 返回 `"equity_pct": "55%"`（带百分号的字符串）是常见畸变。
+    污染的后果不是"少钳一次"：`_compute_deviation_drift` 用同一判据读它 → `has_target` 只剩
+    `sector_targets` → `rebalance_suggested` 可能变 None → `_reuse_escape_reason` 见 None 直接
+    `return {}`，**整个逃逸机制永久沉默**，且不留任何痕迹。这里把每一次静默改成 ① 能修的修
+    （字符串数字 → float）、② 修不了的记 warning（既有 `_clamp_warnings` 通道会发 SSE）。
     """
     ta = result.get("target_allocation")
     if not isinstance(ta, dict) or not bounds:
         return []
     warnings: list[str] = []
 
+    def _num(v) -> bool:
+        """bool 是 int 的子类，`True` 不该被当成数字 1 混进仓位计算。"""
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    # 先做一轮就地修复：LLM 把数字写成带 % 的字符串 / 混合类型，是可救的，不该升级成"静默丢弃"。
+    for _k in ("equity_pct", "cash_pct", "max_single_stock_pct", "max_portfolio_beta"):
+        _v = ta.get(_k)
+        if _v is None or _num(_v):
+            continue
+        if isinstance(_v, str):
+            try:
+                ta[_k] = float(_v.strip().rstrip("%"))
+                warnings.append(f"{_k} 类型修正 {_v!r}→{ta[_k]}")
+                continue
+            except ValueError:
+                pass
+        # 不可救：只留这一条（下面 equity_pct 的填默认值会给出路，不再叠一条重复说明）
+        warnings.append(f"{_k} 类型不可用（{type(_v).__name__}: {_v!r}），该字段本轮不参与钳制与偏离判据")
+
     eq = ta.get("equity_pct")
-    if isinstance(eq, (int, float)):
+    if _num(eq):
         lo, hi = bounds.get("equity_min", 0), bounds.get("equity_max", 100)
         if eq > hi:
             ta["equity_pct"] = hi
@@ -389,16 +415,22 @@ def _clamp_target_allocation(result: dict, bounds: dict) -> list[str]:
         elif eq < lo:
             ta["equity_pct"] = lo
             warnings.append(f"equity_pct {eq}→{lo}（下限）")
+    else:
+        # 缺失/不可救 → 填 L1 推荐值，而不是留个 None 让下游的偏离判据静默失效（N-14 的病根）
+        _rec = bounds.get("recommended_equity")
+        if _num(_rec):
+            ta["equity_pct"] = _rec
+            warnings.append(f"equity_pct 缺失或不可用，填 L1 推荐值 {_rec}")
 
     ms = ta.get("max_single_stock_pct")
     cap = bounds.get("max_single_pct")
-    if isinstance(ms, (int, float)) and cap and ms > cap:
+    if _num(ms) and cap and ms > cap:
         ta["max_single_stock_pct"] = cap
         warnings.append(f"max_single_stock_pct {ms}→{cap}")
 
     mb = ta.get("max_portfolio_beta")
     blimit = bounds.get("beta_limit")
-    if isinstance(mb, (int, float)) and blimit and mb > blimit:
+    if _num(mb) and blimit and mb > blimit:
         ta["max_portfolio_beta"] = blimit
         warnings.append(f"max_portfolio_beta {mb}→{blimit}")
 
@@ -734,6 +766,31 @@ async def run_macro_strategy(
         yield _sse("decision_error", layer="L1", error=str(e))
 
 
+def _format_downstream_feedback(store: WatchlistStore, *, days: int = 30, min_count: int = 2) -> str:
+    """P2-D（N-15）：把"被投委会反复否掉"的标的渲染成 L1 日检 prompt 里的一小段。
+
+    只留痕、只进 prompt，**不**自动改 regime：让下游改写上游的宏观判断风险远大于收益。
+    任何异常都吞成"无"——L1 日检是每日必跑的链路，一个附属读库失败不该让它整轮挂掉
+    （反馈是**参考信息**，不是日检的判据）。
+    """
+    try:
+        rows = store.get_committee_rejection_summary(days=days, min_count=min_count, limit=5)
+    except Exception:
+        logger.warning("L1 日检：投委会否决聚合读取失败，本轮不带下游反馈", exc_info=True)
+        return "无"
+    if not rows:
+        return "无"
+    lines = []
+    for r in rows:
+        _sector = (r.get("sector") or "").strip()
+        lines.append(
+            f"- {r['ticker']}　意图：{r.get('action', '?')}　近 {days} 天被否 {r['rejects']} 次"
+            f"　最近一次：{(r.get('last_at') or '')[:10]}"
+            + (f"　板块：{_sector}" if _sector else "")
+        )
+    return "\n".join(lines)
+
+
 async def run_macro_check(
     store: WatchlistStore,
     budget: BudgetTracker | None = None,
@@ -781,6 +838,7 @@ async def run_macro_check(
             .replace("{version}", str(current.get("version", 1)))
             .replace("{current_strategy}", json.dumps(current.get("result_json", {}), ensure_ascii=False))
             .replace("{today_market_data}", json.dumps(market_data, ensure_ascii=False))
+            .replace("{downstream_feedback}", _format_downstream_feedback(store))
         )
 
         result = await _llm_json_object(llm, prompt, layer="L1-check")
@@ -843,14 +901,26 @@ def _reuse_escape_reason(store: WatchlistStore, plan_rj: dict, market: str) -> d
         drift = _compute_deviation_drift(store, plan_rj, account, positions, market)
         if drift.get("rebalance_suggested") is None:
             return {}
-        top = max(
-            (("权益", drift["equity_drift_pct"]), ("现金", drift["cash_drift_pct"])),
-            key=lambda kv: abs(kv[1]),
-        )
+        # P1-F（N-12）：候选集必须**含板块漂移**。`_compute_deviation_drift` 早就在算 `sector_drift`
+        # 并把它并进了 `max_abs_drift_pct`，但这里只取权益/现金两项 —— 于是最典型的"策略已失效"
+        # 形态（板块结构被打乱）算得出、却逃逸不了：权益/现金都贴着目标时整体啥也不做。
+        # 板块用了 `target_pct` 明细的票才进候选，与 `max_abs_drift_pct` 同口径。
+        _cands = [("权益", drift["equity_drift_pct"]), ("现金", drift["cash_drift_pct"])]
+        _sector_drift = drift.get("sector_drift") or []
+        if _sector_drift:
+            _sec_top = max(_sector_drift, key=lambda d: abs(d["drift_pct"]))
+            _cands.append((f"板块[{_sec_top['sector']}]", _sec_top["drift_pct"]))
+        top = max(_cands, key=lambda kv: abs(kv[1]))
         if abs(top[1]) > _DECISION_DRIFT_ESCAPE_PCT:
+            if top[0].startswith("板块["):
+                # 板块逃逸：括号里报权益目标会误导（那条线本来就在带内），要报的是这个板块自己的数
+                _sec = next(d for d in _sector_drift if f"板块[{d['sector']}]" == top[0])
+                _ctx = f"实际 {_sec['actual_pct']}% / 目标 {_sec['target_pct']}%"
+            else:
+                _ctx = (f"实际 {drift['actual_equity_pct']}%权益/{drift['actual_cash_pct']}%现金，"
+                        f"目标 {drift['target_equity_pct']}%权益")
             return {
-                "reason": f"{top[0]}偏离目标 {top[1]:+.1f}pct（实际 {drift['actual_equity_pct']}%权益/"
-                f"{drift['actual_cash_pct']}%现金，目标 {drift['target_equity_pct']}%权益）",
+                "reason": f"{top[0]}偏离目标 {top[1]:+.1f}pct（{_ctx}）",
                 "drift_pct": top[1],
                 "threshold_pct": _DECISION_DRIFT_ESCAPE_PCT,
                 "drift": drift,
@@ -1917,6 +1987,27 @@ def _opportunity_tier(score: float) -> tuple[float, float] | None:
     return None
 
 
+def _oplog_mandate_exception(store, ticker: str, market: str, l2_w: float, post_w: float,
+                             ep: dict) -> None:
+    """N-29：机会驱动越线落一条 oplog（`result="exception"`）。留痕失败绝不影响决策。"""
+    try:
+        uid = getattr(store, "_user_id", "") or ""
+        if not uid:
+            return
+        from bottleneck_hunter.web.oplog import record_operation
+
+        record_operation(
+            uid, "机会驱动越过 L2 目标授权",
+            detail=f"{market}：{ticker} 目标 {l2_w:.1f}% → 执行后 {post_w:.1f}%，"
+                   f"{ep.get('shares')} 股 ≈ {float(ep.get('estimated_amount') or 0):.0f}，须人工确认"[:300],
+            result="exception", market=market,
+            meta={"ticker": ticker, "l2_target_pct": round(l2_w, 2), "post_weight_pct": round(post_w, 2),
+                  "shares": ep.get("shares"), "amount": ep.get("estimated_amount")},
+        )
+    except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响决策
+        logger.debug("越线留痕失败 %s: %s", ticker, e)
+
+
 def _plan_opportunity_fills(account: dict, positions: list[dict], valuations: dict[str, dict],
                             catalysts: dict[str, dict], composites: dict[str, float],
                             market: str) -> list[dict]:
@@ -1941,7 +2032,11 @@ def _plan_opportunity_fills(account: dict, positions: list[dict], valuations: di
             cur_by_ticker[k] = cur_by_ticker.get(k, 0.0) + float(p.get("market_value") or 0)
 
     budget = equity * _OPPORTUNITY_ROUND_CAP
-    out: list[dict] = []
+    # N-26：先算全部候选 → **按信念排序** → 再分预算。原实现是"边遍历边扣预算、遍历完才排序"，
+    # 于是 `get_valuation_map()` 的字典序（用户不可控）决定了谁先吃到单轮预算：实测两个中档票
+    # （各 2%）排在顶档票前面就能把 6% 预算吃光，顶档票只剩 2000（本应 4000）。末尾那次 sort
+    # 只是把**已定金额**重排，钱早就分完了 —— "信念最高的先补"是排序后的假象。
+    cands: list[dict] = []
     for tk_raw, v in (valuations or {}).items():
         tk = normalize_ticker(tk_raw, market)
         # 与持仓/归一化的键对齐后再取值（估值表单存 600519 而持仓存 600519.SS 时也要命中）
@@ -1960,22 +2055,28 @@ def _plan_opportunity_fills(account: dict, positions: list[dict], valuations: di
         cur_w = cur_val / equity * 100
         if cur_w >= tier_target_pct:
             continue  # 已达档位允许的目标权重 → 不再追高（同一信念不无限加）
-        amount = min(budget, tier_target_pct / 100 * equity - cur_val, step_pct * equity, cash)
-        if amount < equity * 0.005:  # 不足权益 0.5% 的碎单无意义
-            continue
-        out.append({
+        cands.append({
             "ticker": tk_raw,
-            "amount": amount,
             "action": "add" if cur_val > 0 else "buy",
             "target_weight_pct": tier_target_pct,
             "current_weight_pct": round(cur_w, 2),
             "score": score,
             "tier_pct": tier_target_pct,
             "reason": (cat or {}).get("title", ""),
+            # 两个与预算无关的静态上限，预存下来供分配阶段取用
+            "_room": tier_target_pct / 100 * equity - cur_val,
+            "_step": step_pct * equity,
         })
+    cands.sort(key=lambda c: c["score"], reverse=True)  # 信念最高的先分预算（这里是真分配顺序）
+    out: list[dict] = []
+    for c in cands:
+        amount = min(budget, c.pop("_room"), c.pop("_step"), cash)
+        if amount < equity * 0.005:  # 不足权益 0.5% 的碎单无意义
+            continue
+        c["amount"] = amount
+        out.append(c)
         budget -= amount
         cash -= amount
-    out.sort(key=lambda f: f["score"], reverse=True)  # 信念最高的先补
     return out
 
 
@@ -2860,16 +2961,6 @@ async def run_execution_plans(
                     ep["shares"] = _sized
                     ep["estimated_amount"] = round(_sized * _price, 2)
                     ep["_auto_sized"] = True
-                    # P0-4：机会驱动的定股在这里落地——用**实际定出的股数**判是否真越过 L2 目标授权，
-                    # 而不是照抄 L3 的意图。若 L4 的硬校验/降级把仓位压回了目标之内，就不必再打扰人。
-                    if ticker in opp_plans:
-                        _post_w = (_existing + _sized * _price) / _equity * 100 if _equity > 0 else 0.0
-                        _l2_w = l2_targets.get(normalize_ticker(ticker, market), 0.0)
-                        if _post_w > _l2_w + 0.05:  # +0.05pct 容差：躲开浮点噪声造成的假越线
-                            ep["mandate_exception"] = True
-                            ep["mandate_exception_note"] = (
-                                f"机会驱动越过 L2 目标授权：目标 {_l2_w:.1f}% → 执行后 {_post_w:.1f}%"
-                            )
                     logger.info(
                         "驱动补仓 %s：%d 股 ≈ %.0f（计划 %.0f，现有持仓 %.0f）",
                         ticker, _sized, _sized * _price, _gap_amt, _existing,
@@ -2977,6 +3068,31 @@ async def run_execution_plans(
                 logger.info("跳过不可执行计划 %s: action=%s shares=%s", ticker, ep.get("action"), ep.get("shares"))
                 skipped += 1
                 continue
+
+            # ── P0-4 / N-28 越线标记：**必须在股数最终确定之后**才判 ──
+            # 判据是"执行后权重是否真越过 L2 目标授权"，所以它依赖最终 shares。原实现把标记打在
+            # `_sized` 之后、而 `_full_validate`/两轮 LLM 自修正（会替换整个 ep）/`max_compliant_shares`
+            # 降级（会改写 shares）都在其后 —— 被压回目标之内的计划仍带着 mandate_exception。
+            # 方向是安全的（多要一次人工确认），但人工确认队列被污染，与注释声称的"不必再打扰人"相反。
+            # 回到这里判：降级后 shares 已定，被拦的计划已在上面 continue 走不到这里。
+            if ticker in opp_plans and ep.get("action") in ("buy", "add"):
+                _price_f = float(ep.get("target_price") or ep.get("estimated_price") or 0) or 0.0
+                _shares_f = float(ep.get("shares") or 0)
+                _equity_f = float(account.get("total_equity") or account.get("cash_balance") or 0) or 0.0
+                _l2_w = l2_targets.get(normalize_ticker(ticker, market), 0.0)
+                if _equity_f > 0 and _price_f > 0:
+                    _exist_f = next(
+                        (float(p.get("market_value") or 0) for p in positions if p.get("ticker") == ticker), 0.0
+                    )
+                    _post_w = (_exist_f + _shares_f * _price_f) / _equity_f * 100
+                    if _post_w > _l2_w + 0.05:  # +0.05pct 容差：躲开浮点噪声造成的假越线
+                        ep["mandate_exception"] = True
+                        ep["mandate_exception_note"] = (
+                            f"机会驱动越过 L2 目标授权：目标 {_l2_w:.1f}% → 执行后 {_post_w:.1f}%"
+                        )
+                        # N-29：越线必须留痕。这条此前只在 result_json 里躺着，投委会看不到、
+                        # oplog 无记录 —— 事后既无法复盘"为什么这笔越了线"，也无法统计越线频率。
+                        _oplog_mandate_exception(store, ticker, market, _l2_w, _post_w, ep)
 
             ep["_provenance"] = _decision_provenance(
                 ["decision_execution"], [(provider, model)], market, "L4", [ticker]

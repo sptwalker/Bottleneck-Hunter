@@ -17,6 +17,17 @@
 
 {today_market_data}
 
+## 下游执行反馈（投委会裁决）
+
+{downstream_feedback}
+
+*读法*：这里列的是**近期被投委会否决/未能表决**的交易意图。它**不是**要求你改变 regime ——
+下游执行层与上游宏观判断本就不必一致，单笔交易的否决往往只反映个股时点或数据质量问题。
+但若**同一标的被反复否决**，那是上下游在持续相互抵消的信号（"L1/L2 一直建议买、执行层一直
+不放行"，每轮都在烧算力）。**若你判断分歧的根源确实是宏观判断偏离了现实**，唯一能真正生效的
+动作是返回 `"strategy_status": "needs_major_revision"` 触发重建。没有该反馈（显示"无"）时
+**不要**凭空评论执行层。
+
 ## 检查原则
 
 1. **稳定性优先**：宏观策略应保持稳定，频繁变动反而有害
@@ -26,22 +37,23 @@
 
 ## 输出格式
 
-**语言要求：所有文本字段（daily_commentary / reason 等）必须用简体中文，不得使用英文。**
+返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。
+**只输出下列 3 个字段，不要添加示例之外的键** —— 契约外的字段没有任何读取方。
 
-返回严格 JSON，不要包含任何 JSON 以外的文字，也不要 markdown 代码块。下方示例仅为结构示范，请直接输出对应的 JSON 对象：
+**语言要求：所有文本字段（daily_commentary 等）必须用简体中文，不得使用英文。**
 
 {
   "strategy_status": "valid | needs_minor_tweak | needs_major_revision",
-  "confidence_in_current": 8,
   "daily_commentary": "1-2句话描述今日市场与策略的一致性",
-  "notable_changes": [
-    {"indicator": "指标名", "expected": "策略预期", "actual": "实际表现", "significance": "low | medium | high"}
-  ],
   "minor_tweaks": [
     {"aspect": "调整方面", "from": "原值", "to": "建议值", "reason": "原因"}
-  ],
-  "major_revision_needed": false,
-  "major_revision_triggers": ["如果需要重建，列出触发因素"]
+  ]
 }
 
-注意：大多数日子应该返回 `"strategy_status": "valid"`。只有真正的重大变化才需要 `needs_major_revision`。
+**`strategy_status` 是唯一能改变系统行为的字段**（也是唯一会被读取的裁决）：`valid` 保持现行
+策略；`needs_minor_tweak` 只记一笔留痕；**只有 `needs_major_revision` 会真正触发 L1 重建**。
+`minor_tweaks` 非空时同样会写回策略，供下游 L2 读取。
+
+稳定期大多数日子应返回 `"strategy_status": "valid"` —— 频繁重建 L1 会连带作废下游的 L2/L3，代价很高。
+但**若你判断市场风格（regime）可能已经切换、现行策略的前提不再成立，就应当返回 `needs_major_revision`**：
+把它标成 `valid` 会让一个已经失效的 regime 无限期挂着，下游照旧按它下单，损失远大于多跑一次重建。

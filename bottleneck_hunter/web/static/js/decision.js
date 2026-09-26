@@ -125,6 +125,10 @@ function resetLightsForRun(scope) {
 
 /* ── helpers ─────────────────────────────────────────── */
 
+// 展示用：把契约里的 list/orphan 一律当数组处理（L1 的 key_signals/risk_factors 是数组，
+// 但历史数据里出现过单个字符串；统一 asArr 后 String()/join 都不会炸）。
+function asArrDC(v) { if (Array.isArray(v)) return v; if (v == null || v === '') return []; return [v]; }
+
 function escDC(s) {
   if (!s) return '';
   const d = document.createElement('div');
@@ -332,20 +336,43 @@ function renderMacro(macro) {
   }
   rj = rj || {};
 
-  const riskLevel = rj.risk_level || rj.market_risk || '--';
+  // L1 契约（chain/prompts/decision_macro.md）里**没有**风险等级字段，只有 risk_appetite；
+  // 此前读的 risk_level/market_risk 从未存在 → 徽章恒 '--'。改为按风险偏好三档着色
+  // （aggressive=进取红、balanced=中性、defensive=防守绿），并带 regime 中文名。
+  const APPETITE = { aggressive: '进取', balanced: '均衡', defensive: '防守' };
+  const appetite = rj.risk_appetite || '';
+  const riskLevel = APPETITE[appetite] || '--';
   if (badge) {
     badge.textContent = riskLevel;
     badge.className = 'dc-badge ' + (
-      riskLevel === '高' ? 'dc-badge-sell' :
-      riskLevel === '低' ? 'dc-badge-buy' : 'dc-badge-info'
+      appetite === 'aggressive' ? 'dc-badge-sell' :
+      appetite === 'defensive' ? 'dc-badge-buy' : 'dc-badge-info'
     );
   }
 
+  // 字段名必须逐一对齐 L1 契约。此前 4 个里 3 个是幻影键（trend_assessment / key_risks /
+  // position_suggestion 全仓无产出方），filter 又把空值滤掉 → 整块面板只剩市场总结一行。
+  // 现在：regime 带置信度、风险偏好、关键信号、风险因素、建议权益仓位，全部有真的产出方。
+  const SIG = { bullish: '偏多', bearish: '偏空', neutral: '中性' };
+  const REGIME = { bull: '牛市', bear: '熊市', sideways: '震荡', transition: '转换期' };
+  const regimeTxt = rj.regime
+    ? `${REGIME[rj.regime] || rj.regime}${rj.regime_confidence ? `（置信度 ${rj.regime_confidence}/10）` : ''}`
+    : '';
+  const signalsTxt = asArrDC(rj.key_signals).map(x => {
+    if (!x || typeof x !== 'object') return x;
+    const head = [x.name, x.value].filter(Boolean).join('：');
+    return x.interpretation ? `${head}（${SIG[x.interpretation] || x.interpretation}）` : head;
+  }).join('；');
+  const sectorsTxt = asArrDC(rj.sector_rotation?.strengthening).join('、');
+
   const fields = [
     ['市场总结', rj.market_summary],
-    ['趋势判断', rj.trend_assessment || rj.trend],
-    ['关键风险', rj.key_risks],
-    ['建议仓位', rj.position_suggestion || rj.recommended_position],
+    ['市场状态', regimeTxt],
+    ['风险偏好', appetite ? (APPETITE[appetite] || appetite) : ''],
+    ['关键信号', signalsTxt],
+    ['风险因素', asArrDC(rj.risk_factors).join('、')],
+    ['建议权益仓位', rj.recommended_cash_pct != null ? `${100 - rj.recommended_cash_pct}%（现金 ${rj.recommended_cash_pct}%）` : ''],
+    ['板块轮动', sectorsTxt ? `走强：${sectorsTxt}` : ''],
   ].filter(([, v]) => v);
 
   let html = '<div class="dc-macro-content">';
@@ -701,9 +728,15 @@ function renderBlocked(executions) {
     const price = ex.target_price || rj.target_price || '--';
     const reason = ex.rejection_reason || '';
     const isCommittee = reason.indexOf('[投委会否决]') === 0;
-    const tag = isCommittee
-      ? '<span class="dc-blocked-tag dc-blocked-tag--committee">投委会否决</span>'
-      : '<span class="dc-blocked-tag dc-blocked-tag--system">不合规拦截</span>';
+    // P2-B：投委会**没能表决**（needs_review 法定人数不足 / needs_discussion 僵持）被 P0-A 拦下时，
+    // 理由也带「[投委会否决]」前缀（它走的是同一根拦截柱），但它不是委员们的决定 —— 标成"否决"
+    // 等于把"流程没跑完"显示成"已得出结论"，一个该被追问的信号被读成正常业务。
+    const unbacked = isCommittee && reason.indexOf('不可背书') >= 0;
+    const tag = unbacked
+      ? '<span class="dc-blocked-tag dc-blocked-tag--unbacked">未形成结论·须复核</span>'
+      : isCommittee
+        ? '<span class="dc-blocked-tag dc-blocked-tag--committee">投委会否决</span>'
+        : '<span class="dc-blocked-tag dc-blocked-tag--system">不合规拦截</span>';
     const cleanReason = reason.replace(/^\[(系统拦截|投委会否决)\]\s*/, '');
     return `<div class="dc-blocked-item" data-plan-id="${escDC(ex.id)}">
       <div class="dc-pending-header">
@@ -929,13 +962,19 @@ function voteLabel(v) {
   return v || '--';
 }
 
-// 会议集体结论：通过 / 否决 / 有条件通过
+// 会议集体结论：通过 / 否决 / 有条件通过 / 须人工复核 / 需再讨论 / 弃权
+// P2-F（N-18）：补 needs 分支。后端 `_fallback_consensus` 会产出 `needs_review`（法定人数不足）
+// 与 `needs_discussion`（权重持平）两种**非结论性**裁决，原先这里落到兜底 `return v`
+// 直接把英文原串糊到界面上，而 `report-export.js` 有分支 → 同一结论在页面和导出件里长得不一样。
+// P2-B：两者语义不同（复核=票数不够不可背书／讨论=僵持未决），分开展示，别都叫"需再讨论"。
 function verdictLabel(v) {
   const s = String(v || '').toLowerCase();
   if (!s || s === '--') return v || '--';
   if (s.includes('modification') || s.includes('conditional') || s.includes('有条件')) return '有条件通过';
   if (s.includes('approve') || s.includes('pass') || s.includes('通过')) return '通过';
   if (s.includes('reject') || s.includes('fail') || s.includes('否决')) return '否决';
+  if (s.includes('review')) return '须人工复核';
+  if (s.includes('discussion') || s.includes('needs')) return '需再讨论';
   if (s.includes('abstain') || s.includes('弃权')) return '弃权';
   return v || '--';
 }
@@ -2924,6 +2963,7 @@ function renderDecisionStats(s, container) {
   const ok = css.getPropertyValue('--success').trim() || '#3a9d6b';
   const bad = css.getPropertyValue('--danger').trim() || '#d64545';
   const gray = css.getPropertyValue('--muted').trim() || '#8a8f98';
+  const warn = css.getPropertyValue('--warning-strong').trim() || '#b45309';
   // 漏斗蓝色渐深阶梯（L1→L4 阶段本身无好坏，用单色阶最清晰）
   const ramp = ['oklch(0.62 0.15 250)', 'oklch(0.56 0.15 250)', 'oklch(0.5 0.15 250)', 'oklch(0.44 0.15 250)'];
   const names = ['L1 宏观', 'L2 战略', 'L3 战术', 'L4 执行'];
@@ -2958,6 +2998,8 @@ function renderDecisionStats(s, container) {
         data: [
           { value: s.committee_approved || 0, name: '通过', itemStyle: { color: ok } },
           { value: s.committee_rejected || 0, name: '否决', itemStyle: { color: bad } },
+          // P2-B：须人工复核（法定人数不足）单列，不再混进「待议」。两者都非结论，但前者是缺陷信号。
+          { value: s.committee_needs_review || 0, name: '须人工复核', itemStyle: { color: warn } },
           { value: s.committee_pending || 0, name: '待议', itemStyle: { color: gray } },
         ],
       }],
@@ -3061,7 +3103,7 @@ async function runCalibration() {
 // 测试专用导出：暴露市场切换编排内部件供 Node 自检驱动。生产代码不引用，零副作用。
 // ponytail: 仅为可测性开的读写句柄，非公共 API。
 export const __test__ = {
-  dcState, dcConsult,
+  dcState, dcConsult, renderMacro,
   loadOverview, resetConsultContext, abortConsultStream, switchMarket,
   consultStream, setConsultSending, openConsultDrawer, closeConsultDrawer,
   _consultDividerEl, renderConsultSnapshot,

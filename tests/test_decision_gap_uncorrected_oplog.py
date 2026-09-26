@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from bottleneck_hunter.watchlist.decision_engine import run_daily_decision
+from bottleneck_hunter.watchlist.regime_mapper import get_allocation_bounds
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 UID = "u_gap"
@@ -21,7 +22,8 @@ UID = "u_gap"
 def store(tmp_path):
     s = WatchlistStore(db_path=tmp_path / "t.db", user_id=UID).for_user(UID).for_market("us_stock")
     s.add({"ticker": "AAPL", "company_name": "Apple", "tier": "focus", "market": "us_stock"})
-    # L1 判激进多头 → 权益下限 60%；账户却 10% 权益/90% 现金 → 缺口 50pct
+    # L1 判激进多头 → 权益下限随 regime_confidence 收缩（N-11：置信度 5 → 48.9，而非表内原始 60）；
+    # 账户却 10% 权益/90% 现金 → 缺口随之而定。断言在用例里同源推导，不写死数值。
     s.create_macro_strategy(
         {"regime": "bull", "risk_appetite": "balanced", "regime_confidence": 5}, strict=False
     )
@@ -69,7 +71,9 @@ def test_缺口未纠正留痕(store):
     gap = [o for o in ops if o["title"] == "缺口未纠正"]
     assert gap, f"缺口未纠正必须留痕，实际只有 {titles}"
     detail = gap[0]["detail"]
-    assert "权益配置不足" in detail and "下限 60" in detail and "缺口 50" in detail, detail
+    _floor = get_allocation_bounds("bull", "balanced", 5)["equity_min"]  # 同上：生效下限
+    assert "权益配置不足" in detail, detail
+    assert f"下限 {_floor}%" in detail and f"缺口 {round(_floor - 10.0, 2)}pct" in detail, detail
     assert gap[0]["market"] == "us_stock" and gap[0]["result"] == "partial"
 
 
@@ -131,4 +135,6 @@ def test_上游陈旧也留痕(store):
     assert "质量门阻断 L4" not in [o["title"] for o in ops], "前提：质量门未红"
     gap = [o for o in ops if o["title"] == "缺口未纠正"]
     assert gap, "上游陈旧导致停买时，缺口同样必须留痕"
-    assert "L2 陈旧" in gap[0]["detail"] and "缺口 50" in gap[0]["detail"], gap[0]["detail"]
+    _floor = get_allocation_bounds("bull", "balanced", 5)["equity_min"]
+    assert "L2 陈旧" in gap[0]["detail"], gap[0]["detail"]
+    assert f"缺口 {round(_floor - 10.0, 2)}pct" in gap[0]["detail"], gap[0]["detail"]

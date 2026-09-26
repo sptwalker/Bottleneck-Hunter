@@ -69,13 +69,17 @@ class _DecisionMixin:
                 return int(row[0]) if row and row[0] is not None else 0
 
             # 投委会终裁词表见 committee.py：approved / approved_with_modifications=通过，rejected=否决，
-            # needs_discussion / needs_review=待议(=总数-通过-否决)。
+            # needs_review=须人工复核（法定人数不足，结论不可背书），needs_discussion=待议（僵持未决）。
+            # P2-F（N-17/N-18）：needs_review 单独成列。原先它与 needs_discussion 一起被压进
+            # 「待议=总数-通过-否决」这一个灰格里，于是「委员会没能表决」（须人来看）和「委员吵架了」
+            # （正常流程）在统计上长得完全一样 —— 前者是缺陷信号，被后者稀释到看不见。
             committee_total = _count("SELECT COUNT(*) FROM committee_consensus")
             approved = _count(
                 "SELECT COUNT(*) FROM committee_consensus "
                 "WHERE final_verdict IN ('approved', 'approved_with_modifications')"
             )
             rejected = _count("SELECT COUNT(*) FROM committee_consensus WHERE final_verdict = 'rejected'")
+            needs_review = _count("SELECT COUNT(*) FROM committee_consensus WHERE final_verdict = 'needs_review'")
 
             # 战术计划按市场拆分（_user_filter 在 GROUP BY 前插 user_id 过滤）
             q, p = self._user_filter("SELECT market, COUNT(*) FROM tactical_plans GROUP BY market")
@@ -96,6 +100,7 @@ class _DecisionMixin:
                 "committee_total": committee_total,
                 "committee_approved": approved,
                 "committee_rejected": rejected,
+                "committee_needs_review": needs_review,
                 "committee_pending": max(0, committee_total - approved - rejected),
                 "trades": _count("SELECT COUNT(*) FROM sim_trades"),
                 "experiences": _count("SELECT COUNT(*) FROM experience_cards"),

@@ -40,6 +40,8 @@ function verdictLabel(v) {
   if (s.includes('modification') || s.includes('conditional') || s.includes('有条件')) return '有条件通过';
   if (s.includes('approve') || s.includes('pass') || s.includes('通过')) return '通过';
   if (s.includes('reject') || s.includes('fail') || s.includes('否决')) return '否决';
+  // P2-F/P2-B：needs_review（票数不足不可背书）与 needs_discussion（僵持未决）分开，与 decision.js 一致
+  if (s.includes('review')) return '须人工复核';
   if (s.includes('discussion') || s.includes('needs')) return '需再讨论';
   if (s.includes('abstain')) return '弃权';
   return v || '--';
@@ -352,11 +354,14 @@ export function buildDecisionReport(data, market) {
   if (macro) {
     const rj = parseJSON(macro.result_json);
     html += sec('L1 · 宏观策略', kv([
-      ['市场风险', rj.risk_level || rj.market_risk],
-      ['趋势判断', asArr(rj.trend_assessment || rj.trend).join('、')],
-      ['建议仓位', rj.position_suggestion || rj.recommended_position],
+      ['市场状态', rj.regime ? `${rj.regime}${rj.regime_confidence ? `（置信度 ${rj.regime_confidence}/10）` : ''}` : ''],
+      ['风险偏好', rj.risk_appetite],
+      ['建议权益仓位', rj.recommended_cash_pct != null ? `${100 - rj.recommended_cash_pct}%（现金 ${rj.recommended_cash_pct}%）` : ''],
       ['更新于', fmtDate(macro.created_at)],
-    ]) + para(rj.market_summary) + (asArr(rj.key_risks).length ? '<h3>关键风险</h3>' + bullets(rj.key_risks) : ''));
+    ]) + para(rj.market_summary)
+      + (asArr(rj.key_signals).length ? '<h3>关键信号</h3>' + bullets(rj.key_signals,
+          x => (x && typeof x === 'object') ? esc([x.name, x.value].filter(Boolean).join('：') + (x.interpretation ? `（${x.interpretation}）` : '')) : esc(x)) : '')
+      + (asArr(rj.risk_factors).length ? '<h3>风险因素</h3>' + bullets(rj.risk_factors) : ''));
   }
 
   // L2 组合

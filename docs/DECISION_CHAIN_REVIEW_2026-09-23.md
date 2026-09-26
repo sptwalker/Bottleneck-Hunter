@@ -693,6 +693,7 @@ event_type IN ('projection','calibration','anomaly','settlement')
 **P2-E　修复 N-16：独立性守卫要有后果**
 
 - **改法**：`distinct_providers <= 1` 时**不是只告警**——按 `1/len(providers)` 之类对权重打折，或直接把该轮结论降级为 `needs_discussion`（这会自动被 **P0-A** 的新兜底拦住）。
+- **⚠ 就地更正（Batch C，2026-09-26）**：上面的**首选**方案（权重打折）是**数学恒等变换，实测零效果**——`_fallback_consensus` 只读 `w_approve/w_decisive` 两个**比值**，同乘常数约掉，裁决不变。实际采用了第二方案的**强化版**：不降级为 `needs_discussion`（那同样要被 P0-A 拦、只是绕远），而是**直接按不可背书拦下**，并**只覆盖 approved / approved_with_modifications** 两种裁决（rejected / needs_* 本就已拦，保持其理由清晰）。生产实测命中 22/244 笔（9%），其中 **6 笔** approved 是本次补上的漏洞。详见 §9.0、§9.1。
 - **落点**：`committee.py:915-935`。
 - **依赖**：**必须先完成 P0-A**，否则降级成 `needs_discussion` 反而会被自动执行放行——**修完 P0-A 才安全**。
 - **风险**：中。
@@ -1203,6 +1204,225 @@ assert not v.valid
 | `tests/test_decision_driver_direct.py` | 新增 436 行，15 条 |
 | `tests/test_gap_convergence.py` | 新增 170 行，7 条 |
 | **合计** | **+405 / −48（改动文件）+ 606 行（新增文件）** |
+
+### 8.6 P2-D（N-15）：投委会裁决回流 L1 —— 本批实施但**漏记于本批正文**，2026-09-26 补录
+
+**补录缘由**：P2-D 的代码（`store_committee.py::get_committee_rejection_summary`、`decision_engine.py::_format_downstream_feedback` + `{downstream_feedback}` 注入、`decision_macro_check.md` 新增段）与测试（`tests/test_downstream_feedback_to_l1.py` 12 条）都在工作树里，**但 8.x 各节从未写它**——范围表里点到了 P1-E，P2-D 被整段漏掉。第三批提交前逐文件清点工作树时才发现（`git diff` 里有未归属的 hunk）。记此以免"做了但没人知道"，也提醒：**范围表不等于已完成清单，提交前要按 diff 反向核对**。
+
+**报告原方案**：给投委会裁决一条回写 L1 的路，但「**建议先只做留痕，不做自动改 regime**」。实现在此基础上**再加一道**：不留痕只给 LLM 看还不足以产生约束，故把聚合结果**真正注入 L1 日检 prompt**，并明确告知唯一生效动作是 `needs_major_revision`。
+
+**三处经实测的判据（均为本补录时重新核过，非采信既有注释）**：
+
+| 判据 | 报告/注释怎么说 | 实测 |
+|---|---|---|
+| 聚合口径 | 只算 `rejected`/`needs_review` | ✅ SQL 确为 `final_verdict IN ('rejected','needs_review')`。`needs_discussion` **刻意不算**——僵持未决算成"已被否"会把"还在吵"记成"已经否掉" |
+| 聚合键 | 未指定 | **必须按 ticker，不能按 sector**：`sector` 在 A 股 watchlist 全空、美股 21 条仅 15 条有值，按板块聚合会把大头静默丢进 NULL 桶。现状取 `MAX(w.sector)` 作**附带字段**、有值才显示——给板块视角，但不把聚合正确性压在它上面 |
+| 多用户/多市场隔离 | — | 走 `self._filtered(..., table="cc")`，与全仓一致；测试含"别的用户的否决不出现在我的反馈里"与"美股/港股互不串"两条 |
+
+**容错定性**：`_format_downstream_feedback` 把**任何**异常吞成 `"无"`（仅 `logger.warning` + `exc_info`）。这是刻意的——L1 日检是每日必跑链路，一个附属读库失败不该让它整轮挂掉；下游反馈是**参考信息、不是日检判据**。测试专设两条（`rows` 抛异常 / `list` 抛异常）钉死该行为。
+
+### 8.7 P1-E 的 N-11 部分：置信度收缩生效下界 —— 本批实施、**遗漏于本节正文**，2026-09-26 补录
+
+**补录缘由**：与 8.6 同类。`regime_mapper.py` 的 N-11 改动（`equity_min` 随 `regime_confidence` 向同 regime 防御档地板收缩、并新增 `equity_min_base` 保留表内原值）**至今未提交**，而 8.x 各节只点了"P1-E"这个名字、没写它的落点与后果。第三批提交前清点工作树时，它还是 3 处测试失败的因变量（见 §9.7），故必须连记录一起补齐。
+
+**实现（`regime_mapper.py::get_allocation_bounds`）**：
+
+```
+conf_weight   = clamp((confidence - 1) / 9, 0, 1)
+_defensive_lo = REGIME_MAP[(norm_regime, "defensive")]["equity_pct"][0]     # 每 regime 必有该行
+equity_min_eff = round(eq_range[0] - (1 - conf_weight) * (eq_range[0] - _defensive_lo), 1)
+return {..., "equity_min": equity_min_eff, "equity_min_base": eq_range[0], ...}
+```
+
+**病根**：`regime_confidence` 此前只进 `recommended_equity`/`recommended_cash` 这类**建议值**（LLM 完全可以无视），而 `equity_min` 是**硬触发线**——`compute_underweight_gap` 拿 `equity_pct < equity_min` 授权确定性补仓，`_clamp_target_allocation` 拿它当地板。于是"我只有 2 分把握这是 sideways"与"10 分把握"领到**同一条补仓线**：低置信度的 regime 判断照样能撬动真金白银。
+
+**口径的两个端点**（刻意如此）：
+- `confidence = 1` → `conf_weight = 0` → 退到**该 regime 最防守的权益地板**（sideways 即 25）＝"没把握就别扩张"；
+- `confidence = 10` → `conf_weight = 1` → **完全回到表内原值**＝原行为。故这是**纯收紧**，不可能比改动前更激进。
+- `equity_max` / `max_single_pct` / `beta_limit` / `cash_min` / `cash_max` **一个都没动**。降的是"该不该开始补"的门槛，不是"最多能配多少"的预算。
+
+**实测值（本补录时重算）**：
+
+| regime / 档位 | 表内下界 | 置信度 5 生效下界 | 置信度 10 生效下界 |
+|---|---|---|---|
+| `sideways` / `balanced` | 40 | **31.7** | 40.0 |
+| `bull` / `balanced` | 60 | **48.9** | 60.0 |
+
+**后果实证（跨文件，且是对外金额）**：生效下界下降 → `compute_underweight_gap` 算出的缺口变大 → `_plan_gap_fills` 的 `step_cap = 缺口 × 1/3` 变大 → **真实下单金额变大**。以 `sideways/balanced`、置信度 5、缺口口径 30pct 的场景实测：步长预算 `9999 → 7232.61`，AAPL 分摊（2/12 × 0.3333）`1666.5 → 1205.43`。
+
+> **这不是缺陷，是 N-11 的设计意图**（置信度低 → 补仓线更低 → 补得更多）。但它**确实改变了真实成交金额**，且是三处旧测试硬编码期望值失败的唯一原因——归属结论与逐环算术见 §9.7，3 处陈旧期望已改为从 `get_allocation_bounds(...)["equity_min"]` 同源推导。
+
+**守卫**：`tests/test_confidence_risk_budget.py`（新增），断言"置信度必须进风险预算、不能只进建议值"；变异验证见 §9.7（把置信度按死值 10 传 → 派生断言立即失败，证明是活链接而非自证循环）。
+
+---
+
+## 九、第三批（Batch C）修复执行记录（2026-09-26）
+
+本批覆盖 P2-A、P2-B、P2-E、P2-F、P2-G、P2-H 与 P1-E 的剩余项。**约定的纪律照旧：报告里的每条判据都要先在代码/生产上验一遍，验不实的当作噪声丢掉，并在下面写清怎么丢的。**
+
+### 9.0 本批最重要的一个结论：报告的 N-16 首选方案是**数学恒等变换**
+
+报告 P2-E 给 N-16（交叉验证退化为"1 个模型算 N 次"）的首选修复是"按 `1/len(providers)` 对各 provider 权重打折"。**这条在代码上是空操作**，本批实测证明：
+
+`_fallback_consensus` 只读 `w_approve / w_decisive` 两个**比值**。对所有权重同乘一个常数 `c`：
+
+```
+Σ(c·w_approve) / Σ(c·w_decisive) = Σ(w_approve) / Σ(w_decisive)
+```
+
+即"打折"对裁决**零影响**——改了等于没改，还会让人以为已经处理过。这与报告自己在 Batch A 记录里那次"恒真夹具"是同一类病：**看起来在防的机制，实际什么都没防**。
+
+因此 P2-E 采取报告的第二方案（让守卫**产生后果**），并直接用最强的那种。
+
+### 9.1 P2-E（N-16）：独立性缺失时不再放行，改为拦截
+
+**判据**：委员数 ≥2 且**全部**落在同一个 provider → 交叉验证的前提（"不同模型独立得出同一结论"）不成立。此时若裁决是"通过"，该结论**不予采纳**，与"法定人数不足"同类：不是委员会说"不"，而是**没有可信的委员会**。
+
+**生产实测（只读，容器内 DB）**：244 笔已评审计划中本守卫命中 **22 笔（9%）**，裁决分布：
+
+| 裁决 | 笔数 | 本批处理 |
+|---|---|---|
+| `rejected` | 13 | 不受影响（本就已拦，理由保持清晰的"否决"） |
+| `approved` | **6** | **本批新拦下的漏洞** |
+| `needs_review` | 3 | 不受影响（P0-A 已拦） |
+
+命中样本全部为 `qwen`（如 `['qwen','qwen','qwen','qwen']`，另有一例 16 位委员全 qwen）。
+
+**关键实测**：宽松判据（`distinct_providers <= 1`）与严格判据（全具名且同一个）命中**同一批 22 笔、差异为 0**。故收紧判据**不损失任何覆盖面**；而宽松判据会把"provider 遥测缺失"（全空）误判成串通——那会把真单凭空拦下。最终实现：**拦截走严格判据，告警仍走宽松判据**（遥测缺失本就该告警）。
+
+**报告初稿数据的一处更正**：Batch B 的转述里曾写成"命中 22 笔其中 9 笔拿到 approved"，本批以生产计数为准更正为 **6 笔**（这已是审计链上第三处需更正的数字）。
+
+**变异测试（4 轮，全部击杀）**：
+
+| 变异 | 目的 | 结果 |
+|---|---|---|
+| M1' | 删掉整个 `named`/`if` 赋值块 | **KILLED**（2 条真断言） |
+| M3'' | 条件退化为 `if len(set(named)) <= 1:`（复现修复前语义） | **KILLED**（7 条） |
+
+> 两轮假信号已在过程中识别并作废：M1 的"击杀"来自删块后的 `NameError`（模块根本没跑起来）；M3/M3' 是**假存活**（`named == []` 时 `0 == 0` 为真、`0 == 1` 为假，都没复现出旧语义）。M3'' 才是真复现。
+
+新增 5 条测试（`tests/test_committee_quorum_freshness.py`，现 17 条全绿），含**反向守卫**（两个 provider 的 approved 必须**照常放行**）、**"未知 provider 不算串通"**边界、以及端到端（`auto_execute_pending` 下确实不自动成交）。
+
+### 9.2 P2-H（N-26）：机会驱动器的预算被字典序决定
+
+**病根实证**：原实现 `budget -= amount` 在 `for tk_raw, v in valuations.items()` 循环**内部**，而 `out.sort(key=score)` 在循环**之后**——末尾那次排序只是把**已定金额**重排，钱早就分完了。于是 `get_valuation_map()` 的字典序（用户不可控）决定了谁先吃到单轮预算。
+
+**实证**：中档票（各 2% 步长）排在顶档票（4% 步长）之前 → 顶档票只拿到 **2000**，而它应得 **4000**。改写为两阶段（先建候选 → 按信念排序 → 再分预算）后：顶档 4000、中档 2000、合计 6000，且内部字段 `_room`/`_step` 不泄漏进返回结构。
+
+### 9.3 P2-H（N-28）与 N-29：越线标记的时机与可见性
+
+**N-28 确认并修复**：`mandate_exception` 原来打在 `_sized` 之后，但 `_full_validate`（会替换整个 `ep`）、两轮 LLM 自修正、`max_compliant_shares` 降级（会改写 `shares`）**都在其后** —— 被压回目标之内的计划仍带着"越线"标记。方向是安全的（多要一次人工确认），但人工确认队列被污染，与代码注释声称的"不必再打扰人"**正好相反**。已移到 `_is_executable_plan(ep)` 之后（股数已定时判）。
+
+**N-29 的前半被证伪**：报告称"越线计划不带豁免上下文送审（`grep -c mandate_exception committee.py == 0`）"。实测（monkeypatch `_build_llm_chain` 抓真 prompt）：`exec_plan = plan.get("result_json", plan)` → 整份 JSON 序列化进 prompt，**`mandate_exception` 与自解释的 `mandate_exception_note` 早已到达每位委员**。真正缺的只是**强调**（它混在十几个裸键里）。故实现为在 `_review_single` 追加一段"越线申报（必须重点审查）"，**一处改动**覆盖全部四类提示词与第二轮质询/答辩，无需改任何 prompt 契约文件。
+
+**N-29 后半**：新增 `_oplog_mandate_exception`，越线**实际发生时**（`if _post_w > _l2_w + 0.05` 块内）落一条 `operation_log`（`result="exception"`）。此前只在 `result_json` 里躺着，事后既无法复盘"为什么这笔越线"、也无法统计越线频率。留痕失败**刻意不影响决策**（`try/except` + debug 日志）。
+
+### 9.4 N-19 的定性（报告此条部分失实）
+
+逐字段核实后，报告 P2-H 的"死代码"清单需要分别定性，**不能一律删**：
+
+| 字段 | 报告判据 | 实测结论 | 处理 |
+|---|---|---|---|
+| `major_revision_needed` | 全仓零读取 | **确实已删除**（Batch B 的 N-10 已删，本仓 0 命中） | 无需动作 |
+| `valid_until_trigger` | 死字段 | **有写者、有"绕道"读者**：`decision_engine.py:839` 把**整份 `result_json`** 序列化进 `{current_strategy}`（提示词第 14 行），它随策略回灌给 L1 日检；列本身只是平面副本，无读取方 | **保留**，在 schema 注明"故意不设第二消费方" |
+| `expires_at`（macro_strategies） | 无 ADD COLUMN 迁移，故必须永不接线 | **生产库里确实存在**（容器内 `PRAGMA table_info` 实测），结构里无迁移语句 → 早期建表残留。全仓**无写者、无读取方** | **保留原样**，在 schema 注明"永远是 NULL，切勿接消费方" |
+| `minor_tweaks` | 死字段 | **有真实读者**：`update_macro_status` 写回 `result_json`，下游 L2 由整份 `{macro_strategy}` 读取 | 无需动作 |
+
+> **本批最值钱的一条**：`expires_at` 的设计里**没有迁移语句**，但生产表里**确实有这个列** —— 结构定义与生产 schema 已经分叉。若按"结构里没有迁移 → 永远不会被创建"的推论去接线或改动，会得到一个"测试库没有、生产库有"的行为差。**这类判断必须在真库上验，不能只读 `store_schema.py`。**
+
+### 9.5 P2-A / P2-B / P2-F / P1-E（前序会话已完成，本批核实）
+
+- **P2-A**：`tests/frontend/*.mjs` 经 `tests/test_frontend_selfcheck.py` 参数化收进 pytest（子进程跑 node，非零退出即失败；无 node → skip，但**目录为空不跳过**——那是门禁本身失效）。
+- **P2-B**：`needs_review` 从"待议"里拆出并在前端点灯。
+- **P2-F**：N-17 平局判据 + N-18 展示口径一致。
+- **P1-E**：N-11 只做 `equity_min` 随置信度收缩（**实施记录见 §8.7**，本批发现它有跨文件后果 —— 且它是 9.7 那 3 处测试失败的因变量）。
+
+### 9.6 本批新发现并修掉的真实缺陷（不在原报告里）
+
+**（a）L1 宏观面板在页面上实际是空的。**
+
+`renderMacro`（`decision.js`）读 `trend_assessment` / `key_risks` / `position_suggestion` / `risk_level` —— **L1 契约里一个都没有**（真实字段是 `regime` / `regime_confidence` / `risk_appetite` / `key_signals` / `risk_factors` / `recommended_cash_pct` / `sector_rotation`）。更坏的是末尾 `.filter(([, v]) => v)` 把取空的字段**静默滤掉**：面板不报错、不空白，只剩「市场总结」一行——**看着像正常渲染，其实什么都没显示**。
+
+同一处错配也长在 `report-export.js`（导出的报告里 L1 段落同样残缺，且读的是同一批幻影键）。两处均已对齐契约。
+
+**（b）`daily_commentary` 零持久化消费方。**
+
+L1 日检的推理结果（"今日市场与策略的一致性"）只有唯一一路出口：一句瞬时 SSE（`decision_engine.py:867`）。它**不进 `result_json`、无列、无前端读**——生成完即丢，用户在任何界面都看不到。**本批只记录，未修**（需定调：是持久化进策略、还是点进前端）。
+
+> 核实过程中另有两个**怀疑被自己推翻**，记录以免后人重复踩：`strategy_text`（L2）确实在契约里；`riskAss.confidence ?? rj.confidence`（L3）的取值口径是**正确**的（契约里 `confidence` 嵌在 `risk_assessment` 下）。**先核再改**，否则会"修"出两个新 bug。
+
+**（c）前端自检补上一道门禁**：新增 `tests/frontend/decision_macro_fields.mjs`（连同既有两个自检，pytest 门禁共 3 个 mjs）。用真实形态 fixture 驱动 `renderMacro`，断言契约字段逐个落到面板，并**反向断言幻影键不再是取数来源**。变异验证：把四处取数一次性改回修复前的幻影键（`risk_level`/`key_risks`/`trend_assessment`/`position_hint`）→ **10 条断言击杀**（18 条中），非恒真夹具。
+
+### 9.7 过程中撞上的一处跨文件后果：置信度收缩改变了缺口预算（**非本批引入**）
+
+全量跑出 3 处失败，全部同源。先做归因（**不是**先改期望值）：
+
+- 有改动时稳定 `1205.43`；`git checkout HEAD -- regime_mapper.py` 后稳定 `1666.5`（各 3 次）。
+- 逐文件退回：退回其余 8 个文件 → 仍 FAILED；**只有**退回 `regime_mapper.py` → PASS。
+- **结论**：因变量是 `regime_mapper.py` 的 N-11 改动（**前序会话引入，尚未提交**），与 Batch C 的改动无关。
+
+**机制已逐环算通、数字分毫不差**：
+
+```
+confidence=5 → conf_weight=(5-1)/9=0.444
+equity_min: 40 → 31.7        （N-11：向同 regime 防御档地板 25 收缩）
+缺口: 30pct → 21.7pct
+步长预算: 9999 → 7232.61
+AAPL 分摊(2/12) × 0.3333: 1666.5 → 1205.43
+```
+
+三处失败的断言都硬编码了**置信度生效前的数值**，故全部改为**同源推导**（从 `get_allocation_bounds` 取生效下限再算），避免下次口径再变又断。变异验证：把 `_generate_gap_driven_plans` 的置信度按死值传 `10` → **立即失败**，证明派生断言是活链接而非自证循环。
+
+**这不是缺陷**：置信度低 → 补仓线更低 → 补得更多，是 N-11 的**设计意图**；且 `equity_max`/`max_single_pct`/`beta_limit`/`cash_min`/`cash_max` 一律未动，越界风险未放松。**但它确实改变了真实下单金额**——属 N-11 的跨文件后果，记此以免下次误判为回归。
+
+### 9.8 门禁结果
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest | **2374 passed, 5 skipped, 0 failed**（443.43s, exit 0；`--collect-only` 2379 不变） |
+
+> **末轮复跑与首轮的计数差已归因，不是回归**：首轮 2373/6（03:44 跑）→ 末轮 2374/5（15:57 跑），**收集数 2379 两轮一致**，即恰有一例从 skip 变成真跑并通过。它不是本批新增/删除的用例，而是 `test_daily_turnover_gate.py::test_按北京当日而非UTC当日` 自带的**挂钟前置条件**：北京 07:30 这个构造点在北京时间早于 07:30 时该用例的前提不成立（会 `pytest.skip`），跨过 07:30 之后前提成立即真跑。两轮 skip 清单已逐项对齐核实：
+>
+> - 常态 5 项固定 skip：`test_vip_citi_new_layout` ×3（缺 `CITI_SAMPLE_DIR` 样本）、`test_vip_derivatives` ×2（`NOMURA_ACC`/`NOMURA_DEC` 真实样本不存在）；`test_scheduler`/`test_vip_ingest_nomura`/`test_vip_nomura_nav` 的样本本机存在，故为 pass 而非 skip。
+> - 第 6 项**随北京挂钟在 skip ↔ pass 之间摆动**，即上述那一条。
+>
+> 同因的另一条（`test_跨北京午夜归日`，前置北京 ≥ 00:30）两轮均满足，故不参与摆动。**故门禁数须竖两轮一起读**：`2379 = passed + skipped` 恒成立，而 passed/skipped 的切分含一个挂钟因变量。 |
+| 新增前端自检 | `decision_macro_fields.mjs` **18 条断言全绿**；pytest 门禁共 3 个 mjs 收成 4 个用例（外加 1 条"目录非空"守卫）全绿。**本机有 node**，故该文件是**真跑**而非 skip（`skipif(NODE is None)` 未触发） |
+| `ruff check`（只读） | 触达文件共 11 处告警，与 `git show HEAD:` 版本**逐条同址同级、零新增**（E501×8 / E402×1 / B007×1 / SIM105×1，均为 pre-existing） |
+| 变异测试 | P2-E 2 轮真击杀（另 2 轮假信号已作废，见 9.1）；前端护栏 **10/18 击杀**；N-26 分配顺序 1 轮 |
+
+### 9.9 本批 diff 统计
+
+| 文件 | 变化（`git diff --numstat`） |
+|---|---|
+| `bottleneck_hunter/watchlist/decision_engine.py` | +142 / −26 |
+| `bottleneck_hunter/watchlist/committee.py` | +63 / −3 |
+| `bottleneck_hunter/watchlist/store_committee.py` | +40 / −0 |
+| `bottleneck_hunter/watchlist/regime_mapper.py` | +19 / −2 |
+| `bottleneck_hunter/web/static/js/decision.js` | +53 / −11 |
+| `bottleneck_hunter/chain/prompts/decision_macro_check.md` | +22 / −10 |
+| `bottleneck_hunter/web/static/js/report-export.js` | +9 / −4 |
+| `bottleneck_hunter/watchlist/store_schema.py` | +8 / −0 |
+| `bottleneck_hunter/watchlist/store_decision.py` | +6 / −1 |
+| `bottleneck_hunter/web/static/css/decision/decision.css` | +6 / −0 |
+| `tests/test_committee_quorum_freshness.py` | +101 / −0（15→17 条） |
+| `tests/test_gap_driver.py` / `test_decision_gap_uncorrected_oplog.py` | +17 / −4（陈旧期望改派生） |
+| `tests/frontend/decision_macro_fields.mjs` | **新增 145 行，18 条断言**（P2-A 前端门禁） |
+| `tests/test_frontend_selfcheck.py` | 新增 50 行（P2-A：mjs 收进 pytest） |
+| `tests/test_confidence_risk_budget.py` | 新增 128 行（P1-E/N-11 守卫） |
+| `tests/test_downstream_feedback_to_l1.py` | 新增 266 行 / 12 条（**P2-D/N-15，见 §8.6 补录**） |
+| **合计（本次提交全部）** | **+1194 / −63** |
+
+> **本表口径**：§9.9 原先只统计"本批新写"的文件，故不含 P2-D 与 P1-E 的既有产物。实际**本次提交**把三条线索一并带上（Batch C 主体 + §8.6 补录的 P2-D + §8.7 补录的 N-11），上表已按提交口径重列。**这也是提交前逐文件清点才发现的**：范围表里写了 P1-E，P2-D 则整段漏记。
+
+### 9.10 未做的事（明确不做，非遗漏）
+
+- **N-27（P2-C）**：按报告自身的"建议先不做"跳过。
+- **`daily_commentary` 的消费方**：见 9.6(b)，需先定调"持久化还是点进前端"，本批只记账。
+- **`expires_at` 的删除**：SQLite 删列需重建整表，为零收益在生产动 `macro_strategies` 不划算，**故意保留**。
+- **报告 §7.6 的三项悬置**：`restore_execution` 孤儿态、`daily_turnover_amount` 里非 sargable 的 `date(created_at,+8 hours)`、`create_committee_consensus` 的 `"approved"` 默认值（YAGNI）—— 维持悬置。
+- **生产部署与证真**：本批**尚未提交、尚未上线**，故无上线后证真，待批准后补。
+
 
 ---
 

@@ -556,6 +556,46 @@ class _CommitteeMixin:
         finally:
             conn.close()
 
+    def get_committee_rejection_summary(self, days: int = 30, min_count: int = 2,
+                                        limit: int = 5) -> list[dict]:
+        """P2-D（N-15）：投委会**非结论/否决**裁决按标的聚合，供 L1 日检"看得见"上下游分歧。
+
+        N-15 的病：投委会的裁决到不了 L1。同一标的一直被否、而 L1 仍写着"超配"，两边持续
+        相互抵消，每轮烧一次全链算力，用户只看到"一直建议买、一直不执行"两套说辞。
+        这里只做**留痕聚合**，不自动改 regime —— 让下游改写上游的宏观判断，风险远大于收益。
+
+        聚到标的（ticker）而非板块：`rejection_patterns` 是 `trade_feedback` 的裸 SELECT，
+        而生产上 A 股 watchlist 的 `sector` 全空、美股 21 条里只有 15 条有值，**按板块聚合会
+        把大部分记录静默丢进 NULL 桶**（实测：直方图里 None 桶比任何真板块都大）。`sector`
+        作为附带字段带出，有值才显示——能给出板块视角，但不把聚合正确性压在它上面。
+
+        只算 `rejected` / `needs_review`：这两种是"委员会说了不"。`needs_discussion` 是僵持
+        未决，算成"被否"会把"还在吵"记成"已经否掉"。
+        """
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                """SELECT ep.ticker AS ticker, ep.action AS action, MAX(w.sector) AS sector,
+                          COUNT(DISTINCT cc.id) AS rejects, MAX(cc.created_at) AS last_at
+                   FROM committee_consensus cc
+                   JOIN execution_plans ep ON ep.id = cc.execution_plan_id
+                   LEFT JOIN watchlist w ON w.ticker = ep.ticker AND w.market = cc.market
+                   WHERE cc.final_verdict IN ('rejected', 'needs_review')
+                     AND cc.created_at >= date('now', ?)
+                   GROUP BY ep.ticker, ep.action
+                   HAVING COUNT(DISTINCT cc.id) >= ?
+                   ORDER BY rejects DESC, last_at DESC
+                   LIMIT ?""",
+                # 参数化为日期修饰符（而非拼接 SQL 字面量），天数由调用方定、不接受外部字符串
+                (f"-{int(days)} days", max(1, int(min_count)), max(1, int(limit))),
+                table="cc",
+            )
+            rows = conn.execute(q, p).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
     def get_rejection_patterns(self, ticker: str | None = None, limit: int = 50) -> list[dict]:
         conn = self._connect()
         try:

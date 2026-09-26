@@ -267,19 +267,22 @@ class SignalPerception:
 #### **增量检查 Prompt**
 
 ```
-输入：当前有效策略（X 天前生成）+ 今日市场数据
+输入：当前有效策略（X 天前生成）+ 今日市场数据 + 下游执行反馈（投委会近期否决/未决的交易意图）
 
 任务：快速判断当前策略是否仍然有效？
 
-输出：
+输出（**只有这 3 个字段有读取方**，契约外字段一律不输出）：
 - strategy_status: valid | needs_minor_tweak | needs_major_revision
-- minor_tweaks: 轻微调整建议（如板块权重微调）
-- major_revision_triggers: 如需重建，列出触发因素
+  —— **唯一能改变系统行为的字段**：needs_major_revision 触发 L1 重建，其余只记留痕
+- daily_commentary: 1-2 句市场与策略一致性描述（留痕展示用）
+- minor_tweaks: 轻微调整建议（如板块权重微调）；非空时写回策略 result_json，供下游 L2 读取
 
 原则：
 - 默认策略有效，除非有明确证据
 - 轻微偏差不触发调整
-- 只有重大变化才全面重建
+- 但 regime 前提若已不成立，应返回 needs_major_revision ——
+  标成 valid 会让失效的 regime 无限期挂着，下游照旧按它下单
+- 下游反馈只作参考：同一标的被**反复**否决才是上下游持续抵消的信号
 ```
 
 #### **数据持久化**
@@ -1894,7 +1897,7 @@ WebSocket 连接（ws://localhost:8001/ws/strategy-chat）
 | 文件 | 用途 | 输出格式 |
 |------|------|---------|
 | `decision_macro.md` | L1 宏观策略生成（每周） | JSON: regime, risk_appetite, sector_rotation |
-| `decision_macro_check.md` | L1 日常检查（每日） | JSON: strategy_status, notable_changes |
+| `decision_macro_check.md` | L1 日常检查（每日） | JSON: strategy_status, daily_commentary, minor_tweaks |
 | `decision_strategic.md` | L2 组合策略生成（每周） | JSON: allocation, stock_selection, risk_limits |
 | `decision_deviation_check.md` | L2 偏离度检查（每日） | JSON: rebalance_needed, deviations |
 | `decision_tactical.md` | L3 战术计划（每日） | JSON: tactical_plans[], priority_ranking |

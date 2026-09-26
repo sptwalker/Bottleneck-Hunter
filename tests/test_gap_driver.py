@@ -11,6 +11,7 @@ from bottleneck_hunter.watchlist.decision_engine import (
     _generate_gap_driven_plans,
     _plan_gap_fills,
 )
+from bottleneck_hunter.watchlist.regime_mapper import get_allocation_bounds
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 # sideways/balanced → equity 40~60，单票上限 12
@@ -141,7 +142,13 @@ def test_wrapper_writes_plans_and_logs_account_id(monkeypatch, caplog):
     assert ids == ["plan-MSFT", "plan-AAPL"]  # 缺口倒序：MSFT(10pct) 先于 AAPL(2pct)
     assert all(p["result_json"]["gap_driven"] is True for p in store.plans)
     assert store.plans[1]["entry_id"] == "e1"          # AAPL 已入观察池 → 关联 entry
-    assert store.plans[1]["result_json"]["_planned_amount"] == 1666.5  # 按缺口比例分摊步长预算(9999×2/12)
+    # 按缺口比例分摊步长预算。**不要把这个数写死**：预算 = 缺口×(1/3)、缺口又由生效权益下限决定，
+    # 而 N-11 之后下限随 regime_confidence 收缩（sideways/balanced 置信度 5 → 31.7，而非表内原始 40）。
+    # 硬编码 1666.5 会在任何置信度口径调整后再断一次；改为同源推导，断则说明分摊逻辑真变了。
+    _floor = get_allocation_bounds("sideways", "balanced", 5)["equity_min"]  # L1 fixture 的 regime/置信度
+    _gap_dollars = (_floor - 10.0) / 100 * 100000  # 权益 10% → 缺口 dollars
+    _budget = _gap_dollars * _GAP_STEP_FRACTION
+    assert store.plans[1]["result_json"]["_planned_amount"] == round(_budget * 2 / 12, 2)  # AAPL 缺口 2pct / 合计 12pct
     assert "acct123" in caplog.text  # 多账户同机跑时，光看金额分辨不出是哪本账
 
 

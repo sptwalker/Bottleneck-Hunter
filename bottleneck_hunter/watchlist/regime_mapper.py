@@ -48,7 +48,8 @@ def get_allocation_bounds(
         confidence: L1 的 regime_confidence (1-10)，越高越靠近区间上界
 
     Returns:
-        dict with keys: equity_min, equity_max, cash_min, cash_max,
+        dict with keys: equity_min（**已按置信度收缩的生效下界**）, equity_min_base（表内原始下界）,
+                        equity_max, cash_min, cash_max, recommended_equity, recommended_cash,
                         max_single_pct, beta_limit, confidence_weight
     """
     norm_regime = _normalize_regime(regime)
@@ -69,8 +70,24 @@ def get_allocation_bounds(
     recommended_equity = round(eq_range[0] + (eq_range[1] - eq_range[0]) * conf_weight)
     recommended_cash = round(cash_range[1] - (cash_range[1] - cash_range[0]) * conf_weight)
 
+    # N-11：下界随置信度**保守收缩**。
+    # 此前 confidence 只进 recommended_*（一个"建议值"，LLM 完全可以无视），而下界是**硬触发线**：
+    # 缺口驱动器 `compute_underweight_gap` 拿 `equity_pct < equity_min` 授权确定性补仓，L2 的
+    # `_clamp_target_allocation` 拿它当地板。于是"我只有 2 分把握这是 sideways"和"10 分把握"
+    # 领到**同一条补仓线**——扩张力度完全不吃置信度，低置信度的 regime 判断照样能撬动真金白银。
+    # 锚点取**同 regime 防御档的下界**（表里每个 regime 必有该行）：置信度 1（w=0）→ 退到该 regime
+    # 最防守的权益地板，等于"没把握就别扩张"；置信度 10（w=1）→ 回到本档下界，即原行为。
+    # 只动这一个标量：equity_max / max_single_pct / beta_limit / cash_min / cash_max **一律不动**。
+    # 降的是"该不该开始补"的门槛，不是"最多能配多少"的预算——越界风险一分都不放松。
+    # 未知 regime 时 `bounds` 已回退到 sideways/balanced，`.get(..., bounds)` 再兜一层 → 锚点=下界 → 不偏移。
+    _defensive_lo = REGIME_MAP.get((norm_regime, "defensive"), bounds)["equity_pct"][0]
+    equity_min_eff = round(eq_range[0] - (1 - conf_weight) * (eq_range[0] - _defensive_lo), 1)
+
     return {
-        "equity_min": eq_range[0],
+        # equity_min 是**生效**下界（已按置信度收缩），下游三个消费方直接读它即得新口径。
+        # equity_min_base 保留表里的原始下界，供留痕/排查分辨"表说的"与"本轮生效的"。
+        "equity_min": equity_min_eff,
+        "equity_min_base": eq_range[0],
         "equity_max": eq_range[1],
         "recommended_equity": recommended_equity,
         "cash_min": cash_range[0],

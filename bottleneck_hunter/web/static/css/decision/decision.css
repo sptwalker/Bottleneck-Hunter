@@ -1681,6 +1681,12 @@
   background: oklch(0.6 0.15 300 / 0.18);
   color: oklch(0.72 0.14 300);
 }
+/* P2-B：投委会「没能表决」（法定人数不足）——与「否决」区分：这不是委员们的决定，
+   是流程没跑完，两个标签撞成同一个紫的会读成"投委会否掉了它"，把缺陷信号洗成正常结论。 */
+.dc-blocked-tag--unbacked {
+  background: oklch(0.6 0.14 85 / 0.18);
+  color: var(--warning-strong);
+}
 
 .dc-btn-restore {
   background: transparent;

@@ -298,11 +298,19 @@ CREATE TABLE IF NOT EXISTS macro_strategies (
     sector_rotation     TEXT DEFAULT '{}',
     risk_factors        TEXT DEFAULT '[]',
     strategy_text       TEXT DEFAULT '',
+    -- N-19 定性：本列**故意不设读取方**。它由 create_macro_strategy 从 result_json 落库，
+    -- 但真正送进 L1 日检提示词的是整份 result_json（decision_engine.py `{current_strategy}`
+    -- ← json.dumps(result_json)），本列只是同一份数据的平面副本、供排查时直接 SQL 查看。
+    -- 别再给它写第二个消费方：那会造成"改了一处、另一处仍陈旧"的分裂。
     valid_until_trigger TEXT DEFAULT '',
     result_json         TEXT DEFAULT '{}',
     status              TEXT DEFAULT 'valid' CHECK(status IN ('valid','needs_minor_tweak','needs_major_revision','superseded')),
     created_at          TEXT NOT NULL,
     updated_at          TEXT,
+    -- N-19 定性：**孤儿列**。全仓无写者、无读取方（结构里没有 ADD COLUMN 迁移，但生产
+    -- macro_strategies 实测确实带此列 —— 早期建表残留）。保留原样：SQLite 删列要重建整表，
+    -- 为零收益在生产库动 macro_strategies 不划算。**切勿**给它接消费方或改成 NOT NULL
+    -- —— 它现在永远是 NULL，任何"按到期日过滤"的逻辑都会把所有策略过滤掉。
     expires_at          TEXT
 );
 

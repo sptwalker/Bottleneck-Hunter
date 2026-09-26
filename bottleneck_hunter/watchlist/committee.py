@@ -244,6 +244,19 @@ async def _review_single(
             v = json.dumps(v, ensure_ascii=False, default=str)
         prompt = prompt.replace("{" + k + "}", v)
 
+    # N-29：越线豁免必须让委员看得见。标记本身就在 `execution_plan` 的 JSON 里（整份 result_json
+    # 都序列化进 prompt），但它混在十几个键中、没有任何解释——委员不会知道 `mandate_exception`
+    # 意味着"这笔已越过 L2 授权"。此处**只做强调**，不改任何 prompt 文件。
+    if isinstance(execution_plan, dict) and execution_plan.get("mandate_exception"):
+        prompt += (
+            "\n\n## ⚠ 越线申报（必须重点审查）\n\n"
+            "该计划已被下游标记为 `mandate_exception`：它**超出了 L2 组合策略给这只票的目标权重授权**，"
+            "由机会/信念驱动器主动申报越线，成交前需人工确认。"
+            f"具体越线幅度见计划中的 `mandate_exception_note`（{execution_plan.get('mandate_exception_note', '')}）。\n"
+            "请**就此单独给出判断**：这笔越线是抓住了真实机会，还是仅仅在一个已被证明失效的信念上加码？"
+            "若你认为越线缺乏充分依据，应当投反对票——你的否决是这道越线被拦下的最后一道关卡。\n"
+        )
+
     provider, model = "", ""
     try:
         response, provider, model = await _invoke_with_retry(chain, prompt, member["role"])
@@ -522,11 +535,21 @@ def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | No
 
 
 def _needs_discussion(reviews: dict[str, dict]) -> bool:
-    """判断是否需要圆桌讨论"""
+    """判断是否需要圆桌讨论
+
+    P2-F（N-17）：平局判据**按实际有效票数动态算**，不再写死 2:2。
+    写死 2:2 等于把"4 人委员会"焊进判据：委员数一变（缺票/加人/某轮只回来 3 票），
+    真实的 3:1 分歧反而不触发圆桌，只剩信心差一条线在兜。用 `有效票数 // 2` 表示
+    "没有任何一方过半"——4 票时是 2:2、3 票时 2:1 不算平局（已经过半）、5 票时 3:2 是平局。
+    """
+    reviews = reviews or {}
     votes = [r.get("vote", "abstain") for r in reviews.values()]
     approve = sum(1 for v in votes if v in ("approve", "approve_with_modification"))
     reject = sum(1 for v in votes if v == "reject")
-    if approve == 2 and reject == 2:
+    decided = approve + reject
+    if decided >= 2 and max(approve, reject) * 2 <= decided:
+        # 谁也没过半 = 僵持。4 票时 2:2 触发、3 票时 2:1 不触发（已过半）、5 票时 3:2 触发。
+        # 弃权票在场（1 赞成 1 反对 1 弃权）同样触发。
         return True
     confidences = [r.get("confidence", 5) for r in reviews.values()]
     return bool(confidences and max(confidences) - min(confidences) >= 5)
@@ -914,9 +937,27 @@ async def run_committee_review(
 
         # H-18 独立性守卫：委员若挤在同一 provider（如都降级到 kimi/glm），
         # 交叉验证退化为"1 个模型算 N 次"，必须显式告警而非静默放行。
+        #
+        # P2-E（N-16）：告警本身拦不住任何东西 —— 生产实测 244 笔已评审计划中本守卫命中 22 笔
+        # （9%），其中 6 笔拿到了 approved，全部是同 provider 委员互相背书的结果。
+        # 交叉验证的全部价值就在"不同模型独立得出同一结论"，独立性缺失时这个前提不成立，
+        # 结论与 needs_review（法定人数不足）同类：不是"委员会说不"，而是"没有可信的委员会"。
+        # 故此处不再只是告警，而是把该计划按不可背书拦下（与 P0-A 同一出口，前端「已拦截」可见）。
+        independence_blocked = False
+        independence_reason = ""
         providers_used = [r.get("provider", "") for r in reviews1.values() if not r.get("error")]
         distinct_providers = {p for p in providers_used if p}
         if len(providers_used) >= 2 and len(distinct_providers) <= 1:
+            # 拦截条件比告警严一档：provider 全空说明遥测缺失（provider_hint 未落库），
+            # 证据不足以断定"同源串通"，拦下是凭空收紧真单；告警仍照发（本就该补遥测）。
+            # 生产实测这两种口径命中同一批 22 笔（0 差异），收紧不损失覆盖面。
+            named = [p for p in providers_used if p]
+            if len(named) == len(providers_used) and len(set(named)) == 1:
+                independence_blocked = True
+                independence_reason = (
+                    f"{len(providers_used)} 位委员集中于 {len(distinct_providers)} 个 provider"
+                    f"（{next(iter(distinct_providers))}）"
+                )
             logger.warning(
                 "投委会独立性降级：%d 位委员均使用 provider=%s，交叉验证失去多样性",
                 len(providers_used),
@@ -1042,7 +1083,26 @@ async def run_committee_review(
         verdict_raw = consensus.get("final_verdict", "unknown")
         summary_text = consensus.get("summary", "")
         try:
-            if verdict_raw == "rejected":
+            if independence_blocked and verdict_raw in ("approved", "approved_with_modifications"):
+                # P2-E（N-16）：本来要放行的结论，因委员独立性缺失而失去背书资格。
+                # 只拦这两种裁决 —— rejected / needs_* 无论独立性如何都已被下面拦下，
+                # 此处覆盖的正是"交叉验证失效却拿到了通行证"这个唯一的洞。
+                store.reject_execution(
+                    plan_id,
+                    f"{store.BLOCK_MARKER_COMMITTEE} 委员独立性不足：{independence_reason}，"
+                    f"交叉验证失效（原裁决 {verdict_raw} 不予采纳），须人工复核",
+                )
+                yield _sse(
+                    "committee_gating",
+                    ticker=ticker,
+                    plan_id=plan_id,
+                    action="blocked",
+                    verdict=verdict_raw,
+                    reason="independence",
+                    message=f"{ticker} 投委会 {independence_reason}，交叉验证失效，"
+                    f"{verdict_raw} 不予采纳，已移出待确认队列",
+                )
+            elif verdict_raw == "rejected":
                 store.reject_execution(plan_id, f"{store.BLOCK_MARKER_COMMITTEE} {summary_text}")
                 yield _sse(
                     "committee_gating",

@@ -216,3 +216,104 @@ async def test_non_decisive_verdict_is_not_auto_executed(tmp_path, monkeypatch):
     async for _ in auto_execute_pending(store, "us_stock"):
         pass
     assert executed == []
+
+
+# ────────────────────────── (E) P2-E：独立性缺失必须有后果 ──────────────────────────
+
+async def _run_committee_with_providers(store, providers, monkeypatch, verdict="approved"):
+    """跑一遍 run_committee_review：委员 provider 按 providers 列表指定，裁决固定为 verdict。"""
+    members = list(C.MEMBERS)
+
+    async def fake_review(member, execution_plan, context):
+        idx = members.index(member)
+        return {"role": member["role"], "vote": "approve", "confidence": 6,
+                "provider": providers[idx % len(providers)], "model": f"m{idx}"}
+
+    async def fake_consensus(reviews, discussion, weights):
+        return {"final_verdict": verdict, "summary": "测试结论",
+                "consensus_modifications": [], "approval_rate": 0.75}
+
+    monkeypatch.setattr(C, "_review_single", fake_review)
+    monkeypatch.setattr(C, "_build_consensus", fake_consensus)
+
+    from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
+    bind = save_stage_snapshot(store, "L4", {"batch": ["AAA"]})
+    pid = store.create_execution_plan(
+        "tp1", "", "AAA", {"ticker": "AAA", "action": "buy", "shares": 10},
+        snapshot_id=bind["snapshot_id"], strategy_version=bind["strategy_version"])
+    plan = store.get_execution_plan(pid)
+    plan.update(bind)
+    async for _ in C.run_committee_review(store, [plan], budget=None, market="us_stock"):
+        pass
+    return store.get_execution_plan(pid)
+
+
+async def test_single_provider_approved_is_blocked(tmp_path, monkeypatch):
+    """P2-E（N-16）：4 位委员全在同一个 provider 上投出的 approved，不得直接放行。
+
+    交叉验证的全部价值在「不同模型独立得出同一结论」。全挤一个 provider 时那是"1 个模型算 N 次"，
+    结论与 needs_review 同类：不是"委员会说不"，而是"没有可信的委员会"。生产实测 244 笔已评审
+    计划中本守卫命中 22 笔（9%），其中 6 笔因此拿到了 approved —— 这 6 笔就是本测试守的洞。
+    """
+    store = _store(tmp_path)
+    plan = await _run_committee_with_providers(store, ["qwen"], monkeypatch)
+    assert plan["status"] == "rejected"
+    assert plan["rejection_reason"].startswith(store.BLOCK_MARKER_COMMITTEE)
+    assert "独立性不足" in plan["rejection_reason"]
+    assert "approval_rate" not in plan["rejection_reason"]  # 理由须可读，不是字段倾倒
+    assert "approved" in plan["rejection_reason"]           # 原裁决带出，便于事后追溯
+
+
+async def test_two_providers_approved_still_passes(tmp_path, monkeypatch):
+    """反向守卫：委员分布在 ≥2 个 provider 时，approved 必须照常留在 pending。
+
+    provider_hint 没配好就降级到同一个 provider 是常态，但只要有 2 个不同 provider，
+    交叉验证就站得住 —— 拦多了等于把正常单也堵死，比不拦更糟。
+    """
+    store = _store(tmp_path)
+    plan = await _run_committee_with_providers(store, ["qwen", "deepseek"], monkeypatch)
+    assert plan["status"] == "pending"
+    assert plan["rejection_reason"] == ""
+
+
+async def test_single_provider_rejected_reason_stays_plain_veto(tmp_path, monkeypatch):
+    """边界：全同 provider 且本就 rejected → 理由仍用「否决」，不重复叠加独立性文案。
+
+    无条件的拦截会把 22 笔里的 13 笔既有否决改成另一种说辞，把清晰的事变模糊。
+    """
+    store = _store(tmp_path)
+    plan = await _run_committee_with_providers(store, ["qwen"], monkeypatch, verdict="rejected")
+    assert plan["status"] == "rejected"
+    assert "独立性不足" not in plan["rejection_reason"]
+
+
+async def test_single_provider_not_auto_executed(tmp_path, monkeypatch):
+    """端到端：独立性不足的 approved 走不进自动执行（这是本修真正的收益）。"""
+    from bottleneck_hunter.watchlist.auto_execute import LEVEL_SEMI, auto_execute_pending, set_auto_execute_level
+
+    store = _store(tmp_path)
+    set_auto_execute_level(store, LEVEL_SEMI)
+    await _run_committee_with_providers(store, ["qwen"], monkeypatch)
+
+    executed: list[str] = []
+
+    async def fake_cae(_store, plan_id):
+        executed.append(plan_id)
+        return {"status": "confirmed"}
+
+    monkeypatch.setattr("bottleneck_hunter.watchlist.trade_executor.confirm_and_execute", fake_cae)
+    async for _ in auto_execute_pending(store, "us_stock"):
+        pass
+    assert executed == []
+
+
+async def test_unknown_provider_is_not_treated_as_collusion(tmp_path, monkeypatch):
+    """边界：provider 全空（遥测缺失）时不得拦截 —— 那是"没记下来"，不是"同源串通"。
+
+    旧行为下 provider_hint 未落库会让 4 个空值被判为"集中于 1 个 provider"，
+    于是每一笔正常 approved 都被凭空拦下。本守卫只拦有证据的同源。
+    """
+    store = _store(tmp_path)
+    plan = await _run_committee_with_providers(store, [""], monkeypatch)
+    assert plan["status"] == "pending"
+    assert plan["rejection_reason"] == ""
