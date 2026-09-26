@@ -358,6 +358,7 @@ export function buildDecisionReport(data, market) {
       ['风险偏好', rj.risk_appetite],
       ['建议权益仓位', rj.recommended_cash_pct != null ? `${100 - rj.recommended_cash_pct}%（现金 ${rj.recommended_cash_pct}%）` : ''],
       ['更新于', fmtDate(macro.created_at)],
+      ['日常检查', rj.daily_commentary],
     ]) + para(rj.market_summary)
       + (asArr(rj.key_signals).length ? '<h3>关键信号</h3>' + bullets(rj.key_signals,
           x => (x && typeof x === 'object') ? esc([x.name, x.value].filter(Boolean).join('：') + (x.interpretation ? `（${x.interpretation}）` : '')) : esc(x)) : '')

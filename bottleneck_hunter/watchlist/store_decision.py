@@ -191,19 +191,35 @@ class _DecisionMixin:
 
 
     def update_macro_status(self, strategy_id: str, status: str,
-                            minor_tweaks: list | None = None) -> bool:
+                            minor_tweaks: list | None = None,
+                            daily_commentary: str | None = None) -> bool:
+        """日检回写：status 直接落列，`minor_tweaks` / `daily_commentary` 打进 `result_json`。
+
+        **为什么不给 `daily_commentary` 单开一列**：本表 `valid_until_trigger` 的 N-19 注释已定调
+        ——"别为同一份数据接第二个消费方，那会造成改了一处、另一处仍陈旧的分裂"。`result_json`
+        本就是 L1 的完整落点（前端 `renderMacro` 读它、L2 prompt 由它渲染），再开一列就是那个副本。
+
+        ponytail: `daily_commentary` 每次日检**覆盖**，只留最新一句、不能逐日回看。要日检史就建
+        `macro_daily_checks` 表（DDL 见 docs/TRADING_DECISION_SYSTEM.md 3.2 节），届时本方法
+        改写成往那张表 INSERT；在那之前别在 `result_json` 里堆数组模拟历史。
+        """
         conn = self._connect()
         try:
             parts = ["status = ?", "updated_at = ?"]
             vals = [status, _now_iso()]
-            if minor_tweaks is not None:
+            if minor_tweaks is not None or daily_commentary is not None:
                 q, p = self._filtered(
                     "SELECT result_json FROM macro_strategies WHERE id = ?", (strategy_id,)
                 )
                 row = conn.execute(q, p).fetchone()
                 if row:
                     rj = json.loads(row["result_json"] or "{}")
-                    rj["minor_tweaks"] = minor_tweaks
+                    # 仅在传了时才写：日检返回 minor_tweaks=None（常态）不得把上一次的微调抹掉
+                    if minor_tweaks is not None:
+                        rj["minor_tweaks"] = minor_tweaks
+                    # 空串同样不写：LLM 没给点评时保留上一条，好过用空串把有内容的盖成空
+                    if daily_commentary:
+                        rj["daily_commentary"] = daily_commentary
                     parts.append("result_json = ?")
                     vals.append(json.dumps(rj, ensure_ascii=False))
             vals.append(strategy_id)

@@ -858,6 +858,9 @@ async def run_macro_check(
                 current["id"],
                 status,
                 minor_tweaks=result.get("minor_tweaks"),
+                # 日检的推理结论（"今日市场与策略的一致性"）此前只有下面那句 SSE，生成完即丢 ——
+                # 任何界面都看不到。落进策略的 result_json，随 L1 面板一起展示（见 update_macro_status）。
+                daily_commentary=result.get("daily_commentary", ""),
             )
             yield _sse(
                 "decision_done",

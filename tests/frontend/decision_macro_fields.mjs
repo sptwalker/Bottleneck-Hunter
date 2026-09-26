@@ -135,10 +135,25 @@ function testNullMacroShowsHint() {
   assert(_els['dc-macro-body'].innerHTML.includes('尚未生成宏观策略'), '空 macro → 引导语');
 }
 
+// ── L1 日检点评：落库后必须能在面板上看到 ──
+// 病根：L1 日检的推理结论只有一句瞬时 SSE，生成完即丢。持久化进策略 result_json 之后，
+// 面板必须能读到 —— 否则等于没落库（数据在库里、没人看得见）。
+function testDailyCommentaryRendered() {
+  console.log('5. 日常检查点评落到面板（落库但面板不读 = 白落）');
+  const { html } = renderWith({ ...MACRO.result_json, daily_commentary: '今日市场与策略一致，维持现行判断。' });
+  assert(html.includes('今日市场与策略一致'), 'daily_commentary 显示在面板里');
+  assert(html.includes('日常检查'), '带「日常检查」标签，不与市场总结混淆');
+
+  // 还没跑过日检时不得凭空长出一行空标签（末尾 filter 的老规矩）
+  const { html: h2 } = renderWith(MACRO.result_json);
+  assert(!h2.includes('日常检查'), '无 daily_commentary 时不渲染空标签');
+}
+
 testContractFieldsAreRendered();
 testPhantomKeysAreNotTheSource();
 testDegradedShapes();
 testNullMacroShowsHint();
+testDailyCommentaryRendered();
 
 console.log('');
 if (failures === 0) { console.log('✅ 全部通过'); process.exit(0); }

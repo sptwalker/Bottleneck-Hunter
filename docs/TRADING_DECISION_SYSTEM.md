@@ -274,7 +274,7 @@ class SignalPerception:
 输出（**只有这 3 个字段有读取方**，契约外字段一律不输出）：
 - strategy_status: valid | needs_minor_tweak | needs_major_revision
   —— **唯一能改变系统行为的字段**：needs_major_revision 触发 L1 重建，其余只记留痕
-- daily_commentary: 1-2 句市场与策略一致性描述（留痕展示用）
+- daily_commentary: 1-2 句市场与策略一致性描述；**非空时写回策略 result_json，随 L1 宏观面板展示给用户**
 - minor_tweaks: 轻微调整建议（如板块权重微调）；非空时写回策略 result_json，供下游 L2 读取
 
 原则：

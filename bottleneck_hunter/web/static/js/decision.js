@@ -373,6 +373,7 @@ function renderMacro(macro) {
     ['风险因素', asArrDC(rj.risk_factors).join('、')],
     ['建议权益仓位', rj.recommended_cash_pct != null ? `${100 - rj.recommended_cash_pct}%（现金 ${rj.recommended_cash_pct}%）` : ''],
     ['板块轮动', sectorsTxt ? `走强：${sectorsTxt}` : ''],
+    ['日常检查', rj.daily_commentary],
   ].filter(([, v]) => v);
 
   let html = '<div class="dc-macro-content">';

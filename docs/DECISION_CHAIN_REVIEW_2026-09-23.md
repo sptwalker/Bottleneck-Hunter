@@ -1469,6 +1469,75 @@ P1-F 的第一版夹具用**两个**板块（半导体目标 40%、软件 20%）
 **本批 diff**：`tests/test_p1f_p1g_guards.py` **新增 154 行 / 6 条**；`bottleneck_hunter/data_provider/yf_gate.py` **+4 / −2**（删冗余截断 2 行 + 补 4 行注释说明为何不能截）；`docs/DECISION_CHAIN_REVIEW_2026-09-23.md` **+48 / −4**（§9.10 一处过期更正、§7.6/§8.4 两处"尚未上线"改为事实、§9.11 新增）。
 
 
+### 9.12 §9.6(b) 收尾：`daily_commentary` 持久化进策略（2026-09-27）
+
+**授权**：用户 2026-09-27 就 §9.6(b) 未定调的问题（"持久化进策略 / 点进前端 / 都先不做"三选一）答复**「持久化进策略」**。
+
+**修复前的事实**（§9.6(b) 原始记录，本次复核仍然成立）：`daily_commentary` 全仓**只有一个产出方**（`chain/prompts/decision_macro_check.md` 契约）与**一个出口**（`decision_engine.py` 的 `decision_done` SSE，`commentary=` 字段）。既不进 `result_json`、无列、前端零读取 —— **生成完即丢**，L1 面板上永远看不到"今天为什么判定策略仍有效"。
+
+**落点选择的依据（三条，均取自本仓既有约定而非外部偏好）**：
+
+1. **用户选项的原文是"随 L1 一起展示"**，而前端 `renderMacro` 读的正是 `macro.result_json` —— 落进它即自然可见，无需新读接口。
+2. **同表 `valid_until_trigger` 的 N-19 注释已为本表定调**：*"别再给它写第二个消费方：那会造成'改了一处、另一处仍陈旧'的分裂"*。新开 `daily_commentary TEXT` 列正是那个被明令禁止的第二副本 —— 同一份语义既在 `result_json` 又在列里。
+3. **零 schema 迁移、零生产库风险**。`macro_strategies` 是生产在用的表；SQLite 改列要重建整表（§9.10 已就 `expires_at` 的删除记过同样的账："为零收益在生产动 `macro_strategies` 不划算"）。
+
+**因此复用 `minor_tweaks` 已存在的那条回写路径**：两者都打进 `result_json`，`status` 仍单独落列。落库后自动流经两条既有消费链 —— 前端 `renderMacro` 面板、以及 L2 prompt 的 `{macro_strategy}`（整份 `result_json` 注入）—— **不新增任何消费方接线**。
+
+**改动**（4 处代码 + 2 处文档，共 5 文件）：
+
+| 文件 | 改动 |
+|---|---|
+| `watchlist/store_decision.py` | `update_macro_status()` 加 `daily_commentary` 形参；与 `minor_tweaks` 同段写 `result_json`。附方法级 docstring 说明"为何不单开一列"并指向 N-19 |
+| `watchlist/decision_engine.py` | `run_macro_check` 的 `update_macro_status(...)` 调用点补传 `daily_commentary=result.get("daily_commentary", "")`（+3 行） |
+| `web/static/js/decision.js` | `renderMacro` 的 `fields` 增 `['日常检查', rj.daily_commentary]`（复用既有 `filter(([,v]) => v)` 空值滤除） |
+| `web/static/js/report-export.js` | L1 导出段落增同名一行 |
+| `chain/prompts/decision_macro_check.md` | 契约尾注补一句：该字段**会显示给用户**，故"留空比写废话好"、"没给点评时保留上一次内容" |
+| `docs/TRADING_DECISION_SYSTEM.md` | 3.2 节字段表把"（留痕展示用）"改为事实描述 |
+
+**两个刻意的行为选择**（都在 `update_macro_status` 的 docstring 里写明）：
+
+- **空串不覆盖**：`if daily_commentary:` —— LLM 没给点评时保留上一条，好过用空串把有内容的盖成空。`None` 与 `""` 两种空值语义一致。
+- **`None` 不清微调**：`minor_tweaks is not None` 的判断是既有逻辑（本次未改），但与新参数同处一个 `if` 分支，故一并纳入护栏。
+
+**护栏**：`tests/test_l1_daily_commentary_persist.py`（**5 条**）+ `tests/frontend/decision_macro_fields.mjs` 增 `testDailyCommentaryRendered`（2 断言）。四条变异实测**全部击杀**，且击杀分布证明断言各钉各自的契约、非恒真：
+
+| 变异 | 复现的修复前语义 | 击杀 |
+|---|---|---|
+| 引擎不传 `daily_commentary` | 日检"只发 SSE、不落库"（**修复前的真实形态**） | **1**（`test_日检流程真的把点评写进库`） |
+| store 层整段不写 | 完全没有持久化 | **4**（除变异复现条外的全部） |
+| store 层无条件写（空串也覆盖） | 空点评抹掉上一条 | **1**（精确命中 `test_空点评不覆盖上一条`） |
+| 前端不读该字段 | 落了库但面板不显示 = 白落 | **2**（前端自检两条） |
+
+> 第一条变异的击杀数少（1/5）是**预期而非缺陷**：另 4 条测的是 store 层自身能力，与"日检是否真的接上"无关。真正钉住接线的是第 5 条端到端用例 —— 它跑完整 `run_macro_check`（mock LLM 与 `_collect_market_context`），断言库里留下那句点评。第 4 条 `test_变异复现_省略落库参数则栏红` 反向证明了这一点：不传参数就该是"没落库"，故第 5 条不是恒真夹具。
+
+**已知天花板（明确写进代码 `ponytail:` 注释）**：`daily_commentary` **每次日检覆盖**，只剩最新一句，**不能逐日回看**。要日检史须建 `macro_daily_checks` 表 —— 其 DDL 本仓早已写在 `docs/TRADING_DECISION_SYSTEM.md` 3.2 节（`date / current_strategy_id / adjustment_needed / adjustment_type / daily_commentary`），届时把本方法改写成往那张表 INSERT 即可。**在那之前不得在 `result_json` 里堆数组模拟历史**（那会把一份 JSON 变成隐式日志，且无保留期策略）。
+
+**门禁**：全量 **2384 passed / 6 skipped / 0 failed**（372.73s，exit 0）；**本报告定稿后又复跑一次，同为 2384 / 6 / 0**（377.70s，exit 0）—— 分类完全一致，说明首跑那次 skipped 的搬家确非本批引入。**逐条算清这个数字，因为它对不上"上批 + 新增条数"**：
+
+- `--collect-only` **2390** = 2384 + 6 = 上批 2385 + 本文件 **5**（对上）。
+- 但**分类**是 `2380+5 → 2384+6`，即 **+4 passed / +1 skipped**，不是预期的 +5 passed。差额源自**一条既有用例**：`tests/test_daily_turnover_gate.py::test_按北京当日而非UTC当日` 自带一个**按当前北京时间**的前置条件（`bj < 07:30` 则 `pytest.skip`）。本批门禁跑在**北京 00:50**（UTC 09-26 16:50）→ 构造前提不成立 → 自行跳过；上一批跑在 07:30 之后 → 它是 passed。**与本批改动无关**，是该用例刻意的时点依赖（同文件 `test_跨北京午夜归日` 本次仍通过）。本批 5 条新用例在隔离跑与全量跑下**均 5 passed**。
+
+> 记这一笔，是因为它给本报告已有的"数字不等于事实"教训又添了一个形态：**passed 计数在本仓会随墙钟时间在 passed / skipped 之间搬家**（同一个 commit、同一台机器，换个钟点跑就不同）。故跨批次比对总数时，必须**先按 `--collect-only` 对齐分母、再逐条解释分类差异**，只比"passed 有没有变多"会得出错误结论。
+
+**前端自检**：3 个 `mjs` 全绿（`decision_macro_fields.mjs` 由 18 断言增至 **21**（本报告上一稿误记为 20，`grep -c '^  assert('` 前后实测为 18 / 21））；**ruff**：触达文件零新增告警（`git stash` 前后实测同为那 3 条既存告警）；**变异**：4 处已全部还原，`git diff --stat HEAD -- bottleneck_hunter/` 仅剩本轮改动。
+
+**本批 diff**（数字全部出自 `git diff --numstat` / `grep -c ""`，可重跑；本报告自身的改动自指、单列在末）：
+
+| 文件 | 行数 |
+|---|---|
+| `watchlist/store_decision.py` | **+19 / −3** |
+| `watchlist/decision_engine.py` | **+3 / −0** |
+| `chain/prompts/decision_macro_check.md` | **+4 / −0** |
+| `web/static/js/decision.js` | **+1 / −0** |
+| `web/static/js/report-export.js` | **+1 / −0** |
+| `tests/frontend/decision_macro_fields.mjs` | **+15 / −0** |
+| `docs/TRADING_DECISION_SYSTEM.md` | **+1 / −1** |
+| `tests/test_l1_daily_commentary_persist.py`（新增，未跟踪） | **124 行 / 5 条** |
+| **跟踪文件合计（不含下述自指与本新增文件）** | **+44 / −4** |
+| 本报告 `docs/DECISION_CHAIN_REVIEW_2026-09-23.md` | 自指，**故不写数字** —— 它随本行自身改动而变，写下的瞬间即过期 |
+
+> 这张表**在定稿前被我自己推翻过一次**：初稿写 `store_decision.py +22/−3`、新增测试 `116 行`、mjs `+16`／断言由 18 增至 20 —— 三处**全是照改动量的估摸，不是读数**（实测 19/3、124 行、+15、21）。它们不改变任何结论，但恰是本报告反复记的那类病：**数字若不出自一条可重跑的命令，它就只是叙述**。故本表逐行附上出处命令，便于复核；凡我未跑过的数字，一律不写。
+
 ---
 
 ## 附录 A：生产证真数据（2026-09-23，只读）
@@ -1522,7 +1591,8 @@ rejected                     → rejected 65
 | **Batch A** | 2026-09-25「3 批都做，每批全量测试+代码审核+记录文档」 | P0-A / P0-B / P0-D / P1-C / P1-D / P1-J | **§七** |
 | **Batch B** | 同上 | P1-B / P0-C / P1-I(①②) / P0-E / P1-H(N-30)，另**提前**做 N-32；补录 P2-D(§8.6) / N-11(§8.7) | **§八** |
 | **Batch C** | 2026-09-26「先完成所有 C 部分，建议不做的都先不做」 | P2-A / P2-B / P2-E / P2-F / P2-G / P2-H / P1-E 剩余；补记 **P1-F / P1-G**(§9.11) | **§九** |
+| **第 4 批（收尾）** | 2026-09-27「持久化进策略」 | §9.6(b) `daily_commentary` 的消费方 —— **本批落地**，见 §9.12 | **§9.12** |
 
-**据此，第四节的 P 项已全部处理完毕**，无一项悬空。**唯一刻意未做的是三项**（用户已同意，非遗漏）：**P2-C(N-27)**（报告自身即"建议先不做"）、**P1-A 后半**（在 `result_json` 冗余保留 `gap_driven`/`opportunity_driven` 标记——生产实测两标记各 0 条，经 `tactical_plan_id` 回查已可确认驱动归属；**P1-A 前半"扩张意图一等执行权"已由 Batch B 的 P1-I② 兑现**）、**`daily_commentary` 的消费方**（需先定调"持久化还是点进前端"）。另 §7.6 三项悬置（`restore_execution` 孤儿态、非 sargable 的 `date(created_at,+8 hours)`、`create_committee_consensus` 的 `"approved"` 默认值）按 YAGNI 维持。
+**据此，第四节的 P 项已全部处理完毕**，无一项悬空。**仅剩两项刻意未做**（用户已同意，非遗漏）：**P2-C(N-27)**（报告自身即"建议先不做"）、**P1-A 后半**（在 `result_json` 冗余保留 `gap_driven`/`opportunity_driven` 标记——生产实测两标记各 0 条，经 `tactical_plan_id` 回查已可确认驱动归属；**P1-A 前半"扩张意图一等执行权"已由 Batch B 的 P1-I② 兑现**）。~~`daily_commentary` 的消费方~~ 已于 2026-09-27 按用户选定"持久化进策略"落地（§9.12）。另 §7.6 三项悬置（`restore_execution` 孤儿态、非 sargable 的 `date(created_at,+8 hours)`、`create_committee_consensus` 的 `"approved"` 默认值）按 YAGNI 维持。
 
 **生产上线**：四批均已上线（第 0 批 → Batch A/B 随 **`602926a`**，Batch C 收尾随 **`03e6e2a`**，均经 `./deploy.sh` 重建镜像 + 容器内 `grep`/`inspect.getsource` 逐处证真）。**注意**：§六~§八 各批**没有单独留档"上线后生产证真"**（§六 有 6.3 一节，§七/§八 只有上线后补做的 §8.7 溯源），这是记录上的缺口而非事实上的缺口——各批的上线状态已由提交祖先关系核实。
