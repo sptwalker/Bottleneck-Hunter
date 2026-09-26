@@ -104,10 +104,12 @@ def throttle() -> None:
         # 而不是先睡一场再发现超时。代价是并发被削到与节拍一致——这正是「限速不是限并发」
         # 的本意：多出来的并发拿不到数据源，早点走「无数据」分支比睡在队里更有用。
         _next_at = min(_next_at, now + _interval)
-        if left is not None:
-            _next_at = min(_next_at, now + left)
         start = now if now >= _next_at else _next_at
         wait = start - now
+        # 注意：**不要**在这里把 `_next_at` 再截到 `now + left`。那样 `wait` 会等于 `(now+left)-now`，
+        # 即 `left` ±浮点噪声，下面这个严格 `>=` 就退化成抛硬币（实测同一权重下 `wait-left` 在
+        # ±2e-11 间随 `now` 的量级变号）——丢了硬币就照睡满 `_interval`，正是本层要防的
+        # 「300s 预算跑成 327s」。直接拿真实槽位等待与余量比：量级差 2~3 个数量级，无刀锋。
         if left is not None and wait >= left:
             # 不更新 _next_at：这一槽没被消费，额度留给未来真正还能跑的一轮
             raise RateLimited(f"取数预算已用尽（余 {left:.1f}s，需等 {wait:.1f}s）")
