@@ -141,25 +141,57 @@ def compute_portfolio_risk(
                 if var_bm > 0:
                     m.portfolio_beta = round(cov / var_bm, 4)
 
-    # 相关性矩阵（标记 ρ > 0.7 的高相关对）
-    tickers = [p.get("ticker", "") for p in positions]
-    for i in range(len(tickers)):
-        for j in range(i + 1, len(tickers)):
-            t1, t2 = tickers[i], tickers[j]
-            r1 = stock_returns.get(t1, [])
-            r2 = stock_returns.get(t2, [])
-            if r1 and r2:
-                n = min(len(r1), len(r2))
-                if n >= 20:
-                    corr = _pearson(r1[:n], r2[:n])
-                    if abs(corr) > 0.7:
-                        m.correlation_pairs.append({
-                            "ticker_a": t1, "ticker_b": t2,
-                            "correlation": round(corr, 4)
-                        })
-                        m.warnings.append(f"{t1} 与 {t2} 高相关 ρ={corr:.3f}")
+    # 相关性矩阵（标记 ρ > 0.7 的高相关对）。判据与取样口径集中在 high_correlation_pairs ——
+    # L4 生成期的组合相关性约束复用同一个函数，否则两处各写一遍阈值/样本下限/收益率定义，
+    # 迟早漂移成「报告说高相关、生成期说没事」。
+    for pair in high_correlation_pairs(
+        {p.get("ticker", ""): price_histories.get(p.get("ticker", ""), []) for p in positions}
+    ):
+        m.correlation_pairs.append(pair)
+        m.warnings.append(
+            f"{pair['ticker_a']} 与 {pair['ticker_b']} 高相关 ρ={pair['correlation']:.3f}"
+        )
 
     return m
+
+
+def high_correlation_pairs(price_histories: dict[str, list[float]],
+                           threshold: float = 0.7,
+                           min_samples: int = 20) -> list[dict]:
+    """从「收盘价序（按日期正序）」里挑出 |ρ| > threshold 的标的对。
+
+    报告路径（L2 / VIP / 投委会的 `high_correlation_pairs`）与 L4 生成期的组合相关性约束
+    共用此函数：阈值、样本下限、收益率定义三处口径只要各写一遍，就会慢慢漂移。
+
+    为什么用 abs(ρ)：方向无关。ρ=-0.9 的对冲对不该被罚，两头同跌（ρ=+0.9）才是拥挤交易，
+    而「同涨同跌」在两头都成立——罚的是伪分散，不是方向本身。
+
+    min_samples 为什么是 20：共同交易日太少时 ρ 是噪声（两三天的巧合能轻松到 0.9），
+    拿它去提示「拥挤」会天天误报，提示一多就没人看了。
+    """
+    rets: dict[str, list[float]] = {}
+    for tk, prices in (price_histories or {}).items():
+        if not tk or not prices or len(prices) < 2:
+            continue
+        try:
+            px = [float(x) for x in prices]
+        except (TypeError, ValueError):   # 脏价（None/空串/非数）整条跳过，不因一只脏票废掉全组合
+            continue
+        r = [px[i] / px[i - 1] - 1 for i in range(1, len(px)) if px[i - 1] > 0]
+        if r:
+            rets[tk] = r
+    out = []
+    keys = sorted(rets)          # 排序而非依赖入参顺序：同一份数据每次跑出同样的对，便于比对数
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            r1, r2 = rets[keys[i]], rets[keys[j]]
+            n = min(len(r1), len(r2))
+            if n < min_samples:
+                continue
+            corr = _pearson(r1[:n], r2[:n])
+            if abs(corr) > threshold:
+                out.append({"ticker_a": keys[i], "ticker_b": keys[j], "correlation": round(corr, 4)})
+    return out
 
 
 def _pearson(x: list[float], y: list[float]) -> float:

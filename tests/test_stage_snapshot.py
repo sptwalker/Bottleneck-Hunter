@@ -51,10 +51,13 @@ async def test_l4_shared_batch_and_capture_before_writes(tmp_path, monkeypatch, 
     ]}, [])))
     monkeypatch.setattr(validator, "check_account_circuit_breaker", lambda *a: Mock(
         valid=not circuit_breaker, violations=["circuit"] if circuit_breaker else []))
+    # warnings=[] 是必需的：真 ValidationResult 是 dataclass，warnings 有 default_factory=list。
+    # Mock 不给这个属性时会自动造一个 Mock，而 L4 会把 warnings 当可迭代对象读 → TypeError 中断整批。
     monkeypatch.setattr(validator, "validate_execution_plan", lambda ep, *a, **kw: Mock(
-        valid=ep["ticker"] == "AAPL", violations=[] if ep["ticker"] == "AAPL" else ["invalid MSFT"]))
-    monkeypatch.setattr(validator, "validate_portfolio_beta", lambda *a: Mock(valid=True))
-    monkeypatch.setattr(validator, "validate_against_regime", lambda *a: Mock(valid=True))
+        valid=ep["ticker"] == "AAPL", violations=[] if ep["ticker"] == "AAPL" else ["invalid MSFT"],
+        warnings=[]))
+    monkeypatch.setattr(validator, "validate_portfolio_beta", lambda *a: Mock(valid=True, violations=[], warnings=[]))
+    monkeypatch.setattr(validator, "validate_against_regime", lambda *a: Mock(valid=True, violations=[], warnings=[]))
     monkeypatch.setattr(validator, "max_compliant_shares", lambda *a, **kw: 0)
     monkeypatch.setattr(engine, "_repair_execution_plan", lambda *a: None)
     save = Mock(side_effect=ValueError("capture failed") if capture_failure else save_stage_snapshot)

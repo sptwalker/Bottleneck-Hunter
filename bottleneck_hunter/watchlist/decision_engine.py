@@ -151,6 +151,58 @@ def _today() -> str:
     return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
 
+def _strip_internal(obj):
+    """剥离 dict 中以 `_` 开头的内部键 —— 那是系统自用的留痕/标记，不属于 LLM 契约。
+
+    为什么必须有这一层：L3/L4 的 prompt 用 `json.dumps(result_json)` **整体**注入上游计划，
+    而落库前的 `result` 里混着 `_provenance`(prompt 哈希+模型+快照日)、`_divergence_warning`
+    (L1 多模型分歧)、`_clamp_warnings`(L2 越界钳制)、`_models_used`、`_cross_validated`、
+    `_auto_sized` 等内部键。生产实测 93 条 L2 里 43 条带 `_provenance`、4 条带
+    `_divergence_warning`——即这些键**确实**随 prompt 进了下游模型的上下文：既白占 token，
+    又给模型递了它无从解释的内部元数据（"上一轮已经警告过/已经钳制过"），有可能被当成指令照办。
+    `chain/prompts/*.md` 契约里没有任何 `_` 开头字段，剥离对正常字段零副作用。
+
+    递归下去：内部键可能在嵌套 dict 里（如逐票计划的 result_json 套 result_json）。
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_internal(v) for k, v in obj.items() if not str(k).startswith("_")}
+    if isinstance(obj, list):
+        return [_strip_internal(v) for v in obj]
+    return obj
+
+
+def _prompt_json(obj) -> str:
+    """注入 prompt 的 JSON 序列化：**先剥离内部键**再 dumps。
+
+    所有 `{..._plan}` / `{..._outcomes}` / `{original_plan}` 占位符一律走这里，避免新增注入点
+    时又漏掉剥离（这正是本缺陷的成因：8 个注入点各写各的 json.dumps）。
+    """
+    return json.dumps(_strip_internal(obj), ensure_ascii=False)
+
+
+def _record_decision_warning(store, market: str, title: str, detail: str,
+                             meta: dict | None = None) -> None:
+    """把「模型输出有问题」类告警落一条 operation_log —— 光发 SSE 不够。
+
+    `runDaily` / `runFullRefresh` 的通用分发器只把 `data.message` 当进度条文案：下一条事件一到
+    就被覆盖，流一断什么都不剩，刷新页面更是什么都看不到。而这类告警的全部意义就是**被人看见**
+    （模型给出越界仓位被钳制、顶层配置与逐票明细自相矛盾），所以必须落到持久层。
+
+    用 category=user_action 而非 error：这是"模型输出如此"的提示，不是流程失败，不该进推送白名单
+    （否则每次 L2 取整差异都推一条 IM，很快就被忽略）。留痕失败不得影响决策。
+    """
+    try:
+        uid = getattr(store, "_user_id", "") or ""
+        if not uid:
+            return
+        from bottleneck_hunter.web.oplog import record_operation
+
+        record_operation(uid, title, detail=(detail or "")[:300], result="partial",
+                         market=market, meta=meta)
+    except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响决策
+        logger.debug("决策告警留痕失败: %s", e)
+
+
 # (B) L3 上游新鲜度阈值：L1 宏观/L2 组合是【周度】生成（见模块 docstring + scheduler.job_weekly_strategy；
 # 日常决策只跑 run_macro_check/run_deviation_check，不重生 L1/L2）。故"陈旧"按【周】判，而非计划字面的"今日"
 # ——用"今日"会 6/7 天误杀 L3。8 天＝一个周度周期(7)+1 天宽限：当周计划(0–7d)放行，漏刷一个周期(≥8d)即阻断。
@@ -836,7 +888,7 @@ async def run_macro_check(
             .replace("{strategy_date}", created_at[:10] if created_at else "未知")
             .replace("{days_ago}", str(days_ago))
             .replace("{version}", str(current.get("version", 1)))
-            .replace("{current_strategy}", json.dumps(current.get("result_json", {}), ensure_ascii=False))
+            .replace("{current_strategy}", _prompt_json(current.get("result_json", {})))
             .replace("{today_market_data}", json.dumps(market_data, ensure_ascii=False))
             .replace("{downstream_feedback}", _format_downstream_feedback(store))
         )
@@ -1160,10 +1212,7 @@ async def run_strategic_plan(
             .replace("{lessons_learned}", lessons or "暂无历史复盘数据")
             .replace(
                 "{previous_strategic_plan}",
-                json.dumps(
-                    previous_plan.get("result_json", {}) if previous_plan else {},
-                    ensure_ascii=False,
-                ),
+                _prompt_json(previous_plan.get("result_json", {}) if previous_plan else {}),
             )
             .replace("{user_persona}", format_persona_for_prompt(store))
         )
@@ -1191,6 +1240,15 @@ async def run_strategic_plan(
             result["_clamp_warnings"] = clamp_warnings
             for w in clamp_warnings:
                 yield _sse("decision_warning", layer="L2", message=f"⚠ L2 配置越界已钳制：{w}")
+            # N-13 消费方：钳制**悄悄改数**——改完只发一条 SSE，用户永远不知道自己看到的
+            # equity_pct 已经不是模型给的那个。与下方自洽告警同构落一条 operation_log：
+            # 钳制本身是保护（防越界仓位被下游放行），但"被改过"这件事必须留痕，
+            # 否则用户拿着一份改了数的组合去对照 L1 边界，只会觉得系统算错了。
+            _record_decision_warning(
+                store, market, "L2 配置越界已钳制",
+                f"{market}：" + "；".join(clamp_warnings),
+                meta={"warnings": clamp_warnings},
+            )
         # P0-E（N-23）：L2 自洽校验——顶层 target_allocation 与逐票明细必须对得上。
         # 生产实测过这个形态：顶层 equity_pct=51 而 core_holdings 四票合计只有 33%，相差 18pct。
         # 危害不是"数字难看"：下游（缺口驱动器 / 偏离报告 / 前端对照条）**全部只读明细**，顶层那个数
@@ -1202,24 +1260,15 @@ async def run_strategic_plan(
             result["allocation_inconsistent"] = _incons
             yield _sse("decision_warning", layer="L2", message=f"⚠ L2 配置自相矛盾：{_incons['detail']}")
             # 光发 SSE 不够：`runDaily` 只把它当进度条文案，下一条事件一到就被覆盖，流一断
-            # 什么都不剩。而 P0-E 的全部意义就是让这处矛盾**被人看见**——所以落一条 operation_log。
-            # 用 category=user_action 而非 error：这是"模型自相矛盾"的提示，不是流程失败，
-            # 不该进推送白名单（否则每次 L2 取整差异都推一条 IM，很快就被忽略）。
-            try:
-                uid = getattr(store, "_user_id", "") or ""
-                if uid:
-                    from bottleneck_hunter.web.oplog import record_operation
-
-                    record_operation(
-                        uid, "L2 配置自相矛盾",
-                        detail=f"{market}：{_incons['detail']}"[:300],
-                        result="partial", market=market,
-                        meta={"equity_pct": _incons["equity_pct"],
-                              "detail_sum_pct": _incons["detail_sum_pct"],
-                              "diff_pct": _incons["diff_pct"]},
-                    )
-            except Exception as e:  # noqa: BLE001 —— 留痕失败不得影响决策
-                logger.debug("L2 自洽告警留痕失败: %s", e)
+            # 什么都不剩。而 P0-E 的全部意义就是让这处矛盾**被人看见**——所以落一条 operation_log
+            # （与上方钳制告警共用 `_record_decision_warning`，两处同构）。
+            _record_decision_warning(
+                store, market, "L2 配置自相矛盾",
+                f"{market}：{_incons['detail']}",
+                meta={"equity_pct": _incons["equity_pct"],
+                      "detail_sum_pct": _incons["detail_sum_pct"],
+                      "diff_pct": _incons["diff_pct"]},
+            )
         _sel = result.get("stock_selection", {})
         _l2_tk = [h.get("ticker", "") for h in (_sel.get("core_holdings", []) + _sel.get("tactical_holdings", []))]
         result["_provenance"] = _decision_provenance(["decision_strategic"], [(provider, model)], market, "L2", _l2_tk)
@@ -1366,7 +1415,7 @@ async def run_deviation_check(
             logger.debug("underweight gap 计算跳过", exc_info=True)
 
         prompt = (
-            prompt_template.replace("{strategic_plan}", json.dumps(plan.get("result_json", {}), ensure_ascii=False))
+            prompt_template.replace("{strategic_plan}", _prompt_json(plan.get("result_json", {})))
             .replace("{computed_drift}", json.dumps(drift, ensure_ascii=False))
             .replace(
                 "{current_positions}",
@@ -1762,7 +1811,7 @@ async def run_tactical_plans(
 
         prompt_template = _load_prompt("decision_tactical")
         macro_text = (
-            macro.get("market_summary", "") or json.dumps(macro.get("result_json", {}), ensure_ascii=False)[:500]
+            macro.get("market_summary", "") or _prompt_json(macro.get("result_json", {}))[:500]
         )
 
         recent_map = _recent_executed_by_ticker(store)
@@ -1771,7 +1820,7 @@ async def run_tactical_plans(
         prompt = (
             prompt_template.replace("{market_context}", market_ctx)
             .replace("{macro_summary}", macro_text)
-            .replace("{strategic_plan}", json.dumps(strategic.get("result_json", {}), ensure_ascii=False))
+            .replace("{strategic_plan}", _prompt_json(strategic.get("result_json", {})))
             .replace("{stock_data}", json.dumps(stock_data, ensure_ascii=False))
             .replace("{catalyst_timeline}", json.dumps(catalyst_by_ticker, ensure_ascii=False))
             .replace(
@@ -2453,7 +2502,7 @@ def _repair_execution_plan(llm, ep: dict, violations: list[str], account: dict, 
     try:
         template = _load_prompt("decision_execution_repair")
         prompt = (
-            template.replace("{original_plan}", json.dumps(ep, ensure_ascii=False))
+            template.replace("{original_plan}", _prompt_json(ep))
             .replace("{violations}", "\n".join(f"- {v}" for v in violations))
             .replace(
                 "{account_status}",
@@ -2535,7 +2584,7 @@ async def run_execution_plans(
         cash_balance = account.get("cash_balance", 100000)
 
         prompt_template = _load_prompt("decision_execution")
-        tactical_json = json.dumps([tp.get("result_json", tp) for tp in actionable], ensure_ascii=False)
+        tactical_json = _prompt_json([tp.get("result_json", tp) for tp in actionable])
         account_json = json.dumps(
             {
                 "total_equity": account.get("total_equity", 100000),
@@ -2611,6 +2660,7 @@ async def run_execution_plans(
             validate_against_regime,
             validate_execution_plan,
             validate_portfolio_beta,
+            validate_portfolio_correlation,
         )
         from bottleneck_hunter.watchlist.position_sizing import (
             PositionSizer,
@@ -2807,12 +2857,22 @@ async def run_execution_plans(
         if _turnover_used > 0:
             logger.info("当日已成交额 %s: %.0f（本批计划仅可使用剩余日额度）", market, _turnover_used)
 
-        risk_snapshots = {}
-        for ticker in {ep.get("ticker", "") for ep in exec_plans if ep.get("action") in ("buy", "add")}:
+        # 价格序列：本批 buy/add 票（供个股波动率定量）∪ 现有持仓（供相关性配对）。
+        # 持仓票原先不取——相关性的每一对都必须**两侧**都有价序，只取买入侧就永远配不出对，
+        # 约束会静默变成空转。仍是一次循环、每票一次查询，risk_snapshots 的覆盖面保持不变
+        # （持仓票只进 corr_series，不进归档的 risk_snapshots，避免 payload 语义悄悄变宽）。
+        _planned_tk = {ep.get("ticker", "") for ep in exec_plans if ep.get("action") in ("buy", "add")}
+        _series_snaps: dict[str, list] = {}
+        for ticker in _planned_tk | {p.get("ticker", "") for p in positions if p.get("ticker")}:
             try:
-                risk_snapshots[ticker] = store.get_snapshots(ticker, days=60)
+                _series_snaps[ticker] = store.get_snapshots(ticker, days=60)
             except Exception:
-                risk_snapshots[ticker] = []
+                _series_snaps[ticker] = []
+        risk_snapshots = {tk: v for tk, v in _series_snaps.items() if tk in _planned_tk}
+        corr_series = {
+            tk: [s["close"] for s in reversed(snaps or []) if s.get("close") not in (None, "")]
+            for tk, snaps in _series_snaps.items()
+        }
         stage_inputs = {
             "prompts": input_prompts,
             "tactical_plans": actionable,
@@ -3006,6 +3066,11 @@ async def run_execution_plans(
                 if not br.valid:
                     vr.violations.extend(br.violations)
                     vr.valid = False
+                # P2.1 组合相关性：只 add_warning，不动 vr.valid —— 相关性无法靠缩量降级，
+                # 做成硬拦就只剩"整笔拦死"且无豁免通道（详见该函数 docstring）。
+                vr.warnings.extend(
+                    validate_portfolio_correlation(plan_ep, positions, corr_series, constraints).warnings
+                )
                 # B1: 启用原死代码 validate_against_regime，让 regime 收紧的 equity 上限在 L4 真正生效
                 rr = validate_against_regime(plan_ep, _view, positions, alloc_bounds)
                 if not rr.valid:
@@ -3065,6 +3130,28 @@ async def run_execution_plans(
                 blocked += 1
                 logger.info("拦截不合规执行计划 %s: %s", ticker, vres.violations)
                 continue
+
+            # ── P2.1 相关性警告：写进 result_json + oplog ──
+            # 受 N-13 的教训：一个只出现在内存里的警告等于没有警告。这条只有在计划活到落库时
+            # 才有意义（上面被拦的计划已经在"已拦截"区带着 violations 走），所以放在 continue 之后。
+            # 前端读 result_json.warnings 逐条挂旗（与 mandate_exception 同一渲染位），
+            # 投委会四委员又从 result_json 读整份计划 → 同一条警告同时到达人和评审，零额外通道。
+            # 整块包在 try 里：这是纯通知通道，绝不能成为新的故障点。外层只在批次级捕获异常
+            # （一旦抛出就中止**整个 L4 批次**，后续每一笔都收不到待确认单），而这个块读的是
+            # 校验器返回值——任何校验器将来返回个非 list 的 warnings 都会连带炸掉同批其余票。
+            # 警告是"锦上添花"，用它换掉一批真实交易计划是荒谬的交换。
+            try:
+                if vres.warnings:
+                    ep["warnings"] = list(vres.warnings)
+                    for _w in vres.warnings:
+                        yield _sse("decision_warning", layer="L4", message=f"⚠ {ticker}：{_w}")
+                    _record_decision_warning(
+                        store, market, "L4 组合约束提示",
+                        f"{market}：{ticker} " + "；".join(vres.warnings),
+                        meta={"ticker": ticker, "warnings": vres.warnings},
+                    )
+            except Exception as e:  # noqa: BLE001 —— 见上：通知失败不得中止决策批次
+                logger.debug("L4 组合约束提示写入失败 %s: %s", ticker, e)
 
             if not _is_executable_plan(ep):
                 # hold / 漏填股数的计划过校验会 fail-open 成 valid，落库即“--股”不可执行指令

@@ -22,6 +22,7 @@ DEFAULT_CONSTRAINTS = {
     "max_single_trade_pct": 50.0,      # 单笔上限占总权益比；纯美元绝对值对 A股(人民币本金)会缩数十倍误拦
     "max_daily_turnover_pct": 30.0,
     "max_portfolio_beta": 1.1,
+    "max_pair_correlation": 0.85,   # P2.1 组合相关性：与本笔买入的标的 ρ 超过此值的持仓对触发警告
 }
 
 
@@ -95,6 +96,7 @@ REGIME_CONSTRAINTS = {
         "max_single_trade_pct": 60.0,
         "max_daily_turnover_pct": 40.0,
         "max_portfolio_beta": 1.3,
+        "max_pair_correlation": 0.90,
     },
     "balanced": {
         "max_single_position_pct": 25.0,
@@ -104,6 +106,7 @@ REGIME_CONSTRAINTS = {
         "max_single_trade_pct": 50.0,
         "max_daily_turnover_pct": 30.0,
         "max_portfolio_beta": 1.1,
+        "max_pair_correlation": 0.85,
     },
     "defensive": {
         "max_single_position_pct": 18.0,
@@ -113,6 +116,7 @@ REGIME_CONSTRAINTS = {
         "max_single_trade_pct": 40.0,
         "max_daily_turnover_pct": 20.0,
         "max_portfolio_beta": 0.9,
+        "max_pair_correlation": 0.75,   # 防守期对伪分散最不容忍：现有持仓已同涨同跌时不该再加一张
     },
 }
 
@@ -480,6 +484,70 @@ def validate_portfolio_beta(
     if portfolio_beta > max_beta:
         result.add_violation(
             f"买入后组合 beta {portfolio_beta:.2f} 超过 regime 上限 {max_beta:.2f}"
+        )
+    return result
+
+
+def validate_portfolio_correlation(
+    plan: dict,
+    positions: list[dict],
+    price_histories: dict,
+    constraints: dict | None = None,
+) -> ValidationResult:
+    """P2.1 组合级相关性约束：本笔买入是否与**现有持仓**高度同涨同跌（伪分散）。
+
+    为什么是 warning 而不是 violation：本项目里"拦住一笔"只有两条出路——LLM 自修正，
+    或 `max_compliant_shares` 降到合规。相关性**不可降级**（缩量不改变相关系数），所以做成
+    violation 就只剩"整笔拦死"一条路，且没有任何豁免通道（`validate_against_regime` 有
+    `mandate_exception`，这里没有）。而它的数据基础是 60 日快照，持仓票常缺样本 → 拦错了
+    用户无从申诉。故只警告：把"这笔买进去你并不是在分散"讲清楚，决定权留给人。
+
+    why 只在 buy/add 上判：卖出/减仓是在**降低**相关性敞口，对它们报警只会制造噪声。
+
+    price_histories: {ticker: [收盘价正序...]}，须含持仓票与本笔标的——缺的那一侧配不成对，
+    也就判不出来（优雅降级，与 validate_portfolio_beta 的缺 beta 同构）。
+    """
+    c = {**DEFAULT_CONSTRAINTS, **(constraints or {})}
+    result = ValidationResult()
+    threshold = c.get("max_pair_correlation")
+    if not threshold:
+        return result
+
+    result_json = plan.get("result_json", {})
+    if isinstance(result_json, str):
+        import json
+        try:
+            result_json = json.loads(result_json)
+        except (json.JSONDecodeError, TypeError):
+            result_json = {}
+
+    action = plan.get("action") or result_json.get("action", "")
+    if action not in ("buy", "add"):
+        return result
+    ticker = plan.get("ticker", "")
+    if not ticker:
+        return result
+
+    held = [p.get("ticker", "") for p in positions if p.get("ticker") and p.get("ticker") != ticker]
+    if not held:
+        return result
+
+    series = {tk: (price_histories or {}).get(tk, []) for tk in [ticker, *held]}
+    if not series.get(ticker):
+        result.add_warning("缺少本笔标的的历史价，跳过组合相关性校验")
+        return result
+
+    from bottleneck_hunter.watchlist.risk_metrics import high_correlation_pairs
+
+    hits = [
+        p for p in high_correlation_pairs(series, threshold=threshold)
+        if ticker in (p["ticker_a"], p["ticker_b"])
+    ]
+    for h in hits:
+        other = h["ticker_b"] if h["ticker_a"] == ticker else h["ticker_a"]
+        result.add_warning(
+            f"{ticker} 与持仓 {other} 高度同涨同跌 ρ={h['correlation']:.2f}"
+            f"（阈值 {threshold:.2f}），买入后组合未必因多一只票而更分散"
         )
     return result
 

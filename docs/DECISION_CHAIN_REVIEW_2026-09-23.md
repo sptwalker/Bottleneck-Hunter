@@ -1540,6 +1540,110 @@ P1-F 的第一版夹具用**两个**板块（半导体目标 40%、软件 20%）
 
 ---
 
+### 9.13 第四批（Batch D）：N-13 消费方 / P1.1·P2.1·P2.2 补实现 / 内部键剥离（2026-09-27）
+
+**授权**：用户 2026-09-27 逐字指令 —— **「1 修N-13 的消费方 / 2 补实现 / 3 加剥离 / 完成后按老规矩走」**。
+
+**为什么要做这一批**：`DECISION_LOOP_IMPROVEMENT.md` 把 P1/P2 整段标成"✅ 已完成（2026-06-30）"，
+但按用户长期指令（*"这些审计结果不能全盘相信，他们可能会有幻觉，你需要自己实际审计代码逻辑进行验证"*）逐条回读代码后，
+发现**两处口径失实**：P2.1 的相关性集中**根本没实现**（`constraint_validator.py` 全文 `correlation` 零命中），
+P1.1 的实现路径与文档写的（新建 `catalyst_signals` 表）根本不是一回事。这正是 §9.9/§9.11 记的那类病——**文档的"已完成"是自评，不是证据。**
+
+#### (a) N-13 的消费方：从"无痕"到三重可见
+
+N-13 的报告口径需**收紧**：`_clamp_warnings` 的问题**不是"完全不可见"**——`decision.js:1045-1105` 的通用分发器
+把 `data.message` 落进 `setProgress()`，流式那一刻在屏幕上是有字的。真实缺陷是 **"无持久消费方"**：
+刷完就没了，事后无从追查，用户也不会在那几秒里读到。
+
+修法是新增 `_record_decision_warning(store, market, title, detail, meta=None)`（`decision_engine.py:183-204`），
+落 `operation_log`，并在 `:1247` / `:1265` 两处钳制告警接入。三个刻意的选择：
+
+- `category="user_action"` **而非 `error`**——否则每次 L2 取整差异都会推一条 IM，告警疲劳比没告警更糟。
+- `result="partial"`，与"这次未完全成功"的语义对齐。
+- 用户靠 `getattr(store, "_user_id", "")` 取，异常整个吞掉——**告警通道自己绝不能成为新的故障点**。
+
+#### (b) P2.1 相关性集中：补实现，定为 warning
+
+详见 `DECISION_LOOP_IMPROVEMENT.md` 的 P2.1 实施回改。要点：共享辅助 `risk_metrics.high_correlation_pairs`
+（报告层与生成期共用，防口径漂移）、四档阈值、`validate_portfolio_correlation`、**刻意不做 violation**
+（相关性不可靠缩量降级，做成硬拦只剩"整笔拦死"且无豁免通道）、**三重消费**（`result_json.warnings` / SSE / oplog）。
+
+取数上修掉一个会让约束**静默空转**的缺陷：原快照循环只取本批 buy/add 票，而相关性的每一对必须**两侧都有价序**，
+只取买入侧永远配不出对。改为「计划票 ∪ 持仓票」，`risk_snapshots` 的归档覆盖面不变。
+
+#### (c) P2.2 状态机留痕：_14 个变迁方法全部接线，并暴露一个真实生产 bug_
+
+审计表建在 `_CREATE_TABLES` 里（`IF NOT EXISTS` 幂等，启动即补进老库，**不需要 `_MIGRATIONS` 条目**）。
+**不能用 SQLite 触发器**：触发器拿不到 `.for_user().for_market()` 上下文，`user_id`/`market` 写不进去，隔离当场失效；
+故行由 store 方法层插入，**连接由调用方传入**以保证与状态变更同事务。
+
+**同秒乱序是测试暴露的真实缺陷，不是测试问题**：`created_at` 只到秒，而确认→成交→回滚可能全在同一秒完成，
+只按秒排序时同秒内的变迁以任意顺序渲染，一条 `executed → confirmed` 看起来就像数据坏了。
+修法是两个读取方都加 **`rowid DESC`** 作二级排序键（rowid 按插入序单调，恰是变迁的真实先后）。
+
+#### (d) 内部键剥离：`result_json` 进 prompt 前的 `_` 前缀清洗
+
+`result_json` 里混着 `_` 前缀的内部字段——实际在写的六个：`_provenance`（prompt 哈希+模型+快照日）、
+`_divergence_warning`（L1 多模型分歧）、`_clamp_warnings`（L2 越界钳制）、`_models_used`、`_cross_validated`、
+`_auto_sized`（全仓 grep 确认，写点见 `decision_engine.py:419/778/803/1274/1617/1885/2211/3026/3187/3317`）。
+原先逐字进 L3/L4 prompt——既浪费上下文，又把内部实现细节暴露给 LLM 当"事实"读
+（"上一轮已经警告过/已经钳制过"这类元数据它无从解释，有可能被当成指令照办）。
+新增 `_strip_internal` + `_prompt_json`，8 处注入点全部替换。
+
+#### (e) 自查中踩到的自身缺陷（记在此，因为与前几次同类）
+
+1. **机械补丁吃掉了相邻行**：`create_execution_plan` 的 16 列 INSERT 少了 3 个绑定值
+   （`status, rejection_reason, _now_iso()`），`sqlite3.ProgrammingError: uses 20, supplied 17`。
+   这是**第四次**同类事故（§9.11 已记三次），根因是"脚本式批量替换"而非 Edit 逐行。
+   本次之后的做法：**任何脚本化改动，改完先 `git diff` 逐行核，再跑测试。**
+2. **测试夹具两度退化**（`_closes()` 恒定增长率 → 收益率是常数 → `std=0` → `_pearson` 返 0.0 → ρ 无定义）：
+   第一版用 `random.Random(seed)` **写在推导式内**，等于每个元素重播种、整列同一个常数，还是 std=0。
+   修法：RNG 在推导式**外**建一次。原型验证价序 ρ≈0.951（高相关）、独立序列 ρ≈0.175（不报）。
+3. **`list(reversed(prices))` 造不出反向相关**：倒序价序的收益率不是原收益率的相反数（`r → -r/(1+r)` 且顺序也翻），
+   实测 ρ≈0；且 `_prices([-r...], start=a[0])` 还会因缺一个前导占位而**整条错位一天**（ρ 同样掉到 0）。
+   正确造法：收益率取负 + 前导补 `0.0`，实测 ρ=−1.0。
+4. **既有测试的 Mock 不满足真契约**（`test_stage_snapshot.py`，4 个参数化全红）：那处把 `validate_execution_plan`
+   等替换成 `Mock(valid=..., violations=...)`，**没给 `warnings`** —— Mock 会自动造一个，而 L4 新代码把 `warnings`
+   当可迭代对象读 → `TypeError: 'Mock' object is not iterable`。真 `ValidationResult` 是 dataclass，
+   `warnings: list[str] = field(default_factory=list)` 永远可迭代，**故这是夹具欠指定，不是生产 bug**。
+   但它暴露了一个**真实的爆炸半径**：该块在 `pending_writes` 循环体内，抛异常会中断**整个 L4 批次**
+   （外层只在批次级捕获，后续每一笔都收不到待确认单），而不只是那一笔。
+   → 双管齐下：夹具补 `warnings=[]`（与真契约一致），**并且**生产侧把整块包进 `try/except` 吞掉
+   —— 警告通道绝不能成为新的故障点（与 §9.13(a) 里"告警通道吞异常"同一条原则）。
+
+   **变异实测（对照组齐全，不是自评）**：`c:\tmp\mut_notify.py` 让 `_record_decision_warning` 抛 `RuntimeError`，
+   同时给每笔塞一条相关性警告确保走进该块。
+
+   | 工况 | decision_error | 落库计划数 |
+   |---|---|---|
+   | 基线（通知正常） | 0 | **2** |
+   | 通知抛异常 + **护盾在位** | 0 | **2** |
+   | 通知抛异常 + **临时摘掉护盾**（对照） | 0 | **0** |
+
+   第三行是这条护盾**不是摆设**的证明：护盾摘掉后同一次变异把两笔计划全部吞掉。注意 `decision_error` 三行都是 0
+   ——**异常被批次级 except 吞了、只留一条 `logger.exception`，用户侧完全无感**，这正是它值得防的原因：
+   没有这组对照，"摘掉护盾"与"护盾在位"在测试输出上长得一模一样。
+
+> 这一条值得单独记：**它只有在跑全量时才会现形**。单跑 `test_stage_snapshot.py` 之前是绿的，
+> 因为那时 L4 不读 `warnings`；我的改动让一个**旧夹具的欠指定**变成了红灯。夹具与真契约的偏离
+> 可以静默潜伏很久，直到有人开始读那个从没被读过的字段。
+
+> 后两条的共性：**"夹具写错了"和"被测代码坏了"在失败信息上长得一模一样**。区分它们的唯一方法是把数据代回定义手算一遍，
+> 而不是看断言红不红。这与 §9.11 记的"掷骰子掷出红灯"是同一类教训。
+
+#### (f) 门禁
+
+新增 `tests/test_portfolio_correlation_and_status_log.py`（**24 条**，P2.1 相关性 + P2.2 留痕）——单跑 **24 passed**。
+`tests/test_stage_snapshot.py` 的 4 个参数化夹具补 `warnings=[]` 后转绿（见 (e)-4）。
+`ruff check` 触达文件**零新增告警**（改动前后同为 19 条既存告警，逐条比对确认）。`node --check` 通过。
+全量门禁：**2409 passed / 5 skipped / 0 failed**。
+
+**本批 diff（代码）**：`store_schema.py`（+1 表 +2 索引）、`store_decision.py`（+113/−1）、`decision_engine.py`、
+`risk_metrics.py`、`constraint_validator.py`、`decision_api.py`（+1 端点）、`static/index.html`、`static/js/decision.js`、
+`tests/test_portfolio_correlation_and_status_log.py`（新增）。文档：本报告 §9.13、`DECISION_LOOP_IMPROVEMENT.md`（P1.1/P2.1/P2.2 三处实施回改）。
+
+---
+
 ## 附录 A：生产证真数据（2026-09-23，只读）
 
 **代码上线**：`main@72bc42f`，容器 `bottleneck-hunter` 内 grep 计数——`compute_underweight_gap`=1、`mandate_exception`=4、驱动器函数=4、`缺口未纠正`=3、`_reuse_escape_reason`=2、`simtrading` alloc-target=5。**扩张侧代码确认全部上线。**

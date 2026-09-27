@@ -435,6 +435,69 @@ class _DecisionMixin:
             conn.close()
 
 
+    # ── P2.2 执行状态机审计：execution_status_log ──────────────────────────
+    def _log_exec_status(self, conn, plan_id: str, from_status: str, to_status: str,
+                         reason: str = "", actor: str = "system", ticker: str = "") -> None:
+        """在**调用方已开的写事务里**记一条状态变迁。
+
+        为什么必须落表、且必须在这一层：execution_plans.status 是唯一的真相，而 14 个变迁方法
+        全是裸 UPDATE —— 一张票被确认、成交失败回滚、被投委会否决、过期收尸，用户事后只看得见
+        终态。最阴的是 `revert_to_pending`：失败回滚后的行与「刚生成还没轮到」逐字节相同，
+        没有日志就只能靠猜是没轮到还是三次都失败了。
+
+        为什么不用 SQLite 触发器：触发器拿不到 user_id / market —— 它们来自 store 的
+        .for_user().for_market() 上下文，不在 SQL 里。多用户/多市场隔离是硬约束，故走
+        _user_insert_cols / _market_insert_cols 三件套。
+
+        为什么连接由调用方传：审计行必须与状态变更**同事务**提交。若自己开 _write_conn，
+        状态改了而日志没落（或反之）就出现无法解释的历史，比没有日志更坏。
+
+        为什么吞异常：留痕是旁路，不能让审计失败把一笔真实交易回滚掉。
+        """
+        try:
+            conn.execute(
+                f"""INSERT INTO execution_status_log
+                   (id, execution_plan_id, ticker, from_status, to_status, reason, actor, created_at
+                    {self._user_insert_cols()}{self._market_insert_cols()})
+                   VALUES (?,?,?,?,?,?,?,?{self._user_insert_vals()}{self._market_insert_vals()})""",
+                (uuid.uuid4().hex[:12], plan_id, ticker or "", from_status or "", to_status,
+                 (reason or "")[:300], actor, _now_iso())
+                + self._user_insert_params() + self._market_insert_params(),
+            )
+        except Exception as e:  # noqa: BLE001 —— 审计失败不得回滚真实状态变更
+            logger.debug("执行状态留痕失败 %s %s→%s: %s", plan_id, from_status, to_status, e)
+
+    def get_execution_status_log(self, plan_id: str, limit: int = 50) -> list[dict]:
+        """某执行计划的状态变迁时间线（新→旧）。前端「执行留痕」据此展示。
+
+        `rowid DESC` 是必需的二级排序键，不是装饰：`created_at` 只到秒，而状态变迁天生是突发
+        的（确认→成交→回滚可能全在同一秒内），只按秒排的话时间线会以任意顺序渲染 —— 一条
+        "executed → confirmed" 看起来就像数据坏了。rowid 由 SQLite 按插入序单调分配，
+        恰是这些变迁的真实先后。
+        """
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM execution_status_log WHERE execution_plan_id = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (plan_id, limit),
+            )
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def get_recent_exec_status_log(self, limit: int = 100) -> list[dict]:
+        """全量最近状态变迁（跨计划，新→旧）。供「执行留痕」总览。排序键同单计划视图。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM execution_status_log ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
+            )
+            return [dict(r) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+
     def create_execution_plan(self, tactical_plan_id: str, entry_id: str,
                               ticker: str, result_json: dict,
                               status: str = "pending",
@@ -470,6 +533,9 @@ class _DecisionMixin:
                     status, rejection_reason, _now_iso(),
                 ) + params + self._user_insert_params() + self._market_insert_params(),
             )
+            self._log_exec_status(conn, sid, "", status,
+                                  reason=rejection_reason or "计划创建",
+                                  actor="system", ticker=ticker)
             conn.commit()
             return sid
         finally:
@@ -515,6 +581,10 @@ class _DecisionMixin:
                 (fid, sid, ticker, "auto_block", full_reason, _now_iso())
                 + params + self._user_insert_params() + self._market_insert_params(),
             )
+            self._log_exec_status(
+                conn, sid, "", "rejected", reason=full_reason, ticker=ticker,
+                actor="committee" if marker == self.BLOCK_MARKER_COMMITTEE else "system",
+            )
         return sid
 
 
@@ -543,6 +613,9 @@ class _DecisionMixin:
                 (plan_id,),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "rejected", "pending",
+                                      reason="用户手动恢复", actor="user")
             return cur.rowcount > 0
 
 
@@ -598,6 +671,12 @@ class _DecisionMixin:
                 tuple(vals) + (plan_id,),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                # 投委会只缩不放，改的是 shares/price/method —— status 仍是 pending，但
+                # 「这份计划被谁动过」必须留痕，否则用户拿到的数与 L4 原始输出对不上账。
+                self._log_exec_status(conn, plan_id, "pending", "pending",
+                                      reason=f"投委会缩减：{json.dumps(modifications, ensure_ascii=False)}",
+                                      actor="committee")
             return cur.rowcount > 0
 
 
@@ -620,6 +699,8 @@ class _DecisionMixin:
                 (_now_iso(), plan_id),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "pending", "confirmed", actor="user")
             return cur.rowcount > 0
 
 
@@ -632,6 +713,9 @@ class _DecisionMixin:
                 (plan_id,),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "confirmed", "pending",
+                                      reason="成交失败/异常回滚", actor="system")
             return cur.rowcount > 0
 
     def record_execution_failure(self, plan_id: str, error: str) -> bool:
@@ -648,6 +732,9 @@ class _DecisionMixin:
                 ((error or "")[:500], plan_id),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "", "", reason=f"成交尝试失败：{error}",
+                                      actor="system")
             return cur.rowcount > 0
 
     def get_stale_pending_executions(self, cutoff_iso: str, limit: int = 500) -> list[dict]:
@@ -678,6 +765,9 @@ class _DecisionMixin:
                 (reason, plan_id),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "pending", "expired",
+                                      reason=reason, actor="scheduler")
             return cur.rowcount > 0
 
 
@@ -713,18 +803,37 @@ class _DecisionMixin:
                     (uuid.uuid4().hex[:12], plan_id, row["ticker"], "rejection",
                      reason, plan_market, _now_iso(), row["user_id"], row["snapshot_id"], row["strategy_version"]),
                 )
+                # actor 由 reason 前缀判出：投委会/系统拦截各自带标记，其余是用户手动否决。
+                self._log_exec_status(
+                    conn, plan_id, row["status"], "rejected", reason=reason, ticker=row["ticker"],
+                    actor=("committee" if reason.startswith(self.BLOCK_MARKER_COMMITTEE)
+                           else "system" if reason.startswith(self.BLOCK_MARKER_SYSTEM)
+                           else "user"),
+                )
             return cur.rowcount > 0
 
 
     def clear_pending_executions(self) -> int:
         """清空所有 pending/confirmed(未执行) 的执行计划，标记为 rejected。挂单(resting)不清。"""
         with self._write_conn() as conn:
+            # 先取受影响行：批量变更也要一票一条留痕，否则「清空」是唯一无痕的状态跃迁。
+            q, p = self._filtered(
+                "SELECT id, status, ticker FROM execution_plans "
+                "WHERE status IN ('pending', 'confirmed') AND executed_at IS NULL "
+                "AND COALESCE(resting_until, '') = ''"
+            )
+            affected = conn.execute(q, p).fetchall()
+            if not affected:
+                return 0
             q, p = self._filtered(
                 "UPDATE execution_plans SET status = 'rejected', rejection_reason = '用户手动清空' "
                 "WHERE status IN ('pending', 'confirmed') AND executed_at IS NULL "
                 "AND COALESCE(resting_until, '') = ''"
             )
             cur = conn.execute(q, p)
+            for r in affected:
+                self._log_exec_status(conn, r["id"], r["status"], "rejected",
+                                      reason="用户手动清空", actor="user", ticker=r["ticker"])
             return cur.rowcount
 
 
@@ -740,6 +849,9 @@ class _DecisionMixin:
                 (_now_iso(), resting_until, plan_id),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "confirmed", "confirmed",
+                                      reason=f"转挂单，到期 {resting_until}", actor="system")
             return cur.rowcount > 0
 
     def get_resting_executions(self, limit: int = 100) -> list[dict]:
@@ -779,6 +891,8 @@ class _DecisionMixin:
                 (_now_iso(), plan_id),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "confirmed", "executed", actor="system")
             return cur.rowcount > 0
 
     def expire_execution(self, plan_id: str, reason: str = "") -> bool:
@@ -790,6 +904,8 @@ class _DecisionMixin:
                 (reason, plan_id),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "confirmed", "expired", reason=reason)
             return cur.rowcount > 0
 
     def unclaim_execution(self, plan_id: str, resting_until: str = "") -> bool:
@@ -802,6 +918,9 @@ class _DecisionMixin:
                 (resting_until or "", plan_id),
             )
             cur = conn.execute(q, p)
+            if cur.rowcount > 0:
+                self._log_exec_status(conn, plan_id, "executed", "confirmed",
+                                      reason="成交失败补偿回滚（原子领单）", actor="system")
             return cur.rowcount > 0
 
 

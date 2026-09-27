@@ -725,6 +725,13 @@ async def get_resting_executions(market: str = "us_stock", user: dict = Depends(
     return {"executions": store.get_resting_executions()}
 
 
+@router.get("/executions/{plan_id}/status-log")
+async def get_execution_status_log(plan_id: str, user: dict = Depends(get_current_user)):
+    """P2.2：单张计划的状态时间线 —— 「这张票到底经历了什么」。"""
+    store = _user_store(user)
+    return {"plan_id": plan_id, "log": store.get_execution_status_log(plan_id)}
+
+
 @router.post("/executions/{plan_id}/cancel-resting")
 async def cancel_resting_execution(plan_id: str, user: dict = Depends(get_current_user)):
     """用户手动取消挂单。"""

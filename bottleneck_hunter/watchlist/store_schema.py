@@ -369,6 +369,26 @@ CREATE TABLE IF NOT EXISTS execution_plans (
     executed_at         TEXT
 );
 
+-- P2.2 执行状态机审计（docs/DECISION_LOOP_IMPROVEMENT.md）。
+-- 为什么必须落表而不是用 SQLite 触发器：触发器拿不到 user_id / market —— 它们是 store 层的
+-- 上下文，不在 SQL 里。多用户/多市场隔离是本项目的硬约束（见 CLAUDE.md），所以留痕只能
+-- 在 store 方法层插入，走 _user_insert_cols / _market_insert_cols 三件套。
+-- 幂等建表：store.py 每次启动都 executescript(_CREATE_TABLES)，老库自动补上，无需 MIGRATIONS。
+CREATE TABLE IF NOT EXISTS execution_status_log (
+    id                  TEXT PRIMARY KEY,
+    execution_plan_id   TEXT NOT NULL,
+    ticker              TEXT DEFAULT '',
+    from_status         TEXT DEFAULT '',
+    to_status           TEXT NOT NULL,
+    reason              TEXT DEFAULT '',
+    actor               TEXT DEFAULT 'system',   -- system / user / committee / scheduler
+    created_at          TEXT NOT NULL,
+    user_id             TEXT DEFAULT '',
+    market              TEXT DEFAULT 'us_stock'
+);
+CREATE INDEX IF NOT EXISTS idx_exec_status_log_plan ON execution_status_log(execution_plan_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_exec_status_log_user ON execution_status_log(user_id, market, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS committee_reviews (
     id                  TEXT PRIMARY KEY,
     execution_plan_id   TEXT NOT NULL,

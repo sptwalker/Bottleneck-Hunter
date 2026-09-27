@@ -155,6 +155,18 @@ else:
 
 需新增：信号生成函数 + 一张轻量 `catalyst_signals` 表（或复用现有 signal 机制）。L3 `run_tactical_plans` 读取这些信号作为额外输入。
 
+**实施回改（2026-09-27）**：原文括号里的「**或复用现有 signal 机制**」就是实际落地的路径，**不再新建 `catalyst_signals` 表**
+（全仓确认该表不存在，也无需存在）。已落地的通道是：
+
+1. `decision_engine.py:1703` `store.get_recently_judged_catalysts(days=7)` 取近 7 日已判定（realized/failed/partial）的催化剂；
+2. 聚合成 `outcome_by_ticker`，以 `{catalyst_outcomes}` 注入 L3 prompt（`:1827`）—— 每票带回 `title / outcome / impact / judged_at`，
+   让 LLM 自己判断「这个消息兑现了该加、落空了该减」；
+3. `:1738` `forced = catalyst_outcome_tickers & held_tickers` 把「持仓中且催化剂已落空」的标的**强制纳入 L3 选股集**
+   （即使 L2 没选它），确保一定会生成止损/减仓战术，而不是因为不在 L2 名单里被静默跳过。
+
+为什么不建表：新增一张表只是把同一份信息换个地方存一遍，L3 的消费口径仍要维护；而 `catalyst_monitor` 判定结果本就持久
+在 `catalysts` 表里，`get_recently_judged_catalysts` 已是它的现成读方。**没有新增数据类型，就不该有新增存储。**
+
 #### P1.2 复盘四因归因 → 分层绩效表
 
 新建 `layer_performance` 表，`trade_reviewer` 复盘后写入四层归因：
@@ -197,12 +209,38 @@ L3 `run_tactical_plans` / L4 直接读取：bear 价 → 止损位，bull 价 �
 
 需数据：个股 beta（yfinance info 已采集，见 `company_profiles.raw.beta`）、板块归类。
 
+**实施回改（2026-09-27）**：原标"✅ 已完成"是**过度乐观**——三个子项里**相关性集中根本没做**。
+`constraint_validator.py` 里 `correlation` 零命中：报告层（`risk_metrics.compute_portfolio_risk`）早在算高相关对并写进 L2/投委会 prompt，
+生成期却从未因此提示过一笔，"避免买入与现有持仓高相关的标的"从来没生效。本次补齐：
+
+- 共享辅助 `risk_metrics.high_correlation_pairs(price_histories, threshold=0.7, min_samples=20)`——
+  报告路径与生成期**共用同一个函数**，否则阈值/样本下限/收益率定义两处各写一遍，迟早漂移成「报告说高相关、生成期说没事」。
+- `constraint_validator.validate_portfolio_correlation()` + 四档 `max_pair_correlation`（defensive 0.75 / balanced 0.85 / aggressive 0.90）。
+- **刻意定为 warning 而非 violation**：本项目"拦住一笔"只有 LLM 自修正与 `max_compliant_shares` 降级两条出路，
+  而相关性**不可降级**（缩量不改变相关系数）——做成 violation 就只剩"整笔拦死"且无任何豁免通道
+  （`validate_against_regime` 有 `mandate_exception`，这里没有）。数据基础也薄（60 日快照，持仓票常缺样本）。
+- 消费方三重接通（N-13 的教训：只活在内存里的警告等于没有警告）：写入 `result_json.warnings`（前端旗标 + 投委会四委员读整份计划时自动可见）、
+  `decision_warning` SSE、`_record_decision_warning` 落 oplog。
+- 取数：`decision_engine.py` 快照循环改为取「本批 buy/add 票 ∪ 现有持仓票」——相关性的每一对必须**两侧**都有价序，
+  只取买入侧永远配不出对，约束会静默空转。
+
 #### P2.2 执行状态机加固
 
 清理 `pending→confirmed→executed/failed` 全链路：
 - `confirm_execution` + `execute_trade` 用单一事务包裹，失败自动回滚到 pending（而非卡 confirmed）
 - 新增 `execution_status_log` 审计每次状态变迁
 - （P0 已临时修复 reject 接受 confirmed 态，此处做根治）
+
+**实施回改（2026-09-27）**：审计表 `execution_status_log` 已落地，14 个状态变迁方法全部接线（`actor` 区分
+system / user / committee / scheduler）。三点实现口径值得记：
+
+- **不能用 SQLite 触发器**：触发器里拿不到 store 的 `.for_user().for_market()` 上下文，写不进 `user_id`/`market`，
+  多用户/多市场隔离当场失效。审计行必须由 store 方法层插入，且**连接由调用方传入**，保证与状态变更同事务原子提交。
+- **建表放进 `store_schema._CREATE_TABLES` 即自动补进老库**，无需 `_MIGRATIONS` 条目——`_init_db` 每次启动都
+  `executescript(_CREATE_TABLES + _CREATE_INDEXES)`，`IF NOT EXISTS` 幂等。
+- **排序键必须是 `created_at DESC, rowid DESC`**：`created_at` 只到秒，而状态变迁天生突发（确认→成交→回滚可能全在同一秒），
+  只按秒排的话同秒内的变迁以任意顺序渲染，一条"executed → confirmed"看起来就像数据坏了。rowid 按插入序单调，恰是变迁的真实先后。
+  这个缺陷是写测试时被 `test_确认_成交_两跳都留痕` 暴露出来的真实生产 bug，不是测试问题。
 
 #### P2.3 上游 staleness 守卫
 

@@ -597,6 +597,11 @@ function renderPending(executions, opts = {}) {
       if (rj.mandate_exception) {
         flags += `<span class="dc-pending-flag dc-badge-danger">越线待确认</span>`;
       }
+      // P2.1 组合约束提示（相关性等）：警告不拦单，但必须让人在点"确认执行"前看见
+      const warnList = Array.isArray(rj.warnings) ? rj.warnings : [];
+      if (warnList.length) {
+        flags += `<span class="dc-pending-flag dc-flag-adjust" title="${escDC(warnList.join('\n'))}">⚠ 组合提示 ${warnList.length}</span>`;
+      }
 
       return `<div class="dc-pending-item" data-plan-id="${escDC(ex.id)}">
         <div class="dc-pending-header">
@@ -607,6 +612,7 @@ function renderPending(executions, opts = {}) {
         <div class="dc-pending-actions">
           <button class="dc-btn-confirm" data-action="confirm" data-plan-id="${escDC(ex.id)}">确认执行</button>
           <button class="dc-btn-reject" data-action="reject" data-plan-id="${escDC(ex.id)}">拒绝</button>
+          <button class="dc-btn-reject" data-action="statuslog" data-plan-id="${escDC(ex.id)}" title="查看这张票的状态变迁">留痕</button>
         </div>
       </div>`;
     }).join('');
@@ -747,6 +753,7 @@ function renderBlocked(executions) {
       <div class="dc-blocked-reason">${escDC(cleanReason)}</div>
       <div class="dc-pending-actions">
         <button class="dc-btn-restore" data-action="restore" data-plan-id="${escDC(ex.id)}">恢复到待确认</button>
+        <button class="dc-btn-reject" data-action="statuslog" data-plan-id="${escDC(ex.id)}" title="查看这张票的状态变迁">留痕</button>
       </div>
     </div>`;
   }).join('');
@@ -760,6 +767,8 @@ function renderBlocked(executions) {
 }
 
 async function handleBlockedAction(e) {
+  const logBtn = e.target.closest('[data-action="statuslog"]');
+  if (logBtn) { openExecStatusLog(logBtn.dataset.planId); return; }
   const btn = e.target.closest('[data-action="restore"]');
   if (!btn) return;
   const planId = btn.dataset.planId;
@@ -871,6 +880,9 @@ async function handlePendingAction(e) {
   if (!btn) return;
   const planId = btn.dataset.planId;
   const action = btn.dataset.action;
+
+  // 留痕是只读查看，不走「禁用按钮 + 重载概览」那套变更流程
+  if (action === 'statuslog') { openExecStatusLog(planId); return; }
 
   btn.disabled = true;
   btn.textContent = action === 'confirm' ? '执行中...' : '处理中...';
@@ -1235,6 +1247,7 @@ export function initDecision() {
   document.getElementById('dc-btn-oplog')?.addEventListener('click', openOpLogDrawer);
   document.getElementById('dc-oplog-close')?.addEventListener('click', closeOpLogDrawer);
   document.getElementById('dc-oplog-more')?.addEventListener('click', () => loadOpLogHistory(false));
+  document.getElementById('dc-statuslog-close')?.addEventListener('click', closeExecStatusLog);
   document.querySelectorAll('.dc-oplog-filter').forEach(b => b.addEventListener('click', () => {
     document.querySelectorAll('.dc-oplog-filter').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
@@ -2504,6 +2517,46 @@ function closeOpLogDrawer() {
   const d = document.getElementById('dc-oplog-drawer');
   if (d) d.style.display = 'none';
   _opLogStopStream();
+}
+
+/* ── 执行留痕抽屉（P2.2）：某张执行计划的状态变迁时间线 ────────── */
+
+const EXEC_STATUS_CN = {
+  '': '（创建）', pending: '待确认', confirmed: '已确认', rejected: '已否决',
+  executed: '已成交', expired: '已过期',
+};
+
+async function openExecStatusLog(planId) {
+  const d = document.getElementById('dc-statuslog-drawer');
+  const list = document.getElementById('dc-statuslog-list');
+  if (!d || !list) return;
+  document.getElementById('dc-statuslog-plan').textContent = planId;
+  list.innerHTML = '<div class="dc-oplog-empty">加载中…</div>';
+  d.style.display = '';
+  try {
+    const r = await fetch(`/api/decision/executions/${encodeURIComponent(planId)}/status-log`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const logs = (await r.json()).log || [];
+    if (!logs.length) { list.innerHTML = '<div class="dc-oplog-empty">暂无留痕（该计划创建于本功能上线前）</div>'; return; }
+    list.innerHTML = logs.map(rec => {
+      const from = EXEC_STATUS_CN[rec.from_status] ?? rec.from_status;
+      const to = EXEC_STATUS_CN[rec.to_status] ?? rec.to_status;
+      const when = rec.created_at ? fmtBJ(rec.created_at) : '';
+      return `<div class="dc-oplog-row dc-oplog-user_action">
+        <span class="dc-oplog-ts">${escDC(when)}</span>
+        <span class="dc-oplog-title">${escDC(from)} → ${escDC(to)}</span>
+        <span class="dc-oplog-res">${escDC(rec.actor || '')}</span>
+        ${rec.reason ? `<div class="dc-oplog-detail">${escDC(rec.reason)}</div>` : ''}
+      </div>`;
+    }).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="dc-oplog-empty">加载失败：${escDC(err.message)}</div>`;
+  }
+}
+
+function closeExecStatusLog() {
+  const d = document.getElementById('dc-statuslog-drawer');
+  if (d) d.style.display = 'none';
 }
 
 
