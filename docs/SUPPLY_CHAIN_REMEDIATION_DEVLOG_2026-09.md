@@ -1157,3 +1157,20 @@ ruff bottleneck.py → 5 findings，与 6A 后同一集合，新增 0
 ```
 python -m pytest -q  → 2568 passed, 5 skipped in 486.77s（6A~6D 全部改动后的最终状态）
 ```
+
+---
+
+## 批后复核（2026-09-28）：生产实跑 5cbf9130 验收 + A股财务趋势取错期修复
+
+**实跑验收**（AI计算中心/机房电源，A股，4 阶段完成）：6A 约束字段 103 节点中 93–102 有值、202 条 link notes 全非空；
+6B 供需缺口 reasoning 普遍引用「产能扩张周期约 N 个月（拆解阶段估计）」；6C `sources` 全部落库（llm 16/chain 2/llm+chain 2）；
+6D 总分 4.2–8.3 无硬凑极端分。外部源本轮 0 命中：AKShare 板块列表服务器不可达；Gangtise 选股 curated 表只收中信一级
+行业词，「光刻胶/激光器」等具体环节名全部 `sector_id_for → None` 静默降级（已知天花板，见 gangtise_sector_ids ponytail）。
+
+**新发现（自 4495daf 起存在）**：`stock_financial_abstract_ths` 按报告期**升序**返回（生产实测 603986 第 0 行 2011-12-31，
+末行 2026-06-30），而 `_fetch_astock_financial` 用 `df.head(8)` / `df.iloc[0]` 按「最新在前」取数 → 本轮 20 家趋势区间全落在
+2004–2022，`trend_bonus` +0.4~+2.5 与喂给 LLM 的营收加速度全错；主数字被 gangtise overlay 覆盖才显得正常（overlay 失败时
+主数字也会退回上市首期）。老测试只 mock 1 行，覆盖不到排序。
+
+**修复**：取数前按报告期倒序（3 行）。哨兵 `test_ths_ascending_rows_take_latest_quarters`：升序 12 期输入 → 最新期
+2026-06-30、趋势 8 期不含 201x；回退修复即红。全量 2569 passed, 5 skipped。

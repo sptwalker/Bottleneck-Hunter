@@ -271,6 +271,9 @@ def _fetch_astock_financial(code_6: str) -> FinancialSnapshot:
     try:
         df = ak.stock_financial_abstract_ths(symbol=code_6, indicator="按报告期")
         if df is not None and not df.empty:
+            # 同花顺按报告期【升序】返回（第 0 行是上市首期）；下游 head(8)/iloc[0]/_compute_trend
+            # 全按「最新在前」取数，不先倒序就会拿十几年前的 8 期算趋势、拿首期当最新期。
+            df = df.sort_values(df.columns[0], ascending=False, key=lambda c: c.astype(str))
             cols = df.columns.tolist()
 
             col_map = {

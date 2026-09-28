@@ -124,6 +124,28 @@ class TestFetchAstock:
         assert snap.volume_ratio is not None
 
     @patch("bottleneck_hunter.chain.financial_data.ak")
+    def test_ths_ascending_rows_take_latest_quarters(self, mock_ak):
+        """同花顺真实返回是报告期【升序】（生产实测 603986：第 0 行 2011-12-31）。
+        必须取最新 8 期算趋势、最新期做主数字，而不是上市头 8 期。"""
+        dates = ["2011-12-31", "2012-12-31", "2013-12-31", "2014-12-31",
+                 "2024-06-30", "2024-09-30", "2024-12-31", "2025-03-31",
+                 "2025-06-30", "2025-09-30", "2025-12-31", "2026-06-30"]
+        mock_ak.stock_financial_abstract_ths.return_value = pd.DataFrame({
+            "报告期": dates,
+            "营业总收入": [float(i + 1) * 1e8 for i in range(len(dates))],
+            "营业总收入同比增长率": [float(i) for i in range(len(dates))],
+            "销售毛利率": [30.0] * len(dates),
+        })
+        mock_ak.stock_research_report_em.return_value = None
+        mock_ak.stock_zh_a_hist.return_value = None
+        snap = _fetch_astock_financial("603986")
+        assert snap.report_date == "2026-06-30"
+        assert snap.revenue_yi == 12.0
+        qs = [q.report_date for q in snap.trend.quarters]
+        assert qs[0] == "2026-06-30" and qs[-1] == "2024-06-30"
+        assert not any(d.startswith("201") for d in qs)
+
+    @patch("bottleneck_hunter.chain.financial_data.ak")
     def test_empty_data(self, mock_ak):
         mock_ak.stock_financial_abstract_ths.return_value = pd.DataFrame()
         mock_ak.stock_research_report_em.return_value = None
