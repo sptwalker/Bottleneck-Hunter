@@ -47,6 +47,9 @@ _RL_STRIKES = 5        # 限流达此次数才判「严重」→ 禁用
 _RL_WINDOW = 600.0     # 秒：strike 计数滑窗（超窗的旧 strike 丢弃）
 _TIMEOUT_STRIKES = 3   # 超时达此次数（用户指定：3 次以上）→ 禁用
 _TIMEOUT_WINDOW = 600.0
+# 同一波并发调用（扇出/批量打分）会在同一秒一起超时——那是「一次慢」，不是「三次挂」。
+# 距上一击不足此秒数的超时不另计，否则一波 4 并发即刻打满阈值、持久禁用一个只是慢的节点。
+_TIMEOUT_BURST = 30.0
 _BADREQ_STRIKES = 3    # 确定性请求错误达此次数 → 禁用（阈值躲开偶发单请求超长/瞬时坏 payload）
 _BADREQ_WINDOW = 600.0
 _CACHE_TTL = 30.0      # 秒：is_disabled/disabled_info 进程内缓存 TTL
@@ -79,13 +82,16 @@ def _now() -> float:
     return time.monotonic()
 
 
-def _bump_strike(uid: str, provider: str, cat: str, window: float, threshold: int) -> bool:
-    """记一次某类(cat)失败 strike，返回是否达阈值。按 (uid,provider,cat) 隔离。"""
+def _bump_strike(uid: str, provider: str, cat: str, window: float, threshold: int,
+                 burst: float = 0.0) -> bool:
+    """记一次某类(cat)失败 strike，返回是否达阈值。按 (uid,provider,cat) 隔离。
+    burst>0：距上一击不足 burst 秒的并发失败并入上一击，不另计。"""
     k = (uid or "", _norm(provider), cat)
     now = _now()
     with _lock:
         win = [t for t in _strikes.get(k, []) if now - t < window]
-        win.append(now)
+        if not (burst and win and now - win[-1] < burst):
+            win.append(now)
         _strikes[k] = win
         return len(win) >= threshold
 
@@ -254,7 +260,7 @@ def record_result(uid: str, provider: str, ok: bool, reason: str = "", model: st
             _do_disable(uid, p, _STATUS_RL, reason, f"{_RL_WINDOW:.0f}s 内限流 {_RL_STRIKES}+ 次", model=model)
         return
     if reason == _TIMEOUT_REASON:
-        if _bump_strike(uid, p, "to", _TIMEOUT_WINDOW, _TIMEOUT_STRIKES):
+        if _bump_strike(uid, p, "to", _TIMEOUT_WINDOW, _TIMEOUT_STRIKES, burst=_TIMEOUT_BURST):
             _do_disable(uid, p, _STATUS_TIMEOUT, reason, f"{_TIMEOUT_WINDOW:.0f}s 内超时 {_TIMEOUT_STRIKES}+ 次", model=model)
         return
     if reason == _BADREQ_REASON:

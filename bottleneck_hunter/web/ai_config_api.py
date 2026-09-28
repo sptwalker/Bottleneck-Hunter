@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -235,13 +236,28 @@ async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
                          api_key=(api_key or None),
                          base_url=(req.base_url.strip() or None),
                          user_id=uid, with_fallback=False)
+        from bottleneck_hunter.llm_clients.fallback import cand_timeout
+        limit = cand_timeout(model)
+        t0 = time.monotonic()
         await asyncio.wait_for(
             asyncio.to_thread(lambda: llm.invoke([HumanMessage(content="hi")])),
-            timeout=60,
+            timeout=limit,
         )
+        resp = {"ok": True, "model": model, "latency_s": round(time.monotonic() - t0, 1), "timeout_s": limit}
+        # 短问答只证「连得上」，证不了「长输出不超时」——附近 7 日真实调用均延迟，让两边结论可对照。
+        try:
+            st = next((r for r in _get_store(user).get_model_call_stats(7)
+                       if r["provider"] == provider.lower() and r["model"] == model), None)
+            if st and st["calls"]:
+                avg = st["avg_latency_ms"] / 1000
+                resp["real_avg_s"] = round(avg, 1)
+                if avg > limit * 0.8:
+                    resp["warn"] = (f"连通正常，但近7日真实调用均耗时 {avg:.0f}s，接近/超过超时上限 {limit:.0f}s，"
+                                    f"长任务仍可能超时切换。")
+        except Exception:  # noqa: BLE001
+            pass
         # 单发探活通了，但该节点可能仍被持久熔断（欠费/限流/超时禁用）——「测试」不清熔断，
         # 决策链仍会跳过它。提示引导用户改用「测试并恢复」，消除“测了正常、系统仍报错”的错位感。
-        resp = {"ok": True, "model": model}
         try:
             from bottleneck_hunter.llm_clients import provider_gate
             info = provider_gate.disabled_info(uid, provider)
@@ -256,7 +272,7 @@ async def test_one(req: TestOneRequest, user: dict = Depends(get_current_user)):
             pass
         return resp
     except asyncio.TimeoutError:
-        return {"ok": False, "error": "请求超时（60s）"}
+        return {"ok": False, "error": f"请求超时（{limit:.0f}s）"}
     except Exception as e:
         msg = str(e).strip() or e.__class__.__name__
         return {"ok": False, "error": msg[:300]}
@@ -291,16 +307,18 @@ async def recover_provider(provider: str, user: dict = Depends(get_current_user)
     if not model:
         return {"ok": False, "recovered": False, "error": "未配置模型（请先在配置中心填写模型名）"}
 
+    from bottleneck_hunter.llm_clients.fallback import cand_timeout
+    limit = cand_timeout(model)
     for i in range(_RECOVER_CALLS):
         try:
             llm = create_llm(provider, model, api_key=(api_key or None),
                              user_id=uid, with_fallback=False)
             await asyncio.wait_for(
                 asyncio.to_thread(lambda m=llm: m.invoke([HumanMessage(content="ping")])),
-                timeout=60,
+                timeout=limit,
             )
         except asyncio.TimeoutError:
-            return {"ok": False, "recovered": False, "error": f"第 {i + 1}/{_RECOVER_CALLS} 次请求超时(60s)"}
+            return {"ok": False, "recovered": False, "error": f"第 {i + 1}/{_RECOVER_CALLS} 次请求超时({limit:.0f}s)"}
         except Exception as e:
             from bottleneck_hunter.llm_clients.fallback import classify_reason
             msg = str(e).strip() or e.__class__.__name__

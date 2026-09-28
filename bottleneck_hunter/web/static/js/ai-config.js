@@ -592,7 +592,7 @@ async function testFormConfig() {
       toast(`测试请求失败 (HTTP ${resp.status})${detail ? '：' + (typeof detail === 'string' ? detail : JSON.stringify(detail)) : '；请确认已登录并刷新页面'}`);
       return;
     }
-    if (data.ok) toast(`连接成功！\n模型: ${data.model || model}` + (data.warn ? `\n\n⚠️ ${data.warn}` : ''));
+    if (data.ok) toast(`连接成功！\n模型: ${data.model || model}` + (data.latency_s != null ? `\n耗时: ${data.latency_s}s（超时上限 ${data.timeout_s}s）` : '') + (data.real_avg_s != null ? `\n近7日真实调用均耗时: ${data.real_avg_s}s` : '') + (data.warn ? `\n\n⚠️ ${data.warn}` : ''));
     else toast(`连接失败：${data.error || '未返回错误信息'}`);
   } catch (e) {
     toast('测试失败: ' + e.message);

@@ -165,12 +165,12 @@ async def _invoke_with_retry(chain: list[tuple], prompt: str, role: str, max_ret
             try:
                 # ponytail: 须 wait_for 硬超时——裸壳同步 invoke 无 asyncio 级超时上限，单个 hang 的模型
                 # 会挂死一个 to_thread 线程并拖住整个委员会/决策周期（正是「确保每周期正常执行」要防的）。
-                # 超时略高于候选级 _CAND_TIMEOUT，让 record-only 壳有机会先自然返回；真超时由下方 except 记账。
-                from bottleneck_hunter.llm_clients.fallback import _CAND_TIMEOUT
+                # 超时略高于该模型候选级超时，让 record-only 壳有机会先自然返回；真超时由下方 except 记账。
+                from bottleneck_hunter.llm_clients.fallback import cand_timeout
 
                 content = await asyncio.wait_for(
                     asyncio.to_thread(lambda: llm.invoke(prompt).content),  # noqa: B023  立即 await，无延迟绑定后果
-                    timeout=_CAND_TIMEOUT + 30,
+                    timeout=cand_timeout(model) + 30,
                 )
                 health.record_success(uid, provider)  # 恢复：清该 provider 的失败计数
                 if idx > 0 or attempt > 0:

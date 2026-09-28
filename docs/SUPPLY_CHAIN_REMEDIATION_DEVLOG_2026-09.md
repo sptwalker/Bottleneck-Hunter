@@ -1174,3 +1174,26 @@ python -m pytest -q  → 2568 passed, 5 skipped in 486.77s（6A~6D 全部改动�
 
 **修复**：取数前按报告期倒序（3 行）。哨兵 `test_ths_ascending_rows_take_latest_quarters`：升序 12 期输入 → 最新期
 2026-06-30、趋势 8 期不含 201x；回退修复即红。全量 2569 passed, 5 skipped。
+
+## DeepSeek 超时切换 vs 配置中心测试结论不一致（2026-09-29）
+
+**现象**：deepseek_company/deepseek-v4-pro 频繁「超时→自动替换→超时频发禁用」，配置中心点测试却每次都通过。
+
+**生产实证**：
+- 真实长输出实测 99.2s（首 chunk 0.2s，生成本身慢），配置中心 "hi" 探活 2.7s；
+- `model_call_stats` 均延迟 09-23 84s / 09-25 72s / 09-27 65s；09-28 7 调 7 超时，全部精确卡在 60s；
+- 20:10:31 同秒 ~4 个并发超时 → 一波就打满 3 击阈值 → 持久 `disabled_timeout`。
+
+**结论**：两个猜测都成立，外加第三个放大器。
+1. 判定过严：`_CAND_TIMEOUT` 60s 是**总时长**上限，对推理/Pro 档长输出天然不够；
+2. 测试过松：短问答只证「连得上」，证不了「长输出不超时」；
+3. 并发放大：同一波扇出同时超时，每个都记一击 → 一次慢 = 三次挂。
+
+**修复**（最小改动）：
+- `fallback.cand_timeout(model)`：推理/Pro 档（reasoner / -pro / thinking / -r1 / o1-o4 / gpt-5 / kimi-k）上限 180s（`BH_LLM_SLOW_TIMEOUT`），其余仍 60s。SDK timeout（factory）/候选 wait_for/委员会外壳/配置测试与恢复**同一口径**。
+- `provider_gate`：距上一击 <30s 的超时并入上一击（`_TIMEOUT_BURST`），分波超时照常累计 3 击禁用。
+- 配置中心测试：回报本次耗时 + 超时上限 + 近 7 日真实调用均耗时；均耗时 >80% 上限时给出警示，让「测试通过」与「生产超时」可直接对照。
+
+**刻意未做**：按遥测自适应超时——超时样本被截断在上限处，均值自带天花板，自适应会自我锁死；等有「未截断的长尾延迟」数据再考虑。
+
+**哨兵**：`test_concurrent_timeouts_count_as_one_strike`、`test_slow_reasoning_model_gets_longer_timeout`、`test_fast_model_on_slow_budget_not_cut`（去掉修复即红）。

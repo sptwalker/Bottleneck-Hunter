@@ -340,7 +340,6 @@ def _create_raw_llm(
     # 且熔断器因“挂起不抛异常”永不触发。timeout 是防挂起的关键；每次尝试都受它约束。
     # max_retries 保留 SDK 默认 2：对瞬时 429/5xx 仍有韧性（一次性调用如热点扫描无上层重试，
     # retries=0 会因单次瞬时错误直接失败）；最坏 (2+1)×timeout 仍有界。callers 可覆盖。
-    kwargs.setdefault("timeout", float(os.getenv("BH_LLM_TIMEOUT", "60")))
     kwargs.setdefault("max_retries", int(os.getenv("BH_LLM_MAX_RETRIES", "2")))
     # 严格按用户隔离的 KEY 解析：显式传入（测试端点）> 当前上下文用户的加密 KEY。
     # 绝不读 _CUSTOM_PROVIDERS 明文缓存、绝不读 os.getenv、绝不借他人 KEY。
@@ -351,6 +350,9 @@ def _create_raw_llm(
         key = _resolve_user_llm_key(provider, uid)
     if not model:
         model = resolve_provider_model(provider, user_id)
+    # 超时按模型定（慢推理模型放宽），与 fallback 候选 wait_for 同一口径
+    from bottleneck_hunter.llm_clients.fallback import cand_timeout
+    kwargs.setdefault("timeout", cand_timeout(model))
     # 推理型模型拒绝自定义 temperature → 剔除，交服务端默认（见 _TEMPERATURE_LOCKED）。
     # 覆盖主模型(create_llm 直建)与全部备选(build_fallback_candidates 也走本函数)——单点即全链。
     if _rejects_custom_temperature(model):

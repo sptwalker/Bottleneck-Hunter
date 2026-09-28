@@ -101,3 +101,27 @@ def test_user_level_primary_isolation(tmp_path):
     store.set_provider_config_primary("", "uidA")
     assert store.get_primary_provider_config("uidA") is None
     assert store.get_primary_provider_config("uidB") is None
+
+
+def test_slow_reasoning_model_gets_longer_timeout(monkeypatch):
+    """deepseek-v4-pro 长输出实测 99s：统一 60s 会误判超时，而配置中心 "hi" 3s 必过——结论矛盾的根因。"""
+    monkeypatch.setattr(FB, "_CAND_TIMEOUT", 60.0)
+    monkeypatch.setattr(FB, "_SLOW_TIMEOUT", 180.0)
+    assert FB.cand_timeout("deepseek-v4-pro") == 180.0
+    assert FB.cand_timeout("deepseek-reasoner") == 180.0
+    assert FB.cand_timeout("deepseek-chat") == 60.0
+    assert FB.cand_timeout("qwen-plus") == 60.0
+
+
+async def test_fast_model_on_slow_budget_not_cut(monkeypatch):
+    """慢模型用放宽上限：0.3s 响应在快上限 0.1s 下必超时，放宽到 1s 后正常返回、不切换。"""
+    monkeypatch.setattr(FB, "_CAND_TIMEOUT", 0.1)
+    monkeypatch.setattr(FB, "_SLOW_TIMEOUT", 1.0)
+    begin_notices()
+    fb = FallbackChatModel(candidates=[
+        (SlowLLM(0.3), "deepseek", "deepseek-v4-pro"),
+        (OkLLM("backup ok"), "qwen", "qwen-plus"),
+    ])
+    res = await fb.ainvoke("hi")
+    assert res.content != "backup ok"
+    assert drain_notices() == []

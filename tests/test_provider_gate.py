@@ -122,3 +122,17 @@ def test_disabling_primary_for_one_user_not_others(store, primary):
     assert primary["uidB"] == "", "uidB 主模型应被取消"
     assert primary["uidA"] == "deepseek", "uidA 主模型不受 uidB 失效影响"
 
+
+
+def test_concurrent_timeouts_count_as_one_strike(store, monkeypatch):
+    """一波并发调用同秒超时是「一次慢」——生产 4 并发同秒超时曾直接打满阈值持久禁用 deepseek。"""
+    clock = [1000.0]
+    monkeypatch.setattr(pg, "_now", lambda: clock[0])
+    for _ in range(pg._TIMEOUT_STRIKES + 2):  # 同一波
+        pg.record_result("u1", "deepseek", False, pg._TIMEOUT_REASON)
+    assert not pg.is_disabled("u1", "deepseek")
+    for _ in range(pg._TIMEOUT_STRIKES - 1):  # 之后分波再超时，照常累计
+        clock[0] += pg._TIMEOUT_BURST + 1
+        pg.record_result("u1", "deepseek", False, pg._TIMEOUT_REASON)
+    assert pg.is_disabled("u1", "deepseek")
+    assert pg.disabled_info("u1", "deepseek")["status"] == pg._STATUS_TIMEOUT

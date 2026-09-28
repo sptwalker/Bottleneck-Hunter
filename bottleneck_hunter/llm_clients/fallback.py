@@ -31,6 +31,17 @@ logger = logging.getLogger(__name__)
 # 可达、超时喂进 provider_gate，且**内部**兜底后不再需要 chain/* 外层 wait_for（后者抛
 # CancelledError 会穿透 except Exception，正是自毁根因）。
 _CAND_TIMEOUT = float(os.getenv("BH_LLM_TIMEOUT", "60"))
+# 推理型/Pro 档模型长输出实测 90~100s（deepseek-v4-pro 生产均延迟 65~84s），60s 总时长上限
+# 会把「慢但正常」判成超时 → 切换 → 熔断；而配置中心 "hi" 探活 3s 就回，结论必然不一致。
+# ponytail: 子串表判慢模型，新推理模型上线需补表；想按遥测自适应须先解决「超时样本被截断在上限」的自限问题。
+_SLOW_TIMEOUT = float(os.getenv("BH_LLM_SLOW_TIMEOUT", "180"))
+_SLOW_PATTERNS = ("reasoner", "-pro", "thinking", "-r1", "o1-", "o3-", "o4-", "gpt-5", "kimi-k")
+
+
+def cand_timeout(model: str) -> float:
+    """该模型单次调用的超时上限（秒）。SDK timeout / 候选 wait_for / 配置测试共用，口径一致。"""
+    m = (model or "").lower()
+    return max(_CAND_TIMEOUT, _SLOW_TIMEOUT) if any(p in m for p in _SLOW_PATTERNS) else _CAND_TIMEOUT
 
 # ── 提示 sink（请求级）──────────────────────────────────
 _notices: ContextVar[list | None] = ContextVar("llm_fallback_notices", default=None)
@@ -229,7 +240,7 @@ class FallbackChatModel(BaseChatModel):
         for i, (llm, provider, model) in enumerate(cands):
             t0 = time.monotonic()
             try:
-                msg = await asyncio.wait_for(llm.ainvoke(messages, stop=stop, **kwargs), timeout=_CAND_TIMEOUT)
+                msg = await asyncio.wait_for(llm.ainvoke(messages, stop=stop, **kwargs), timeout=cand_timeout(model))
                 vok, vreason = _validate(msg)
                 is_last = i == len(cands) - 1
                 accept = vok or is_last  # 末候选即便格式不佳也接受，不为格式问题整体失败
@@ -265,7 +276,7 @@ class FallbackChatModel(BaseChatModel):
                 aiter = llm.astream(messages, stop=stop, **kwargs).__aiter__()
                 while True:
                     try:
-                        chunk = await asyncio.wait_for(aiter.__anext__(), timeout=_CAND_TIMEOUT)
+                        chunk = await asyncio.wait_for(aiter.__anext__(), timeout=cand_timeout(model))
                     except StopAsyncIteration:
                         break
                     emitted = True
