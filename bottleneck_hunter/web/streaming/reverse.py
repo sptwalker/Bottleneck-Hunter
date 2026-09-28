@@ -93,7 +93,11 @@ def _fetch_company_basic(ticker: str, market_enum: MarketRegion) -> dict:
             code = _extract_astock_code(ticker)
             if not code:
                 return out
-            df = ak.stock_individual_info_em(symbol=code)
+            try:
+                df = ak.stock_individual_info_em(symbol=code)
+            except Exception as e:  # noqa: BLE001 — 东财被断连时走下方腾讯兜底
+                logger.warning("东财公司信息失败，改用腾讯行情核实 (%s): %s", ticker, e)
+                df = None
             if df is not None and not df.empty:
                 info = dict(zip(df["item"], df["value"]))
                 out["name"] = str(info.get("股票简称", "") or "")
@@ -102,6 +106,12 @@ def _fetch_company_basic(ticker: str, market_enum: MarketRegion) -> dict:
                 mc = _to_float(info.get("总市值"))
                 if mc is not None:
                     out["market_cap"] = round(mc / 1e8, 1)  # 元 → 亿
+            # 东财空/被断连 → 腾讯行情兜底核实身份（与供应商检索同一验证源；无行业字段）
+            if not out["name"]:
+                from bottleneck_hunter.chain.supplier_search import fetch_tencent_quotes
+                q = fetch_tencent_quotes([code]).get(code) or {}
+                out["name"] = out["name_cn"] = q.get("name", "")
+                out["market_cap"] = q.get("total_mcap_yi")
         else:
             from bottleneck_hunter.watchlist.price_pipeline import _fetch_company_info_us
             sym = ticker.split(".")[0].strip()
