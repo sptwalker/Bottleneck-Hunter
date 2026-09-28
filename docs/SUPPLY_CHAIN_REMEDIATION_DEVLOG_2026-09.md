@@ -675,3 +675,485 @@ python -m pytest tests/test_fact_check_rules.py -q   → 3 passed
 
 > 第三例是写这条测试时才补的：只断言"反向不去重"会让去重功能整体被删掉也不报警，
 > 得同时钉住"同向必须去掉"。两条一起才框得住那个键。
+
+## Batch 5 — 真实错误（P2-6 / P2-5+P2-9 / 假闭环收尾）
+
+### 5A P2-6 催化剂日期：链侧 `expected_date` 是自由文本，下游只认 ISO
+
+**症状属实，但审查说的传播路径是错的 —— 我自己核实了一遍。**
+
+审查称 `models.py` 的 `expected_date` 会流到 `_days_until_date`，于是 `2025Q3` 被当成
+「这家没有催化剂」。我按「生产者判定」追了写入侧：
+
+- `watchlist` 侧 `create_catalyst` 只有三个调用方（`catalyst_monitor.py:99`、`:125`、`scheduler.py:929`）；
+  其中 `catalyst_monitor` 的 LLM prompt 早已**强制** `YYYY-MM-DD 或 null`；
+  另有一处从 `action_strategy` JSON 取 `item.get("date") or item.get("expected_date")`，
+  而它的产出方从不写期间串。
+- **生产库实证**：`catalyst_tracking` 表里非 ISO 值 **0 条**（384 个 NULL，57 个 distinct ISO）。
+- 但 chain 侧 `analyses.db` 里有大量非 ISO：`2025Q3` x338、`2025Q4` x272、`2025H2` x76、
+  `2025年下半年` x6 ……（实测 148 个 distinct / 1783 行）。
+
+所以：**症状真实，但炸点不在观察池，在 chain 侧** —— 而 chain 侧的 `expected_date`
+目前**只被当展示文本**渲染（`dashboard.js:791-810`、`phase-views.js:627`），暂无日期排序消费方。
+
+**修法选择（最小且面向未来）**：在**两个写入收口各归一一次**，而不是去给「还不存在的消费方」
+加过滤。
+
+1. `chain/models.py`：`CatalystEvent._normalize_date`（`mode="before"` validator）——
+   任何构造路径都归一，不依赖调用方自觉。
+2. `watchlist/store_committee.py:create_catalyst`：**唯一的写入收口**。它的下游是
+   **字符串比较**（SQL `expected_date <= ?`、`snap_date <= expected_date`、`_date_diff` 的
+   strptime），一旦存进 `2025Q3` 那些判断全部静默不成立，而
+   `WHERE expected_date IS NOT NULL` 仍会把它当有效日期捞出来 —— 比"没有日期"更坏。
+   解析不了存 `NULL`，三个调用方自动受益。
+
+**期间语义**：模糊期间（`2025Q3`）归一到**该期间最后一天**。方向是保守的 ——
+到期日算得越晚，越不会把还没到期的催化剂误判成「已过期」。区间（`2025Q4-2026Q1`）
+取**最晚**者 → `2026-03-31`，与 prompt 里「未来 6-18 个月」的时间窗一致。
+
+**连带修掉的一处 prompt 病**：`catalyst.py` 的示例日期**写死**且是 `2025Q3` ——
+既教 LLM 用下游解析不了的格式，又已过期一年。改为 `_sample_expected_date()`：
+今天 + 2 个季度、取季末，与那条相对时间窗同构；并补上「仅为格式参考」的反锚定声明
+（与 `bottleneck.py:576` 一致）。
+
+**实测收口率**（拿生产库 148 个真实 distinct 值跑新代码）：
+
+```
+distinct=148  rows=1783
+归一成功 1779 行（99.8%）  失败 4 行（0.2%）
+归一后仍不可解析（严重 bug）  0 行
+```
+
+剩 4 行全是相对表述（`未来6-12个月` / `未来1-3个月` / `未来3-6个月`）——
+解析它们需要**写入时刻**，此处拿不到，故返回 `""`（= 无日期）。
+不拿今天去代入：那会把「6 个月后」写成今天附近的某天，是把「不知道」伪装成「知道」。
+
+### 5A 过程中自己改出来的三个缺陷（已修，留证）
+
+1. **区间被悄悄截断成起点**（我的测试先发现的，不是审查给的）。
+   `2025Q3-Q4` 返回 `2025-09-30` 而非 `2025-12-31` —— 因为每条期间正则都要求 4 位年份，
+   裸写的 `Q4` 被整段丢弃，区间塌缩成单点，**到期日凭空提前一个季度**。
+   修法是加 `_expand_bare_periods` 把省略的年份补回来，**并且**让 `2025年Q3-Q4`
+   这种中英混写也吃进同一个 token（否则同一个 bug 会换个写法复发）。
+2. **整年兜底盖掉精确写法**。我加「`2025全年`→`2025-12-31`」兜底时最初无条件参与 `max`，
+   于是 `2025Q3` 多出一个 12-31 候选并被选中，季度末语义被整年末吃掉。改为
+   **仅当更精确的写法一个都没匹配上时**才启用。
+3. **数量被读成日期**。整年兜底会把「订单金额2026万元」读成「2026 年兑现」——
+   凭空造出一个从未存在过的到期日。加末位断言排除「4 位数 + 单位」。
+   （`2025%` / `5000万台` / `2026万股` 均已覆盖为返回 `""`。）
+
+第 3 条是**凭空造日期**，比返回「无日期」坏得多 —— 与 5A 的整个立意同向。
+
+### 5A 验证记录
+
+```
+python -m pytest tests/test_batch5_sentinels.py -q          → 53 passed
+python -m pytest tests/test_catalyst.py tests/test_batch5_sentinels.py \
+                 tests/test_batch3_sentinels.py -q          → 64 passed
+python -m pytest -q                                          → 2493 passed, 5 skipped
+ruff check --select F,E9 <4 touched files>                   → All checks passed
+ruff check <4 touched files>                                 → 4 errors,
+    全部是 E501 且**逐行核对为 HEAD 既有**（models.py:41/146、store_committee.py:182/322），
+    非本次引入，不擅自扩大范围。
+```
+
+前端 `dashboard.js` / `phase-views.js` 只渲染文本、不做日期运算，
+因此本轮改动对现有展示**无行为变化**；改的是「未来任何消费方都拿得到可解析日期」。
+
+### 5B P2-9 集中度链路：审查给的前提是**错的**，真缺陷在别处
+
+**审查原话**：真实集中度（akshare）取到了，但 `_check_hhi_consistency` 的校准结果被
+`normalize_scores` 抹掉 —— 所以「校准形同虚设」。
+
+按「生产者判定」先追**写入侧**，结论是：**这条链路上根本没有任何一次真实数据进来过**。
+拿生产 `analyses.db` 全量跑（去重后 8437 个环节）：
+
+```
+去重节点数: 8437
+(market, cr3_source): {('us_stock', None): 577, ('us_stock','llm_estimate'): 6381,
+                       ('a_stock','llm_estimate'): 1479}
+非空 concentration_detail: 0
+带校准文本的维度数: 30  /  文本≠分数: 28
+  背离样例: ('高纯多晶硅','pricing_power','[HHI校准: HHI=2800>2500, 4→6]', 3.9)
+            ('抗辐射绝缘涂层材料','pricing_power','[HHI校准: HHI=1200<1500, 7→5]', 1.8)
+```
+
+**akshare 来源 0 条。** 也就是说「校准被 z-score 抹掉」这个描述虽然**恰好也成立**
+（下条详述），但它描述的是一条**从未被走到过**的路径。
+
+**排除了三种「取样/接线」解释**（都要动手验，不能靠推理）：
+
+- **功能比样本新？** 否。该功能 2026-07-03 上线（`25e250d`），而所有 A 股分析落在
+  07-06 … 09-10，**全部在其之后**。
+- **市场没接上？** 否。`phases.py:251` 确实按 market 传参。
+- **名字对不上？** 否。`光刻机`/`PCB`/`先进封装`/`存储芯片`/`光刻胶`/`MLCC`
+  在东财**概念板块**列表里逐字存在。
+
+三个真正的根因：
+
+1. **无重试，且先试最不稳的那个源。** `stock_board_industry_name_em` 实测
+   **连续 5–6 次 `RemoteDisconnected`**（`concept_name` 反而间歇可用，且**名字对得上的
+   正是概念板块**）。原实现 industry 在前、concept 在后、**且完全不重试** ——
+   一次抖动就静默判死一个板块。
+2. **`None` 被永久缓存。** 失败也写进 `_CONCENTRATION_CACHE`，而 `clear_cache()` 在
+   生产代码里**零调用方** —— 一次抖动 = 该板块在进程存续期内永久判死。
+3. **校准确实被 z-score 抹掉（28/30 实证）。**
+
+第 3 条的真根因不是「z-score 太晚」，而是**跑了两遍**：一遍在 `_analyze_node`
+（标准化**之前**），一遍在 `_calibrate_concentration`（**之后**）。前一遍是纯负债 ——
+它的分数**必然**被 `5+2z` 整维重写，只有那句「[HHI校准…]」留在 reasoning 里没被抹掉，
+于是报告同时出现「校准到 5」和实际 1.8。**删掉前一遍**既是根因修复，也是净删除；
+审查自己的 P1-1 建议的正是这条路（选项 a）。
+
+### 5B 改了什么
+
+| # | 改动 | 为什么 |
+|---|------|--------|
+| 1 | 删 `_analyze_node` / `_merge_sub_reports` 里的**标准化前校准**；`hhi_adjustments` 不再在那里构造 | 结果必被覆写，只留下自相矛盾的文本（28/30） |
+| 2 | `_check_hhi_consistency` **重写**：所有规则先跑完，**最后每个维度写一个戳**，取最终分 | 结构性缺陷 —— HHI 与 CR3 会先后命中同一维度，各自写戳时先写的记的是中间值 |
+| 3 | `retry_failed_nodes` 补上 `normalize_scores` + `_calibrate_concentration` | 它此前**从不**过标准化，产出与首批**两套不可比的尺度**混在同一次分析里 |
+| 4 | `_extract_keywords` 两份实现**合一** | 见下 |
+| 5 | `_match_boards` / `_fetch_cons` 抽出共用；**概念板块在前**；带重试；`regex=False` | 根因 1 与 2 |
+| 6 | 板块列表进程级缓存；失败**不写** `_CONCENTRATION_CACHE` | 每次 term 都重拉整张板块表，而它恰是最不稳的接口 |
+| 7 | `_try_akshare_search` 改走共用实现 | 顺带白拿重试/缓存/字面匹配 |
+| 8 | 校准幅度随来源缩放：`akshare` 2 分、`llm_estimate` 1 分 + 文本标「(估算)」 | 自估的 HHI 与真实算出的差一个量级，此前同权同效 |
+| 9 | 取不到真实数据时 prompt **明说**「无真实数据，保守估算」 | 此前留空 → LLM 照提示词里的示例 HHI=1800 编数，而下游把编出来的数**当锚点改分** |
+
+### 关键词两份实现分叉（实测，非推断）
+
+15 个真实环节名，**HEAD 上分叉 3 个**，方向全部是「落空」形态：
+
+```
+'高端光刻胶（ArF 浸没式）'  concentration: ['光刻胶（ArF 浸没式）']   supplier: ['光刻胶','ArF','浸没式']
+'电子特种气体 高纯'         concentration: ['电子特种气体 高纯']       supplier: ['电子特种气体','高纯']
+'光刻胶，显影液'           concentration: ['光刻胶，显影液']         supplier: ['光刻胶','显影液']
+当前实现分叉数: 0
+```
+
+**注意方向与我最初的判断相反**：持有**弱化版**的是 `industry_concentration`
+（它不切括号/空白、无长度上限），`supplier_search` 那份才是强的。
+弱的那份把整条 `光刻胶（ArF 浸没式）` 拿去 substring 匹配板块名 → **必然 0 命中，且静默**。
+两边匹配的是同一个东西（东财板块名），故统一到强的实现，放在无 LLM 依赖的
+`industry_concentration` 里，`supplier_search` 反过来委托它。
+
+**市值换算也分叉**（`_mcap_to_yi` 共用一个 vs `supplier_search` 里的内联版）：
+
+```
+'1,234,567,890'   共用=12.3457   内联=12.35   <<< 分叉（精度）
+'0'               共用=None     内联=0.0     <<< 分叉（0 市值被当成有效值参与 CR3/HHI）
+'-5'              共用=None     内联=-5.0    <<< 分叉
+```
+
+第 2 行是有后果的：`0.0` 会作为一家公司进 `_concentration_from_mcaps`，把 HHI 分母撑大、
+**摊薄真实集中度**。统一到共用实现后这三行都收口。
+
+### 5B 过程中自己改出来的缺陷（已修，留证）
+
+1. **枚举 repr 漏进台账**：我的重写写 `f"{s.dimension} ..."`，产出
+   `BottleneckDimension.PRICING_POWER 4→6`；旧代码写的是字面量。这条串会进日志，
+   已改 `getattr(s.dimension, "value", s.dimension)`。
+2. **`{:.0f}` 重犯本条要修的错**：探针实测 `光刻机 scarcity score=3.9 claims=4` ——
+   写「→4」正是「文本说的和旁边分数不是一回事」。改 `:g`，并把哨兵从
+   `round(s.score) == round(claimed)` **收紧为精确相等**。
+3. **一条测试建立在错误前提上**：`test_counter_reports_only_real_changes` 断言 `== 0`。
+   探针证明 `scarcity=4/pricing=4 + CR3=25/HHI=2800` 下 scarcity 是 `4→6→4`（净零、不记），
+   但 `pricing_power 4→6` **是真改动**。正确断言是 `== 1`，已按「哪一维真的动了」重写。
+4. **`test_us_stock_never_probes_the_source` 测错了层级**：直接调
+   `_fetch_real_concentration` 测的是「该函数自身不做市场判断」，与美股无关 ——
+   闸门在 `_analyze_node`。已改为驱动 `_analyze_node`，并加断言「美股不碰类级熔断计数」
+   （那是进程共享的，误加会**误伤同进程的 A 股分析**）。
+
+第 4 条值得单独记：**测试打到错误层级时，它给的是虚假安心** —— 绿是因为测的不是生产路径。
+
+### 5B 验证记录
+
+```
+python -m pytest tests/test_batch5b_sentinels.py tests/test_supplier_keywords.py -q
+                                    → 42 passed
+python -m pytest -q                 → 2512 passed, 5 skipped in 380.69s
+                                     （较 5A 的 2493 增 19 条哨兵）
+ruff check --no-cache <5 改动文件>   → 9 findings，**逐条比对 HEAD 基线**
+                                     （基线 15 条，消失的 6 条是我删掉的长 f-string E501）
+                                     新增 0 条
+```
+
+`hhi_adjustments` 已确认**无消费方**（grep 全仓：只写不读），故本轮只把它从
+「构造于错误时机」改为「构造于校准之后」，不动其下游。
+
+### 5C 假闭环收尾：源评分卡喂给简报 prompt 的一直是三个 `null`
+
+**生产实证（2026-09-28，`analyses.db`，375 张 scorecard）**
+
+```
+顶层含 quality_score/alpha_score/final_score 的: 0
+在 final.* 下齐全的:                            375
+```
+
+消费方 `strategy_engine._aggregate_source_scorecard` 读的是**顶层**，
+于是每次都返回 `{"quality_score": None, "alpha_score": None, "final_score": None}`。
+`json.dumps` 把 `None` 写成 `null` 不报错，LLM 简报 prompt 里那行「供应链评分」
+长期是三个 null，面板上也一直空着。**全程无异常，所以无人发现。**
+
+这是本工作区反复出现的同一类病：**静默的 `None` 比抛异常更坏** ——
+它长得像「这家公司没评分」，而不是「代码读错了地方」。
+
+**改法（生产者侧一处）**
+
+`final = sc.get("final") or {}` 起手，三个分依次从生产者实际写入的位置取；
+`final` 缺失的老记录退到 `overall_score` / `alpha.alpha_score`，
+`final_score` 确实没有就**如实为 None**，不回退到中性 5.0 把「不知道」
+装成「中等」（与 P1-2 同一原则）。
+
+只改这一处的原因是**核对过消费链**：该 dict 在 `:485` 被读进
+`source_scorecard_summary`，`:543` 渲染进 prompt，两者都在这个生产者下游。
+改生产者一处即覆盖三处。同类读取方（`web/api.py:862,879`、
+`web/reverse_api.py:162,171`、`web/streaming/phases.py:832`、
+`web/watchlist_api.py:440`）早已全部走 `final.*`，**这个函数是唯一的漏网者**。
+
+**验证**
+
+- 哨兵 5 条，`git stash` 实测**修复前 2 条必红**（非空断言那 2 条），修复后 5 条全绿。
+- 决定性证据不是测试，是**真实生产记录**：拿 NVO 那张 scorecard 驱动修复后的函数，
+  返回 `{'overall_score': 6.7, 'quality_score': 6.7, 'alpha_score': 6.7,
+  'final_score': 6.7, 'bottleneck_node': '预填充注射笔'}`，与 `final.*` 逐字一致。
+- 测试打到正确层级：驱动的是 `_aggregate_source_scorecard` 本身，即生产路径上那个函数。
+
+```
+python -m pytest tests/test_batch5c_sentinels.py tests/test_strategy_engine.py -q
+                                    → 25 passed
+python -m pytest -q                 → 2517 passed, 5 skipped in 419.69s
+                                     （较 5B 的 2512 增 5 条哨兵）
+ruff check --no-cache <strategy_engine.py>  → 5 findings
+ruff check --no-cache <HEAD 基线>           → 5 findings，**同一集合，新增 0 条**
+tests/test_batch5c_sentinels.py             → ruff 干净
+```
+
+## Batch 6 — 覆盖项（6A 节点约束 / 6B 供需锚 / 6C 候选来源 / 6D 强制分布 / 6E 主营规则）
+
+| 项 | 结论 | 代码改动 |
+|---|---|---|
+| 6A | 审查前提错（`IndustryNode` 无 notes）；真问题是 13960 条 `link.notes` 零读取方 → 接入打分 prompt，覆盖 0 → 99.0% | `models.py` / `decomposer.py` / `bottleneck.py` |
+| 6B | 审查的 akshare 财报锚生产不可达 → 用 6A 采到的扩产周期作锚，无锚时明说「保守打分」 | `bottleneck.py` |
+| 6C | 同层扩池实测是互补件、+199 家噪声 → 不做；改为消费 `sources`（截断排序 + 评估 prompt 标注） | `supplier_search.py` / `supplier_eval.py` |
+| 6D | 删强制分布；中心平移会抹真信号、撞绝对阈值 → 不做 | `prompts/supplier_eval.md` |
+| 6E | 主营占比规则在 20 个生产样本上 ≥3 个误判 → 不上硬门禁 | 无 |
+
+### 6A 链节点约束字段：审查的前提错了，真正的问题比它说的更大
+
+**审查原话**：五项约束事实（供应结构 / 扩产周期 / 认证周期 / 地理集中度 / 出口管制）
+「此前只能靠 LLM 在 `notes` 自由文本里带一句」，建议结构化。
+
+**逐条核实（2026-09-28，生产 `analyses.db`，32 条链）**
+
+```
+IndustryNode.model_fields 里有 notes 吗？     没有（ChainLink 才有）
+8484 个节点里带任一约束字段的：               0
+14064 条 link 里 notes 非空的：               13960
+全仓读取 ChainLink.notes 的代码：             0 处
+```
+
+审查错在两层：`IndustryNode` **没有 `notes` 字段**，所以不是「有位置但不结构化」，
+而是**根本没地方放**；而真正装着约束事实的是 `ChainLink.notes` ——
+「高端纯化填料被GE(现Cytiva)、Waters等外资厂商垄断」「高端品种高度依赖进口」——
+拆解 prompt 一直在要，存进了 DB，**然后没有任何人读**。又一个假闭环。
+
+**改法（三处）**
+
+1. `models.py` — `IndustryNode` 加五个字段，缺失一律 `None`（未采集），不用默认值冒充。
+2. `decomposer.py` — prompt schema 加五项 + 「没把握就填 null」；四个归一函数：
+   - 周期月数 `0 → None`（扩产周期不可能为 0，存 0 是**反向事实**）；
+     容忍「约 18 个月」「2 年」（年 ×12，不换算就是 12 倍口径错）；
+   - 枚举只做**精确别名匹配**，不做子串猜测（「供不应求」含「不应」，
+     子串匹配会把一句话读成结论）；剥括号以收住 LLM 照抄的 `single(独家)`。
+3. `bottleneck._build_context` — **消费侧**，本批关键。只加字段不接线，
+   就是再造一个假闭环。把五个结构化字段**和** `ChainLink.notes/alternatives`
+   都接进实际发给 LLM 的打分 prompt；什么都没有时整段不出现（空标题会被读成
+   「已确认无约束」）。
+
+**为什么接 `link.notes` 比加字段更要紧**
+
+新字段要等用户**重新拆解**才会有值；而 `phases.py:156`（共享模板）与 `:180`
+（14 天缓存）都是反序列化旧链后直接跑 `_analyze_node`。接上 `link.notes`，
+**库里已有的链立即受益，不用重拆**。
+
+**真实数据回放（生产 32 条链原样喂修复后的 `_build_context`）**
+
+```
+                         修复前（容器现网代码）  修复后
+prompt 带约束事实的节点   0 / 8484               8398 / 8484 (99.0%)
+  其中 拆解备注                                  8381
+  其中 已知替代方案                              7526
+含完全重复行的节点                               0（去重前 1282）
+```
+
+**回放揪出的第二个问题**：通用名节点（如「控制系统」）在多个子树里撞名，
+单节点出边最多 24 条，初版逐条照搬 → 1282 个节点出现重复行，还有互相矛盾的
+「替代方案 1 个 / 2 个 / 3 个」。改为 notes 去重、上限 5 条（覆盖 97% 节点），
+alternatives 合为一行（多值时写区间并注明口径不一）。撞名本身要在拆解侧解决，
+不在本批范围，已用 `ponytail:` 注释标出上限与升级路径。
+
+**自己踩到、自己修掉的缺陷**
+
+- `"18个月"` 被旧的 `_safe_int(default=-1)` 吞成 None —— 正是本批要根除的
+  静默丢数；改为正则取数 + 年换算。
+- `"认证周期" not in prompt` 假红：DIMENSION_DESC 本来就有这四个字。
+  改标签为「新进入者认证周期」，断言改为**带冒号的标签行**。
+- `alternatives` 被错绑在 `notes` 非空的条件下 —— 两个独立事实共用一个守卫，
+  生产里有 104 条 link 会因此静默丢掉替代方案数。拆成两个独立判断。
+
+**验证**
+
+- 哨兵 41 条。非空性双向实证：(a) 回退到 HEAD / 回退到「只接字段不接 notes」，
+  正向哨兵转红；(b) 注入「总是输出标题」「不按 upstream 过滤」的草率实现，
+  反向哨兵转红。
+- 预设链 JSON（ev/gpu/robot）与缺字段的旧记录都能正常反序列化（→ None）。
+
+```
+python -m pytest tests/test_batch6a_sentinels.py -q → 41 passed
+python -m pytest -q                                  → 2557 passed, 5 skipped, 1 failed
+                                                        （失败项 test_chain_us_candidates_validated 是
+                                                         活网 yfinance 取 NVDA 报价，单跑 3/3 通过，与 6A 无关）
+ruff（改动 3 文件）基线 22 → 16，消失的 6 条是被重写掉的 E501，新增 0 条
+tests/test_batch6a_sentinels.py                      → ruff 干净
+```
+
+### 6B 供需缺口锚点：审查建议的数据路在生产走不通，改用 6A 已采到的事实
+
+**审查原话（C-2 / P2-2）**：`supply_demand_gap` 权重最高（0.25）却是唯一无数据锚的维度；
+建议 A 股接存货周转 / 在建工程 / 分产品营收增速 / 价格趋势，美股在 prompt 标注「无数据锚，请保守打分」。
+
+**逐条核实（2026-09-28）**
+
+- 「唯一无锚」**属实**：`_check_hhi_consistency` 只动 scarcity / pricing_power。
+- 更糟的一点审查没说：集中度块在无数据时会**明说**「无真实数据，请保守估算」，
+  而供需缺口连这句都没有 —— LLM 只能照着 prompt 里的示例 JSON 值编。
+- 审查建议的 A 股数据路**在生产走不通**：容器内实测 `compute_concentration`（同一套
+  akshare 板块链路）对 光刻胶 / 锂电池隔膜 / 多肽原料药 / HBM **4/4 返回 None，每次约 22 秒**；
+  生产 8437 份瓶颈报告里 `cr3_source="akshare"` 为 **0**。
+- 且生产 32 次分析中 **24 次是美股** —— A 股优先的锚点对大多数分析本就不生效。
+
+**改法（`_analyze_node` 一处）**
+
+system prompt 的 supply_demand_gap 刻度本来就按「扩产周期」分档（1-2 年 / 2-3 年 / >3 年），
+缺的只是把事实递过去。6A 让拆解阶段采集了 `capacity_lead_time_months`，于是：
+
+- 有扩产周期 → `## 供需缺口锚点`，写明「估计值，非披露数据」，要求对照刻度打分、不符须说明；
+- 没有 → `## 供需缺口：无数据锚`，要求保守打分并注明「估算」（即审查对美股的建议，
+  现在对所有无数据节点生效，不分市场）。
+- 扩产周期从 6A 的「结构性事实」段移出，只出现在锚点段一次，不在同一 prompt 里说两遍。
+
+**刻意没做**：新增 `_compute_supply_demand_anchor` 的财报四路数据。数据源在生产不可达，
+接上只会多一次 22 秒超时后降级回同一句「无数据锚」。已用 `ponytail:` 注释标出：
+真实产能利用率数据源接通后再加第二路锚。
+
+**已知局限**：锚点是 LLM 拆解时的**估计**，不是披露数据。它的作用是让打分与拆解
+自洽、让「无数据」被明说，而不是替代真实供需数据。老链（6A 之前拆解）没有这个字段，
+全部走「无数据锚」分支 —— 这正是它们的真实状态。
+
+**验证**
+
+- 哨兵 2 条（`TestSupplyDemandAnchor`）。非空性：去掉 `{sdg_block}` 后 **2/2 转红**，恢复后转绿。
+- `test_lead_time_becomes_the_anchor` 同时断言「30 个月」全 prompt 只出现一次，防回归成双写。
+
+```
+python -m pytest tests/test_batch6a_sentinels.py tests/test_bottleneck.py -q → 58 passed
+ruff bottleneck.py → 5 findings，与 6A 后同一集合，新增 0
+```
+
+### 6C 候选池：审查要的「扩池」在生产数据上是负收益，真正的假闭环是 `sources` 没人读
+
+**审查原话（C-5 / P2-8）**：`_extract_chain_candidates` 只取本节点 + 直接上游，应扩到同层竞争 +
+2 跳上游；并与真实板块成分股交叉核对，两边都有的升权、只在一边的标注来源分歧。
+
+**用生产 32 条链（8452 个非根节点）重放后逐条核实**
+
+| 方案 | 实测 | 结论 |
+|---|---|---|
+| 同层节点并入 | 新增候选**中位数 +199 家**、最多 +629；抽样「注射笔用弹簧」的同层是针头/活塞/外壳/剂量控制 —— **互补件，不是竞品** | 不做。`layer` 是深度，不是「同一环节」；并入等于把整层公司灌进一个节点 |
+| 2 跳上游并入 | 仅 21.2% 节点有增量；本节点+直接上游为 0 家、而 2 跳能补上的**只有 13 个节点** | 不做。收益面太窄，且上游的上游是供应商的供应商，与本环节瓶颈关系更弱 |
+| 来源交叉 / 升权 | `_merge_supplier` 已按 ticker 写 `sources`（P1-6），但**全仓零读取方**；`search()` 末尾按合并顺序（LLM 优先）`[:max_results]` 截断 | **这才是真缺口**，做 |
+
+另一个审查没提的事实：生产 `supplier_scorecards` 里被选中的瓶颈节点名有 **195/310 是逗号拼接的
+多节点名**（`get_node` 查不到），这些节点图谱源本来就取不到候选 —— 扩 `target_nodes` 对它们零效果。
+属于拆解/合并侧的命名问题，不在本批范围，记录备查。
+
+**改法（两处消费 `sources`）**
+
+1. `search()` 截断前稳定排序：有外部数据（`akshare` 板块成分股 / `gangtise` 指标选股）核对过的票排前，
+   其次按命中源数。`chain` 也是拆解阶段 LLM 自报，**不算外部核对** —— `llm+chain` 双命中不得冒充交叉验证。
+   同档内保持原 LLM 优先级。`EXTERNAL_SOURCES` 常量定义在 `supplier_search.py`。
+2. 评估 prompt 基本面加一行「候选来源」：含外部核对 / 均为 LLM 自报（环节归属未经外部数据核对）。
+   `sources` 为空（用户手动输入 ticker、反向分析等不经检索的路径）**不标**，免得把用户指定误标成 LLM 自报。
+
+**已知局限**：生产现存 375 张评分卡的 `source` 只有 `llm`/`chain`，外部源在美股天然为空、A 股 akshare
+板块检索在生产基本不可达（见 6B）。所以本改动在当前生产上的主要效果是**评估 prompt 如实告知「环节归属未经核对」**；
+排序升权要等外部源真正命中时才生效 —— 这是正确的顺序：先让系统说真话，数据源接通后自动受益。
+
+**验证**
+
+- 哨兵 6 条（`tests/test_batch6c_sentinels.py`，gangtise 已 monkeypatch 不碰网络）。
+- 非空性三向：去掉排序 → 截断哨兵 **2 红**；换成草率的「只按源数排」→ `llm+chain` 冒充外部的哨兵 **红**；
+  去掉 prompt 标注 → prompt 哨兵 **2 红**。均恢复后转绿。
+- ruff：`supplier_search.py` / `supplier_eval.py` 新增 0 条。
+
+### 6D 中心校准：删掉强制分布；**不做**批次中心平移（生产数据证明它会抹掉真信号）
+
+**审查原话（B-1 / P1-10）**：供应商层无中心校准，LLM 偏严时 quality 系统性偏低；又因强制分布要求
+与「独立评分」冲突，逼出来的极端分落在 moat 维度上。
+
+**删强制分布：做。** `supplier_eval.md` 的「9 个维度至少 2 个 ≤4 或 ≥8 / 全在 5-7 分说明不够深入」两条删除，
+换成明确的反向指令「不要为了拉开差异编造极端分」。**同段 6 条数据触发的锚定规则保留**（PE>100 → valuation≤4 等）——
+它们由真实数据触发，是锚，不是凑分。生产 375 张卡里有 8 张「核心 5 维 0 极端、极端分全靠 moat 凑满 2 个」，
+与审查描述的机制吻合。
+
+**中心校准：不做。生产实测三条理由**
+
+1. **偏移里有真信号**：22 次分析的 quality 均值跨 5.62 ~ 7.77。把每批平移到同一中心，等于断言「每个产业链的
+   供应商平均质量相同」—— A 股小市值链与美股 AI 算力链的差距会被抹平。区分「裁判偏严」与「这批确实弱」需要
+   **每批评一组固定参照公司**（额外 LLM 成本 + 参照集维护），是设计项，不是补丁。
+2. **核心维度已有绝对锚**：`financial_health` / `valuation` 以 0.7、`market_position` 以 0.5 的权重与真实数据
+   `_blend`（`supplier_eval.py:457-459`），平移会把这部分绝对锚一起挪走。
+3. **下游有绝对阈值**：`ShortlistConfig.min_overall_score`（`phases.py:599`）与「高质量」标签 `overall_score >= 7`
+   （`api.py:427`）都按绝对分读；按批次平移会让同一家公司在不同分析里过/不过线。
+   重放：把每批 quality 均值平移到 6.5 后，22 次分析中 **11 次排序变化、2 次 Top5 换人** —— 改动不小，却没有依据说新排序更对。
+
+**已知局限（如实记录）**：`FinalScorer` 里 alpha 的 `bottleneck_score` 来自 z-score 过的瓶颈层、quality 是绝对分，
+两个因子的尺度来源确实不同。本批没有解决它，只是拒绝用一个会引入新错误的办法去「解决」。
+
+**验证**：哨兵 2 条（`tests/test_batch6d_sentinels.py`）—— 强制分布文字不在、6 条数据锚仍在、反向指令在。
+非空性：还原 prompt → **2/2 红**，恢复后转绿。
+
+### 6E `main_business` → FactCheck 可判定规则：用生产数据试了阈值，**结论是不上**
+
+上一轮复核（P2-4）的结论是「缺的不是接线，是可判定规则」。本批按约定由我来定规则与阈值，
+先在生产数据上试，再决定上不上。
+
+**覆盖面**：生产 375 张评分卡里 `main_business.segments` 非空的只有 **20 张（5.3%）**，全部是 A 股 Gangtise 路径；
+美股为 0。
+
+**试的规则**：主营分部名与瓶颈节点名做 2-gram 重叠（剔除「系统/设备/产品/业务」等通用字），
+命中分部营收占比 < 阈值 → 「营收不来自瓶颈环节」。20 张卡的重放结果（节选）：
+
+| 公司 | 瓶颈节点 | 匹配占比 | 实际 |
+|---|---|---|---|
+| 中微公司 | 蚀刻设备 | **0%** | 主营就是刻蚀设备，但分部只有一行「主营业务」—— **误判** |
+| 宇瞳光学 | 光学镜头 | **2.3%** | 「安防类 50.55%」就是安防镜头 —— **误判** |
+| 新益昌 | 精密运动控制系统 | 0% | 分部按下游（LED/半导体设备）切，不按部件切 —— 无法判定 |
+| 亚翔集成 | 离子注入机 | 0% | 洁净室工程，确实不相关 —— 正确 |
+| 扬杰科技 | 功率半导体 | 97.8% | 正确 |
+
+**不上的理由**：分部口径是公司自定的（按产品 / 按下游 / 只有一行「主营业务」），与产业链节点名不在同一套词表里，
+字符串匹配在 20 个样本里就有 ≥3 个明确误判。而 FactCheck 的输出是**硬门禁**（fatal → REJECT、mismatch 累计 → REVIEW），
+一条会冤枉中微公司的规则比没有规则更坏 —— 正是本工作区反复在堵的「规则没数据支撑却产生确定性结论」。
+
+**保持现状**：`main_business` 继续渲染进评估 prompt（`supplier_eval.py:235-245`），由 LLM 做语义判断 —— 这是它当前唯一可靠的用法。
+**什么时候再做**：分部 → 产业链节点有了映射表（或 Gangtise 提供按产品细分的口径），再把占比阈值规则接进 `_CLAIM_RULES`。
+（「不上」是我的判断，可推翻；推翻时上面的重放脚本可直接复用。）
+
+本项无代码改动。
+
+### Batch 6 收口门禁
+
+```
+python -m pytest -q  → 2568 passed, 5 skipped in 486.77s（6A~6D 全部改动后的最终状态）
+```

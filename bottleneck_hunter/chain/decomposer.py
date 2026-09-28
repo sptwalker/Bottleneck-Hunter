@@ -38,6 +38,92 @@ def _safe_int(val, default: int = 0) -> int:
         return default
 
 
+# ── 约束类字段（P2-1）的归一 ────────────────────────────────────────
+# 统一返回 None 表示「未采集」。LLM 常用 "unknown" / "" / "N/A" / 0 表达「不知道」，
+# 若原样存下，下游无法区分「不知道」与「真的是 0 个月」。全部折叠到 None。
+
+_STRUCTURES = {"single": "single", "oligopoly": "oligopoly", "multi": "multi"}
+_STRUCTURE_ALIASES = {
+    "monopoly": "single", "sole": "single", "独家": "single", "单一": "single",
+    "寡头": "oligopoly", "双寡头": "oligopoly", "duopoly": "oligopoly",
+    "多家": "multi", "竞争": "multi", "分散": "multi", "competitive": "multi",
+}
+_RISKS = {"high": "high", "medium": "medium", "low": "low"}
+_RISK_ALIASES = {"高": "high", "中": "medium", "低": "low", "none": "low", "无": "low"}
+
+_NULLISH = {"", "unknown", "n/a", "na", "none", "null", "未知", "不确定", "不详", "-"}
+
+
+def _nullish(val) -> bool:
+    """LLM 表达「不知道」的各种写法（**不含**数字 0）。
+
+    0 只在 `_safe_int_or_none` 里当「不知道」处理 —— 那是周期月数特有的语义
+    （认证/扩产周期不可能是 0）。字符串字段没有这个特例。
+    """
+    return str(val).strip().lower() in _NULLISH
+
+
+def _safe_str_or_none(val) -> str | None:
+    if val is None or _nullish(val):
+        return None
+    s = str(val).strip()
+    return s or None
+
+
+_MONTHS_RE = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+def _safe_int_or_none(val) -> int | None:
+    """周期月数。0 与「取不到数」都 → None。
+
+    0 视为「不知道」而非「零个月」—— 认证/扩产周期不可能是 0，LLM 写 0 时
+    表达的是「没有这个信息」。存成 0 不是少一条数据，是**反向事实**：
+    下游会读成「一扩产就能上量」，恰是卡脖子判断的反面。
+
+    容忍 LLM 的自然写法（prompt 要的是纯整数，但它常写「约 18 个月」「2 年」）：
+    取第一个数字；出现「年」就 ×12 —— 不换算的话「2 年」会记成 2 个月，
+    是 12 倍的口径错误，比 None 更坏。
+    """
+    if val is None or _nullish(val):
+        return None
+    s = str(val).strip()
+    m = _MONTHS_RE.search(s)
+    if not m:
+        return None
+    n = float(m.group(1))
+    if "年" in s:
+        n *= 12
+    n = int(round(n))
+    return n if n > 0 else None
+
+
+def _safe_enum_or_none(val, allowed: set[str], aliases: dict[str, str]) -> str | None:
+    """把 LLM 的自由写法折叠到枚举；认不出就 None（= 未采集）。
+
+    只做**别名精确匹配**，不做子串猜测：`"供不应求"` 里含 `"不应"`，
+    却和供应结构毫无关系。子串匹配在枚举上太容易把一句话读成肯定结论——
+    那比 None 更坏，因为下游会当真。
+    但括号里的补充说明要剥掉：prompt 里写的就是 `single(独家)`，
+    LLM 照抄整串是常见行为，剥完再匹配才收得住。
+    """
+    if val is None or _nullish(val):
+        return None
+    key = re.sub(r"[（(].*?[)）]|[\s/、,，]+", "", str(val)).strip().lower()
+    if not key:
+        return None
+    if key in allowed:
+        return key
+    return aliases.get(key)
+
+
+def _safe_structure(val) -> str | None:
+    return _safe_enum_or_none(val, _STRUCTURES, _STRUCTURE_ALIASES)
+
+
+def _safe_risk(val) -> str | None:
+    return _safe_enum_or_none(val, _RISKS, _RISK_ALIASES)
+
+
 def _safe_float(val, default: float = 0.5) -> float:
     if isinstance(val, (int, float)):
         return float(val)
@@ -322,6 +408,14 @@ class ChainDecomposer:
                             upstream_deps=child_data.get("upstream_deps", []),
                             downstream_deps=[parent.name],
                             representative_companies=companies,
+                            # 约束类字段（P2-1）：解析不到就 None，不塞默认值
+                            supply_structure=_safe_structure(child_data.get("supply_structure")),
+                            capacity_lead_time_months=_safe_int_or_none(
+                                child_data.get("capacity_lead_time_months")),
+                            qualification_cycle_months=_safe_int_or_none(
+                                child_data.get("qualification_cycle_months")),
+                            geo_concentration=_safe_str_or_none(child_data.get("geo_concentration")),
+                            export_control_risk=_safe_risk(child_data.get("export_control_risk")),
                         )
                         graph.nodes.append(child)
                         existing_names.append(child_name)
@@ -443,12 +537,22 @@ class ChainDecomposer:
 - upstream_deps: 该环节的上游依赖（名称列表）
 - dependency: 对下游的重要程度 0-1
 - alternatives: 已知替代方案数量
+- supply_structure: 供应结构，四选一: single(全球独家)/oligopoly(寡头2-3家)/multi(多家竞争)/unknown
+- capacity_lead_time_months: 该环节新建产能到量产需要几个月（整数）。不确定填 null
+- qualification_cycle_months: 下游客户认证一个新供应商需要几个月（整数）。不确定填 null
+- geo_concentration: 地理集中度，如"日本90%"、"台韩合计85%"。无集中特征填 null
+- export_control_risk: 出口管制/政策风险，四选一: high/medium/low/unknown
 - notes: 补充说明
 - representative_companies: 该环节最具代表性的上市公司列表（2-4家），每个元素包含 name（公司简称）和 code（股票代码）
   - 优先推荐A股上市公司，code 格式为6位数字（如"002371"，沪市6开头、深市0或3开头、北交所4或8开头）
   - 若该环节主要为美股上市公司，code 为字母ticker（如"NVDA"）
   - 若该环节无上市公司或不确定，code 留空字符串
   - 务必确保推荐的公司确实在该环节有核心业务，不要为了凑数而推荐不相关的公司
+
+约束类字段（supply_structure / capacity_lead_time_months / qualification_cycle_months /
+geo_concentration / export_control_risk）是你对**这个环节本身**的客观判断，不是评分 ——
+这些是判断「该环节会不会被卡脖子」的直接依据，请如实填写；**没有把握的填 null，
+不要为了填满而编造**。数字字段填整数月份（如 18），不要填区间或文字。
 {market_note}
 
 只返回 JSON 数组，不要其他文字。"""

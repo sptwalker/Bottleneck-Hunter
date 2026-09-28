@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import logging
+from datetime import date
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
@@ -27,6 +29,18 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+def _sample_expected_date() -> str:
+    """prompt 里示例用日期：今天 + 2 个季度，取该季度最后一天。
+
+    「未来 6-18 个月」是相对表述，示例若写死年份就会过期 —— 实测旧示例
+    还是 `2025Q3`，既教 LLM 用下游解析不了的格式，又已过期一年。
+    """
+    today = date.today()
+    m = today.month + 6
+    y, q = today.year + (m - 1) // 12, (m - 1) % 12 // 3 + 1
+    return f"{y:04d}-{q * 3:02d}-{calendar.monthrange(y, q * 3)[1]:02d}"
 
 
 def _load_prompt(name: str) -> str:
@@ -72,6 +86,10 @@ class CatalystAnalyzer:
         lang_note = "请用中文回答" if self.language == "zh" else "Answer in English"
         report_info = _extract_report_keywords(financial_snapshot)
 
+        # 示例日期取「今天 + 2 个季度」，不写死 —— 写死的年份会过期，
+        # 而 prompt 里那条「未来 6-18 个月」的时间窗是相对的，示例必须同样相对。
+        sample_date = _sample_expected_date()
+
         trend_block = ""
         if financial_snapshot and financial_snapshot.trend and financial_snapshot.trend.trend_summary:
             trend_block = f"\n- 财务趋势: {financial_snapshot.trend.trend_summary}"
@@ -95,13 +113,13 @@ class CatalystAnalyzer:
 
 请识别该供应商未来6-18个月内最重要的催化剂事件（3-5个），评估每个事件的兑现时间、影响力和置信度，并给出整体紧迫度评分。
 
-返回严格 JSON:
+返回严格 JSON（注意：下面的数值与日期仅为格式参考，你必须根据实际情况给出完全不同的值）:
 {{
   "events": [
     {{
       "event_type": "capacity",
       "description": "新产线投产，产能翻倍",
-      "expected_date": "2025Q3",
+      "expected_date": "{sample_date}",
       "confidence": 8,
       "impact_score": 7
     }}

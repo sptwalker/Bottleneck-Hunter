@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import calendar
 import logging
+import re
 from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_serializer
@@ -40,6 +42,34 @@ class IndustryNode(BaseModel):
     representative_companies: list[dict] = Field(
         default_factory=list,
         description="Representative companies: [{name, code (stock ticker, may be empty)}]",
+    )
+    # ── 约束类字段（P2-1）─────────────────────────────────────────────
+    # 这五项是「这个环节会不会被卡脖子」的直接判据，且**全部由拆解阶段可知** ——
+    # 丢掉之后，下游分析层拿不到任何结构性事实，只能重新从 0 猜。
+    #
+    # 订正：审查称它们「此前靠 LLM 在 `notes` 自由文本里带一句」——**`IndustryNode`
+    # 没有 `notes` 字段**（`ChainLink` 才有）。生产实测：8484 个节点，五项字段
+    # 一个都没有（0/8484）。所以不是「有位置放但不结构化」，是**根本没地方放**。
+    # 自由文本那条通路确实存在，但在 link 上，见 `bottleneck._build_context`
+    # 现在把两处都接进了打分 prompt。
+    #
+    # 缺失一律用 None（= 未采集），**不用默认值冒充**：0 个月扩产周期和「不知道」
+    # 是完全不同的结论，正如 `AlphaScore` 不用 5.0 表示无数据。
+    supply_structure: str | None = Field(
+        default=None,
+        description="供应结构: single(独家) / oligopoly(寡头 2-3 家) / multi(多家竞争) / unknown",
+    )
+    capacity_lead_time_months: int | None = Field(
+        default=None, ge=0, description="产能扩张周期（月）—— 供需缺口能持续多久"
+    )
+    qualification_cycle_months: int | None = Field(
+        default=None, ge=0, description="新进入者认证周期（月）—— 半导体/医药/航空的核心壁垒"
+    )
+    geo_concentration: str | None = Field(
+        default=None, description="地理集中度，如「日本 90%」—— 单一地域集中的尾部风险"
+    )
+    export_control_risk: str | None = Field(
+        default=None, description="出口管制/政策风险: high / medium / low / unknown"
     )
 
     @field_validator("key_parameters", "upstream_deps", "downstream_deps", mode="before")
@@ -306,14 +336,117 @@ class SmartMoneySignal(BaseModel):
     details: list[str] = Field(default_factory=list, description="信号明细说明")
 
 
+# 模糊期间 → 该期间的最后一天。「预期在某季度兑现」用期末表示：到期日算得越晚，
+# 越不会把还没到期的催化剂误判成「已过期」，方向是保守的。
+_PERIOD_END = {
+    "Q1": (3, 31), "Q2": (6, 30), "Q3": (9, 30), "Q4": (12, 31),
+    "H1": (6, 30), "H2": (12, 31),
+    "上半年": (6, 30), "下半年": (12, 31),
+}
+_CN_QUARTER = {"一": 1, "二": 2, "三": 3, "四": 4, "1": 1, "2": 2, "3": 3, "4": 4}
+
+# `2025Q3-Q4` / `2025H2-H1` 这类简写里，后半段的年份被省略了。先补全再解析，
+# 否则 `Q4` 因无年份被整段丢弃，区间被当成单点 Q3 —— 到期日凭空提前一个季度。
+# 中英混写的 `2025年Q3-Q4` 同样要吃进来，否则同一个 bug 会换个写法复发。
+_PERIOD_TOKEN = re.compile(r"(\d{4})\s*年?\s*([QHqh])\s*([1-4])|([QHqh])\s*([1-4])")
+
+
+def _expand_bare_periods(s: str) -> str:
+    """给省略年份的期间记号补上前面出现过的年份。"""
+    last_year = ""
+
+    def _sub(m: re.Match) -> str:
+        nonlocal last_year
+        if m.group(1):
+            last_year = m.group(1)
+            return m.group(0)
+        return f"{last_year}{m.group(4)}{m.group(5)}" if last_year else m.group(0)
+
+    return _PERIOD_TOKEN.sub(_sub, s)
+
+
+def _normalize_expected_date(raw) -> str:
+    """把 LLM 写的模糊时间归一成 YYYY-MM-DD；无从解析则返回 ""（= 无日期，不臆测）。
+
+    实测生产库里 `2025Q3`(338) / `2025Q4`(272) / `2025H2` / `2025年下半年` / `2025-08`
+    这类写法占了绝大多数，而所有下游（`_days_until_date`、`_date_diff`、各种 [:10]
+    切片）都只认 ISO —— 于是它们**静默解析失败**，等同于「这家没有催化剂」。
+    同类写法按期末折算后取**最晚**的一个（`2025Q4-2026Q1` → 2026-03-31），
+    与「6-18 个月内」的时间窗语义一致。
+    """
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    s = _expand_bare_periods(s)
+    candidates: list[str] = []
+    for m in re.finditer(r"(\d{4})-(\d{1,2})-(\d{1,2})", s):          # 2025-09-30
+        y, mo, d = (int(g) for g in m.groups())
+        if 1 <= mo <= 12 and 1 <= d <= _last_day(y, mo):
+            candidates.append(f"{y:04d}-{mo:02d}-{d:02d}")
+    for m in re.finditer(r"(\d{4})-(\d{1,2})(?![\d-])", s):            # 2025-08（月末）
+        y, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12:
+            candidates.append(f"{y:04d}-{mo:02d}-{_last_day(y, mo):02d}")
+    for m in re.finditer(r"(\d{4})\s*年?\s*[Qq]([1-4])", s):           # 2025Q3 / 2025年Q3
+        candidates.append(_period_end(int(m.group(1)), f"Q{m.group(2)}"))
+    for m in re.finditer(r"(\d{4})\s*年?\s*[Hh]([12])", s):            # 2025H2 / 2025年H2
+        candidates.append(_period_end(int(m.group(1)), f"H{m.group(2)}"))
+    for m in re.finditer(r"(\d{4})\s*年\s*(\d{1,2})\s*月", s):          # 2025年5月
+        y, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12:
+            candidates.append(f"{y:04d}-{mo:02d}-{_last_day(y, mo):02d}")
+    for m in re.finditer(r"(\d{4})\s*年\s*(\d{1,2})\s*月?\s*[-~至到]\s*(\d{1,2})\s*月", s):  # 2025年7-8月 / 7月至8月
+        y, mo = int(m.group(1)), int(m.group(3))                        # 取后一个月（保守方向）
+        if 1 <= mo <= 12:
+            candidates.append(f"{y:04d}-{mo:02d}-{_last_day(y, mo):02d}")
+    for m in re.finditer(r"(\d{4})\s*年\s*(上半年|下半年)", s):          # 2025年下半年
+        candidates.append(_period_end(int(m.group(1)), m.group(2)))
+    for m in re.finditer(r"(\d{4})\s*年?\s*第?\s*([1-4一二三四])\s*季度", s):  # 2025年第3季度
+        q = _CN_QUARTER.get(m.group(2))
+        if q:
+            candidates.append(_period_end(int(m.group(1)), f"Q{q}"))
+    # 整年写法（末位兜底）：`2025全年` / `2025年内` / `2025年` / `2025-2026年`。
+    # 只在上面的精确写法**一个都没匹配到**时才启用 —— 否则 `2025Q3` 会多出
+    # 一个 2025-12-31 的候选，被 `max` 选中，季度末语义被整年末盖掉。
+    # 末尾断言排除「2026万元」这类**数量**（4 位数跟着单位），否则金额会被读成日期。
+    if not any(candidates):
+        for m in re.finditer(r"(?<!\d)(\d{4})(?!\d)\s*年?(?![万亿个%元股])", s):
+            y = int(m.group(1))
+            if 1990 <= y <= 2100:
+                candidates.append(f"{y:04d}-12-31")
+    if not candidates:
+        logger.debug("expected_date 无法解析为日期: %r", raw)
+        return ""
+    return max(c for c in candidates if c)
+
+
+def _last_day(year: int, month: int) -> int:
+    return calendar.monthrange(year, month)[1]
+
+
+def _period_end(year: int, period: str) -> str:
+    """模糊期间 → 期末 ISO 日期；未知期间返回 ""。"""
+    mmdd = _PERIOD_END.get(period.upper() if period.isascii() else period)
+    if not mmdd:
+        return ""
+    return f"{year:04d}-{mmdd[0]:02d}-{mmdd[1]:02d}"
+
+
 class CatalystEvent(BaseModel):
     """单个催化剂事件。"""
 
     event_type: str = Field(description="催化剂类型: policy/capacity/technology/order/earnings")
     description: str = Field(description="事件描述")
-    expected_date: str = Field(default="", description="预期时间 e.g. 2025Q3 或 2025-09")
+    expected_date: str = Field(default="", description="预期日期 YYYY-MM-DD（写入时由 validator 归一）")
     confidence: float = Field(default=5.0, ge=0, le=10, description="置信度 0-10")
     impact_score: float = Field(default=5.0, ge=0, le=10, description="影响力 0-10")
+
+    @field_validator("expected_date", mode="before")
+    @classmethod
+    def _normalize_date(cls, v):
+        return _normalize_expected_date(v)
 
 
 class CatalystTimeline(BaseModel):

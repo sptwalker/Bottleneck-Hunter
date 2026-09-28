@@ -111,29 +111,7 @@ DIMENSION_DESC = {
 }
 
 
-# 受真实集中度锚定的维度。
-# scarcity / pricing_power 是 HHI/CR3 一致性校准的作用对象，而真实 CR3/HHI 的
-# 绝对锚定正是 z-score 做不到的事 —— 两者互补而非竞争。若让 z-score 在后覆盖，
-# 辛苦取到的真实数据在 ≥3 个环节时会整批被重写，报告里那句「[校准: 6→4]」
-# 还与实际分数不一致（文本与数值背离，比不校准更误导）。
-_ANCHORED_DIMS = ("scarcity", "pricing_power")
-
-
-def _anchored_dims(reports: list[BottleneckReport]) -> set[str]:
-    """批次内存在真实集中度数据（cr3_source=akshare）时，返回受真实锚定的维度名。
-
-    无真实数据时返回空集 —— 此时 HHI/CR3 全为 LLM 自估，校准幅度减半（见
-    `_check_hhi_consistency`），但仍值得保留该维度不被 z-score 抹平。
-    """
-    if not any(r.cr3_source == "akshare" for r in reports):
-        return set()
-    return set(_ANCHORED_DIMS)
-
-
-def normalize_scores(
-    reports: list[BottleneckReport],
-    skip_dims: set[str] | None = None,
-) -> list[BottleneckReport]:
+def normalize_scores(reports: list[BottleneckReport]) -> list[BottleneckReport]:
     """对同一批次的评分进行 z-score 标准化，消除 LLM 评分偏差。
 
     对每个维度独立做 z-score，然后重新映射回 0-10 区间。
@@ -141,26 +119,17 @@ def normalize_scores(
     当某维度所有分数完全相同（sigma=0）时，利用该维度 reasoning 长度差异
     作为微扰因子，避免排名完全并列。
 
-    Args:
-        reports: 同一批次 LLM 返回的 BottleneckReport 列表
-        skip_dims: 不做标准化的维度（有真实数据锚点的维度，见 `_anchored_dims`）。
-            必须整维跳过而非按节点跳过，否则同一次分析内该类维度尺度不一致。
-
     Returns:
         原地修改后的同一列表（overall_score 会被重新计算）
     """
     if len(reports) < 3:
         return reports
 
-    skip_dims = skip_dims or set()
-
     from statistics import mean, stdev
 
     zero_sigma_dims = 0
 
     for dim in BottleneckDimension:
-        if dim.value in skip_dims:
-            continue
         dim_scores: list[tuple[int, float]] = []
         dim_reasoning_lens: list[tuple[int, int]] = []
         for i, rpt in enumerate(reports):
@@ -222,6 +191,10 @@ class BottleneckAnalyzer:
     LLM_TIMEOUT = 120
     MAX_CONCURRENCY = 4
     MAX_RETRIES = 2
+
+    # 真实集中度数据源的连续失败熔断阈值（类级共享，见 _fetch_real_concentration）。
+    _CONC_FAIL_LIMIT = 12
+    _real_conc_consecutive_fails = 0
 
     def __init__(
         self,
@@ -317,12 +290,10 @@ class BottleneckAnalyzer:
                 continue
             if r is not None:
                 reports.append(r)
-
-        # z-score 标准化消除 LLM 评分偏差，然后重算加权总分。
-        # 有真实集中度锚点的维度整维跳过标准化 —— 真实数据的绝对锚定正是 z-score
-        # 做不到的事。若归一化在后覆盖，≥3 个环节时校准结果会被整批重写，而报告里
-        # 那句「[校准: 6→4]」还留着，文本与数值背离（原 A-6）。
-        normalize_scores(reports, skip_dims=_anchored_dims(reports))
+        # z-score 标准化消除 LLM 评分偏差，然后重算加权总分；随后按集中度锚定
+        # scarcity/pricing_power —— 校准只能在标准化之后，见 _calibrate_concentration。
+        normalize_scores(reports)
+        self._calibrate_concentration(reports)
         for rpt in reports:
             rpt.overall_score = round(self._weighted_score(rpt.scores), 2)
 
@@ -388,8 +359,55 @@ class BottleneckAnalyzer:
             if r is not None:
                 reports.append(r)
 
+        # 与 analyze() 同款收口：补充分析的节点此前完全不走 z-score（因此保留着
+        # 未标准化的原始 LLM 评分，与首批节点不同尺度），且校准只做一次、不重放。
+        # 这里让两条路径的分数落在同一套规则下，否则同一次分析里两批节点不可比。
+        normalize_scores(reports)
+        self._calibrate_concentration(reports)
+        for rpt in reports:
+            rpt.overall_score = round(self._weighted_score(rpt.scores), 2)
+
         self._on_progress = None
         return reports
+
+    async def _fetch_real_concentration(self, node_name: str) -> dict | None:
+        """取 A 股真实集中度（akshare），失败返回 None 降级回 LLM 估算。
+
+        「失败」分两种，处理方式不同：
+        - 单节点没匹配上板块 → 正常的降级，静默；
+        - 板块列表接口本身拉不到（东财 `stock_board_industry_name_em` 实测
+          连续 5 次 RemoteDisconnected）→ **本批直接放弃**。这是最贵的调用：
+          每个节点都要等 akshare 内部重试耗尽约 5-6s，上百个节点就是几分钟白白
+          烧在注定失败的请求上，拉长整条分析链路。
+
+        连续失败数用类级别累计（实例是 per-analyze 的，实例属性会随分析结束清零，
+        起不到熔断作用）；成功一次即清零，给恢复留路。
+        """
+        from bottleneck_hunter.chain.industry_concentration import (
+            ProbeFailure,
+            compute_concentration,
+        )
+
+        if BottleneckAnalyzer._real_conc_consecutive_fails >= self._CONC_FAIL_LIMIT:
+            return None
+        try:
+            result = await asyncio.to_thread(compute_concentration, node_name)
+        except ProbeFailure as e:
+            BottleneckAnalyzer._real_conc_consecutive_fails += 1
+            if BottleneckAnalyzer._real_conc_consecutive_fails == self._CONC_FAIL_LIMIT:
+                logger.warning(
+                    "真实集中度数据源连续 %d 个节点不可达，本批放弃（降级回 LLM 估算）: %s",
+                    self._CONC_FAIL_LIMIT, e,
+                )
+            return None
+        except Exception:
+            # 东财接口间歇不可达 → 静默降级回 LLM 估算，不阻断分析
+            logger.debug("真实集中度计算失败: %s", node_name, exc_info=True)
+            return None
+        # 成功即清零，给恢复留路（此前清零写在 else 分支里，而 try 里已经 return，
+        # 那段代码永远不可达 —— 计数器只增不减，一次抖动会污染整个进程）。
+        BottleneckAnalyzer._real_conc_consecutive_fails = 0
+        return result
 
     async def _analyze_node_multi(
         self, node_name: str, description: str, layer: int, graph: ChainGraph,
@@ -475,12 +493,11 @@ class BottleneckAnalyzer:
             merged_cr3 = real_report.cr3_estimate
             merged_hhi = real_report.hhi_estimate
 
-        # 校准必须在真实值覆盖**之后**：此前它跑在覆盖之前，用的是各子模型 LLM
-        # 估算的 CR3/HHI 中位数，真实数据取到了却没参与校准（P1-1 同源瑕疵）。
-        adjustments = self._check_hhi_consistency(
-            merged_scores, merged_cr3, merged_hhi, node_name, cr3_source,
-        )
-
+        # 此处**不**校准。（此前在这里跑过一次 `_check_hhi_consistency`，但它的结果
+        # 随后会被 `normalize_scores` 的 `5+2z` 整维重写 —— 分数白改，reasoning 里
+        # 那句「[HHI校准…]」却留了下来，于是报告同时出现「校准到 5」和实际 1.8，
+        # 生产实测 30 条校准里 28 条如此。校准统一在标准化之后做一次，见
+        # `_calibrate_concentration`。）
         overall = self._weighted_score(merged_scores)
 
         return BottleneckReport(
@@ -493,7 +510,6 @@ class BottleneckAnalyzer:
             risks=unique_risks,
             cr3_estimate=merged_cr3,
             hhi_estimate=merged_hhi,
-            hhi_adjustments=adjustments,
             cr3_source=cr3_source,
             concentration_detail=concentration_detail,
         )
@@ -530,15 +546,11 @@ class BottleneckAnalyzer:
         chain_context = self._build_context(node_name, graph)
 
         # 真实行业集中度（仅 A 股）：用板块成分股市值算 CR3/HHI，作为事实锚点覆盖 LLM 估算。
-        # 东财接口间歇不可达 → 失败返回 None，静默降级回 LLM 估算，不阻断分析。
+        # 东财接口间歇不可达 → 失败返回 None 降级回 LLM 估算；连续失败则熔断（见
+        # `_fetch_real_concentration`），不再逐节点烧在注定失败的请求上。
         real_conc = None
         if self.market == "a_stock":
-            try:
-                from bottleneck_hunter.chain.industry_concentration import compute_concentration
-                real_conc = await asyncio.to_thread(compute_concentration, node_name)
-            except Exception as e:
-                logger.debug("真实集中度计算异常(%s): %s", node_name, e)
-                real_conc = None
+            real_conc = await self._fetch_real_concentration(node_name)
 
         real_conc_block = ""
         if real_conc:
@@ -550,6 +562,35 @@ class BottleneckAnalyzer:
                 + (f"- Top 公司（市值份额）: {tops}\n" if tops else "")
                 + "⚠ 请【直接采用】以上真实 CR3/HHI 校准 scarcity/pricing_power，不要另行估算集中度。\n"
             )
+        else:
+            # 取不到真实数据时必须**明说**。此前这里只留空：LLM 看提示词里的示例
+            # HHI=1800，会误以为自己拿到了真实值，集中度就照着示例编了 —— 而下游
+            # `_check_hhi_consistency` 会把这些编出来的数当锚点去改分。
+            real_conc_block = (
+                "\n## 市场集中度：无真实数据\n"
+                "本次未取到该环节的真实集中度数据。CR3/HHI 请基于你的知识**保守估算**，"
+                "并在 reasoning 里注明「估算」。\n"
+            )
+
+        # 供需缺口（权重最高 0.25）此前是唯一既无数据锚、也无「无数据」声明的维度（P2-2）。
+        # 锚点用 6A 采集的扩产周期 —— system prompt 的 supply_demand_gap 刻度本来就按
+        # 扩产周期分档，缺的只是把这个事实递过去。取不到时必须明说，理由同上方集中度块。
+        # ponytail: 审查建议的 akshare 财报/板块锚在生产不可达（实测 4/4 None、各 22s），
+        # 且 24/32 分析是美股；真实产能利用率数据源接通后再加第二路锚。
+        graph_node = graph.get_node(node_name)
+        lead = graph_node.capacity_lead_time_months if graph_node else None
+        if lead:
+            sdg_block = (
+                "\n## 供需缺口锚点\n"
+                f"- 拆解阶段估计该环节产能扩张周期约 {lead} 个月（估计值，非披露数据）\n"
+                "请对照 supply_demand_gap 刻度中的「扩产周期」一档打分；与之不符须在 reasoning 说明理由。\n"
+            )
+        else:
+            sdg_block = (
+                "\n## 供需缺口：无数据锚\n"
+                "本环节没有产能利用率、扩产周期等数据。supply_demand_gap 请**保守打分**，"
+                "并在 reasoning 里注明「估算」。\n"
+            )
 
         user_prompt = f"""{lang_note}
 
@@ -559,7 +600,7 @@ class BottleneckAnalyzer:
 描述: {description}
 
 {chain_context}
-{real_conc_block}
+{real_conc_block}{sdg_block}
 请对该环节进行瓶颈分析，对以下5个维度各打0-10分，并给出理由:
 {chr(10).join(f"- {d.value}: {desc}" for d, desc in DIMENSION_DESC.items())}
 
@@ -659,8 +700,8 @@ class BottleneckAnalyzer:
                     "cr5": real_conc["cr5"],
                     "top_companies": real_conc.get("top_companies", []),
                 }
-            adjustments = self._check_hhi_consistency(scores, cr3, hhi, node_name, cr3_source)
-
+            # 此处不校准：真实值覆盖已完成，校准统一留给标准化之后的
+            # `_calibrate_concentration`（跑在这里会被 z-score 抹掉）。
             overall = self._weighted_score(scores)
 
             return BottleneckReport(
@@ -673,7 +714,6 @@ class BottleneckAnalyzer:
                 risks=data.get("risks", []),
                 cr3_estimate=cr3,
                 hhi_estimate=hhi,
-                hhi_adjustments=adjustments,
                 cr3_source=cr3_source,
                 concentration_detail=concentration_detail,
             )
@@ -689,11 +729,18 @@ class BottleneckAnalyzer:
         node_name: str,
         cr3_source: str = "llm_estimate",
     ) -> list[str]:
-        """检查 LLM 的 scarcity/pricing_power 评分是否与其自身估算的 HHI/CR3 一致，不一致则修正。
+        """用集中度锚定 scarcity/pricing_power，并保证 reasoning 那句戳与最终分数一致。
 
         校准幅度随 `cr3_source` 缩放：LLM 自估的 HHI/CR3 与真实板块成分股算出的
         不确定性差一个量级，却曾同权同效。`llm_estimate` 时幅度减半（至少 1 分），
-        且 reasoning 里标注来源，避免读者把估算值当作事实。
+        且文本里标注来源，避免读者把估算值当作事实。
+
+        **分数先全部算完，戳最后统一写**。HHI 与 CR3 会先后命中同一维度（HHI 先把
+        scarcity 抬到 6，CR3 再抬到 8）；若每条规则各自写戳，先写的那条记的就是中间
+        值 6 —— 读者只看到第一个戳，于是「文本说 6、分数是 8」。生产里 LLM 自估的
+        CR3/HHI 常不互洽，两条规则同时命中是常态，不是罕见分支。
+
+        Returns: 描述**实际生效**改动的条目（净变化为零的维度不记）。
         """
         if cr3 is None and hhi is None:
             return []
@@ -703,7 +750,15 @@ class BottleneckAnalyzer:
         tag = "" if cr3_source == "akshare" else "(估算)"
 
         score_map = {s.dimension: s for s in scores}
-        adjustments: list[str] = []
+        # 维度 -> (首次命中前的分数, [命中的规则标签])，戳留到全部规则跑完再写
+        hits: dict[str, tuple[float, list[str]]] = {}
+
+        def _hit(dim: BottleneckScore | None, target: float, label: str) -> None:
+            if dim is None:
+                return
+            prev = hits.setdefault(dim.dimension, (dim.score, []))
+            dim.score = target
+            prev[1].append(label)
 
         scarcity = score_map.get("scarcity")
         pricing = score_map.get("pricing_power")
@@ -711,50 +766,90 @@ class BottleneckAnalyzer:
         if hhi is not None:
             if hhi > 2500:
                 if scarcity and scarcity.score < 6:
-                    old = scarcity.score
-                    scarcity.score = max(6.0, scarcity.score + step)
-                    scarcity.reasoning = f"[HHI校准{tag}: HHI={hhi}>2500, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
-                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (HHI={hhi}{tag}高集中度)")
+                    _hit(scarcity, max(6.0, scarcity.score + step), f"HHI校准{tag}: HHI={hhi}>2500")
                 if pricing and pricing.score < 5:
-                    old = pricing.score
-                    pricing.score = max(5.0, pricing.score + step)
-                    pricing.reasoning = f"[HHI校准{tag}: HHI={hhi}>2500, {old:.0f}→{pricing.score:.0f}] " + pricing.reasoning
-                    adjustments.append(f"pricing_power {old:.0f}→{pricing.score:.0f} (HHI={hhi}{tag}高集中度)")
+                    _hit(pricing, max(5.0, pricing.score + step), f"HHI校准{tag}: HHI={hhi}>2500")
 
             elif hhi < 1500:
                 if scarcity and scarcity.score > 6:
-                    old = scarcity.score
-                    scarcity.score = min(6.0, scarcity.score - step)
-                    scarcity.reasoning = f"[HHI校准{tag}: HHI={hhi}<1500, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
-                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (HHI={hhi}{tag}低集中度)")
+                    _hit(scarcity, min(6.0, scarcity.score - step), f"HHI校准{tag}: HHI={hhi}<1500")
                 if pricing and pricing.score > 6:
-                    old = pricing.score
-                    pricing.score = min(6.0, pricing.score - step)
-                    pricing.reasoning = f"[HHI校准{tag}: HHI={hhi}<1500, {old:.0f}→{pricing.score:.0f}] " + pricing.reasoning
-                    adjustments.append(f"pricing_power {old:.0f}→{pricing.score:.0f} (HHI={hhi}{tag}低集中度)")
+                    _hit(pricing, min(6.0, pricing.score - step), f"HHI校准{tag}: HHI={hhi}<1500")
 
         if cr3 is not None:
             if cr3 > 80:
                 if scarcity and scarcity.score < 7:
-                    old = scarcity.score
-                    scarcity.score = max(7.0, scarcity.score + step)
-                    scarcity.reasoning = f"[CR3校准{tag}: CR3={cr3}%>80%, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
-                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (CR3={cr3}%{tag}高垄断)")
+                    _hit(scarcity, max(7.0, scarcity.score + step), f"CR3校准{tag}: CR3={cr3}%>80%")
 
             elif cr3 < 30:
                 if scarcity and scarcity.score > 4:
-                    old = scarcity.score
-                    scarcity.score = min(4.0, scarcity.score - step)
-                    scarcity.reasoning = f"[CR3校准{tag}: CR3={cr3}%<30%, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
-                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (CR3={cr3}%{tag}低集中)")
+                    _hit(scarcity, min(4.0, scarcity.score - step), f"CR3校准{tag}: CR3={cr3}%<30%")
 
         for s in scores:
             s.score = round(max(0.0, min(10.0, s.score)), 1)
+
+        adjustments: list[str] = []
+        for s in scores:
+            rec = hits.get(s.dimension)
+            if rec is None:
+                continue
+            old, labels = rec
+            if s.score == round(old, 1):
+                continue  # 两条规则方向相反、抵消回原值 —— 分数没动，不写校准戳
+            # 用维度的字符串值（"pricing_power"）而非 enum repr —— 这条串会进日志，
+            # str(BottleneckDimension.PRICING_POWER) 是 "BottleneckDimension.PRICING_POWER"。
+            name = getattr(s.dimension, "value", s.dimension)
+            # `:g` 而非 `:.0f`：分数可为 3.9，写「→4」就是在重犯本条要修的那种
+            # 「文本说的和旁边分数不是一回事」。整数时 `:g` 仍写 "8"。
+            old_s, new_s = f"{round(old, 1):g}", f"{s.score:g}"
+            s.reasoning = f"[{'; '.join(labels)}, {old_s}→{new_s}] " + s.reasoning
+            adjustments.append(f"{name} {old_s}→{new_s} ({'; '.join(labels)})")
 
         if adjustments:
             logger.info(f"HHI一致性校准 [{node_name}] (source={cr3_source}): {'; '.join(adjustments)}")
 
         return adjustments
+
+    def _calibrate_concentration(
+        self, reports: list[BottleneckReport],
+    ) -> int:
+        """用真实/估算的集中度锚定 scarcity/pricing_power —— **标准化之后**跑，是唯一的校准点。
+
+        校准必须在 `normalize_scores` **之后**：那里用 `5 + 2z` 把整维重写成另一套
+        尺度，任何跑在它前面的校准都被覆盖掉。此前正是如此 —— `_analyze_node` 与
+        `_merge_sub_reports` 各自校准过一次，随后被 z-score 抹平，而 reasoning 里
+        那句「[HHI校准: HHI=1200<1500, 7→5]」留了下来，报告同时出现「校准到 5」和
+        实际 1.8（生产实测 30 条校准里 28 条如此，比不校准更误导）。
+
+        现在那两处不再校准（见各自注释），只此一处。分数已被标准化到共同尺度，
+        此时按 HHI/CR3 锚定正是想要的效果。
+
+        幂等：`_check_hhi_consistency` 每个分支都**自证伪** —— 只在 `score < 6` 时
+        抬到 `≥6`，只在 `score > 6` 时压到 `≤6`。前一次已把它推到界线另一侧，
+        再跑必然一个分支都不命中。
+
+        只动确实带集中度数据的节点（生产占比 29/8437）。不做「整批跳过该维度」的
+        批级锚定：那会为 29 个节点改变 8000+ 个节点的打分，代价远大于收益。
+
+        Returns: **分数真被改动的**节点数（分支命中但落点未变的不计）。
+        """
+        n = 0
+        for rpt in reports:
+            if rpt.cr3_estimate is None and rpt.hhi_estimate is None:
+                continue
+            before = tuple(s.score for s in rpt.scores)
+            adjustments = self._check_hhi_consistency(
+                rpt.scores, rpt.cr3_estimate, rpt.hhi_estimate, rpt.node_name, rpt.cr3_source,
+            )
+            if not adjustments:
+                continue  # 有集中度数据但无需校准
+            if tuple(s.score for s in rpt.scores) == before:
+                continue  # 两条规则方向相反、抵消回原值 —— 分数没变，不记为已校准
+            # 只在分数真动了时才记：否则 hhi_adjustments 会写满「scarcity 4→6」这类
+            # 根本没生效的条目（生产 30 条校准文本里正有这种误导）。
+            rpt.hhi_adjustments = list(adjustments)
+            n += 1
+        return n
 
     def _weighted_score(self, scores: list[BottleneckScore]) -> float:
         score_map = {s.dimension: s.score for s in scores}
@@ -774,4 +869,57 @@ class BottleneckAnalyzer:
             lines.append(f"下游环节: {', '.join(n.name for n in downstream)}")
         if upstream:
             lines.append(f"上游环节: {', '.join(n.name for n in upstream)}")
+
+        # 拆解阶段已经知道、但此前**只有写没有读**的约束事实（P2-1）。两处来源：
+        #
+        # 1. `IndustryNode` 的结构化字段（本轮新增）—— 干净、可直接判分；
+        # 2. `ChainLink.notes` 的自由文本 —— 拆解 prompt 一直在要这个字段，
+        #    生产 14064 条 link 里 **13960 条有内容**，全是约束事实本身
+        #    （"高端纯化填料被 GE/Waters 等外资厂商垄断"、"高端品种高度依赖进口"）。
+        #    它被存进 DB 后**全仓没有一个读取方**。不接这一段，那些知识就得等
+        #    用户重新拆解才会经新字段回来；接上它，缓存链（14 天）立刻受益。
+        #
+        # ⚠ 确实**没有** `IndustryNode.notes` 这个字段（`ChainLink` 才有）。
+        # 先前审查与本人初稿都写成「LLM 在节点的 notes 里带一句」——错了，
+        # 故此处按 link 取。缺一项就不提那一项（宁缺勿编）。
+        facts = []
+        node = graph.get_node(node_name)
+        if node is not None:
+            if node.supply_structure:
+                facts.append(f"供应结构: {node.supply_structure}")
+            # 扩产周期不在这里：它是 supply_demand_gap 的锚点，见 `_analyze_node` 的 sdg_block。
+            if node.qualification_cycle_months:
+                facts.append(f"新进入者认证周期: 约 {node.qualification_cycle_months} 个月")
+            if node.geo_concentration:
+                facts.append(f"地理集中度: {node.geo_concentration}")
+            if node.export_control_risk:
+                facts.append(f"出口管制/政策风险: {node.export_control_risk}")
+
+        # 本环节 → 下游的 link，notes 讲的就是**本环节**为什么难替代。
+        # notes 与 alternatives 各自独立判断：notes 空不代表 alternatives 不存在
+        # （生产 14064 条 link 里有 104 条只有 alternatives 没有 notes）。
+        #
+        # 一个节点可有多条出边（生产 93% ≤3 条，但「控制系统」这类通用名会在
+        # 多个子树里撞名，最多 24 条）。逐条照搬会出现重复行和互相矛盾的
+        # 「替代方案 1 个 / 2 个 / 3 个」，所以：notes 去重、alternatives 合成一行。
+        # ponytail: 硬上限 5 条 notes，覆盖 97% 节点；撞名节点要真正分开得在拆解侧去重命名
+        notes: list[str] = []
+        alts: set[int] = set()
+        for link in graph.links:
+            if link.upstream != node_name:
+                continue
+            note = (link.notes or "").strip()
+            if note and note not in notes:
+                notes.append(note)
+            if link.alternatives:
+                alts.add(link.alternatives)
+        facts.extend(f"拆解备注: {n}" for n in notes[:5])
+        if len(alts) == 1:
+            facts.append(f"已知替代方案: {alts.pop()} 个")
+        elif alts:
+            facts.append(f"已知替代方案: {min(alts)}~{max(alts)} 个（不同下游口径不一）")
+
+        if facts:
+            lines.append("## 该环节的已知结构性事实（拆解阶段采集，请据此判断）")
+            lines.extend(facts)
         return "\n".join(lines)

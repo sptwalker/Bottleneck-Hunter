@@ -270,14 +270,23 @@ async def _aggregate_source_scorecard(entry_id: str, entry: dict) -> dict:
 
         # 查找匹配的 scorecard
         for sc in scorecards:
-            if sc.get("supplier", {}).get("ticker") == ticker:
-                return {
-                    "overall_score": sc.get("overall_score"),
-                    "quality_score": sc.get("quality_score"),
-                    "alpha_score": sc.get("alpha_score"),
-                    "final_score": sc.get("final_score"),
-                    "bottleneck_node": sc.get("bottleneck_node", ""),
-                }
+            if sc.get("supplier", {}).get("ticker") != ticker:
+                continue
+            # 三个分只存在于 `final.*` 底下，顶层**没有**这三个键（生产 375 张
+            # scorecard 全数如此）。此前直接读顶层，于是每次喂给简报 prompt 的都是
+            # `null` —— 一路静默，因为 `json.dumps` 把 None 写成 null 不报错。
+            # `alpha.alpha_score` 是第二来源：`final` 缺失时它还能给一个数
+            # （`AlphaScore.alpha_score` 可为 None，故取到 None 时继续往下退）。
+            final = sc.get("final") or {}
+            quality = final.get("quality_score", sc.get("overall_score"))
+            return {
+                "overall_score": sc.get("overall_score"),
+                "quality_score": quality,
+                "alpha_score": final.get("alpha_score",
+                                         (sc.get("alpha") or {}).get("alpha_score")),
+                "final_score": final.get("final_score"),
+                "bottleneck_node": sc.get("bottleneck_node", ""),
+            }
 
         return {}
     except Exception as e:

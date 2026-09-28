@@ -331,6 +331,14 @@ class SupplierEvaluator:
             basic_lines.append(f"- 行业: {supplier.sector}")
         if supplier.description:
             basic_lines.append(f"- 描述: {supplier.description}")
+        # 候选来源（P2-8）：「这家公司属于该环节」是 LLM 自报还是有外部数据核对，
+        # 可信度不同 —— 让评估方知道它在给哪一种打分。`sources` 只在检索合并时写入；
+        # 为空（用户手动输入的 ticker 等）就不标，免得把用户指定误标成「LLM 自报」。
+        if supplier.sources:
+            from bottleneck_hunter.chain.supplier_search import EXTERNAL_SOURCES
+            tag = ("含外部板块/选股数据核对" if EXTERNAL_SOURCES & set(supplier.sources)
+                   else "均为 LLM 自报，环节归属未经外部数据核对")
+            basic_lines.append(f"- 候选来源: {'+'.join(supplier.sources)}（{tag}）")
         if pe_ratio is not None:
             basic_lines.append(f"- 市盈率(PE): {pe_ratio:.1f}")
         if revenue_growth is not None:

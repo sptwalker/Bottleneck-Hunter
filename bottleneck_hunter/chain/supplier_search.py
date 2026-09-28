@@ -327,61 +327,66 @@ async def fetch_us_quotes(tickers: list[str]) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 
 def _try_akshare_search(terms: list[str], max_market_cap_yi: float | None) -> list[SupplierInfo]:
-    """Try AKShare concept/industry board search. Returns empty on failure."""
+    """Try AKShare concept/industry board search. Returns empty on failure.
+
+    板块匹配/成分股拉取走 `industry_concentration` 的共用实现：那里有重试（实测同一
+    板块 5 次里 3 次 RemoteDisconnected）、板块列表进程缓存（此前每个 term 都把整张
+    板块表重拉一遍，而 `industry_name` 恰是最不稳的接口），以及 `regex=False` 的字面
+    匹配（term 里的大小写/符号混排被当正则会抛或错配）。
+    """
     try:
         import akshare as ak
     except ImportError:
         return []
 
+    from bottleneck_hunter.chain.industry_concentration import (
+        ProbeFailure,
+        _fetch_cons,
+        _match_boards,
+        _mcap_to_yi,
+    )
+
     suppliers: list[SupplierInfo] = []
 
     for term in terms:
-        for search_fn, cons_fn in [
-            (ak.stock_board_concept_name_em, ak.stock_board_concept_cons_em),
-            (ak.stock_board_industry_name_em, ak.stock_board_industry_cons_em),
-        ]:
+        try:
+            boards = _match_boards(ak, [term], max_boards=3)
+        except ProbeFailure:
+            # 数据源整体不可用：单点重试已尽，继续换词也只是空等
+            logger.warning("AKShare 板块列表不可达，本环节放弃板块搜索")
+            break
+
+        for board_name, cons_fn in boards:
             try:
-                df_boards = search_fn()
-                matches = df_boards[df_boards["板块名称"].str.contains(term, na=False)]
-                for board_name in matches["板块名称"].tolist()[:3]:
-                    try:
-                        df_cons = cons_fn(symbol=board_name)
-                    except Exception:
-                        continue
-                    if df_cons is None or df_cons.empty:
-                        continue
-                    board_count = 0
-                    for _, row in df_cons.iterrows():
-                        if board_count >= 10:
-                            break
-                        code = str(row.get("代码", "")).strip()
-                        if not code or not code.isdigit():
-                            continue
-                        name = str(row.get("名称", ""))
-                        mcap_raw = row.get("总市值", row.get("市值", None))
-                        mcap = None
-                        if mcap_raw is not None:
-                            try:
-                                v = float(str(mcap_raw).replace(",", ""))
-                                mcap = round(v / 1e8, 2) if v > 1e8 else v
-                            except ValueError:
-                                pass
-                        if max_market_cap_yi and mcap and mcap > max_market_cap_yi:
-                            continue
-                        suppliers.append(SupplierInfo(
-                            name=name,
-                            name_cn="",
-                            ticker=_code_to_ticker(code),
-                            market=MarketRegion.A_STOCK,
-                            market_cap=mcap,
-                            sector=str(row.get("行业", "")),
-                            description=f"{name} ({code})",
-                            key_products=[],
-                            source="akshare",
-                        ))
-                        board_count += 1
+                df_cons = _fetch_cons(cons_fn, board_name)
             except Exception:
                 continue
+            if df_cons is None or df_cons.empty:
+                continue
+
+            board_count = 0
+            for _, row in df_cons.iterrows():
+                if board_count >= 10:
+                    break
+                code = str(row.get("代码", "")).strip()
+                if not code or not code.isdigit():
+                    continue
+                name = str(row.get("名称", ""))
+                mcap = _mcap_to_yi(row.get("总市值", row.get("市值", None)))
+                if max_market_cap_yi and mcap and mcap > max_market_cap_yi:
+                    continue
+                suppliers.append(SupplierInfo(
+                    name=name,
+                    name_cn="",
+                    ticker=_code_to_ticker(code),
+                    market=MarketRegion.A_STOCK,
+                    market_cap=mcap,
+                    sector=str(row.get("行业", "")),
+                    description=f"{name} ({code})",
+                    key_products=[],
+                    source="akshare",
+                ))
+                board_count += 1
 
     logger.info(f"AKShare 板块搜索: 关键词 {terms} → {len(suppliers)} 家")
     return suppliers
@@ -500,6 +505,10 @@ _MERGE_BACKFILL_FIELDS = (
     "institution_holding_pct", "market_share",
 )
 _MERGE_BACKFILL_TEXT_FIELDS = ("sector", "name_cn")
+
+
+# 来自外部数据（板块成分股 / 指标选股）而非 LLM 自报的候选源。
+EXTERNAL_SOURCES = frozenset({"akshare", "gangtise"})
 
 
 def _merge_supplier(keep: SupplierInfo, extra: SupplierInfo) -> None:
@@ -664,6 +673,13 @@ class SupplierSearcher:
                 f"✓ {bottleneck.node_name}: {' + '.join(parts)} → 去重后 {len(unique)} 家{cross}"
             )
 
+        # 截断前把「有外部数据核对过环节归属」的排前（P2-8）：合并顺序是 LLM 优先，
+        # 原先 `[:max_results]` 会让 10 家 LLM 自报挤掉 akshare/gangtise 也命中的票 ——
+        # `sources` 写了却没人读，是又一个假闭环。chain 也是拆解阶段 LLM 自报，不算外部核对。
+        # sort 稳定：同档内保持原优先级。
+        # ponytail: 审查建议的「同层 + 2 跳上游」扩池不做：生产 8452 节点实测同层是互补件
+        # （弹簧/针头/外壳）而非竞品、中位数 +199 家；2 跳仅 13 个节点能从 0 变非空。
+        unique.sort(key=lambda s: (bool(EXTERNAL_SOURCES & set(s.sources)), len(s.sources)), reverse=True)
         return unique[: self.max_results]
 
     # ----- LLM recommendation (market-aware) ---------------------------------
@@ -1058,19 +1074,13 @@ class SupplierSearcher:
 
     @staticmethod
     def _extract_keywords(node_name: str) -> list[str]:
-        """从节点名称/短语中提取搜索关键词（不依赖 LLM）。
-        按分隔符与句读切分，仅保留 2..12 字的短词——板块/概念名本就短(2-6 字)，
-        论述长句片段无法 substring 匹配板块名，在此源头剔除（防 akshare 0 命中污染回归）。"""
-        for prefix in ("高端", "先进", "精密", "超高纯", "高纯", "高性能",
-                        "新型", "专用", "关键", "核心", "特种"):
-            node_name = node_name.removeprefix(prefix)
-        # 句读/顿号/连接词/括号/空白全部作为切分点：论述句被拆散，避免整句沦为「关键词」
-        parts = re.split(r"[/、及和与，。；：,.;:\s（）()\[\]「」【】\"'’“”]+", node_name)
-        keywords = [p.strip() for p in parts if 2 <= len(p.strip()) <= 12]
-        if not keywords:
-            kw = node_name.strip()
-            keywords = [kw] if 2 <= len(kw) <= 12 else []
-        return keywords
+        """从节点名称提取板块搜索关键词 —— 转发到唯一实现在 `industry_concentration`。
+
+        两处曾各持一份，分叉出「落空」形态的差异（见该函数 docstring）。匹配的都是
+        东财板块名，逻辑本就该只有一份。
+        """
+        from bottleneck_hunter.chain.industry_concentration import _extract_keywords as _impl
+        return _impl(node_name)
 
     # ----- Batch search across all bottlenecks -------------------------------
 

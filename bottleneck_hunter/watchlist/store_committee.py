@@ -271,6 +271,13 @@ class _CommitteeMixin:
         position_implication: str = "",
     ) -> str:
         cid = uuid.uuid4().hex[:12]
+        # 唯一的写入收口：催化剂日期由 LLM/策略文本自由生成，而下游全是**字符串比较**
+        # （SQL `expected_date <= ?`、`snap_date <= expected_date`、`_date_diff` 的
+        # strptime）——一旦存进 "2025Q3" 这类写法，那些判断全部静默不成立，
+        # 而 WHERE expected_date IS NOT NULL 仍会把它当有效日期捞出来。
+        # 归一在此处做一次，三个调用方自动受益。
+        from bottleneck_hunter.chain.models import _normalize_expected_date
+        expected_date = _normalize_expected_date(expected_date) or None
         conn = self._connect()
         try:
             conn.execute(
