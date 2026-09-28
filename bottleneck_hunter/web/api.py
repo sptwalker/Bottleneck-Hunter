@@ -422,7 +422,7 @@ async def phase3_score(req: Phase3Request, user: dict = Depends(get_current_user
     ranked = []
     for i, sc in enumerate(top_scorecards, 1):
         key_factors = []
-        if sc.alpha and sc.alpha.alpha_score >= 7:
+        if sc.alpha and sc.alpha.alpha_score is not None and sc.alpha.alpha_score >= 7:
             key_factors.append("高预期差")
         if sc.overall_score >= 7:
             key_factors.append("高质量")
@@ -861,7 +861,7 @@ async def restore_history(analysis_id: str, user: dict = Depends(get_current_use
         for sc in scorecards:
             final = sc.get("final") or {}
             key_factors = []
-            if (sc.get("alpha") or {}).get("alpha_score", 0) >= 7:
+            if ((sc.get("alpha") or {}).get("alpha_score") or 0) >= 7:
                 key_factors.append("高预期差")
             if sc.get("overall_score", 0) >= 7:
                 key_factors.append("高质量")
@@ -1050,7 +1050,7 @@ async def ai_report(req: AiReportRequest, user: dict = Depends(get_current_user)
         cat = sc.catalyst
         moat = sc.moat
         snap = sc.financial_snapshot
-        alpha_val = a.alpha_score if a else 0
+        alpha_val = a.alpha_score if a else None
         final_val = sc.final.final_score if sc.final else 0
 
         line = (
@@ -1072,11 +1072,13 @@ async def ai_report(req: AiReportRequest, user: dict = Depends(get_current_user)
             )
             if moat.moat_reasoning:
                 line += f" — {moat.moat_reasoning[:60]}"
-        # Alpha 明细
-        if a:
+        # Alpha 明细（alpha_score 为 None = 数据不足，勿格式化成数字）
+        if a and alpha_val is not None:
             line += f"\n   Alpha={alpha_val:.1f}"
             if a.reasoning:
                 line += f" ({a.reasoning[:80]})"
+        elif a:
+            line += f"\n   Alpha=数据不足 ({a.reasoning[:80]})"
         # 催化剂
         if cat and cat.events:
             evts = "; ".join(f"{e.description[:30]}(影响力{e.impact_score:.0f}/10)" for e in cat.events[:3])

@@ -2,7 +2,10 @@
 
 Orchestrates the full pipeline:
   end product → chain decomposition → bottleneck identification
-  → supplier search → supplier evaluation → cross-validation → report
+  → supplier search → supplier evaluation → fact-check gate → report
+
+注：多模型交叉验证曾在此接线但从未生效（validator 构造后未被图引用），
+其唯一的活生产者在 Web 的 legacy 端点（streaming/legacy.py），见开发日志 P1-9/P2-7。
 """
 
 from __future__ import annotations
@@ -13,7 +16,6 @@ from langchain_core.language_models import BaseChatModel
 from langgraph.graph import END, StateGraph
 
 from bottleneck_hunter.chain.bottleneck import BottleneckAnalyzer
-from bottleneck_hunter.chain.cross_validation import CrossValidator
 from bottleneck_hunter.chain.decomposer import ChainDecomposer
 from bottleneck_hunter.chain.models import (
     MarketRegion,
@@ -61,7 +63,9 @@ async def supplier_search_step(state: dict, searcher: SupplierSearcher) -> dict:
         return {"error": "No bottleneck reports available for supplier search"}
 
     try:
-        supplier_map = await searcher.search_bottlenecks(bottlenecks)
+        # 产业链对象此前没往检索层传：链内候选（_extract_chain_candidates）因此恒为空，
+        # 同一次筛选在 CLI 下比 Web 少一路来源。传 state["chain"] 补上。
+        supplier_map = await searcher.search_bottlenecks(bottlenecks, chain_graph=state.get("chain"))
         # Flatten for state storage
         flat_suppliers = []
         for suppliers in supplier_map.values():
@@ -85,7 +89,14 @@ async def supplier_eval_step(state: dict, evaluator: SupplierEvaluator) -> dict:
         return {"supplier_scorecards": []}
 
     try:
-        scorecards = await evaluator.evaluate_all(supplier_map, bottlenecks)
+        # 评估层此前拿不到真实财务数据，于是 _data_* 系列全空、打分退回纯 LLM 口径
+        # ——同一个评分模型在 CLI 下系统地比 Web 少一层数据锚。这里自己取。
+        from bottleneck_hunter.chain.financial_data import fetch_batch
+        flat = [s for sup_list in supplier_map.values() for s in sup_list]
+        financial_map, failed = await fetch_batch(flat)
+        if failed:
+            logger.warning(f"财务数据缺失 {len(failed)}/{len(flat)} 家（不影响评估，仅降级为纯 LLM 口径）")
+        scorecards = await evaluator.evaluate_all(supplier_map, bottlenecks, financial_map=financial_map)
         return {"supplier_scorecards": scorecards}
     except Exception as e:
         logger.exception("Supplier evaluation failed")
@@ -124,7 +135,6 @@ def build_screening_graph(
     analyzer: BottleneckAnalyzer,
     searcher: SupplierSearcher,
     evaluator: SupplierEvaluator,
-    validator: CrossValidator | None = None,
 ) -> StateGraph:
     """Build the full LangGraph workflow for industry chain screening."""
 
@@ -177,7 +187,6 @@ async def run_screening(
     market: MarketRegion = MarketRegion.A_STOCK,
     max_market_cap_yi: float | None = 200,
     max_suppliers: int = 20,
-    validation_models: list[dict[str, str]] | None = None,
 ) -> ScreeningResult:
     """Run the full screening pipeline.
 
@@ -191,7 +200,6 @@ async def run_screening(
         market: Which market to search
         max_market_cap_yi: Max market cap filter (亿 for A-stock)
         max_suppliers: Max suppliers per bottleneck
-        validation_models: List of {"provider", "model"} for cross-validation
     """
     decomposer = ChainDecomposer(llm=deep_llm, max_depth=max_depth, sector=sector, language=language,
                                  market=market)
@@ -206,9 +214,8 @@ async def run_screening(
         llm=deep_llm,
     )
     evaluator = SupplierEvaluator(llm=deep_llm, language=language)
-    validator = CrossValidator(validation_models=validation_models or [], language=language) if validation_models else None
 
-    app = build_screening_graph(decomposer, analyzer, searcher, evaluator, validator)
+    app = build_screening_graph(decomposer, analyzer, searcher, evaluator)
 
     initial_state = {
         "sector": sector,
@@ -221,7 +228,6 @@ async def run_screening(
         "supplier_map": {},
         "flat_suppliers": [],
         "supplier_scorecards": [],
-        "cross_validations": [],
         "result": None,
         "error": None,
     }
@@ -240,6 +246,6 @@ async def run_screening(
         chain=final_state.get("chain"),
         bottleneck_reports=final_state.get("bottleneck_reports", []),
         supplier_scorecards=scorecards,
-        cross_validations=[],  # 旧字段保留兼容,已废弃
+        cross_validations=[],  # CLI 不再产出 CV（见模块 docstring）；字段本身仍活，Web legacy 端点会填
         top_picks=top_picks,
     )

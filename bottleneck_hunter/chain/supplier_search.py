@@ -491,6 +491,36 @@ _ALL_MARKET_PROMPT = """你是一位资深全球行业研究员。请根据以�
 # Main searcher
 # ---------------------------------------------------------------------------
 
+# 多源合并时会回填的字段。数值型判 `is None`（缺席就是真 None），
+# 文本型（sector / name_cn）与列表型（key_products，见下）按**真值**判空——
+# 它们的"空"是空串/空列表，拿 `is None` 根本判不出来（akshare 的 name_cn 就是 ""）。
+# 一律只填空缺、不覆写主源；description 除外——它是带源口吻的整段论述，回填会串味。
+_MERGE_BACKFILL_FIELDS = (
+    "market_cap", "pe_ratio", "revenue_growth", "gross_margin",
+    "institution_holding_pct", "market_share",
+)
+_MERGE_BACKFILL_TEXT_FIELDS = ("sector", "name_cn")
+
+
+def _merge_supplier(keep: SupplierInfo, extra: SupplierInfo) -> None:
+    """把 extra（落败源）的空缺字段补进 keep，并记录双方来源。
+
+    原实现按 ticker 先到先得，落败源的字段被整个丢弃——akshare 从板块成分股
+    取到的真实 market_cap 就常常这样消失（LLM/chain 不填市值，却在前面）。
+    """
+    for src in (keep.source, extra.source):
+        if src and src not in keep.sources:
+            keep.sources.append(src)
+    for f in _MERGE_BACKFILL_FIELDS:
+        if getattr(keep, f) is None and getattr(extra, f) is not None:
+            setattr(keep, f, getattr(extra, f))
+    for f in _MERGE_BACKFILL_TEXT_FIELDS:
+        if not getattr(keep, f) and getattr(extra, f):
+            setattr(keep, f, getattr(extra, f))
+    if not keep.key_products and extra.key_products:
+        keep.key_products = list(extra.key_products)
+
+
 class SupplierSearcher:
     """Market-aware supplier search with LLM recommendation and API validation."""
 
@@ -534,7 +564,13 @@ class SupplierSearcher:
     ) -> list[SupplierInfo]:
         """Search for suppliers related to a bottleneck node (multi-source)."""
 
-        # --- 并行执行三路搜索 ---
+        # 关键词在【这里】统一派生一次，供 akshare 与 gangtise 共用（P1-5）。
+        # 此前两个源各取各的：akshare 用提取后的短词，gangtise 却用【整个原环节名】
+        # （`keywords[0] if keywords else bottleneck.node_name`）——同一次检索里
+        # 两个源在搜不同的词，命中不可比。keywords 参数保留给显式指定。
+        kw_terms = list(keywords) if keywords else self._extract_keywords(bottleneck.node_name)
+
+        # --- 并行执行四路搜索 ---
         async def _llm_source():
             if not self.llm:
                 return []
@@ -543,13 +579,11 @@ class SupplierSearcher:
         async def _akshare_source():
             if self._is_us:
                 return []
-            # 仅用显式 keywords 或从环节名提取的短词做板块检索。
-            # 不再喂 key_insights——那是论述长句，无法 substring 匹配板块名，
-            # 反而把整句灌进 term 令 akshare 100% 0 命中（Loki 归因）。
-            terms = list(keywords) if keywords else self._extract_keywords(bottleneck.node_name)
+            # 仅用短词做板块检索。不再喂 key_insights——那是论述长句，
+            # 无法 substring 匹配板块名，反而把整句灌进 term 令 akshare 100% 0 命中（Loki 归因）。
             try:
                 results = await asyncio.to_thread(
-                    _try_akshare_search, terms, self.max_market_cap_yi
+                    _try_akshare_search, kw_terms, self.max_market_cap_yi
                 )
                 for s in results:
                     s.source = "akshare"
@@ -567,7 +601,7 @@ class SupplierSearcher:
             # §6.2 指标选股前置漏斗：仅 A股，板块内「主营含瓶颈词」粗筛（curated 板块表）
             if self._is_us or self._is_all:
                 return []
-            kw = (keywords[0] if keywords else bottleneck.node_name) or ""
+            kw = (kw_terms[0] if kw_terms else bottleneck.node_name) or ""
             try:
                 from bottleneck_hunter.data_provider.hub import CAP_SCREEN, get_hub
                 r = await get_hub().fetch(CAP_SCREEN, kw, "a_stock", "")
@@ -591,30 +625,25 @@ class SupplierSearcher:
         )
 
         # --- 按 ticker 去重合并（LLM 优先 > chain > gangtise > akshare）---
+        # 优先级只决定"谁是主"，落败源的空字段会被回填而不是丢弃（P1-6）。
         merged: dict[str, SupplierInfo] = {}
         source_stats = {"llm": 0, "chain": 0, "gangtise": 0, "akshare": 0}
 
-        for supplier in llm_results:
-            if supplier.ticker not in merged:
-                merged[supplier.ticker] = supplier
-                source_stats["llm"] += 1
-
-        for supplier in chain_results:
-            if supplier.ticker not in merged:
-                merged[supplier.ticker] = supplier
-                source_stats["chain"] += 1
-
-        for supplier in gangtise_results:
-            if supplier.ticker not in merged:
-                merged[supplier.ticker] = supplier
-                source_stats["gangtise"] += 1
-
-        for supplier in akshare_results:
-            if supplier.ticker not in merged:
-                merged[supplier.ticker] = supplier
-                source_stats["akshare"] += 1
+        for key, group in (
+            ("llm", llm_results), ("chain", chain_results),
+            ("gangtise", gangtise_results), ("akshare", akshare_results),
+        ):
+            for supplier in group:
+                if supplier.ticker not in merged:
+                    if supplier.source and supplier.source not in supplier.sources:
+                        supplier.sources.append(supplier.source)
+                    merged[supplier.ticker] = supplier
+                    source_stats[key] += 1
+                else:
+                    _merge_supplier(merged[supplier.ticker], supplier)
 
         unique = list(merged.values())
+        multi_source = sum(1 for s in unique if len(s.sources) > 1)
 
         # --- 进度消息 ---
         parts = []
@@ -630,8 +659,9 @@ class SupplierSearcher:
         if not unique:
             await self._emit(f"✗ 未找到供应商: {bottleneck.node_name}")
         else:
+            cross = f"，其中 {multi_source} 家为多源交叉命中" if multi_source else ""
             await self._emit(
-                f"✓ {bottleneck.node_name}: {' + '.join(parts)} → 去重后 {len(unique)} 家"
+                f"✓ {bottleneck.node_name}: {' + '.join(parts)} → 去重后 {len(unique)} 家{cross}"
             )
 
         return unique[: self.max_results]

@@ -171,7 +171,7 @@ function openKlineFullscreen(data, title, period = 'day') {
 
 function buildDrawerContent(c) {
   const q = c.quality_score || c.overall_score || 0;
-  const a = c.alpha_val || c.alpha?.alpha_score || 0;
+  const a = c.alpha_val ?? c.alpha?.alpha_score;
   const f = c.final_score || 0;
   const snap = c.financial_snapshot || {};
   const alpha = c.alpha || {};
@@ -208,7 +208,7 @@ function buildDrawerContent(c) {
     <div class="drawer-score-grid">
       <div class="drawer-score-box"><div class="val val-accent">${f.toFixed(2)}</div><div class="lbl">最终评分</div></div>
       <div class="drawer-score-box"><div class="val val-yellow">${q.toFixed(1)}</div><div class="lbl">质量分</div></div>
-      <div class="drawer-score-box"><div class="val val-green">${a.toFixed(1)}</div><div class="lbl">预期差</div></div>
+      <div class="drawer-score-box"><div class="val val-green">${a != null ? a.toFixed(1) : '<span style="font-size:13px;color:var(--muted)">数据不足</span>'}</div><div class="lbl">预期差</div></div>
     </div>
     <div class="drawer-section"><h4>企业简介</h4><p style="font-size:13px;line-height:1.7">${c.supplier?.description || c.description || '暂无企业简介'}</p></div>
     ${c.supplier?.products?.length ? `

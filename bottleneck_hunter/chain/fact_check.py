@@ -30,11 +30,11 @@ _CLAIM_RULES = [
     (r"毛利率?\s*(提升|增长|改善|扩张)", "gross_margin_trend", "positive", "mismatch"),
     (r"营收\s*(加速|高增|快速增长)", "revenue_acceleration", "positive", "mismatch"),
     (r"现金流\s*(充裕|健康|良好)", "cashflow_per_share", "positive", "fatal"),
-    (r"负债率?\s*(低|健康|可控)", "debt_ratio_pct", "negative", "mismatch"),
+    (r"负债率?\s*(低|健康|可控)", "debt_ratio_pct", "positive", "mismatch"),
 
     # 估值类
-    (r"(估值|PE|市盈率)\s*(低|便宜|被低估|合理)", "consensus_pe", "negative", "mismatch"),
-    (r"(高估|贵|泡沫)", "consensus_pe", "positive", "mismatch"),
+    (r"(估值|PE|市盈率)\s*(低|便宜|被低估|合理)", "consensus_pe", "positive", "mismatch"),
+    (r"(高估|贵|泡沫)", "consensus_pe", "negative", "mismatch"),
 
     # 市场地位类
     (r"(龙头|龙一|第一|领先|市占率高)", "market_share", "positive", "mismatch"),
@@ -136,6 +136,13 @@ def check_scorecard(
     mismatch_count = 0
     supported_count = 0
     unverifiable_count = 0
+    # 同一真实字段只裁决一次：多条规则可能落到同一 actual_field 上
+    # （financial_health 与 gross_margin_trend 共用毛利趋势；market_share 与
+    # cr3_estimate 共用真实 CR3）。否则一条事实被计两次，一次观察双倍扣分。
+    # 去重键是 (字段, 期望方向) 而**不只是字段**：同一字段上的两条规则若方向相反，
+    # 是两条独立主张（如 "估值便宜" 与 "被高估" 同时出现在 strengths 与 weaknesses 里），
+    # 只按字段去重会把后一条无声吞掉——连同它的 mismatch 计数与 REVIEW 触发。
+    judged: set[tuple[str, str]] = set()
 
     for pattern, field, expected_dir, severity in _CLAIM_RULES:
         match = re.search(pattern, claims_text)
@@ -161,6 +168,21 @@ def check_scorecard(
             ))
             unverifiable_count += 1
             continue
+
+        if (actual_field, expected_dir) in judged:
+            # 同一条事实已被**同方向**的规则裁决过 → 不再重复计分
+            findings.append(FactCheckFinding(
+                claim_text=claim_snippet,
+                rule_desc=f"{field} 期望{expected_dir}",
+                data_field=field,
+                data_value=data_value,
+                expected_direction=expected_dir,
+                actual_direction="already_judged",
+                severity=severity,
+                verdict="duplicate_skipped",
+            ))
+            continue
+        judged.add((actual_field, expected_dir))
 
         # 判断实际方向
         actual_dir = _judge_direction(actual_field, data_value, scorecard)
@@ -282,8 +304,13 @@ def _get_data_value(
         return None, field
 
     if field == "market_share":
-        # 用 market_position 评分作为代理
-        return scorecard.market_position, "market_position"
+        # 历史上这里拿 scorecard.market_position(LLM 自打的分)去核实 LLM 自己写的
+        # "龙头"声明 —— 那是自洽性检查，不是事实核查。改为只引用真实 CR3：
+        # cr3_source == "akshare"（东财板块成分股算出）才作数，LLM 估算的一律
+        # 视为无数据。原则：宁可少一条规则，不要一条假规则。
+        if bottleneck_report and bottleneck_report.cr3_source == "akshare":
+            return bottleneck_report.cr3_estimate, "cr3_estimate"
+        return None, field
 
     if field == "cr3_estimate":
         if bottleneck_report:
@@ -344,15 +371,6 @@ def _judge_direction(field: str, value: float, scorecard: SupplierScorecard) -> 
             return "positive"  # 低PE=便宜
         elif value is not None and value > 40:
             return "negative"  # 高PE=贵
-        else:
-            return "neutral"
-
-    # 市场地位评分
-    if field in ("market_share", "market_position"):
-        if value >= 7.5:
-            return "positive"
-        elif value <= 4.0:
-            return "negative"
         else:
             return "neutral"
 
@@ -502,17 +520,88 @@ def demo():
     )
 
     report3 = check_scorecard(sc_good, None)
-    print(f"[DEBUG] Case3: credibility={report3.credibility}, rec={report3.recommendation}")
-    print(f"[DEBUG] Findings count: {len(report3.findings)}")
-    for f in report3.findings:
-        print(f"  verdict={f.verdict} severity={f.severity} claim={f.claim_text!r} "
-              f"field={f.data_field} value={f.data_value} exp={f.expected_direction} act={f.actual_direction}")
-
     assert report3.recommendation == "PASS", f"预期PASS,实际{report3.recommendation}"
     assert report3.credibility >= 9.5, f"全支撑应高分,实际{report3.credibility}"
     supported_findings = [f for f in report3.findings if f.verdict == "supported"]
     assert len(supported_findings) >= 3, f"预期>=3条supported,实际{len(supported_findings)}"
     logger.info("[demo] Case3通过: 声称与数据同向获supported")
+
+    # Case 4: 健康公司说真话 → 不应被 REVIEW（P0-3 回归哨兵）
+    # 四条 expected_dir 曾与 _judge_direction 系统性相反，导致"负债率低/估值便宜/不贵"
+    # 这类**诚实且正确**的声称被记 mismatch；三条即触发 REVIEW，属反向激励。
+    snap_healthy = FinancialSnapshot(
+        data_source="test",
+        report_date="2025-12-31",
+        debt_ratio_pct=30.0,      # 低负债 → positive
+        consensus_pe=18.0,        # 低 PE → positive
+        cashflow_per_share=1.5,   # 正现金流 → positive
+    )
+    sc_healthy = SupplierScorecard(
+        supplier=SupplierInfo(
+            name="测试D",
+            ticker="000004.SZ",
+            market=MarketRegion.A_STOCK,
+            sector="测试行业",
+            description="测试公司D",
+        ),
+        bottleneck_node="测试环节",
+        market_position=7.0,
+        customer_validation=7.0,
+        capacity_status=7.0,
+        financial_health=8.0,
+        valuation=8.0,
+        overall_score=7.5,
+        strengths=["负债率低", "估值便宜", "现金流充裕", "行业领先"],
+        weaknesses=[],
+        financial_snapshot=snap_healthy,
+    )
+
+    report4 = check_scorecard(sc_healthy, None)
+    assert report4.recommendation == "PASS", (
+        f"健康公司的诚实声称不应触发{report4.recommendation}（方向写反的回归哨兵）"
+    )
+    assert not [f for f in report4.findings if f.verdict == "mismatch"], (
+        f"不应有 mismatch: {[f.to_dict() for f in report4.findings]}"
+    )
+    logger.info("[demo] Case4通过: 健康公司不被误降级")
+
+    # Case 5: 同一字段上的**反向**两条主张都要计分（去重键的回归哨兵）
+    # 去重键若只取 actual_field，索引靠后的那条（"被高估"）会被判 duplicate_skipped，
+    # 连同它的 mismatch 计数一起消失——而它是一条方向相反、结论完全不同的独立主张。
+    sc_conflict = SupplierScorecard(
+        supplier=SupplierInfo(
+            name="测试E",
+            ticker="000005.SZ",
+            market=MarketRegion.A_STOCK,
+            sector="测试行业",
+            description="测试公司E",
+        ),
+        bottleneck_node="测试环节",
+        market_position=6.0,
+        customer_validation=6.0,
+        capacity_status=6.0,
+        financial_health=6.0,
+        valuation=6.0,
+        overall_score=6.0,
+        # 两个文件都写 consensus_pe：一处说便宜(positive，与 PE=18 相符)，
+        # 一处说高估(negative，与 PE=18 不符→应记 mismatch) —— 同时成立。
+        strengths=["估值便宜"],
+        weaknesses=["估值被高估"],
+        financial_snapshot=snap_healthy,
+    )
+    report5 = check_scorecard(sc_conflict, None)
+    judged = {
+        (f.data_field, f.expected_direction): f.verdict
+        for f in report5.findings
+    }
+    mismatch_5 = [f for f in report5.findings if f.verdict == "mismatch"]
+    assert len(mismatch_5) == 1, (
+        f"「被高估」必须被独立裁决为 mismatch，实际 {[f.to_dict() for f in report5.findings]}"
+    )
+    assert "duplicate_skipped" not in {f.verdict for f in report5.findings}, (
+        f"方向相反的两条主张不构成重复: {judged}"
+    )
+    logger.info("[demo] Case5通过: 同字段反向主张各自计分")
 
     logger.info("[demo] ✓ 所有自测通过")
 

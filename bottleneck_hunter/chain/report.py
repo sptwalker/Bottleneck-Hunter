@@ -21,6 +21,19 @@ def generate_report(result: ScreeningResult, language: str = "zh", extra_section
     return "\n".join(lines)
 
 
+def _fc_badge(rec: str | None) -> str:
+    """事实核查闸的结论 → 报告用徽章。None = 该票没跑核查，如实标注而非留空。"""
+    return {"PASS": "✅ 通过", "REVIEW": "⚠ 需复核", "REJECT": "❌ 否决"}.get((rec or "").upper(), "-")
+
+
+def _coverage_str(sc) -> str:
+    """数据覆盖 + 仅 LLM 给分的维度。缺数据要看得见，否则"没锚的结论"会被当成"有锚的结论"。"""
+    if sc.data_coverage is None:
+        return "-"
+    base = f"{sc.data_coverage:.0%}"
+    return f"{base}（LLM 独判: {', '.join(sc.llm_only_dims)}）" if sc.llm_only_dims else base
+
+
 def _report_zh(result: ScreeningResult, lines: list[str], extra_sections: str = "") -> None:
     lines.append(f"# {result.sector} 产业链选股报告\n")
 
@@ -38,10 +51,15 @@ def _report_zh(result: ScreeningResult, lines: list[str], extra_sections: str = 
 
     # --- 2. Bottleneck ranking ---
     lines.append("## 2. 瓶颈环节排名\n")
-    lines.append("| 排名 | 环节 | 层级 | 稀缺性 | 不可替代 | 供需缺口 | 定价权 | 技术壁垒 | 综合得分 |")
-    lines.append("|------|------|------|--------|----------|----------|--------|----------|----------|")
+    lines.append("| 排名 | 环节 | 层级 | 稀缺性 | 不可替代 | 供需缺口 | 定价权 | 技术壁垒 | CR3 | 综合得分 |")
+    lines.append("|------|------|------|--------|----------|----------|--------|----------|-----|----------|")
     for r in result.bottleneck_reports:
         score_map = {s.dimension: s.score for s in r.scores}
+        # CR3 标来源：akshare 是板块成分股实算的真值，llm_estimate 是自估——
+        # 两者不确定性差一个量级，不标就同权同效（前端 charts.js 早有此徽章，报告层没有）。
+        cr3_str = "-" if r.cr3_estimate is None else f"{r.cr3_estimate}%" + (
+            "" if r.cr3_source == "akshare" else "（估）"
+        )
         lines.append(
             f"| {r.rank} | {r.node_name} | L{r.layer} "
             f"| {score_map.get('scarcity', '-'):.1f} "
@@ -49,6 +67,7 @@ def _report_zh(result: ScreeningResult, lines: list[str], extra_sections: str = 
             f"| {score_map.get('supply_demand_gap', '-'):.1f} "
             f"| {score_map.get('pricing_power', '-'):.1f} "
             f"| {score_map.get('tech_barrier', '-'):.1f} "
+            f"| {cr3_str} "
             f"| **{r.overall_score:.1f}** |"
         )
     lines.append("")
@@ -141,26 +160,24 @@ def _report_zh(result: ScreeningResult, lines: list[str], extra_sections: str = 
     # --- 6. Final recommendations ---
     if result.top_picks:
         lines.append("## 6. 最终推荐\n")
-        lines.append("| 优先级 | 代码 | 公司 | 共识 |")
-        lines.append("|--------|------|------|------|")
+        lines.append("| 优先级 | 代码 | 公司 | 综合 | 核查 | 数据覆盖 |")
+        lines.append("|--------|------|------|------|------|----------|")
 
-        # Build lookup for cross-validation consensus
-        cv_map = {cv.ticker: cv for cv in result.cross_validations}
         sc_map = {sc.supplier.ticker: sc for sc in result.supplier_scorecards}
 
         for i, ticker in enumerate(result.top_picks, 1):
-            name = ""
-            consensus_str = "-"
-            cv = cv_map.get(ticker)
-            if cv:
-                name = cv.supplier_name
-                consensus_str = f"{cv.avg_score:.1f}/10"
-            else:
-                sc = sc_map.get(ticker)
-                if sc:
-                    name = sc.supplier.name
-                    consensus_str = f"评分 {sc.overall_score:.1f}/10"
-            lines.append(f"| {i} | {ticker} | {name} | {consensus_str} |")
+            sc = sc_map.get(ticker)
+            if sc is None:
+                lines.append(f"| {i} | {ticker} | - | - | - | - |")
+                continue
+            # 事实核查闸的结论此前只写进 scorecard、报告层从不渲染（fact_check_recommendation
+            # 全仓零消费方）。它是入围与否的判据，报告里必须看得见。
+            lines.append(
+                f"| {i} | {ticker} | {sc.supplier.name} "
+                f"| {sc.overall_score:.1f}/10 "
+                f"| {_fc_badge(sc.fact_check_recommendation)} "
+                f"| {_coverage_str(sc)} |"
+            )
         lines.append("")
 
     # --- Disclaimer ---
@@ -170,7 +187,7 @@ def _report_zh(result: ScreeningResult, lines: list[str], extra_sections: str = 
     lines.append("---")
     lines.append("*本报告由 BottleneckHunter AI 生成，仅供参考，不构成投资建议。*")
     lines.append("")
-    lines.append("*方法论：Serenity「三步法」— 产业链拆解 → 供应商检索 → 多模型交叉验证*")
+    lines.append("*方法论：Serenity「三步法」— 产业链拆解 → 供应商检索 → 数据核查（事实核查闸）*")
 
 
 def _report_en(result: ScreeningResult, lines: list[str], extra_sections: str = "") -> None:
@@ -188,10 +205,13 @@ def _report_en(result: ScreeningResult, lines: list[str], extra_sections: str = 
 
     # Bottleneck ranking
     lines.append("## Bottleneck Ranking\n")
-    lines.append("| Rank | Node | Layer | Scarcity | Irreplaceability | Gap | Pricing | Tech | Overall |")
-    lines.append("|------|------|-------|----------|------------------|-----|---------|------|---------|")
+    lines.append("| Rank | Node | Layer | Scarcity | Irreplaceability | Gap | Pricing | Tech | CR3 | Overall |")
+    lines.append("|------|------|-------|----------|------------------|-----|---------|------|-----|---------|")
     for r in result.bottleneck_reports:
         sm = {s.dimension: s.score for s in r.scores}
+        cr3_str = "-" if r.cr3_estimate is None else f"{r.cr3_estimate}%" + (
+            "" if r.cr3_source == "akshare" else " (est.)"
+        )
         lines.append(
             f"| {r.rank} | {r.node_name} | L{r.layer} "
             f"| {sm.get('scarcity', '-'):.1f} "
@@ -199,6 +219,7 @@ def _report_en(result: ScreeningResult, lines: list[str], extra_sections: str = 
             f"| {sm.get('supply_demand_gap', '-'):.1f} "
             f"| {sm.get('pricing_power', '-'):.1f} "
             f"| {sm.get('tech_barrier', '-'):.1f} "
+            f"| {cr3_str} "
             f"| **{r.overall_score:.1f}** |"
         )
     lines.append("")
@@ -229,8 +250,20 @@ def _report_en(result: ScreeningResult, lines: list[str], extra_sections: str = 
     # Final picks
     if result.top_picks:
         lines.append("## Top Picks\n")
+        lines.append("| # | Ticker | Company | Overall | Fact Check | Data Coverage |")
+        lines.append("|---|--------|---------|---------|------------|---------------|")
+        sc_map = {sc.supplier.ticker: sc for sc in result.supplier_scorecards}
         for i, ticker in enumerate(result.top_picks, 1):
-            lines.append(f"{i}. **{ticker}**")
+            sc = sc_map.get(ticker)
+            if sc is None:
+                lines.append(f"| {i} | {ticker} | - | - | - | - |")
+                continue
+            lines.append(
+                f"| {i} | {ticker} | {sc.supplier.name} "
+                f"| {sc.overall_score:.1f}/10 "
+                f"| {sc.fact_check_recommendation or '-'} "
+                f"| {_coverage_str(sc)} |"
+            )
         lines.append("")
 
     if extra_sections.strip():

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_serializer
+
+logger = logging.getLogger(__name__)
 
 
 class LayerType(str, Enum):
@@ -163,6 +166,10 @@ class SupplierInfo(BaseModel):
     pe_ratio: float | None = None
     institution_holding_pct: float | None = None
     source: str = Field(default="llm", description="候选来源: llm / akshare / chain")
+    sources: list[str] = Field(
+        default_factory=list,
+        description="该票被哪些源命中过（多源留痕，首源为准但其余源的字段会回填空缺）",
+    )
 
 
 class QuarterlyDataPoint(BaseModel):
@@ -219,21 +226,54 @@ class FinancialSnapshot(BaseModel):
     days_since_ipo: int | None = Field(None, description="上市天数")
     avg_daily_amount_wan: float | None = Field(None, description="日均成交额(万，本币；A股万元/美股万美元)")
 
+    @field_validator("debt_ratio_pct")
+    @classmethod
+    def _validate_debt_ratio(cls, v: float | None) -> float | None:
+        """值域守卫：本字段是资产负债率 D/A(%)，合理区间 0-100。
+
+        越界即说明上游填错了字段（历史上美股路径误塞 D/E 百分数进来），
+        宁可丢这个数也不能让错口径流进评分与事实核查。
+        """
+        if v is None:
+            return None
+        if not 0.0 <= v <= 100.0:
+            logger.warning("debt_ratio_pct 越界(%.4f)，已丢弃 —— 上游可能填了 D/E 而非 D/A", v)
+            return None
+        return v
+
+    @field_validator("cashflow_per_share")
+    @classmethod
+    def _validate_cfps(cls, v: float | None) -> float | None:
+        """值域守卫：本字段是**每股**经营现金流，不是总额。
+
+        总量级（>1e6）只可能来自未除股本的 operatingCashflow 总额，丢弃并告警。
+        """
+        if v is None:
+            return None
+        if abs(v) > 1e6:
+            logger.warning("cashflow_per_share 量级异常(%.4g)，已丢弃 —— 上游可能存了现金流总额", v)
+            return None
+        return v
+
 
 class AlphaScore(BaseModel):
-    """预期差评分：瓶颈重要性高 + 市场关注度低 = 高 Alpha 潜力。"""
+    """预期差评分：瓶颈重要性高 + 市场关注度低 = 高 Alpha 潜力。
 
-    market_attention: float = Field(default=0.0, ge=0, le=10, description="市场关注度 0-10")
-    information_gap: float = Field(default=0.0, ge=0, le=10, description="信息差评分 0-10")
-    alpha_score: float = Field(default=0.0, ge=0, le=10, description="综合预期差 0-10")
+    market_attention / information_gap / alpha_score 在全维度无数据时为 None。
+    下游消费方须做 None 守卫，不应回退到中性分 5.0（None = 数据不足，5.0 = 中等关注度，语义不同）。
+    """
+
+    market_attention: float | None = Field(default=None, ge=0, le=10, description="市场关注度 0-10；无数据时为 None")
+    information_gap: float | None = Field(default=None, ge=0, le=10, description="信息差评分 0-10；无数据时为 None")
+    alpha_score: float | None = Field(default=None, ge=0, le=10, description="综合预期差 0-10；无数据时为 None")
     trend_bonus: float = Field(default=0.0, description="盈利趋势加分 -1.0~+2.5")
     smart_money_bonus: float = Field(default=0.0, description="聪明钱加分 -1.0~+2.0")
     catalyst_bonus: float = Field(default=0.0, description="催化剂紧迫度加分 0~2.0")
-    dim_cap: float = Field(default=5.0, description="市值规模维度得分 0-9")
-    dim_analyst: float = Field(default=5.0, description="分析师覆盖维度得分 0-9")
-    dim_volume: float = Field(default=5.0, description="成交量动量维度得分 0-9")
-    dim_price: float = Field(default=5.0, description="近3月涨幅维度得分 0-9")
-    dim_institution: float | None = Field(default=5.0, description="机构持仓维度得分 0-9（A股无数据时为None）")
+    dim_cap: float | None = Field(default=None, description="市值规模维度得分 0-9；无数据时为 None")
+    dim_analyst: float | None = Field(default=None, description="分析师覆盖维度得分 0-9；无数据时为 None")
+    dim_volume: float | None = Field(default=None, description="成交量动量维度得分 0-9；无数据时为 None")
+    dim_price: float | None = Field(default=None, description="近3月涨幅维度得分 0-9；无数据时为 None")
+    dim_institution: float | None = Field(default=None, description="机构持仓维度得分 0-9（A股或无数据时为 None）")
     ipo_bonus: float = Field(default=0.0, description="IPO加分 (0 or 2)")
     vp_discount: float = Field(default=1.0, description="量价背离折扣系数 (1.0 or 0.8)")
     reasoning: str = ""
@@ -318,6 +358,11 @@ class SupplierScorecard(BaseModel):
     catalyst: CatalystTimeline | None = Field(None, description="催化剂时间线")
     final: FinalScore | None = Field(None, description="统一最终评分")
     fact_check_recommendation: str | None = Field(None, description="事实核查建议: PASS/REVIEW/REJECT")
+    # 数据覆盖度（P1-11）：customer_validation / capacity_status 是唯二无数据锚的维度，
+    # 数据缺失时它们的权重占比反而从 26.7% 升到 40% —— "缺数据"被算成了"更依赖 LLM"。
+    # 这两个字段把这件事透出来，让下游知道结论有多可靠，而不是看起来一样地自信。
+    data_coverage: float | None = Field(None, ge=0, le=1, description="有真实数据锚的维度权重占比")
+    llm_only_dims: list[str] = Field(default_factory=list, description="纯 LLM 给分、无数据锚的维度名")
 
     @model_serializer(mode="wrap")
     def _serialize_with_dimension_scores(self, handler):

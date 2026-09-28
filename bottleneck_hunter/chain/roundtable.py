@@ -212,7 +212,8 @@ class RoundtableMeeting:
 
             alpha_str = ""
             if sc.alpha:
-                alpha_str = f" | 预期差: {sc.alpha.alpha_score:.1f}"
+                alpha_str = (f" | 预期差: {sc.alpha.alpha_score:.1f}"
+                             if sc.alpha.alpha_score is not None else " | 预期差: 数据不足")
 
             lines.append(f"## {i}. {sup.name} ({sup.ticker}) — {sc.bottleneck_node}")
             lines.append(f"- 综合评分: {sc.overall_score:.1f}{final_score} | 交叉验证: {cv_score}{alpha_str}")

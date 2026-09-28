@@ -13,6 +13,7 @@ function removeSkeleton(id) {
 }
 
 function scoreClass(val) {
+  if (val == null) return '';
   if (val >= 8) return 'score-high';
   if (val >= 6) return 'score-mid';
   return 'score-low';
@@ -824,8 +825,8 @@ function _openDetailDrawer(sc) {
     html += `<div class="drawer-section">
       <h4>预期差分析</h4>
       <table class="drawer-fin-table">
-        <tr><td>市场关注度</td><td>${alphaObj.market_attention.toFixed(1)}/10</td></tr>
-        <tr><td>信息差</td><td>${alphaObj.information_gap.toFixed(1)}/10</td></tr>`;
+        <tr><td>市场关注度</td><td>${alphaObj.market_attention != null ? alphaObj.market_attention.toFixed(1) + '/10' : '<span style="color:var(--muted)">数据不足</span>'}</td></tr>
+        <tr><td>信息差</td><td>${alphaObj.information_gap != null ? alphaObj.information_gap.toFixed(1) + '/10' : '<span style="color:var(--muted)">数据不足</span>'}</td></tr>`;
     if (alphaObj.trend_bonus != null && alphaObj.trend_bonus !== 0) {
       html += `<tr><td>趋势加分</td><td class="${alphaObj.trend_bonus > 0 ? 'val-up' : 'val-down'}">${alphaObj.trend_bonus > 0 ? '+' : ''}${alphaObj.trend_bonus.toFixed(1)}</td></tr>`;
     }
@@ -835,7 +836,7 @@ function _openDetailDrawer(sc) {
     if (alphaObj.catalyst_bonus != null && alphaObj.catalyst_bonus > 0) {
       html += `<tr><td>催化剂加分</td><td class="val-up">+${alphaObj.catalyst_bonus.toFixed(1)}</td></tr>`;
     }
-    html += `<tr><td>Alpha 评分</td><td class="${scoreClass(alphaObj.alpha_score)}"><strong>${alphaObj.alpha_score.toFixed(1)}</strong>/10</td></tr>
+    html += `<tr><td>Alpha 评分</td><td class="${scoreClass(alphaObj.alpha_score)}"><strong>${alphaObj.alpha_score != null ? alphaObj.alpha_score.toFixed(1) + '/10' : '<span style="color:var(--muted)">数据不足</span>'}</strong></td></tr>
       </table>
       ${alphaObj.reasoning ? `<div class="alpha-reasoning">${escapeHtml(alphaObj.reasoning)}</div>` : ''}
     </div>`;

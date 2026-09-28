@@ -111,7 +111,29 @@ DIMENSION_DESC = {
 }
 
 
-def normalize_scores(reports: list[BottleneckReport]) -> list[BottleneckReport]:
+# 受真实集中度锚定的维度。
+# scarcity / pricing_power 是 HHI/CR3 一致性校准的作用对象，而真实 CR3/HHI 的
+# 绝对锚定正是 z-score 做不到的事 —— 两者互补而非竞争。若让 z-score 在后覆盖，
+# 辛苦取到的真实数据在 ≥3 个环节时会整批被重写，报告里那句「[校准: 6→4]」
+# 还与实际分数不一致（文本与数值背离，比不校准更误导）。
+_ANCHORED_DIMS = ("scarcity", "pricing_power")
+
+
+def _anchored_dims(reports: list[BottleneckReport]) -> set[str]:
+    """批次内存在真实集中度数据（cr3_source=akshare）时，返回受真实锚定的维度名。
+
+    无真实数据时返回空集 —— 此时 HHI/CR3 全为 LLM 自估，校准幅度减半（见
+    `_check_hhi_consistency`），但仍值得保留该维度不被 z-score 抹平。
+    """
+    if not any(r.cr3_source == "akshare" for r in reports):
+        return set()
+    return set(_ANCHORED_DIMS)
+
+
+def normalize_scores(
+    reports: list[BottleneckReport],
+    skip_dims: set[str] | None = None,
+) -> list[BottleneckReport]:
     """对同一批次的评分进行 z-score 标准化，消除 LLM 评分偏差。
 
     对每个维度独立做 z-score，然后重新映射回 0-10 区间。
@@ -121,6 +143,8 @@ def normalize_scores(reports: list[BottleneckReport]) -> list[BottleneckReport]:
 
     Args:
         reports: 同一批次 LLM 返回的 BottleneckReport 列表
+        skip_dims: 不做标准化的维度（有真实数据锚点的维度，见 `_anchored_dims`）。
+            必须整维跳过而非按节点跳过，否则同一次分析内该类维度尺度不一致。
 
     Returns:
         原地修改后的同一列表（overall_score 会被重新计算）
@@ -128,11 +152,15 @@ def normalize_scores(reports: list[BottleneckReport]) -> list[BottleneckReport]:
     if len(reports) < 3:
         return reports
 
+    skip_dims = skip_dims or set()
+
     from statistics import mean, stdev
 
     zero_sigma_dims = 0
 
     for dim in BottleneckDimension:
+        if dim.value in skip_dims:
+            continue
         dim_scores: list[tuple[int, float]] = []
         dim_reasoning_lens: list[tuple[int, int]] = []
         for i, rpt in enumerate(reports):
@@ -290,8 +318,11 @@ class BottleneckAnalyzer:
             if r is not None:
                 reports.append(r)
 
-        # z-score 标准化消除 LLM 评分偏差，然后重算加权总分
-        normalize_scores(reports)
+        # z-score 标准化消除 LLM 评分偏差，然后重算加权总分。
+        # 有真实集中度锚点的维度整维跳过标准化 —— 真实数据的绝对锚定正是 z-score
+        # 做不到的事。若归一化在后覆盖，≥3 个环节时校准结果会被整批重写，而报告里
+        # 那句「[校准: 6→4]」还留着，文本与数值背离（原 A-6）。
+        normalize_scores(reports, skip_dims=_anchored_dims(reports))
         for rpt in reports:
             rpt.overall_score = round(self._weighted_score(rpt.scores), 2)
 
@@ -436,10 +467,6 @@ class BottleneckAnalyzer:
         merged_cr3 = round(self._weighted_median(cr3_data)) if cr3_data else None
         merged_hhi = round(self._weighted_median(hhi_data)) if hhi_data else None
 
-        adjustments = self._check_hhi_consistency(merged_scores, merged_cr3, merged_hhi, node_name)
-
-        overall = self._weighted_score(merged_scores)
-
         # 集中度来源：各子报告真实数据同源（同一板块缓存），取任一 akshare 来源即可
         real_report = next((r for r, _ in results if r.cr3_source == "akshare"), None)
         cr3_source = "akshare" if real_report else "llm_estimate"
@@ -447,6 +474,14 @@ class BottleneckAnalyzer:
         if real_report:
             merged_cr3 = real_report.cr3_estimate
             merged_hhi = real_report.hhi_estimate
+
+        # 校准必须在真实值覆盖**之后**：此前它跑在覆盖之前，用的是各子模型 LLM
+        # 估算的 CR3/HHI 中位数，真实数据取到了却没参与校准（P1-1 同源瑕疵）。
+        adjustments = self._check_hhi_consistency(
+            merged_scores, merged_cr3, merged_hhi, node_name, cr3_source,
+        )
+
+        overall = self._weighted_score(merged_scores)
 
         return BottleneckReport(
             node_name=node_name,
@@ -624,7 +659,7 @@ class BottleneckAnalyzer:
                     "cr5": real_conc["cr5"],
                     "top_companies": real_conc.get("top_companies", []),
                 }
-            adjustments = self._check_hhi_consistency(scores, cr3, hhi, node_name)
+            adjustments = self._check_hhi_consistency(scores, cr3, hhi, node_name, cr3_source)
 
             overall = self._weighted_score(scores)
 
@@ -652,10 +687,20 @@ class BottleneckAnalyzer:
         cr3: int | None,
         hhi: int | None,
         node_name: str,
+        cr3_source: str = "llm_estimate",
     ) -> list[str]:
-        """检查 LLM 的 scarcity/pricing_power 评分是否与其自身估算的 HHI/CR3 一致，不一致则修正。"""
+        """检查 LLM 的 scarcity/pricing_power 评分是否与其自身估算的 HHI/CR3 一致，不一致则修正。
+
+        校准幅度随 `cr3_source` 缩放：LLM 自估的 HHI/CR3 与真实板块成分股算出的
+        不确定性差一个量级，却曾同权同效。`llm_estimate` 时幅度减半（至少 1 分），
+        且 reasoning 里标注来源，避免读者把估算值当作事实。
+        """
         if cr3 is None and hhi is None:
             return []
+
+        # 真实数据(akshare)幅度 2 分，LLM 估算减半 → 1 分（见 P1-12）
+        step = 2.0 if cr3_source == "akshare" else 1.0
+        tag = "" if cr3_source == "akshare" else "(估算)"
 
         score_map = {s.dimension: s for s in scores}
         adjustments: list[str] = []
@@ -667,47 +712,47 @@ class BottleneckAnalyzer:
             if hhi > 2500:
                 if scarcity and scarcity.score < 6:
                     old = scarcity.score
-                    scarcity.score = max(6.0, scarcity.score + 2)
-                    scarcity.reasoning = f"[HHI校准: HHI={hhi}>2500, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
-                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (HHI={hhi}高集中度)")
+                    scarcity.score = max(6.0, scarcity.score + step)
+                    scarcity.reasoning = f"[HHI校准{tag}: HHI={hhi}>2500, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
+                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (HHI={hhi}{tag}高集中度)")
                 if pricing and pricing.score < 5:
                     old = pricing.score
-                    pricing.score = max(5.0, pricing.score + 2)
-                    pricing.reasoning = f"[HHI校准: HHI={hhi}>2500, {old:.0f}→{pricing.score:.0f}] " + pricing.reasoning
-                    adjustments.append(f"pricing_power {old:.0f}→{pricing.score:.0f} (HHI={hhi}高集中度)")
+                    pricing.score = max(5.0, pricing.score + step)
+                    pricing.reasoning = f"[HHI校准{tag}: HHI={hhi}>2500, {old:.0f}→{pricing.score:.0f}] " + pricing.reasoning
+                    adjustments.append(f"pricing_power {old:.0f}→{pricing.score:.0f} (HHI={hhi}{tag}高集中度)")
 
             elif hhi < 1500:
                 if scarcity and scarcity.score > 6:
                     old = scarcity.score
-                    scarcity.score = min(6.0, scarcity.score - 2)
-                    scarcity.reasoning = f"[HHI校准: HHI={hhi}<1500, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
-                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (HHI={hhi}低集中度)")
+                    scarcity.score = min(6.0, scarcity.score - step)
+                    scarcity.reasoning = f"[HHI校准{tag}: HHI={hhi}<1500, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
+                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (HHI={hhi}{tag}低集中度)")
                 if pricing and pricing.score > 6:
                     old = pricing.score
-                    pricing.score = min(6.0, pricing.score - 2)
-                    pricing.reasoning = f"[HHI校准: HHI={hhi}<1500, {old:.0f}→{pricing.score:.0f}] " + pricing.reasoning
-                    adjustments.append(f"pricing_power {old:.0f}→{pricing.score:.0f} (HHI={hhi}低集中度)")
+                    pricing.score = min(6.0, pricing.score - step)
+                    pricing.reasoning = f"[HHI校准{tag}: HHI={hhi}<1500, {old:.0f}→{pricing.score:.0f}] " + pricing.reasoning
+                    adjustments.append(f"pricing_power {old:.0f}→{pricing.score:.0f} (HHI={hhi}{tag}低集中度)")
 
         if cr3 is not None:
             if cr3 > 80:
                 if scarcity and scarcity.score < 7:
                     old = scarcity.score
-                    scarcity.score = max(7.0, scarcity.score + 2)
-                    scarcity.reasoning = f"[CR3校准: CR3={cr3}%>80%, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
-                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (CR3={cr3}%高垄断)")
+                    scarcity.score = max(7.0, scarcity.score + step)
+                    scarcity.reasoning = f"[CR3校准{tag}: CR3={cr3}%>80%, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
+                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (CR3={cr3}%{tag}高垄断)")
 
             elif cr3 < 30:
                 if scarcity and scarcity.score > 4:
                     old = scarcity.score
-                    scarcity.score = min(4.0, scarcity.score - 2)
-                    scarcity.reasoning = f"[CR3校准: CR3={cr3}%<30%, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
-                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (CR3={cr3}%低集中)")
+                    scarcity.score = min(4.0, scarcity.score - step)
+                    scarcity.reasoning = f"[CR3校准{tag}: CR3={cr3}%<30%, {old:.0f}→{scarcity.score:.0f}] " + scarcity.reasoning
+                    adjustments.append(f"scarcity {old:.0f}→{scarcity.score:.0f} (CR3={cr3}%{tag}低集中)")
 
         for s in scores:
             s.score = round(max(0.0, min(10.0, s.score)), 1)
 
         if adjustments:
-            logger.info(f"HHI一致性校准 [{node_name}]: {'; '.join(adjustments)}")
+            logger.info(f"HHI一致性校准 [{node_name}] (source={cr3_source}): {'; '.join(adjustments)}")
 
         return adjustments
 

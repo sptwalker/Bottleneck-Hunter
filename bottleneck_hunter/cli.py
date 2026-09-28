@@ -257,31 +257,9 @@ async def _screen_async():
     ).ask()
     deep_llm = create_llm(provider, model)
 
-    # --- Cross-validation models ---
-    enable_cv = questionary.confirm(
-        "启用多模型交叉验证？",
-        default=False,
-    ).ask()
-
-    validation_models = []
-    if enable_cv:
-        cv_model_str = questionary.text(
-            "验证模型列表 (provider:model,逗号分隔):\n"
-            "  例: openai:gpt-5.4,anthropic:claude-sonnet-4-6,deepseek:deepseek-v4-pro",
-            default="",
-        ).ask()
-        if cv_model_str:
-            for item in cv_model_str.split(","):
-                item = item.strip()
-                if ":" in item:
-                    p, m = item.split(":", 1)
-                    validation_models.append({"provider": p.strip(), "model": m.strip()})
-
     # --- Run ---
     console.print(f"\n[bold green]开始分析: {sector} — {end_product}[/bold green]")
     console.print(f"  拆解深度: {max_depth}层 | 瓶颈Top-{top_n} | 市场: {market_str}")
-    if validation_models:
-        console.print(f"  交叉验证: {len(validation_models)} 个模型")
     console.print("")
 
     try:
@@ -302,7 +280,6 @@ async def _screen_async():
                 market=market,
                 max_market_cap_yi=max_market_cap_yi,
                 max_suppliers=max_suppliers,
-                validation_models=validation_models or None,
             )
 
         # --- Display results ---
@@ -425,26 +402,6 @@ def _display_results(result, console: Console) -> None:
                 str(sc.financial_health),
                 str(sc.valuation),
                 f"[bold]{sc.overall_score:.1f}[/bold]",
-            )
-        console.print(table)
-
-    # Cross-validation summary
-    if result.cross_validations:
-        console.print("")
-        table = Table(title="多模型交叉验证", show_lines=True)
-        table.add_column("公司", width=15)
-        table.add_column("代码", width=12)
-        table.add_column("共识", width=10)
-        table.add_column("AI 均分", width=8)
-        table.add_column("共识摘要", width=50)
-
-        for cv in result.cross_validations:
-            score_icon = "🟢" if cv.avg_score >= 7 else ("🟡" if cv.avg_score >= 5 else "🔴")
-            table.add_row(
-                cv.supplier_name,
-                cv.ticker,
-                f"{score_icon} {cv.avg_score:.1f}",
-                cv.consensus_reasoning[:50] + "..." if len(cv.consensus_reasoning) > 50 else cv.consensus_reasoning,
             )
         console.print(table)
 

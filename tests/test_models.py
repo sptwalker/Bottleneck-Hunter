@@ -159,9 +159,11 @@ class TestFinancialSnapshot:
 
 class TestAlphaScore:
     def test_create_defaults(self):
+        """默认全 None = 数据不足，与"恰好中等关注度"的 5.0 语义不同。"""
         alpha = AlphaScore()
-        assert alpha.market_attention == 0.0
-        assert alpha.alpha_score == 0.0
+        assert alpha.market_attention is None
+        assert alpha.alpha_score is None
+        assert alpha.dim_cap is None
         assert alpha.reasoning == ""
 
     def test_create_full(self):

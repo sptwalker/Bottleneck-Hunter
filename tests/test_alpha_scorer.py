@@ -59,16 +59,77 @@ class TestAlphaScorer:
         assert alpha.market_attention > 6.0
         assert alpha.alpha_score < 4.0
 
-    def test_no_snapshot(self):
-        sc = _make_scorecard(market_cap=100, with_snapshot=False)
+    def test_all_dims_missing_marks_insufficient(self):
+        """全维度无数据 → alpha 置 None，**不得**退回中性分 5.0。
+
+        旧行为下"没抓到任何数据"和"恰好中等关注度"会得出同一个 5.0，
+        击穿 alpha = 瓶颈重要性 × (1 − 关注度/10) 的立意。
+        """
+        sc = _make_scorecard(market_cap=None, with_snapshot=False)
         alpha = AlphaScorer.compute(sc, bottleneck_score=8.0)
-        assert 0 <= alpha.alpha_score <= 10
-        assert alpha.reasoning
+        assert alpha.market_attention is None
+        assert alpha.information_gap is None
+        assert alpha.alpha_score is None
+        assert "数据不足" in alpha.reasoning
+
+    def test_partial_dims_still_scores(self):
+        """只有市值一维有数据 → 仍能算关注度（归一化到一维），不误判为数据不足。"""
+        sc = _make_scorecard(market_cap=30, with_snapshot=False)
+        alpha = AlphaScorer.compute(sc, bottleneck_score=8.0)
+        assert alpha.market_attention is not None
+        assert alpha.alpha_score is not None
+        assert alpha.dim_cap == 1  # 50 亿以下 → 最低档
+
+    def test_unknown_bottleneck_marks_insufficient(self):
+        """关注度五维齐备但瓶颈分未知 → 仍算不出 alpha，置 None。"""
+        sc = _make_scorecard(market_cap=30, analyst_report_count=2)
+        alpha = AlphaScorer.compute(sc, bottleneck_score=None)
+        assert alpha.market_attention is not None
+        assert alpha.alpha_score is None
+        assert "瓶颈分未知" in alpha.reasoning
+
+    def test_missing_dims_renormalized_not_zeroed(self):
+        """缺维度 → 从加权中剔除并重归一化，不是当 0/5 分计入。
+
+        不写死金标：直接用返回的 dim_* 与 DIM_WEIGHTS 自洽复算，
+        这样维度权重调整时测试仍有效，只在"缺维度被当成有效分"时才失败。
+        """
+        us = _make_scorecard(
+            market_cap=100, analyst_report_count=20, volume_ratio=1.0,
+            price_change_3m_pct=10, institution_holding_pct=40,
+            market=MarketRegion.US_STOCK,
+        )
+        full = AlphaScorer.compute(us, bottleneck_score=8.0)
+        dims = {
+            "cap": full.dim_cap, "analyst": full.dim_analyst, "vol": full.dim_volume,
+            "price": full.dim_price, "inst": full.dim_institution,
+        }
+        assert all(v is not None for v in dims.values())
+        total_w = sum(AlphaScorer.DIM_WEIGHTS[k] for k in dims)
+        raw = sum(dims[k] * AlphaScorer.DIM_WEIGHTS[k] for k in dims) / total_w
+        assert full.market_attention == max(2.0, min(10.0, round(raw, 1)))
+
+    def test_a_share_drops_inst_dim(self):
+        """A 股无机构持仓数据 → inst 维剔除，权重摊回四维。"""
+        a = _make_scorecard(
+            market_cap=100, analyst_report_count=20, volume_ratio=1.0,
+            price_change_3m_pct=10, market=MarketRegion.A_STOCK,
+        )
+        alpha = AlphaScorer.compute(a, bottleneck_score=8.0)
+        assert alpha.dim_institution is None
+        # 返回的 dim_* 字段名与 DIM_WEIGHTS 键不同名（vol ↔ dim_volume），逐一手写映射
+        four = {"cap": alpha.dim_cap, "analyst": alpha.dim_analyst,
+                "vol": alpha.dim_volume, "price": alpha.dim_price}
+        assert all(v is not None for v in four.values())
+        total_w = sum(AlphaScorer.DIM_WEIGHTS[k] for k in four)
+        raw = sum(four[k] * AlphaScorer.DIM_WEIGHTS[k] for k in four) / total_w
+        assert alpha.market_attention == max(2.0, min(10.0, round(raw, 1)))
 
     def test_no_market_cap(self):
         sc = _make_scorecard(market_cap=None, analyst_report_count=5)
         alpha = AlphaScorer.compute(sc, bottleneck_score=7.0)
         assert 0 <= alpha.market_attention <= 10
+        assert alpha.dim_cap is None  # 缺的维度如实置 None，不假装 5 分
 
     def test_bounds(self):
         sc = _make_scorecard(market_cap=10, analyst_report_count=0)
@@ -78,8 +139,9 @@ class TestAlphaScorer:
         assert 0 <= alpha.information_gap <= 10
         assert 0 <= alpha.dim_cap <= 9
         assert 0 <= alpha.dim_analyst <= 9
-        assert 0 <= alpha.dim_volume <= 9
-        assert 0 <= alpha.dim_price <= 9
+        # 本用例未传 volume_ratio / price_change_3m_pct → 这两维无数据
+        assert alpha.dim_volume is None
+        assert alpha.dim_price is None
         assert alpha.dim_institution is None or 0 <= alpha.dim_institution <= 9
         assert alpha.ipo_bonus in (0, 2)
         assert alpha.vp_discount in (0.8, 1.0)

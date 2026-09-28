@@ -120,6 +120,22 @@ def _safe_int(val) -> int | None:
         return None
 
 
+def _de_to_da_pct(v: float | None) -> float | None:
+    """Yahoo `debtToEquity` → 真资产负债率 D/A(%)。
+
+    Yahoo 返回的是**百分数形式**的 D/E（实测 AAPL 78.4 即 D/E=0.784，
+    KO 115.5 即 1.155），而下游一律按 D/A 解读（A 股路径取的是同花顺
+    「资产负债率」），故必须换算，否则美股杠杆被系统性高估。
+
+    D/A = (D/E) / (1 + D/E)。令 p = 百分数,则 D/A% = 100p/(100+p)。
+    """
+    if v is None:
+        return None
+    if abs(100.0 + v) < 1e-9:  # D/E = -100% 时公式发散
+        return None
+    return round(100.0 * v / (100.0 + v), 2)
+
+
 def _compute_volume_metrics(
     volumes: list[float], closes: list[float],
 ) -> tuple[float | None, float | None, float | None, int]:
@@ -451,8 +467,15 @@ def _fetch_us_financial(ticker: str) -> FinancialSnapshot | None:
         snap.net_profit_yi = _safe_float(info.get("netIncomeToCommon"), 1e-8)
         snap.gross_margin_pct = _safe_float(info.get("grossMargins"), 100)
         snap.roe_pct = _safe_float(info.get("returnOnEquity"), 100)
-        snap.debt_ratio_pct = _safe_float(info.get("debtToEquity"))
-        snap.cashflow_per_share = _safe_float(info.get("operatingCashflow"))
+        # Yahoo 的 debtToEquity 是 D/E 百分数，须换算成资产负债率 D/A（对齐 A 股路径口径）
+        snap.debt_ratio_pct = _de_to_da_pct(_safe_float(info.get("debtToEquity")))
+        # operatingCashflow 是总额（美元），本字段语义是每股 —— 必须除以股本；
+        # 股本取不到就置 None，绝不存总额（否则下游看到 48700000000 这种"每股现金流"）
+        _ocf = _safe_float(info.get("operatingCashflow"))
+        _shares = _safe_float(info.get("sharesOutstanding"))
+        snap.cashflow_per_share = (
+            round(_ocf / _shares, 4) if _ocf is not None and _shares else None
+        )
 
         # 机构持仓
         inst_pct = info.get("heldPercentInstitutions")

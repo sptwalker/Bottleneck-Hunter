@@ -433,6 +433,13 @@ async def stream_reverse_analysis(
         logger.exception("反向分析评估失败")
         yield _sse("error", step="evaluate", message=f"评估失败: {e}")
         return
+    # evaluate 重试仍失败时返回 None（不再返回一张 0 分卡）——反查是单票路径，
+    # 没有"跳过这家继续"的余地，且已有报告无法成立，如实报错而不是发一份全 0 的评分。
+    if sc is None:
+        yield _sse("error", step="evaluate",
+                   message=f"评估失败: {supplier.name} 的评分未能生成"
+                           f"（{evaluator.fail_reason(supplier.ticker)}），请重试或更换模型")
+        return
     if supplier.ticker in sm_map:
         sc.smart_money = sm_map[supplier.ticker]
 
@@ -458,7 +465,9 @@ async def stream_reverse_analysis(
                 company_name_cn=supplier.name_cn, sector=supplier.sector,
                 bottleneck_node=bottleneck.node_name,
                 quality_score=sc.overall_score,
-                alpha_score=sc.alpha.alpha_score if sc.alpha else 0.0,
+                # alpha_score 为 None = 数据不足；列是 REAL DEFAULT 0 的排序缓存（真值在 result_json），
+                # 写 NULL 会破坏该列的既有权重约定，故按列约定落 0.0。
+                alpha_score=sc.alpha.alpha_score if (sc.alpha and sc.alpha.alpha_score is not None) else 0.0,
                 final_score=sc.final.final_score if sc.final else sc.overall_score,
                 source=source, matched_analysis_id=matched_id,
                 owner_analysis_id=owner_analysis_id,
