@@ -1197,3 +1197,25 @@ python -m pytest -q  → 2568 passed, 5 skipped in 486.77s（6A~6D 全部改动�
 **刻意未做**：按遥测自适应超时——超时样本被截断在上限处，均值自带天花板，自适应会自我锁死；等有「未截断的长尾延迟」数据再考虑。
 
 **哨兵**：`test_concurrent_timeouts_count_as_one_strike`、`test_slow_reasoning_model_gets_longer_timeout`、`test_fast_model_on_slow_budget_not_cut`（去掉修复即红）。
+
+## 美股决策中心 9-25 起零成交复核（2026-09-29）
+
+**现象**：美股从 9-25 起没有任何一笔成交，股票仓位 14.6%，远低于 51.1% 的下限。
+
+**生产实证与根因**（按影响排序）：
+1. **挂单死锁（主因）**：L4 会跳过所有「已有挂单」的票。旧挂单是 LLM 按「理想价」挂的，普遍低于现价 3~20%（TSM 420~435 vs ~450、NVDA 210 vs 225、MRVL 210 vs 262、MSFT 490 vs 516、SNPS 380 vs 426），市场走高后成交不了，却要占位 14 天（10-05~10-09 才到期）。缺口驱动每天点名 NVDA/TSM/MRVL/SNPS/MSFT，每天都被「跳过已有挂单」挡掉。
+2. **行情「假新鲜」**：yfinance 被 429 限流，兜底源 akshare_us 在北京 05:30 还没出当日 bar，但照样返回「抓取成功」并把 fetched_at 刷新，旧的新鲜度闸看不出问题。9-28 的 47 票里只有 12 票有当日 bar。
+3. **投委会独立性否决**：glm-5.3 / qwen3.8-max 在投委会长 prompt 下均耗时 57/66s，60s 上限下 7 日成功率只有 22%/28%，超时被禁后委员集中到 deepseek，9-28 的 CDNS 因此被「独立性不足」否决。其余否决（CDNS 9-26、AMZN 9-28 的 needs_discussion）是正常结论。
+4. **挂单日志刷屏**：挂单轮询每小时调一次 `rest_execution`，每次都记一条「转挂单，到期 <新算的日期>」，而这个日期并不落库，日志里全是假到期日。
+
+**修复**：
+- `decision_engine._supersede_stale_resting`：本轮决策又点名某票，且其旧挂单在不利侧偏离现价超过 3%（`BH_RESTING_SUPERSEDE_GAP_PCT`，买单挂太低 / 卖单挂太高）→ 作废旧挂单，让位本轮新计划；贴近现价的挂单保留。
+- `_ensure_price_freshness`：以同批票的最新 bar 日期为基准，落后的票单独补刷一次。补刷不进「过半失败即硬停」的判定（落后一天不值得停掉决策链），也不依赖交易日历（节假日全体一起停，就不会有落后者）。
+- `fallback._SLOW_PATTERNS` 加入 `glm-5`、`-max`，走 180s 慢档上限。
+- `store_decision.rest_execution`：只在首次转挂单时返回 True 并记日志。
+
+**运维动作（非代码）**：部署后需要在 AI 配置中心对 glm / qwen 执行「测试并恢复」，解除 disabled_timeout。
+
+**刻意未做**：挂单阈值按 ATR 缩放（见 ponytail 注释）。
+
+**哨兵**：`test_stale_resting_yields_to_new_decision`、`test_rest_logs_only_first_time`、`test_lagging_bar_date_gets_refreshed_without_hard_stop`。全量 2577 passed, 5 skipped。

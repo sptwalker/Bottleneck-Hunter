@@ -839,13 +839,17 @@ class _DecisionMixin:
 
     # ── 挂单交易（限价单）生命周期：resting_until 非空 = 挂单中 ──────────────
     def rest_execution(self, plan_id: str, resting_until: str) -> bool:
-        """把已确认(confirmed)的计划转为挂单：首次落挂单时间/到期，重复调用不重置(避免续期)。"""
+        """把已确认(confirmed)的计划转为挂单：首次落挂单时间/到期，重复调用不重置(避免续期)。
+
+        只有首次转挂单返回 True 并记一条状态日志。挂单轮询每小时都会调一次，以前每次都记
+        「转挂单，到期 <新算的日期>」，那个日期并没有写进库，日志里就是一串假到期日。
+        """
         with self._write_conn() as conn:
             q, p = self._filtered(
                 "UPDATE execution_plans SET method = 'limit', "
                 "resting_since = CASE WHEN COALESCE(resting_since,'')='' THEN ? ELSE resting_since END, "
-                "resting_until = CASE WHEN COALESCE(resting_until,'')='' THEN ? ELSE resting_until END "
-                "WHERE id = ? AND status = 'confirmed'",
+                "resting_until = ? "
+                "WHERE id = ? AND status = 'confirmed' AND COALESCE(resting_until,'')=''",
                 (_now_iso(), resting_until, plan_id),
             )
             cur = conn.execute(q, p)

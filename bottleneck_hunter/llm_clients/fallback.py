@@ -35,7 +35,9 @@ _CAND_TIMEOUT = float(os.getenv("BH_LLM_TIMEOUT", "60"))
 # 会把「慢但正常」判成超时 → 切换 → 熔断；而配置中心 "hi" 探活 3s 就回，结论必然不一致。
 # ponytail: 子串表判慢模型，新推理模型上线需补表；想按遥测自适应须先解决「超时样本被截断在上限」的自限问题。
 _SLOW_TIMEOUT = float(os.getenv("BH_LLM_SLOW_TIMEOUT", "180"))
-_SLOW_PATTERNS = ("reasoner", "-pro", "thinking", "-r1", "o1-", "o3-", "o4-", "gpt-5", "kimi-k")
+# glm-5 / *-max：生产投委会长 prompt 实测均值 57~66s，60s 上限下成功率仅 22%/28%，
+# 超时被禁后委员集中到单一 provider，触发投委会「独立性不足」否决。
+_SLOW_PATTERNS = ("reasoner", "-pro", "thinking", "-r1", "o1-", "o3-", "o4-", "gpt-5", "kimi-k", "glm-5", "-max")
 
 
 def cand_timeout(model: str) -> float:

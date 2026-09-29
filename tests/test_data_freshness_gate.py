@@ -105,3 +105,20 @@ if __name__ == "__main__":  # 便于 GBK 控制台直接 python 跑
             print("OK: majority-fail hard-stop verified")
 
     asyncio.run(_main())
+
+
+@pytest.mark.asyncio
+async def test_lagging_bar_date_gets_refreshed_without_hard_stop(store):
+    """fetched_at 刚刷过、但最新 bar 落后于同批票 → 补刷落后票，且不因补刷失败硬停。
+
+    生产 9-28：yfinance 限流、兜底源尚无当日 bar，「抓取成功」把 fetched_at 刷成刚才，
+    47 票里 35 票的最新收盘停在 9-25，决策照常用旧价，而旧时效门只看 fetched_at 看不出来。
+    """
+    today = datetime.now(timezone.utc).date()
+    for t, lag in (("AAA", 0), ("BBB", 0), ("CCC", 3), ("DDD", 3)):
+        store.save_snapshots([{"ticker": t, "date": (today - timedelta(days=lag)).isoformat(),
+                               "close": 100.0, "fetched_at": _iso(0), "market": "us_stock"}])
+    halt = {}
+    evts, fake = await _collect(store, "us_stock", halt, results={"CCC": "error: 429", "DDD": "error: 429"})
+    assert sorted(fake.call_args.args[0]) == ["CCC", "DDD"]
+    assert not halt.get("stop")

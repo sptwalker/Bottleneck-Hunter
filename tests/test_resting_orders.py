@@ -99,3 +99,34 @@ if __name__ == "__main__":
         else:
             fn()
     print("挂单生命周期自检通过")
+
+
+def test_rest_logs_only_first_time(store):
+    """挂单轮询每小时调一次 rest_execution —— 只有首次落挂单记日志，不刷一串假到期日。"""
+    pid = _mk(store)
+    assert store.rest_execution(pid, _FAR)
+    assert not store.rest_execution(pid, "2100-06-06T00:00:00+00:00")
+    rows = [r for r in store.get_execution_status_log(pid) if "转挂单" in (r.get("reason") or "")]
+    assert len(rows) == 1 and _FAR in rows[0]["reason"]
+
+
+def test_stale_resting_yields_to_new_decision(store):
+    """美股 9-25 起零成交的根因：挂单价远低于现价、成交不了，还占着坑挡住新计划。
+
+    本轮又点名的票：不利侧偏离 >3% 的旧挂单作废让位；贴近现价的、以及本轮没点名的都保留。
+    """
+    from bottleneck_hunter.watchlist.decision_engine import _supersede_stale_resting
+    far_buy = _mk(store, "TSM", "buy", 420.0)       # 现价 450 → 低 6.7%
+    near_buy = _mk(store, "NVDA", "buy", 224.0)     # 现价 225 → 低 0.4%
+    far_sell = _mk(store, "AVGO", "sell", 380.0)    # 现价 352 → 高 8%
+    untouched = _mk(store, "MRVL", "buy", 210.0)    # 偏得远，但本轮没点名
+    for pid in (far_buy, near_buy, far_sell, untouched):
+        store.rest_execution(pid, _FAR)
+    for tk, px in (("TSM", 450.0), ("NVDA", 225.0), ("AVGO", 352.0), ("MRVL", 260.0)):
+        store.save_snapshots([{"ticker": tk, "date": "2026-09-28", "close": px}])
+
+    out = _supersede_stale_resting(store, store.get_resting_executions(), {"TSM", "NVDA", "AVGO"})
+    assert out == {"TSM", "AVGO"}
+    left = {r["ticker"] for r in store.get_resting_executions()}
+    assert left == {"NVDA", "MRVL"}
+    assert "被新决策取代" in store.get_execution_plan(far_buy)["rejection_reason"]

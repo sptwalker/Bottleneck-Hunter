@@ -1994,6 +1994,39 @@ _EXECUTABLE_ACTIONS = ("buy", "add", "sell", "reduce")
 # 根除「$1M 账户买 5 股 MU=0.44%」这类 LLM 拍脑袋的零头仓。
 _MIN_BUILD_WEIGHT_PCT = 3.0
 
+# 旧挂单价在「不利侧」偏离现价超过该百分比，且本轮决策又点名同票 → 旧挂单让位
+_RESTING_SUPERSEDE_GAP_PCT = float(_os.getenv("BH_RESTING_SUPERSEDE_GAP_PCT", "3"))
+
+
+def _supersede_stale_resting(store, resting: list[dict], wanted: set[str]) -> set[str]:
+    """本轮决策又点名某票、而它的旧挂单离现价已超 N% → 作废旧挂单，返回被作废的票。
+
+    病史（美股 9-25 起零成交）：L4 对「已有挂单」的票一律跳过，可旧挂单是 LLM 按「理想价」挂的，
+    买单普遍低于现价 5~10%，市场走高后根本成交不了，却占着坑位 14 天——缺口驱动每天点名
+    NVDA/TSM/MSFT…，每天都被「跳过已有挂单」挡掉，建仓整体冻结到挂单到期。
+    只作废**不利侧**偏离过大的（买单挂得太低 / 卖单挂得太高）；贴近现价的挂单照留，等它成交。
+    ponytail: 阈值是固定百分比，不看个股波动率；高波动票挂 3% 外也可能成交，需要时按 ATR 缩放。
+    """
+    out: set[str] = set()
+    for r in resting:
+        tk = r.get("ticker", "")
+        if tk not in wanted:
+            continue
+        try:
+            limit = float(r.get("target_price") or 0)
+            px = float((store.get_latest_snapshot(tk) or {}).get("close") or 0)
+        except (TypeError, ValueError):
+            continue
+        if limit <= 0 or px <= 0:
+            continue
+        gap = (px - limit) / px * 100 if r.get("action") in ("buy", "add") else (limit - px) / px * 100
+        if gap > _RESTING_SUPERSEDE_GAP_PCT and store.expire_execution(
+            r["id"], f"[被新决策取代] 挂单价 {limit:g} 偏离现价 {px:g} 达 {gap:.1f}%，难以成交，让位本轮新计划"
+        ):
+            logger.info("挂单让位 %s：挂单价 %g / 现价 %g（不利侧偏离 %.1f%%）", tk, limit, px, gap)
+            out.add(tk)
+    return out
+
 
 def _conviction_score(expected_return_pct: float, catalyst_days_left: int | None,
                       catalyst_impact: str = "", composite_score: float = 0.0) -> float:
@@ -2744,7 +2777,8 @@ async def run_execution_plans(
         # （原先是同一表达式写两遍、`|=` 追加在第二遍上——P1-I/N-25 的驱动直通要在这之后合成，
         #   故把两处并到一处，语义不变，只是不再让后来的读者以为其中一处是笔误。）
         _pending_set = {ep["ticker"] for ep in store.get_pending_executions() if ep.get("ticker")}
-        _resting_set = {ep["ticker"] for ep in store.get_resting_executions() if ep.get("ticker")}
+        _resting = store.get_resting_executions()
+        _resting_set = {ep["ticker"] for ep in _resting if ep.get("ticker")}
         existing_tickers = _pending_set | _resting_set
         beta_map = {}
         for tk in set(list(entry_map.keys()) + [p["ticker"] for p in positions]):
@@ -2800,6 +2834,10 @@ async def run_execution_plans(
         # 逐条成交、不按 ticker 去重，会直接把单轮步长上限击穿。
         # ② 的判据只用 pending（不含挂单），因为挂单已由 ① 单独管；两者都在 `existing_tickers` 里，
         # 这里分开判是为了让"跳过"的日志原因可区分。
+        # 本轮又点名、但旧挂单已离现价过远的票 → 作废旧挂单，让位本轮新计划（见 _supersede_stale_resting）
+        if _supersede_stale_resting(store, _resting, {ep.get("ticker", "") for ep in exec_plans} | set(driver_plans)):
+            _resting_set = {ep["ticker"] for ep in store.get_resting_executions() if ep.get("ticker")}
+            existing_tickers = _pending_set | _resting_set
         _synth = 0
         _exec_tk = {ep.get("ticker", "") for ep in exec_plans}
         for _tp in actionable or []:
@@ -3357,6 +3395,7 @@ async def _ensure_price_freshness(
         return
 
     stale = []
+    bar_dates: dict[str, str] = {}
     for entry in entries[:MAX_STALE_SCAN]:
         ticker = entry.get("ticker", "")
         if not ticker:
@@ -3370,6 +3409,26 @@ async def _ensure_price_freshness(
         color, days = validate_data_freshness(latest, "market_snapshots")
         if color != "green":
             stale.append((ticker, f"{days}天"))
+        else:
+            bar_dates[ticker] = str(snaps[0].get("date") or "")
+    # fetched_at 新鲜 ≠ 数据新鲜：主源限流时兜底源可能还没出最新日K，照样「抓取成功」、
+    # fetched_at 刷成刚才，最新一根却停在上个交易日（实测 9-28 美股 47 票只有 12 票有当日 bar，
+    # 决策用的是 9-25 收盘价）。以同市场同批票的最新 bar 日期为基准，落后的补刷一次——
+    # 不依赖交易日历，节假日全体一起停就没有落后者。
+    # 单独补刷、不进下方「过半失败即硬停」的判定：落后一天的收盘价不值得停掉整条决策链。
+    if bar_dates:
+        _peer = max(bar_dates.values())
+        lag = [t for t, d in bar_dates.items() if d and d < _peer]
+        if lag:
+            from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+            try:
+                res = await fetch_price_batch(lag, store, market=market)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("K线滞后补刷失败 (%s): %s", market, e)
+                res = {}
+            n_ok = sum(1 for v in res.values() if v == "ok")
+            yield _sse("data_refresh_done", layer="data",
+                       message=f"{len(lag)} 票K线落后于 {_peer}，补刷成功 {n_ok} 票（{', '.join(lag[:5])}）")
 
     if not stale:
         yield _sse(
