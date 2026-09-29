@@ -2028,6 +2028,28 @@ def _supersede_stale_resting(store, resting: list[dict], wanted: set[str]) -> se
     return out
 
 
+def _clamp_limit_price(ep: dict, px: float) -> None:
+    """新挂单价不许在不利侧离现价超过 N%（与让位同一阈值），超出压回边界，原地改 ep。
+
+    否则 LLM 照样把买单挂在现价下 10%：成交不了 → 下轮被 _supersede_stale_resting 作废 → 重挂，空转。
+    有利侧（买价≥现价 / 卖价≤现价）不动，执行器按真实市价立即成交。
+    """
+    try:
+        lim = float(ep.get("target_price") or ep.get("estimated_price") or 0)
+    except (TypeError, ValueError):
+        return
+    if lim <= 0 or px <= 0 or ep.get("action") not in _EXECUTABLE_ACTIONS:
+        return
+    g = _RESTING_SUPERSEDE_GAP_PCT / 100
+    bound = round(px * (1 - g), 4) if ep["action"] in ("buy", "add") else round(px * (1 + g), 4)
+    if (ep["action"] in ("buy", "add") and lim < bound) or (ep["action"] in ("sell", "reduce") and lim > bound):
+        ep["target_price"] = bound
+        ep["limit_clamped_from"] = lim
+        if ep.get("shares"):
+            ep["estimated_amount"] = float(ep["shares"]) * bound  # 下方影子现金/日额度按新价计
+        logger.info("挂单价收紧 %s %s：%g → %g（现价 %g）", ep.get("ticker", ""), ep["action"], lim, bound, px)
+
+
 def _conviction_score(expected_return_pct: float, catalyst_days_left: int | None,
                       catalyst_impact: str = "", composite_score: float = 0.0) -> float:
     """P0-4 信念分（纯函数，0~1）：机会驱动器的唯一门槛依据，全部来自现成数据、零新增 LLM。
@@ -3222,6 +3244,7 @@ async def run_execution_plans(
                         # oplog 无记录 —— 事后既无法复盘"为什么这笔越了线"，也无法统计越线频率。
                         _oplog_mandate_exception(store, ticker, market, _l2_w, _post_w, ep)
 
+            _clamp_limit_price(ep, float((store.get_latest_snapshot(ticker) or {}).get("close") or 0))
             ep["_provenance"] = _decision_provenance(
                 ["decision_execution"], [(provider, model)], market, "L4", [ticker]
             )

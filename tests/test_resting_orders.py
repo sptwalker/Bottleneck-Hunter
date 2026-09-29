@@ -130,3 +130,23 @@ def test_stale_resting_yields_to_new_decision(store):
     left = {r["ticker"] for r in store.get_resting_executions()}
     assert left == {"NVDA", "MRVL"}
     assert "被新决策取代" in store.get_execution_plan(far_buy)["rejection_reason"]
+
+
+def test_new_limit_clamped_near_market():
+    """新挂单价在不利侧离现价 >3% 压回边界；有利侧/贴近的不动（去掉 _clamp_limit_price 即红）。"""
+    from bottleneck_hunter.watchlist.decision_engine import _clamp_limit_price
+    buy = {"ticker": "TSM", "action": "buy", "target_price": 420}
+    _clamp_limit_price(buy, 450)
+    assert buy["target_price"] == 436.5 and buy["limit_clamped_from"] == 420
+    sell = {"ticker": "AVGO", "action": "sell", "estimated_price": 380}
+    _clamp_limit_price(sell, 352)
+    assert sell["target_price"] == 362.56
+    near = {"ticker": "NVDA", "action": "buy", "target_price": 224}
+    _clamp_limit_price(near, 225)
+    assert near["target_price"] == 224 and "limit_clamped_from" not in near
+    fav = {"ticker": "META", "action": "buy", "target_price": 734}
+    _clamp_limit_price(fav, 715)
+    assert fav["target_price"] == 734
+    hold = {"ticker": "X", "action": "hold", "target_price": 1}
+    _clamp_limit_price(hold, 100)
+    assert hold["target_price"] == 1

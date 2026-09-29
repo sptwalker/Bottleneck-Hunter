@@ -1219,3 +1219,13 @@ python -m pytest -q  → 2568 passed, 5 skipped in 486.77s（6A~6D 全部改动�
 **刻意未做**：挂单阈值按 ATR 缩放（见 ponytail 注释）。
 
 **哨兵**：`test_stale_resting_yields_to_new_decision`、`test_rest_logs_only_first_time`、`test_lagging_bar_date_gets_refreshed_without_hard_stop`。全量 2577 passed, 5 skipped。
+
+### 补充：新挂单价源头收紧（2026-09-29）
+
+**漏洞**：「旧挂单让位」只解决了 14 天冻结。如果 LLM 新一轮仍把买单挂在现价下 10%，新单同样成交不了，下轮又被作废、再重挂，形成空转。
+
+**修复**：`decision_engine._clamp_limit_price` 在 L4 计划落库前执行。挂单价在不利侧偏离现价超过同一阈值（`BH_RESTING_SUPERSEDE_GAP_PCT`，默认 3%）时，压回边界（买单 ≥ 现价 × 0.97，卖单 ≤ 现价 × 1.03），同步重算 estimated_amount，原价记在 `limit_clamped_from` 以便复盘。有利侧（买价 ≥ 现价 / 卖价 ≤ 现价）不动，执行器按真实市价立即成交。两处用同一阈值，保证「新挂单不会一挂上就满足作废条件」。
+
+**已知边界**：收紧发生在 L4 预校验之后，买单金额最多比校验时高约 3%；执行器成交前会按真实市价重新做约束校验，不会越限成交。
+
+**哨兵**：`test_new_limit_clamped_near_market`（TSM 420→436.5、AVGO 卖 380→362.56，NVDA 贴近 / META 有利侧 / hold 不动）。全量 2578 passed, 5 skipped。
