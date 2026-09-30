@@ -281,6 +281,23 @@ class TestDecisionAPITrade:
         assert resp.status_code == 200
         assert resp.json()["history"] == []
 
+    def test_equity_history_range_and_mark_to_market(self, client, store):
+        """切换时段须改变曲线范围；权益按日线盯市（现金+持仓×收盘），非仅现金流累加。"""
+        from datetime import date, timedelta
+        c, s = client
+        acc = s.get_sim_account()
+        d = lambda n: (date.today() - timedelta(days=n)).isoformat()  # noqa: E731
+        s.create_sim_trade(acc["id"], "AAPL", "buy", 10, 100.0, 1000.0, strict=False)
+        with s._write_conn() as conn:
+            conn.execute("UPDATE sim_trades SET created_at=?", (d(200) + "T00:00:00+00:00",))
+        s.save_snapshots([{"ticker": "AAPL", "date": d(n), "close": 100.0 + n} for n in (1, 60, 150)])
+        init = acc["initial_capital"]
+        h30 = c.get("/api/trading/account/equity-history?days=30").json()["history"]
+        h365 = c.get("/api/trading/account/equity-history?days=365").json()["history"]
+        assert [p["date"] for p in h30] == [d(1), d(0)]
+        assert len(h365) > len(h30) and h365[0]["date"] == d(150)
+        assert h365[0]["equity"] == round(init - 1000 - 1.0 + 10 * 250, 2)  # 买入含 0.1% 佣金，按收盘 250 盯市
+
     def test_equity_history_after_trade(self, client, store):
         c, s = client
         entry_id = store[1]

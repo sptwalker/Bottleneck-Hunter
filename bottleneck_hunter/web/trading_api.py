@@ -69,33 +69,64 @@ async def get_account(market: str = "us_stock", user: dict = Depends(get_current
 
 @router.get("/account/equity-history")
 async def get_equity_history(days: int = 30, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    """逐日盯市权益曲线：权益 = 当日现金 + Σ 持仓股数 × 当日收盘价（共享日线 market_snapshots）。
+    只在交易日出点、按 days 自然日窗口截取，所以切换 30/90/180/365 天会真正改变曲线范围。"""
+    from datetime import date, timedelta
+
+    from bottleneck_hunter.watchlist.trade_executor import COMMISSION_RATE
+
     store = _user_store(user).for_market(market)
     account = store.get_sim_account()
     initial = account.get("initial_capital", 100000)
     trades = store.get_sim_trades(limit=10000, account_id=account.get("id"))
-
-    from collections import defaultdict
-    daily_cash_flow = defaultdict(float)
-    for t in trades:
-        date = (t.get("created_at") or "")[:10]
-        if not date:
-            continue
-        if t.get("side") == "buy":
-            daily_cash_flow[date] -= t.get("amount", 0)
-        else:
-            daily_cash_flow[date] += t.get("amount", 0)
-
-    if not daily_cash_flow:
+    if not trades:
         return {"history": [], "initial_capital": initial}
 
-    sorted_dates = sorted(daily_cash_flow.keys())
-    history = []
-    equity = initial
-    for d in sorted_dates:
-        equity += daily_cash_flow[d]
-        history.append({"date": d, "equity": round(equity, 2)})
+    # 现金事件：成交（含 0.1% 佣金，与 trade_executor 扣款一致）+ 出入金；initial_capital 已含历次入金，倒推期初现金
+    events = []
+    for t in trades:
+        amt = t.get("amount") or 0
+        fee = round(amt * COMMISSION_RATE, 2)
+        sign = -1 if t.get("side") == "buy" else 1
+        events.append(((t.get("created_at") or "")[:10], sign * amt - fee, t["ticker"],
+                       -sign * (t.get("shares") or 0), t.get("price") or 0))
+    fund_total = 0.0
+    for f in store.get_fund_ops(limit=10000):
+        if f.get("account_id") != account.get("id"):
+            continue
+        delta = f["amount"] if f["op_type"] == "deposit" else -f["amount"]
+        fund_total += delta
+        events.append(((f.get("created_at") or "")[:10], delta, None, 0, 0))
+    events.sort(key=lambda e: e[0])
 
-    history = history[-days:]
+    tickers = sorted({e[2] for e in events if e[2]})
+    closes = {tk: {s["date"]: s["close"] for s in store.get_snapshots(tk, days=days + 30) if s.get("close")}
+              for tk in tickers}
+    today = date.today().isoformat()
+    start = max(events[0][0], (date.today() - timedelta(days=days)).isoformat())
+    # 今天恒在轴上：当日成交后收盘日线尚未入库时，也能按最近价出最新点
+    axis = sorted({d for c in closes.values() for d in c if start <= d <= today} | {today})
+
+    cash, shares, last_px, i = initial - fund_total, {}, {}, 0
+    history = []
+    # ponytail: 日线缺失时沿用最近收盘/成交价（停牌、快照未覆盖），不插值
+    for tk in tickers:
+        for d in sorted(closes[tk]):
+            if d < start:
+                last_px[tk] = closes[tk][d]
+    for d in axis:
+        while i < len(events) and events[i][0] <= d:
+            _, dc, tk, dq, px = events[i]
+            cash += dc
+            if tk:
+                shares[tk] = shares.get(tk, 0) + dq
+                last_px.setdefault(tk, px)
+            i += 1
+        for tk in tickers:
+            if d in closes[tk]:
+                last_px[tk] = closes[tk][d]
+        mv = sum(q * last_px.get(tk, 0) for tk, q in shares.items() if q)
+        history.append({"date": d, "equity": round(cash + mv, 2)})
     return {"history": history, "initial_capital": initial}
 
 
@@ -192,6 +223,7 @@ async def refresh_prices(market: str = "us_stock", user: dict = Depends(get_curr
     skipped = 0
     try:
         import yfinance as yf
+
         from bottleneck_hunter.watchlist.trade_executor import sane_reprice
         data = yf.download(tickers, period="1d", progress=False)
         if data.empty:
