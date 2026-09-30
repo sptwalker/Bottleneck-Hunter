@@ -179,6 +179,7 @@ function renderReverseCross(data, market) {
         else {
           const err = await res.json().catch(() => ({}));
           btn.textContent = (err.detail || '').includes('already') ? '已存在' : '失败';
+      if (!(err.detail || '').includes('already')) btn.title = err.detail || '';  // 悬停看拒因
         }
       } catch (e) { btn.textContent = '失败'; }
     });

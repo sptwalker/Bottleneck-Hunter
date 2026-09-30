@@ -124,7 +124,7 @@ class TestNormalizeExpectedDate:
         from bottleneck_hunter.watchlist.decision_engine import _days_until_date
 
         old = CatalystEvent(event_type="capacity", description="d", expected_date="2025Q3")
-        new = CatalystEvent(event_type="capacity", description="d", expected_date="2026-09-30")
+        new = CatalystEvent(event_type="capacity", description="d", expected_date="2099-09-30")
         # 旧写法会归一成 2025-09-30（已过期）；新写法是未来日期
         assert _days_until_date(new.expected_date) is not None
         assert _days_until_date(new.expected_date) > 0

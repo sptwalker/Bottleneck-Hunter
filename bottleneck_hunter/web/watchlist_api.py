@@ -42,6 +42,48 @@ _PROFILE_EMPTY_RETRY_H = 2
 _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 
 
+# 观察池入池守卫：只收美股主板(纳斯达克/纽交所/美交所)与 A股(沪深北 A股)。根因：8-15 供应链分析把
+# RNECY(场外粉单)/HAM(东京代码，美股不存在)加进池，validate_ticker 只查格式放行，行情永远拉不到。
+# 以腾讯实时行情为准：美股 field[2] 带交易所后缀 .OQ/.N/.AM(.PS=粉单)，不存在则 v_pv_none_match。
+_US_MAIN_BOARDS = {"OQ", "N", "AM"}
+_A_MAIN_PREFIX = ("60", "68", "00", "30", "4", "8", "920")   # 沪主板/科创、深主板/创业、北交所；排除 900/200 B股
+
+
+async def _verify_listing(ticker: str, market: str) -> None:
+    """校验 ticker 真实在该市场主板上市，否则抛 ValueError(中文原因)。
+    ponytail: fail-closed——腾讯行情不可达即拒绝入池(宁拒勿脏)；若误拒频发再加备源(FMP profile)。"""
+    from bottleneck_hunter.chain.financial_data import _code_to_tencent
+    from bottleneck_hunter.watchlist.retry import get_http_client
+    from bottleneck_hunter.watchlist.store_base import extract_astock_code, validate_ticker
+    validate_ticker(ticker, market)   # 先过格式：防 "AAPL,sh600519" 之类拼进 URL 查多码
+    code = extract_astock_code(ticker)
+    if market == "a_stock":
+        if not code:
+            raise ValueError(f"{ticker} 不是 A股代码（应为 6 位数字，如 600519.SS）")
+        if not code.startswith(_A_MAIN_PREFIX):
+            raise ValueError(f"{ticker} 不是沪深北 A股（B股/基金/指数等不能加入观察池）")
+        sym = _code_to_tencent(code)
+    elif market == "us_stock":
+        sym = "us" + ticker.replace("-", ".")
+    else:
+        raise ValueError(f"观察池只支持美股与 A股，不支持市场 {market}")
+    try:
+        r = await get_http_client().get(f"http://qt.gtimg.cn/q={sym}", timeout=8)
+        text = r.content.decode("gbk", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("入池上市校验失败 %s: %s", ticker, e)
+        raise ValueError(f"{ticker} 上市校验暂不可用（行情源不可达），请稍后重试") from e
+    m = re.search(r'="([^"]*)"', text)
+    fields = m.group(1).split("~") if m else []
+    if "none_match" in text or len(fields) < 3 or not fields[1]:
+        raise ValueError(f"{ticker} 在{'美股' if market == 'us_stock' else 'A股'}查无此代码，不能加入观察池")
+    if market == "us_stock":
+        board = fields[2].rsplit(".", 1)[-1] if "." in fields[2] else ""
+        if board not in _US_MAIN_BOARDS:
+            raise ValueError(f"{ticker}（{fields[1]}）不在纳斯达克/纽交所/美交所主板上市"
+                             f"（{'场外粉单 OTC' if board == 'PS' else board or '未知交易所'}），不能加入观察池")
+
+
 def _profile_is_stale(profile: dict | None, now: datetime) -> bool:
     """profile 缺失/无 fetched_at/不可解析/超冷却窗 → True(允许重拉一次)；否则新鲜 → False。
 
@@ -286,11 +328,15 @@ async def list_watchlist(tier: str | None = None, user: dict = Depends(get_curre
 
 @router.post("")
 async def add_to_watchlist(req: AddToWatchlistRequest, user: dict = Depends(get_current_user)):
-    from bottleneck_hunter.watchlist.store_base import normalize_market
+    from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
+    market = normalize_market(req.market)
     # 按市场 scope：容量校验只数该市场，实现分市场独立限额
-    store = _user_store(user).for_market(normalize_market(req.market))
+    store = _user_store(user).for_market(market)
     try:
         data = req.model_dump()
+        data["ticker"] = normalize_ticker(data["ticker"], market)
+        if not store.get_by_ticker(data["ticker"]):   # 已在池的走 store.add 原「已存在」提示
+            await _verify_listing(data["ticker"], market)
         # 行业统一为细中文：用 company_profile 的 industry 映射，避免存入粗英文 "Technology"
         prof = store.get_company_profile(data.get("ticker", "")) or {}
         from bottleneck_hunter.watchlist.industry_zh import to_zh_sector
@@ -300,7 +346,7 @@ async def add_to_watchlist(req: AddToWatchlistRequest, user: dict = Depends(get_
         entry_id = store.add(data)
         return {"id": entry_id, "status": "added"}
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.put("/batch-tier")

@@ -1229,3 +1229,34 @@ python -m pytest -q  → 2568 passed, 5 skipped in 486.77s（6A~6D 全部改动�
 **已知边界**：收紧发生在 L4 预校验之后，买单金额最多比校验时高约 3%；执行器成交前会按真实市价重新做约束校验，不会越限成交。
 
 **哨兵**：`test_new_limit_clamped_near_market`（TSM 420→436.5、AVGO 卖 380→362.56，NVDA 贴近 / META 有利侧 / hold 不动）。全量 2578 passed, 5 skipped。
+
+## 观察池入池上市守卫（2026-09-30）
+
+**问题**：RNECY（瑞萨 ADR，场外粉单）与 HAM（滨松光子东京代码，美股查无）于 2026-08-15 经 phase4「加入观察池」入池，行情永远拉不到。
+
+**根因**：
+- 供应链分析的上游守卫（692ba63，09-01：拆解形态过滤 + 美股主板报价校验 + 无报价剔除）晚于这两只入池。
+- 更根本的是，唯一写入口 `POST /api/watchlist` → `store.add` 只有 `validate_ticker` 格式校验：RNECY/HAM 格式合法即放行。
+- 前端把分析产出的 ticker 原样提交，没有任何上市核验。
+- 三处入口（phase4 / reverse / reverse_cross）都走这一个 API，守卫放在这里一次覆盖全部。
+
+**修复**（`web/watchlist_api.py::_verify_listing`，在 add API 入库前调用）：
+- 先过 `validate_ticker` 格式校验，防止拼接多码注入行情 URL。
+- 市场只收 us_stock / a_stock，其余（含 hk_stock）一律拒绝。
+- A股：代码须为 6 位且前缀在 60/68/00/30/4/8/920；拒 900/200 B股、指数码等。
+- 腾讯 `qt.gtimg.cn` 实时核验：
+  - 查无（`v_pv_none_match`）即拒。
+  - 美股 field[2] 交易所后缀须 ∈ {OQ, N, AM}；`.PS` 粉单即拒，并给出中文原因。
+- fail-closed：行情源不可达时拒绝入池并提示稍后重试（宁拒勿脏）。
+- 已在池的 ticker 跳过核验，仍走原「已存在」提示。
+- 前端「失败」按钮悬停 title 显示后端拒因。
+
+**实网验证**：
+- 放行：NVDA / TSM / BRK-B / SPY / 600519 / 688981 / 430047。
+- 拒绝：RNECY(PS) / HAM(查无) / HPHTY(PS) / 999999。
+
+**附带**：`test_batch5_sentinels` 把 `2026-09-30` 硬编码为「未来日期」，今天到期失败，改为 2099-09-30。
+
+**生产存量脏数据**（待用户确认处置）：
+- RNECY、HAM（用户 903115）。
+- 7 月反向分析遗留的小写 ticker：pltr/orcl/sndk/mu/tsla/spcx/lite（用户 007172）与 avav（d32a4a），均早于 normalize_ticker 入池。
