@@ -13,6 +13,8 @@ N-15 的病：投委会的裁决到不了 L1。同一标的反复被否、而 L1
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from bottleneck_hunter.watchlist.decision_engine import _format_downstream_feedback
@@ -24,6 +26,14 @@ def db(tmp_path, monkeypatch):
     from bottleneck_hunter.auth import store as auth_store_mod
     monkeypatch.setattr(auth_store_mod, "_DEFAULT_DB", tmp_path / "auth.db")
     return tmp_path / "wl.db"
+
+
+def _ago(days):
+    """相对今天的 ISO 时间：窗口是「近 30 天」，写死日期会随日历过期（曾在 10-01 后整批变红）。"""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00")
+
+
+_RECENT = _ago(3)
 
 
 def _seed(base, table, cols, rows):
@@ -40,7 +50,7 @@ def _plan(base, pid, ticker, action="buy", user="u1", market="us_stock", entry="
           [(pid, ticker, action, entry, "2026-09-01T00:00:00", user, market)])
 
 
-def _verdict(base, cid, pid, verdict, user="u1", market="us_stock", at="2026-09-01T00:00:00"):
+def _verdict(base, cid, pid, verdict, user="u1", market="us_stock", at=_RECENT):
     _seed(base, "committee_consensus",
           ["id", "execution_plan_id", "final_verdict", "created_at", "user_id", "market"],
           [(cid, pid, verdict, at, user, market)])
@@ -193,14 +203,14 @@ def test_format_renders_ticker_action_count_date(db):
                               "added_at", "user_id", "market"],
           [("w1", "ORCL", "Oracle", "focus", "Technology", "2026-09-01", "u1", "us_stock")])
     for i in range(3):
-        _verdict(base, f"c{i}", "p1", "rejected", at="2026-09-20T00:00:00")
+        _verdict(base, f"c{i}", "p1", "rejected", at=_ago(5))
     for i in range(2):
-        _verdict(base, f"d{i}", "p2", "rejected", at="2026-09-21T00:00:00")
+        _verdict(base, f"d{i}", "p2", "rejected", at=_ago(4))
 
     text = _format_downstream_feedback(base.for_user("u1").for_market("us_stock"))
 
     assert "ORCL" in text and "buy" in text and "3" in text
-    assert "2026-09-20" in text
+    assert _ago(5)[:10] in text
     assert "Technology" in text
     assert "600519.SS" in text
     assert "板块：" not in text.split("600519.SS")[1]  # 无 sector 的条目不追加空标签
@@ -244,7 +254,7 @@ if __name__ == "__main__":
         b = WatchlistStore(p)
         _plan(b, "p1", "ORCL")
         for i in range(3):
-            _verdict(b, f"c{i}", "p1", "rejected", at="2026-09-20T00:00:00")
+            _verdict(b, f"c{i}", "p1", "rejected", at=_ago(5))
         _plan(b, "p2", "TSLA")
         for i in range(4):
             _verdict(b, f"t{i}", "p2", "needs_discussion")

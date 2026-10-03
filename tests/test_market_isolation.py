@@ -139,6 +139,15 @@ def test_normalize_ticker_canonical():
     assert n("300750.SH") == "300750.SZ"    # 创业板即便传 .SH 也归深市
     assert n("430047") == "430047.BJ"       # 北交所
     assert n("688981") == "688981.SS"       # 科创板→上交所
+    assert n("512890") == "512890.SS"       # 沪市 ETF(5 开头)→上交所；曾被拼成 .SZ 致全源取价失败
+    assert n("510880.SZ") == "510880.SS"    # 错后缀也纠正
+    assert n("159915") == "159915.SZ"       # 深市 ETF
+    assert n("920118") == "920118.BJ"       # 北交所新码段 920，不因 9 开头误归沪市
+    from bottleneck_hunter.chain.financial_data import _code_to_tencent
+    from bottleneck_hunter.data_provider.fetchers.baostock_fetcher import _bs_code
+    from bottleneck_hunter.data_provider.providers import _to_ts_code
+    assert _code_to_tencent("512010") == "sh512010" and _bs_code("512010") == "sh.512010"
+    assert _to_ts_code("510880") == "510880.SH" and _to_ts_code("920118") == "920118.BJ"
     assert n("nvda") == "NVDA"               # 美股仅 upper
     assert n("") == ""
     assert n(None) == ""

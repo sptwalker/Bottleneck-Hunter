@@ -215,6 +215,26 @@ def test_机会驱动的越线标记在合成后仍然保留(tmp_path):
     )
 
 
+def test_无真实收盘价的LLM票先补抓_仍缺则不出单(tmp_path):
+    """L2 核心持仓/缺口票可以不在观察池 → 定时刷价不覆盖 → 无真实快照。
+    修复前 L4 照样按 LLM estimated_price 定股出单，执行器再以「无真实市价快照」拒绝，卡死 pending。
+    现在：缺价票先按需补抓一次；补抓仍无价 → 本轮不出单（有价的驱动票照常落地）。"""
+    d = _DriverStore(tmp_path)
+    fetched = []
+
+    async def _fake_fetch(tickers, store, **kw):
+        fetched.extend(tickers)
+        return {t: "no_data" for t in tickers}
+
+    with patch("bottleneck_hunter.watchlist.price_pipeline.fetch_price_batch", _fake_fetch):
+        _run(d.store, d.plans())   # LLM 买 MSFT，MSFT 无快照
+
+    assert "MSFT" in fetched, "缺价票没有按需补抓"
+    by_tk = {p["ticker"] for p in d.store.get_pending_executions()}
+    assert "MSFT" not in by_tk, "无真实收盘价仍按 LLM 估价出单"
+    assert "NVDA" in by_tk
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
 

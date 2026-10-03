@@ -200,12 +200,9 @@ _TENCENT_HEADERS = {
 
 
 def _code_to_tencent(code: str) -> str:
+    from bottleneck_hunter.watchlist.store_base import astock_exchange
     code = code.strip()
-    if code.startswith("6"):
-        return f"sh{code}"
-    if code[:1] in ("4", "8") or code.startswith("920"):  # 北交所
-        return f"bj{code}"
-    return f"sz{code}"
+    return f"{astock_exchange(code)}{code}"
 
 
 def _fetch_tencent_pe_mcap(code_6: str) -> tuple[float | None, float | None, float | None]:

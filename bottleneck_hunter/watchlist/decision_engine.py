@@ -2921,6 +2921,19 @@ async def run_execution_plans(
         # 持仓票原先不取——相关性的每一对都必须**两侧**都有价序，只取买入侧就永远配不出对，
         # 约束会静默变成空转。仍是一次循环、每票一次查询，risk_snapshots 的覆盖面保持不变
         # （持仓票只进 corr_series，不进归档的 risk_snapshots，避免 payload 语义悄悄变宽）。
+        # 真实市价门（与驱动直通、执行器同一口径）：成交只认 market_snapshots 真实收盘价。
+        # L2 核心持仓/缺口驱动的票可以不在观察池 → 定时刷价(只刷观察池)从不覆盖它们，
+        # 此前 L4 照样拿 LLM 的 estimated_price 定股出单，执行器再以「无真实市价快照」拒绝，
+        # 卡死在 pending。先对缺快照的票按需补抓一次（scheduler 同一原语），仍缺 → 本轮不出单。
+        _no_px = sorted({ep.get("ticker", "") for ep in exec_plans
+                         if ep.get("ticker") and ep.get("action") in _EXECUTABLE_ACTIONS
+                         and not (store.get_latest_snapshot(ep["ticker"]) or {}).get("close")})
+        if _no_px:
+            from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+            try:
+                await fetch_price_batch(_no_px, store, market=market)
+            except Exception as e:  # noqa: BLE001 —— 补抓失败下方逐票跳过，不阻塞整批
+                logger.warning("L4 缺价票补抓失败 (%s): %s", market, e)
         _planned_tk = {ep.get("ticker", "") for ep in exec_plans if ep.get("action") in ("buy", "add")}
         _series_snaps: dict[str, list] = {}
         for ticker in _planned_tk | {p.get("ticker", "") for p in positions if p.get("ticker")}:
@@ -2973,6 +2986,10 @@ async def run_execution_plans(
                 continue
             if ticker in batch_tickers:
                 logger.info("跳过本批次重复的 %s", ticker)
+                skipped += 1
+                continue
+            if ticker in _no_px and not (store.get_latest_snapshot(ticker) or {}).get("close"):
+                logger.warning("跳过 %s %s：补抓后仍无真实收盘价，不以 LLM 估价出单", ticker, ep.get("action"))
                 skipped += 1
                 continue
             # P1-I（N-24）：缺口驱动**不再**豁免 5 日同向冷却。

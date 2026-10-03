@@ -1026,7 +1026,7 @@ def _to_ts_code(ticker: str) -> str:
     if "." in t:
         return t
     if len(t) == 6 and t.isdigit():
-        if t[0] == "6":
+        if t[0] in ("5", "6", "9") and not t.startswith("920"):  # 5=沪市ETF/基金
             return f"{t}.SH"
         if t[0] in ("4", "8") or t.startswith("920"):  # 北交所
             return f"{t}.BJ"

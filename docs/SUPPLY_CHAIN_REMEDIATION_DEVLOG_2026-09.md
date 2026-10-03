@@ -1270,3 +1270,34 @@ python -m pytest -q  → 2568 passed, 5 skipped in 486.77s（6A~6D 全部改动�
   - 现金按成交（含 0.1% 佣金）+ 出入金回放，期初现金 = initial_capital − 累计入金；
   - 轴取窗口内的交易日 + 今天。
 - 验证：生产美股 30/90/180 天分别返回 21/62/64 点，末点 1,009,442 ≈ 账户权益 1,009,518；A股末点与账户权益一致。新增回归 `test_equity_history_range_and_mark_to_market`，全量 2589 passed。
+
+## A股执行单「无真实市价快照，拒绝以 LLM 估价成交」堆积（2026-10-04）
+
+**现象**：A 股决策中心积压 3 张被执行器拒绝的买单，均为 kimi-k3 L4 于 10-01/02 生成：
+- 512890.SZ（红利低波 ETF）
+- 512010.SZ（医药 ETF）
+- 510880.SZ（红利 ETF）
+
+**根因**（三个，叠加）：
+1. **交易所后缀错**（主因）。`store_base._astock_suffix` 只把 6/9 开头判为上交所，5 开头的沪市 ETF/基金（510/512/588…）被拼成 `.SZ`。全部数据源都按深市去查，必然查无，所以永远拿不到快照。
+   - 同类判断散落在 7 处（腾讯 / akshare 资金流与融资融券 / baostock / pytdx / Gangtise / Tushare），各自只认 `6` 开头。
+2. **不在观察池的票无人刷价**。这 3 只来自 L2 `core_holdings` 缺口驱动，L3 计划的 entry_id 为空。定时刷价 `job_price_update` 只刷观察池，所以即使后缀正确，也只能等执行器在确认时按需拉价。
+3. **L4 不看真实价就出单**。L4 定股用的是 LLM 的 `target_price/estimated_price`。驱动直通分支已有「无最新收盘价则跳过」的门，LLM 自选分支却没有，于是能落库一张执行器注定拒绝的单，卡在 pending。
+
+**修复**：
+- `_astock_suffix`：5/6/9 → `.SS`，920 → `.BJ`（先判北交所，不让 9 开头误归沪市），0/1/2/3 → `.SZ`。
+  - 新增 `astock_exchange()` 派生 sh/sz/bj 前缀。
+  - 腾讯、akshare、baostock、pytdx、supplier_search 一律改为调用它，不再各写一套。
+  - Gangtise、Tushare 的 `.SH` 码同步补上 5/9。
+- `run_execution_plans`：对缺快照的可执行票先按需 `fetch_price_batch` 补抓一次（与定时刷价是同一原语，结果落共享快照层）。补抓后仍无收盘价，就本轮跳过、不出单，并记 warning。
+- 回归测试：
+  - `test_normalize_ticker_canonical` 补 ETF / 920 / 各数据源前缀的断言；
+  - 新增 `test_无真实收盘价的LLM票先补抓_仍缺则不出单`。去掉门后该用例确认会失败。
+
+**生产存量**（待用户确认处置）：
+- 3 张 pending 单（ab6b4333e470 / 54f93a45c2c6 / 8cb8230dfa67）的 ticker 仍是错误的 `.SZ`。执行器归一后会改查 `.SS`，但共享层还没有这几只 ETF 的快照，需要按需拉价后才能成交。
+- 同样带旧 `.SZ` 后缀的还有：
+  - tactical_plans 5 行；
+  - model_accuracy 16 行（属于历史记录，无害）。
+
+**附带**：`test_downstream_feedback_to_l1` 把「近期否决」的日期写死在 2026-09-01/20，10-01 起跌出 30 天窗口，8 个用例整批变红（改动前即红）。已改为相对今天取日期。全量结果：2581 + 8 = 2589 passed、6 skipped。

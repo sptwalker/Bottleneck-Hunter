@@ -51,13 +51,20 @@ def extract_astock_code(ticker: str | None) -> str | None:
 
 
 def _astock_suffix(code: str) -> str:
-    """6位码 → 交易所后缀。6/9→上交所(.SS)，0/2/3→深交所(.SZ)，4/8→北交所(.BJ)。"""
+    """6位码 → 交易所后缀。全系统唯一的交易所判定（各数据源 sh/sz/bj 前缀都由它派生）。
+    5/6/9→上交所(.SS，5=沪市ETF/基金如 510880/512890)，0/1/2/3→深交所(.SZ，1=深市ETF 159xxx)，
+    4/8/920→北交所(.BJ)。此前漏了 5 → 沪市 ETF 被拼成 .SZ，全源取价失败、无真实快照。"""
     c0 = code[0]
-    if c0 in ("6", "9"):
-        return ".SS"
-    if c0 in ("4", "8"):
+    if c0 in ("4", "8") or code.startswith("920"):
         return ".BJ"
-    return ".SZ"  # 0/2/3 及其它默认深市
+    if c0 in ("5", "6", "9"):
+        return ".SS"
+    return ".SZ"  # 0/1/2/3 及其它默认深市
+
+
+def astock_exchange(code: str) -> str:
+    """6位码 → 数据源交易所前缀 sh/sz/bj（腾讯/akshare/baostock/Tushare 等），由 _astock_suffix 派生。"""
+    return {".SS": "sh", ".BJ": "bj"}.get(_astock_suffix(code), "sz")
 
 
 def normalize_ticker(ticker: str | None, market: str = "") -> str:

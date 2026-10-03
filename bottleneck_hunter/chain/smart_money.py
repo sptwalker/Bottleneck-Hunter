@@ -19,6 +19,8 @@ try:
 except ImportError:
     yf = None  # type: ignore[assignment]
 
+from bottleneck_hunter.watchlist.store_base import astock_exchange
+
 from . import fetch_budget
 from .models import MarketRegion, SmartMoneySignal, SupplierInfo
 
@@ -55,7 +57,7 @@ def _track_astock(code_6: str) -> SmartMoneySignal:
         logger.debug(f"efinance 资金流获取失败 ({code_6}): {e}")
     if total_flow is None:
         try:
-            df = ak.stock_individual_fund_flow(stock=code_6, market="sh" if code_6.startswith("6") else "sz")
+            df = ak.stock_individual_fund_flow(stock=code_6, market=astock_exchange(code_6))
             if df is not None and not df.empty:
                 recent = df.head(5)
                 flow_col = [c for c in recent.columns if "主力净流入" in c and "净额" in c]
@@ -96,7 +98,7 @@ def _track_astock(code_6: str) -> SmartMoneySignal:
 
     # 2) 融资融券余额
     try:
-        exchange = "sh" if code_6.startswith("6") else "sz"
+        exchange = astock_exchange(code_6)
         func = ak.stock_margin_detail_sse if exchange == "sh" else ak.stock_margin_detail_szse
         df_margin = func(code=code_6)
         if df_margin is not None and len(df_margin) >= 2:

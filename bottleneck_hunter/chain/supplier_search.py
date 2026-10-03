@@ -41,21 +41,15 @@ _HTTP_HEADERS = {
 
 def _code_to_tencent(code: str) -> str:
     """6-digit A-stock code → Tencent symbol (sh/sz prefix)."""
+    from bottleneck_hunter.watchlist.store_base import astock_exchange
     code = code.strip()
-    if code.startswith("6"):
-        return f"sh{code}"
-    return f"sz{code}"
+    return f"{astock_exchange(code)}{code}"
 
 
 def _code_to_ticker(code: str) -> str:
     """6-digit code → yfinance-style ticker with exchange suffix."""
-    if code.startswith("6"):
-        return f"{code}.SS"
-    if code.startswith(("0", "3")):
-        return f"{code}.SZ"
-    if code.startswith(("4", "8")):
-        return f"{code}.BJ"
-    return f"{code}.SZ"
+    from bottleneck_hunter.watchlist.store_base import _astock_suffix
+    return code + _astock_suffix(code)
 
 
 def fetch_tencent_quotes(codes: list[str]) -> dict[str, dict]:

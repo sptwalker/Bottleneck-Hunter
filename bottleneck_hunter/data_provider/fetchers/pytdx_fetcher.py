@@ -29,9 +29,8 @@ MARKET_SZ = 0
 
 
 def _code_to_market(code: str) -> int:
-    if code.startswith(("6", "9")):
-        return MARKET_SH
-    return MARKET_SZ
+    from bottleneck_hunter.watchlist.store_base import astock_exchange
+    return MARKET_SH if astock_exchange(code) == "sh" else MARKET_SZ
 
 
 class PytdxFetcher(BaseFetcher):

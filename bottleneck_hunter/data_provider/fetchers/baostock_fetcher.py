@@ -28,12 +28,11 @@ _bs_lock = threading.Lock()
 
 def _bs_code(ticker: str) -> str | None:
     """6位代码 → baostock 格式 sh.600xxx / sz.000xxx / sz.30xxxx。"""
-    from bottleneck_hunter.watchlist.store_base import extract_astock_code
+    from bottleneck_hunter.watchlist.store_base import astock_exchange, extract_astock_code
     code = extract_astock_code(ticker)  # 全系统唯一 A股代码提取器（见 store_base）
     if not code:
         return None
-    prefix = "sh" if code[0] == "6" else "sz"  # 6=沪, 0/3=深, 688 科创也在沪(6)
-    return f"{prefix}.{code}"
+    return f"{astock_exchange(code)}.{code}"  # 5/6=沪(含沪市ETF), 0/1/3=深
 
 
 class BaostockFetcher(BaseFetcher):

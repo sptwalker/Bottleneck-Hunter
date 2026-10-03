@@ -163,7 +163,7 @@ def _sec_code(ticker: str, market: str) -> str:
     if "." in t:
         return t
     if market == "a_stock" and len(t) == 6 and t.isdigit():
-        if t[0] == "6":
+        if t[0] in ("5", "6", "9") and not t.startswith("920"):  # 5=沪市ETF/基金
             return f"{t}.SH"
         if t[0] in ("4", "8") or t.startswith("920"):
             return f"{t}.BJ"
