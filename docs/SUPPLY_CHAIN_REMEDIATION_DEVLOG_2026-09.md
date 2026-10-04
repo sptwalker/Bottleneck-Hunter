@@ -1301,3 +1301,32 @@ python -m pytest -q  → 2568 passed, 5 skipped in 486.77s（6A~6D 全部改动�
   - model_accuracy 16 行（属于历史记录，无害）。
 
 **附带**：`test_downstream_feedback_to_l1` 把「近期否决」的日期写死在 2026-09-01/20，10-01 起跌出 30 天窗口，8 个用例整批变红（改动前即红）。已改为相对今天取日期。全量结果：2581 + 8 = 2589 passed、6 skipped。
+
+**存量处置（2026-10-04 补记）**：经用户同意，上述 3 张 pending 单已在生产以 `expire_stale_pending` 作废（不走 reject，避免写 trade_feedback 污染偏好学习）。
+
+## 决策链选中观察池外标的 → 硬限定观察池（2026-10-04）
+
+**现象**：上面那 3 张单的标的（510880 / 512890 / 512010）根本不在观察池里，却被当作补仓目标。
+
+**根因**：L2→L4 全链路没有任何一处校验输出标的是否属于观察池。
+- **L2**：提示词只说「基于观察池个股数据」，没禁止池外票；`allowed_tickers` 只限制数据协商时能取哪些票，不限制输出。
+  - 生产实证：10-01~03 的 L2 thesis 写的是「观察池医药/电力股被投委会否决 → 改用医药 ETF/红利 ETF 承接 L1 超配」。
+- **缺口驱动** `_generate_gap_driven_plans` 直接消费 `core_holdings`；**L3** LLM 照抄 L2 名单。两者都按 `entry_map.get(tk, "")` 允许空 entry_id 落库。
+- **L4** 的 LLM 输出同样不校验。
+
+**修复**（用户选「严格限定观察池」，提示词 + 硬规则双管）：
+- 新增 `_decision_pool` = 本市场观察池 ∪ 现有持仓（持仓票须保留，否则无法出卖单）。
+- 新增 `_drop_out_of_pool`：剔除池外条目，记 warning，并通过 `_record_decision_warning` 落 operation_log。
+- 硬过滤接在 5 个出口：
+  - L2 保存前（core / tactical / watchlist_only）；
+  - 缺口驱动读取 `core_holdings` 时（兜住过滤上线前生成的存量 L2 计划）；
+  - L3 保存前；
+  - L4 入口 `actionable`（兜住存量战术计划，即驱动直通的来源）；
+  - L4 LLM 输出。
+- 提示词：`decision_strategic` / `decision_tactical` / `decision_execution` 三份都写明选股范围硬约束。L2 明确要求：池内无标的承接某行业时，降权或留现金，不得用池外 ETF 替代。
+- 测试：
+  - 新增 `test_L3_LLM给出观察池外标的_硬剔除并留痕`、`test_wrapper_drops_core_out_of_pool`，去掉过滤后两例均确认失败；
+  - 4 个原以池外票造场景的夹具（MSFT 不在池），改为先入池。
+
+**取舍**：L2 失去用 ETF 表达行业观点的能力。将来要用 ETF，正路是先把它加进观察池（经入池上市核验），这样就有刷价/新闻覆盖。
+- 全量：2592 passed、5 skipped（中途 test_stage_snapshot 6 例红：_decision_pool 起初复用协商白名单函数，被测试 mock 为空即剔光，已改为独立读观察池∪持仓）。

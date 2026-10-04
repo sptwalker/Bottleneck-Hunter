@@ -220,6 +220,7 @@ def test_无真实收盘价的LLM票先补抓_仍缺则不出单(tmp_path):
     修复前 L4 照样按 LLM estimated_price 定股出单，执行器再以「无真实市价快照」拒绝，卡死 pending。
     现在：缺价票先按需补抓一次；补抓仍无价 → 本轮不出单（有价的驱动票照常落地）。"""
     d = _DriverStore(tmp_path)
+    d.store.add({"ticker": "MSFT", "company_name": "MSFT", "market": "us_stock", "tier": "focus"})  # 池内但无快照
     fetched = []
 
     async def _fake_fetch(tickers, store, **kw):
@@ -233,6 +234,35 @@ def test_无真实收盘价的LLM票先补抓_仍缺则不出单(tmp_path):
     by_tk = {p["ticker"] for p in d.store.get_pending_executions()}
     assert "MSFT" not in by_tk, "无真实收盘价仍按 LLM 估价出单"
     assert "NVDA" in by_tk
+
+
+def test_L3_LLM给出观察池外标的_硬剔除并留痕(tmp_path):
+    """LLM 自行引入池外票（生产实测 L2 用池外 ETF 承接被否行业，L3 照抄）→ 保存前硬剔除。"""
+    from bottleneck_hunter.watchlist import decision_engine as de
+
+    s = WatchlistStore(db_path=tmp_path / "pool.db", user_id=UID).for_user(UID).for_market("us_stock")
+    mid = s.create_macro_strategy(
+        {"regime": "sideways", "risk_appetite": "balanced", "regime_confidence": 5}, strict=False)
+    s.create_strategic_plan(mid, {"stock_selection": {"core_holdings": []},
+                                  "target_allocation": {"equity_pct": 60}}, strict=False)
+    s.add({"ticker": "NVDA", "company_name": "NVDA", "market": "us_stock", "tier": "focus"})
+    plans = {"tactical_plans": [{"ticker": "NVDA", "action": "buy", "reasoning": "池内"},
+                                {"ticker": "XLV", "action": "buy", "reasoning": "池外 ETF"}]}
+
+    async def _negotiate(_llm, _prompt, **_kw):
+        return json.loads(json.dumps(plans)), []
+
+    async def _collect(gen):
+        return [e async for e in gen]
+
+    with patch("bottleneck_hunter.watchlist.decision_engine.get_llm_for_position",
+               return_value=(MagicMock(), "stub", "stub")), \
+         patch("bottleneck_hunter.watchlist.decision_engine._run_data_negotiation", _negotiate), \
+         patch("bottleneck_hunter.watchlist.decision_engine._record_decision_warning") as warn:
+        asyncio.run(_collect(de.run_tactical_plans(s)))
+
+    assert {r["ticker"] for r in s.get_tactical_plans_by_date()} == {"NVDA"}
+    assert warn.called and "XLV" in warn.call_args.args[3]
 
 
 if __name__ == "__main__":
@@ -261,6 +291,7 @@ def test_缺口驱动抛异常时L3照样交出LLM的计划(tmp_path):
         "target_allocation": {"equity_pct": 60, "cash_pct": 35, "hedge_pct": 5},
     }, strict=False)
     s.add({"ticker": "NVDA", "company_name": "NVDA", "market": "us_stock", "sector": "科技", "tier": "focus"})
+    s.add({"ticker": "MSFT", "company_name": "MSFT", "market": "us_stock", "tier": "focus"})
     s.update_sim_account(total_equity=100_000, current_capital=100_000, cash_balance=95_000,
                          peak_equity=100_000, initial_capital=100_000)
 

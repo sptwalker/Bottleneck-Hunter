@@ -133,6 +133,32 @@ def _decision_allowed_tickers(store, market: str, *extra: str) -> list[str]:
     return sorted(pool)
 
 
+def _decision_pool(store, market: str) -> set[str]:
+    """出单白名单 = 本市场观察池 ∪ 现有持仓（持仓票须能卖出）。L2/L3/L4 输出一律按此硬过滤。"""
+    # 不复用 _decision_allowed_tickers：那是数据协商白名单，语义不同、可被单独替换
+    tks = [e.get("ticker", "") for e in (store.list_all() or [])]  # store 已 for_market，list_all 按市场过滤
+    try:
+        tks += [p.get("ticker", "") for p in store.get_sim_positions(store.get_sim_account().get("id"))]
+    except Exception:  # noqa: BLE001  账户读失败退化为纯观察池
+        pass
+    return {normalize_ticker((t or "").strip(), market) for t in tks if t}
+
+
+def _drop_out_of_pool(items: list, pool: set[str], market: str, store, layer: str) -> list:
+    """剔除 ticker 不在 pool 的条目（dict 取 ticker 字段、str 即 ticker），被剔的落一条告警留痕。
+    LLM 会自行引入池外票（实测 L2 用池外 ETF 承接被投委会否决的行业），池外票无定时刷价/新闻/估值覆盖。"""
+    kept, dropped = [], []
+    for it in items or []:
+        tk = it.get("ticker", "") if isinstance(it, dict) else it
+        (kept if normalize_ticker((tk or "").strip(), market) in pool else dropped).append(it)
+    if dropped:
+        names = [d.get("ticker", "") if isinstance(d, dict) else d for d in dropped]
+        logger.warning("%s 剔除观察池外标的 %s (%s)", layer, names, market)
+        _record_decision_warning(store, market, f"{layer} 剔除观察池外标的",
+                                 f"{market}：{'、'.join(names)} 不在观察池/持仓，已剔除", meta={"tickers": names})
+    return kept
+
+
 def _load_prompt(name: str) -> str:
     path = PROMPTS_DIR / f"{name}.md"
     if path.exists():
@@ -1234,6 +1260,12 @@ async def run_strategic_plan(
             budget.record(provider, model, 8000, 3000, "strategic_plan")
 
         _normalize_result_tickers(result)  # 归一 holding ticker(.SH→.SS)，与观察池对齐
+        _pool = _decision_pool(store, market)
+        _ss = result.get("stock_selection")
+        if isinstance(_ss, dict):
+            for _b in ("core_holdings", "tactical_holdings", "watchlist_only"):
+                if isinstance(_ss.get(_b), list):
+                    _ss[_b] = _drop_out_of_pool(_ss[_b], _pool, market, store, "L2")
         # A4: 确定性钳制 L2 目标配置到 L1 alloc_bounds（防止 LLM 给出越界仓位/beta 后被下游放行）
         clamp_warnings = _clamp_target_allocation(result, alloc_bounds)
         if clamp_warnings:
@@ -1577,6 +1609,9 @@ def _generate_gap_driven_plans(store, market: str, strategic: dict) -> list[dict
     account = store.get_sim_account()
     positions = store.get_sim_positions(account.get("id"))
     core = (strategic.get("result_json", {}).get("stock_selection", {}) or {}).get("core_holdings", [])
+    # 存量 L2 计划可能是过滤上线前生成的，含池外票 → 读时再滤一遍
+    core = _drop_out_of_pool(core if isinstance(core, list) else [], _decision_pool(store, market),
+                             market, store, "缺口驱动")
     fills = _plan_gap_fills(account, positions, bounds, core, market)
     if not fills:
         return []
@@ -1852,7 +1887,8 @@ async def run_tactical_plans(
             budget.record(provider, model, 8000, 3000, "tactical_plans")
 
         _normalize_result_tickers(result)  # 归一战术计划 ticker，与观察池/L2 对齐
-        tactical_plans = result.get("tactical_plans", [])
+        tactical_plans = _drop_out_of_pool(result.get("tactical_plans", []), _decision_pool(store, market),
+                                           market, store, "L3")
 
         entry_map = {e["ticker"]: e["id"] for e in entries}
         plan_ids = []
@@ -2610,6 +2646,8 @@ async def run_execution_plans(
         return
 
     actionable = [tp for tp in tactical_plans if tp.get("action") not in ("hold", "wait_for_pullback")]
+    # 存量战术计划（含驱动直通的来源）可能是过滤上线前生成的池外票 → 入口再滤一遍
+    actionable = _drop_out_of_pool(actionable, _decision_pool(store, market), market, store, "L4 输入")
     if not actionable:
         yield _sse("decision_done", layer="L4", message="L3 计划全部为持有，无需生成执行方案")
         return
@@ -2777,7 +2815,8 @@ async def run_execution_plans(
             budget.record(provider, model, 5000, 2000, "execution_plans")
 
         _normalize_result_tickers(result)  # 归一执行计划 ticker，与观察池/持仓对齐
-        exec_plans = result.get("execution_plans", [])
+        exec_plans = _drop_out_of_pool(result.get("execution_plans", []), _decision_pool(store, market),
+                                       market, store, "L4")
 
         entry_map = {
             e["ticker"]: e["id"]

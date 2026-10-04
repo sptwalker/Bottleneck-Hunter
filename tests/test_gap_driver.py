@@ -131,7 +131,7 @@ def test_wrapper_writes_plans_and_logs_account_id(monkeypatch, caplog):
     store = _FakeStore(
         {"id": "acct123", "total_equity": 100000, "cash_balance": 90000},
         positions=[{"ticker": "AAPL", "market_value": 10000}],
-        entries=[{"ticker": "AAPL", "id": "e1"}],
+        entries=[{"ticker": "AAPL", "id": "e1"}, {"ticker": "MSFT", "id": "e2"}],
     )
     with caplog.at_level(logging.INFO, logger="bottleneck_hunter.watchlist.decision_engine"):
         ids = _generate_gap_driven_plans(
@@ -188,6 +188,8 @@ def test_end_to_end_store_roundtrip(tmp_path):
         macro_id, {"stock_selection": {"core_holdings": CORE}, "target_allocation": {"equity_pct": 60}}, strict=False)
     account = store.get_sim_account()
     store.update_sim_account(total_equity=100000, current_capital=100000, cash_balance=100000)
+    for tk in ("AAPL", "MSFT"):
+        store.add({"ticker": tk, "company_name": tk, "market": "us_stock", "tier": "focus"})
 
     strategic = store.get_latest_strategic_plan()
     ids = _generate_gap_driven_plans(store, "us_stock", strategic)
@@ -209,3 +211,15 @@ if __name__ == "__main__":
     test_ticker_normalization_matches_held_position()
     test_target_weight_missing_or_zero_skipped()
     print("P0-2 缺口驱动器自检通过")
+
+
+def test_wrapper_drops_core_out_of_pool(monkeypatch):
+    """L2 核心持仓含观察池外标的（存量计划/LLM 越界）→ 缺口驱动不为它补仓。"""
+    _fresh(monkeypatch)
+    store = _FakeStore({"id": "a", "total_equity": 100000, "cash_balance": 90000},
+                       entries=[{"ticker": "AAPL", "id": "e1"}])
+    ids = _generate_gap_driven_plans(
+        store, "us_stock",
+        {"id": "sp1", "created_at": _now(), "result_json": {"stock_selection": {"core_holdings": CORE}}},
+    )
+    assert ids == ["plan-AAPL"]  # MSFT 不在池 → 剔除
