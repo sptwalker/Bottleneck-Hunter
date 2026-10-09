@@ -20,6 +20,7 @@ from pathlib import Path
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position
 from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.evidence import CITE_INSTRUCTION, UNGROUNDED_LABEL, EvidenceIndex
 from bottleneck_hunter.watchlist.prompt_guard import sanitize_list
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
@@ -210,6 +211,7 @@ async def _review_single(
     member: dict,
     execution_plan: dict,
     context: dict,
+    ev_idx: EvidenceIndex | None = None,
 ) -> dict:
     """单个委员独立评审（第 1 轮）"""
     chain = _build_llm_chain(member)
@@ -257,10 +259,14 @@ async def _review_single(
             "若你认为越线缺乏充分依据，应当投反对票——你的否决是这道越线被拦下的最后一道关卡。\n"
         )
 
+    ev_idx = ev_idx or EvidenceIndex()
+    if ev_idx:
+        prompt += "\n\n" + ev_idx.render() + CITE_INSTRUCTION
+
     provider, model = "", ""
     try:
         response, provider, model = await _invoke_with_retry(chain, prompt, member["role"])
-        result = extract_json_object(response)
+        result = ev_idx.check(extract_json_object(response))
         result["role"] = member["role"]
         result["provider"] = provider
         result["model"] = model
@@ -299,6 +305,7 @@ async def _review_round2(
     member: dict,
     execution_plan: dict,
     round1_reviews: dict[str, dict],
+    ev_idx: EvidenceIndex | None = None,
 ) -> dict:
     """第 2 轮：委员看到其他人第 1 轮意见后，重新评估并给出终票。"""
     role = member["role"]
@@ -329,10 +336,13 @@ async def _review_round2(
         )
         .replace("{peers_round1}", _summarize_round1(round1_reviews, exclude_role=role))
     )
+    ev_idx = ev_idx or EvidenceIndex()
+    if ev_idx:
+        prompt += "\n\n" + ev_idx.render() + CITE_INSTRUCTION
 
     try:
         response, provider, model = await _invoke_with_retry(chain, prompt, role)
-        result = extract_json_object(response)
+        result = ev_idx.check(extract_json_object(response))
         result["role"] = role
         result["provider"] = provider
         result["model"] = model
@@ -467,7 +477,7 @@ def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | No
     weights = weights or {}
     votes: dict[str, dict] = {}
     w_approve = w_reject = w_all = 0.0
-    n_approve = n_reject = 0
+    n_approve = n_reject = n_ungrounded = 0
     for role, review in reviews.items():
         vote = review.get("vote", "abstain")
         vote = _VOTE_ALIASES.get(vote, vote)  # 归一化 LLM 复数/verdict 风格票值，防有效赞成被误当弃权漏计 quorum
@@ -479,6 +489,11 @@ def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | No
             w = 1.0
         votes[role] = {"vote": vote, "confidence": review.get("confidence", 5), "weight": round(w, 2)}
         w_all += w
+        # P0-3：赞成票无有效证据引用 → 「无据」，保留展示但不计入通过（按弃权）；反对票不受限（减险不设门槛）
+        if review.get("grounded") is False and vote in ("approve", "approve_with_modification"):
+            votes[role]["evidence_label"] = UNGROUNDED_LABEL
+            n_ungrounded += 1
+            continue
         if vote in ("approve", "approve_with_modification"):
             w_approve += w
             n_approve += 1
@@ -530,7 +545,8 @@ def _fallback_consensus(reviews: dict[str, dict], weights: dict[str, float] | No
         "final_execution_plan": [],
         "key_risks_flagged": [],
         "minority_opinions": [],
-        "summary": f"投票结果: {tally}{note}",
+        "summary": f"投票结果: {tally}{note}"
+        + (f"（{n_ungrounded} 张赞成票未引用有效证据，标「{UNGROUNDED_LABEL}」不计入通过）" if n_ungrounded else ""),
     }
 
 
@@ -876,6 +892,16 @@ async def run_committee_review(
         except Exception as e:
             logger.warning("背景资料聚合失败 %s: %s", ticker, e)
             context.update(_BG_MISSING)  # 显式标注缺失，不沿用上一标的
+        # P0-3：估值/行情字段登记证据 ID，委员赞成票须引用，否则「无据」不计通过
+        ev_idx = EvidenceIndex()
+        try:
+            _snap = store.get_latest_snapshot(ticker) or {}
+            _as_of = _snap.get("date", "")
+            if isinstance(context.get("valuation_data"), dict):
+                ev_idx.add_many(ticker, _as_of, context["valuation_data"])
+            ev_idx.add_many(ticker, _as_of, {k: _snap.get(k) for k in ("close", "change_pct", "rsi_14", "volume")})
+        except Exception as e:  # noqa: BLE001
+            logger.debug("证据索引构建失败 %s: %s", ticker, e)
 
         # 券商研报预读材料（委员投票有据）：一次召回，4 委员共用。无 Gangtise 凭据→空文本，
         # 与未接入前逐字节一致。注：研报接口无评级/目标价字段，此处只附研报摘要（诚实标注）。
@@ -900,13 +926,14 @@ async def run_committee_review(
             {
                 "execution_plan": plan,
                 "context": context,
+                "evidence_index": ev_idx.rows,
                 "parent_snapshot_id": plan.get("snapshot_id"),
                 "parent_strategy_version": plan.get("strategy_version"),
             },
         )
 
         # ── 第 1 轮：4 位委员并行独立评审 ──
-        tasks = [_review_single(m, exec_plan, context) for m in MEMBERS]
+        tasks = [_review_single(m, exec_plan, context, ev_idx) for m in MEMBERS]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         reviews1: dict[str, dict] = {}
@@ -990,7 +1017,7 @@ async def run_committee_review(
             )
         elif len(valid1) >= 2:
             yield _sse("committee_round2_start", ticker=ticker, message=f"{ticker} 第 2 轮辩论与质疑...")
-            r2_tasks = [_review_round2(m, exec_plan, reviews1) for m in MEMBERS]
+            r2_tasks = [_review_round2(m, exec_plan, reviews1, ev_idx) for m in MEMBERS]
             r2_results = await asyncio.gather(*r2_tasks, return_exceptions=True)
             for r in r2_results:
                 if isinstance(r, Exception) or not isinstance(r, dict):
@@ -1083,7 +1110,20 @@ async def run_committee_review(
         verdict_raw = consensus.get("final_verdict", "unknown")
         summary_text = consensus.get("summary", "")
         try:
-            if independence_blocked and verdict_raw in ("approved", "approved_with_modifications"):
+            if _is_risk_reducing(exec_plan) and verdict_raw != "approved" and (
+                verdict_raw != "approved_with_modifications" or independence_blocked
+            ):
+                # 非对称否决：减险（卖出/减仓/硬止损）永不被投委会拦下——否决只能拦「加风险」。
+                # 生产实测 10 张硬止损单被否 5 张，等于风控被评审委员会架空。保留 pending 交人工/自动执行。
+                yield _sse(
+                    "committee_gating",
+                    ticker=ticker,
+                    plan_id=plan_id,
+                    action="kept_risk_reducing",
+                    verdict=verdict_raw,
+                    message=f"{ticker} 减险计划不受投委会否决（裁决 {verdict_raw}），保留待确认",
+                )
+            elif independence_blocked and verdict_raw in ("approved", "approved_with_modifications"):
                 # P2-E（N-16）：本来要放行的结论，因委员独立性缺失而失去背书资格。
                 # 只拦这两种裁决 —— rejected / needs_* 无论独立性如何都已被下面拦下，
                 # 此处覆盖的正是"交叉验证失效却拿到了通行证"这个唯一的洞。
@@ -1333,12 +1373,21 @@ def _reviews_from_transcript(transcript: list[dict]) -> dict[str, dict]:
     return by_role
 
 
+def _is_risk_reducing(exec_plan) -> bool:
+    """卖出/减仓/硬止损——只降低风险敞口的计划。"""
+    if not isinstance(exec_plan, dict):
+        return False
+    return bool(exec_plan.get("_hard_stop")) or (exec_plan.get("action") or "").lower() in ("sell", "reduce")
+
+
 def _regate_after_challenge(store, plan_id: str, verdict: str, consensus: dict, ticker: str) -> str:
     """质询改票后按新结论重新 gating 执行计划，返回动作标识。"""
     plan = store.get_execution_plan(plan_id)
     if not plan:
         return "plan_not_found"
     status = plan.get("status", "")
+    if verdict not in ("approved", "approved_with_modifications") and _is_risk_reducing(plan.get("result_json") or {}):
+        return "kept_risk_reducing"  # 非对称否决：减险计划不因改判被拦
     try:
         if verdict == "rejected":
             if status == "pending":

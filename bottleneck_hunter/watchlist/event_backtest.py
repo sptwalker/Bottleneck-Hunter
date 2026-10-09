@@ -72,6 +72,7 @@ def run_event_backtest(
     initial_cash: float = 1_000_000.0,
     market: str = "us_stock",
     benchmark: Sequence[dict] | None = None,
+    cost_mult: float = 1.0,
 ) -> BacktestReport:
     """事件驱动回放：按交易日历逐日推进，决策日订单在下一可交易日成交。
 
@@ -79,7 +80,8 @@ def run_event_backtest(
     orders: 决策日订单序列；同一决策日多单按 (ticker, side) 稳定排序后处理。
     返回 BacktestReport（净值曲线 + 成交 + 绩效指标 + 被拒订单）。
     """
-    cost_config = COST_CONFIG.get(market, COST_CONFIG["us_stock"])
+    # cost_mult：成本压力测试旋钮（佣金/印花税/滑点同比放大），见 cost_stress。
+    cost_config = {k: v * cost_mult for k, v in COST_CONFIG.get(market, COST_CONFIG["us_stock"]).items()}
     # 建索引：by_date[ticker][date] = Bar；交易日历 = 所有日期并集（有序）。
     by_date: dict[str, dict[str, Bar]] = {}
     calendar: set[str] = set()
@@ -134,6 +136,9 @@ def run_event_backtest(
                 report.rejected.append({"order": order, "reason": "invalid_order"})
                 continue
             price, slip_bps = calc_slippage(bar.close, order.shares, order.side, market, bar.volume)
+            if cost_mult != 1.0:
+                slip_bps *= cost_mult
+                price = round(bar.close * (1 + slip_bps / 10000 * (1 if order.side == "buy" else -1)), 4)
             if order.side == "buy":
                 amount = round(order.shares * price, 4)
                 commission = _commission(amount, "buy", market, cost_config)
@@ -186,3 +191,15 @@ def run_event_backtest(
     report.final_equity = report.equity_curve[-1]["equity"] if report.equity_curve else round(cash, 2)
     report.metrics = compute_metrics(report.equity_curve, report.trades, list(benchmark or []))
     return report
+
+
+def cost_stress(
+    bars: Mapping[str, Sequence[Bar]],
+    orders: Sequence[Order],
+    *,
+    mults: Sequence[float] = (1.0, 1.5, 2.0, 3.0),
+    **kwargs,
+) -> dict[float, PerformanceMetrics]:
+    """成本压力测试：同一组订单在 ×1/1.5/2/3 成本下各回放一次，返回 {倍数: metrics}。
+    策略在 ×2 成本下仍为正才算对成本稳健；只在 ×1 下赚钱的多半是在吃模型化成本的误差。"""
+    return {m: run_event_backtest(bars, orders, cost_mult=m, **kwargs).metrics for m in mults}

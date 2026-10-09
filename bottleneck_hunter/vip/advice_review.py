@@ -4,7 +4,7 @@
 - VIP 是 advice-only 参谋，本模块只读共享行情 + 结 model_accuracy 的 VIP 桶，**绝不写 sim_***。
 - 隔离唯一干净维度是 role_context=vip_advisor + prediction_type∈{vip_advice,vip_recommend}；
   逐条结算按 (ticker, prediction_type, prediction_date) 匹配，不误结 sim 的 vote 行。
-- 无行情则跳过（保持 pending，不硬结）；结算幂等（已结的 is_correct!=-1 不再命中）。
+- 无行情则跳过（保持 pending，不硬结；超 60 天仍缺价→作废终态 -2）；结算幂等（已结的 is_correct!=-1 不再命中）。
 """
 
 from __future__ import annotations
@@ -41,7 +41,10 @@ def _judge(action: str, chg_pct: float, band: float = _BAND) -> bool | None:
         return chg_pct > band
     if want < 0:
         return chg_pct < -band
-    # 持有/关注：无明确方向，涨了也是对（持有本就获利），只有大幅下跌（该减仓却没减）才算错。
+    # 持有：涨了也是对（持有本就获利），只有大幅下跌（该减仓却没减）才算错。
+    # 关注（不建仓）：对称判——大涨=踏空（该建仓）、大跌=该规避，此前同持有口径「涨了也对」偏易过。
+    if action.strip() == "关注":
+        return abs(chg_pct) <= band
     return chg_pct >= -band
 
 
@@ -62,6 +65,15 @@ def _chg_pct(mstore, ticker: str, prediction_date: str, hold_days: int = _HOLD_D
     return round((closes[exit_idx][1] / base - 1) * 100, 2)
 
 
+# 缺价超过此天数仍结不了 → 作废（不计对错）。
+_EXPIRE_DAYS = 60
+
+
+def _expire_cutoff() -> str:
+    from datetime import date, timedelta
+    return (date.today() - timedelta(days=_EXPIRE_DAYS)).isoformat()
+
+
 def review_pending_advice(mstore, *, band: float = _BAND) -> dict:
     """结算当前市场下 VIP 的 pending 建议预测。返回 {reviewed, correct, skipped, no_price}。
     mstore 须已 .for_user().for_market()。同步纯逻辑，无 LLM 调用。"""
@@ -77,12 +89,13 @@ def review_pending_advice(mstore, *, band: float = _BAND) -> dict:
         pdate = row["prediction_date"]
         action = row.get("prediction_value", "")
         chg = _chg_pct(mstore, ticker, pdate)
-        if chg is None:
-            stats["no_price"] += 1
-            continue
-        ok = _judge(action, chg, band)
+        ok = None if chg is None else _judge(action, chg, band)
         if ok is None:
-            stats["skipped"] += 1
+            stats["no_price" if chg is None else "skipped"] += 1
+            # 永远结不了的行（缺价超期/未知动作）落作废终态，否则按日期升序 LIMIT 500 会把新预测饿死
+            if chg is not None or (pdate or "9999") < _expire_cutoff():
+                mstore.record_outcome(ticker, pt, outcome_value="void:no_price" if chg is None else "void:action",
+                                      prediction_date=pdate, void=True)
             continue
         # 二值编码：对→score_delta=0(is_correct=1)，错→5(is_correct=0)。按预测日逐条结。
         mstore.record_outcome(
@@ -158,7 +171,7 @@ if __name__ == "__main__":
     # 持有/关注：涨了也对（本就获利），只有大幅下跌才算错——不再苛求横盘
     assert _judge("持有", 5.0) is True and _judge("持有", 1.0) is True
     assert _judge("持有", -5.0) is False and _judge("持有", -1.0) is True
-    assert _judge("关注", 8.0) is True and _judge("关注", -8.0) is False
+    assert _judge("关注", 8.0) is False and _judge("关注", -8.0) is False and _judge("关注", 1.0) is True
     assert _judge("横盘乱写", 5.0) is None  # 未知动作不结
     # band 边界：恰好 -band 仍算「没大幅下跌」→ 持有对；加仓恰好 +band 不算涨透→错
     assert _judge("持有", -3.0) is True and _judge("加仓", 3.0) is False

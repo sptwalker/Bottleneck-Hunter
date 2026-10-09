@@ -202,7 +202,11 @@ async def run_trade_review(
 
     yield _sse("review_start", ticker=ticker, trade_id=trade_id, message=f"开始复盘 {ticker} 卖出交易...")
 
-    buy_trades = [t for t in trades if t["ticker"] == ticker and t["side"] == "buy"]
+    # 只配对卖出之前的买入（trades 按 created_at DESC，首个即最近一笔开仓）；此前取全局最近一笔，
+    # 卖出后又补仓时会把「卖后的新买入」当成本价。
+    _sell_at = sell_trade.get("created_at", "")
+    buy_trades = [t for t in trades if t["ticker"] == ticker and t["side"] == "buy"
+                  and (t.get("created_at", "") <= _sell_at)]
     if buy_trades:
         entry_price = buy_trades[0].get("price", 0)
         buy_date = buy_trades[0].get("created_at", "")
@@ -253,7 +257,9 @@ async def run_trade_review(
     catalysts = store.get_catalysts_for_entry(entry_id) if entry_id else []
 
     # 以成交所属市场选基准，不依赖仍然存在的观察池记录。
-    benchmark_ticker = "000300.SH" if market == "a_stock" else "SPY"
+    # 与落库基准同源（000300.SS / ^GSPC / ^HSI）；此前写死 000300.SH/SPY，库内 0 行 → 基准收益静默为 0、alpha=原始收益。
+    from bottleneck_hunter.watchlist.macro_data import default_benchmark_ticker
+    benchmark_ticker = default_benchmark_ticker(market)[0]
     catalyst_status = (
         json.dumps(
             [

@@ -102,8 +102,27 @@ def _daily_calls() -> dict[str, int]:
     return fresh
 
 
+# 服务端明确报「额度/积分用尽」→ 当日闩锁（北京次日 0 点解）。滑窗只能估本进程用量，
+# 跨进程/他处消耗或档位降级时只有服务端回执可信；闩住后 order() 直接换源，不再每票白打一次。
+_latched_until: dict[str, float] = {}
+
+
+def latch_until_tomorrow(source: str) -> None:
+    from datetime import datetime, timedelta, timezone
+    bj = timezone(timedelta(hours=8))
+    tomorrow = (datetime.now(bj) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    _latched_until[source] = tomorrow.timestamp()
+    logger.warning("数据源 %s 服务端报额度用尽，闩锁至北京次日 0 点", source)
+
+
+def is_quota_message(msg: str) -> bool:
+    return any(k in (msg or "") for k in ("积分", "权限", "每天", "每分钟", "抱歉", "quota", "limit"))
+
+
 def is_over_quota(source: str) -> bool:
     """任一窗口(min/hour/day)超限即 True。不在 quota 字典（免费源）恒 False。"""
+    if _latched_until.get(source, 0) > time.time():
+        return True
     q = _quota(source)
     if not q:
         return False
@@ -142,4 +161,5 @@ def _reset_for_test() -> None:
     """单测隔离用：清空进程内滑窗与缓存。"""
     global _daily_cache
     _recent.clear()
+    _latched_until.clear()
     _daily_cache = (0.0, {})

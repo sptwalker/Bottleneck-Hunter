@@ -110,8 +110,10 @@ def learn_preferences(store: WatchlistStore) -> dict[str, str]:
             buys = buy_by_ticker.get(tk, [])
             if not buys:
                 continue
-            # 找最近的买入
-            buy = buys[0]  # 最近的（已按 created_at DESC 排序）
+            # 找卖出之前最近的一笔买入（buys 按 created_at DESC）；卖后补仓的买入不能配对
+            buy = next((b for b in buys if b.get("created_at", "") <= sell.get("created_at", "")), None)
+            if buy is None:
+                continue
             try:
                 buy_date = datetime.fromisoformat(buy.get("created_at", "")[:19])
                 sell_date = datetime.fromisoformat(sell.get("created_at", "")[:19])

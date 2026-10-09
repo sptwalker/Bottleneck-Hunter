@@ -8,13 +8,20 @@
   证明或否定 LLM / 多 Glob 的真实增量（供 P2-3 复用）。
 - `summarize_oos`：把逐窗样本外收益聚合成标准指标（均值 / 年化 / 夏普）并附 bootstrap 区间。
 
-不引入 scipy；bootstrap 用 numpy 固定种子生成器，确定可复现。
+- `block_bootstrap_ci`：移动块 bootstrap，保留收益序列自相关（iid 重采样会低估区间宽度）。
+- `pbo_cscv`：组合对称交叉验证的过拟合概率 PBO（Bailey et al. 2015）。
+- `deflated_sharpe`：多重试验 + 非正态校正后的夏普显著性 DSR（Bailey & López de Prado 2014）。
+- `overfit_flags`：PBO>0.5 或 DSR<0.9 → 疑似过拟合（只标记，绝不自动采纳）。
+
+不引入 scipy（正态分布用 stdlib statistics.NormalDist）；bootstrap 用 numpy 固定种子生成器，确定可复现。
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from itertools import combinations
+from statistics import NormalDist
 
 import numpy as np
 
@@ -176,3 +183,110 @@ def summarize_oos(
         "mean_ci_high": ci.high,
         "confidence": confidence,
     }
+
+
+def block_bootstrap_ci(
+    values: Sequence[float],
+    *,
+    statistic: Callable[[np.ndarray], float] = np.mean,
+    block: int | None = None,
+    n_resamples: int = 2000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> CI:
+    """移动块 bootstrap：每次抽连续 block 长的片段拼接，保留序列自相关。block 默认 ≈ n^(1/3)。"""
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        raise ValueError("block_bootstrap_ci 需要至少一个样本")
+    point = float(statistic(arr))
+    n = arr.size
+    b = max(1, min(n, block or round(n ** (1 / 3))))
+    if n == 1 or b == 1:
+        return bootstrap_ci(arr, statistic=statistic, n_resamples=n_resamples, confidence=confidence, seed=seed)
+    rng = np.random.default_rng(seed)
+    k = -(-n // b)  # 向上取整的块数
+    starts = rng.integers(0, n - b + 1, size=(n_resamples, k))
+    offs = np.arange(b)
+    stats = np.array([float(statistic(arr[(row[:, None] + offs).ravel()[:n]])) for row in starts])
+    alpha = (1.0 - confidence) / 2.0
+    low, high = np.quantile(stats, [alpha, 1.0 - alpha])
+    return CI(point=point, low=float(low), high=float(high), confidence=confidence)
+
+
+def _sharpe(x: np.ndarray) -> np.ndarray:
+    """按列（或一维）算逐期夏普（不年化）；零波动 → 0。"""
+    sd = x.std(axis=0, ddof=1)
+    mu = x.mean(axis=0)
+    return np.divide(mu, sd, out=np.zeros_like(mu, dtype=float), where=sd > 0)
+
+
+def pbo_cscv(perf: Sequence[Sequence[float]], *, n_splits: int = 16) -> float:
+    """CSCV 过拟合概率。perf: T×N 矩阵（T 期 × N 个试过的配置的逐期收益）。
+
+    把 T 行切成 S 块，取所有 C(S, S/2) 种「半数做样本内 / 另一半做样本外」组合；
+    每种组合下选样本内夏普最优的配置，看它在样本外的排名分位 ω，λ=ln(ω/(1-ω))。
+    PBO = P(λ ≤ 0)＝样本内最优在样本外跌到中位数以下的频率。>0.5 ≈ 选优过程比抛硬币还差。
+    """
+    m = np.asarray(perf, dtype=float)
+    if m.ndim != 2 or m.shape[1] < 2:
+        raise ValueError("pbo_cscv 需要 T×N 矩阵且 N≥2")
+    s = n_splits - n_splits % 2
+    if s < 2 or m.shape[0] < s * 2:
+        raise ValueError(f"样本期 {m.shape[0]} 不足以切 {n_splits} 块（每块至少 2 期）")
+    blocks = np.array_split(np.arange(m.shape[0]), s)
+    n_cfg = m.shape[1]
+    lams = []
+    for ins in combinations(range(s), s // 2):
+        is_idx = np.concatenate([blocks[i] for i in ins])
+        oos_idx = np.concatenate([blocks[i] for i in range(s) if i not in ins])
+        best = int(np.argmax(_sharpe(m[is_idx])))
+        oos = _sharpe(m[oos_idx])
+        rank = float((oos < oos[best]).sum() + 1)  # 1..N，越大越好
+        w = rank / (n_cfg + 1)
+        lams.append(np.log(w / (1 - w)))
+    return float(np.mean(np.asarray(lams) <= 0))
+
+
+_EULER_GAMMA = 0.5772156649015329
+
+
+def deflated_sharpe(returns: Sequence[float], trial_sharpes: Sequence[float]) -> float:
+    """DSR：所选策略逐期夏普在「试了 N 次取最好」+ 偏度/峰度校正后仍显著大于 0 的概率。
+
+    returns：被选中策略的逐期收益；trial_sharpes：所有试过配置的逐期（非年化）夏普，N=len。
+    SR₀ = √V[SR]·[(1−γ)Φ⁻¹(1−1/N) + γΦ⁻¹(1−1/(N·e))]——纯运气下 N 次试验的期望最大夏普。
+    """
+    r = np.asarray(returns, dtype=float)
+    t = r.size
+    trials = np.asarray(trial_sharpes, dtype=float)
+    if t < 3:
+        raise ValueError("deflated_sharpe 需要至少 3 期收益")
+    sr = float(_sharpe(r))
+    nd = NormalDist()
+    n = trials.size
+    if n >= 2:
+        v = float(trials.var(ddof=1))
+        sr0 = np.sqrt(v) * ((1 - _EULER_GAMMA) * nd.inv_cdf(1 - 1 / n) + _EULER_GAMMA * nd.inv_cdf(1 - 1 / (n * np.e)))
+    else:
+        sr0 = 0.0
+    sd = r.std(ddof=0)
+    z = (r - r.mean()) / sd if sd > 0 else np.zeros_like(r)
+    skew = float((z ** 3).mean())
+    kurt = float((z ** 4).mean())  # 非超额峰度，正态=3
+    var_sr = max(1e-12, 1 - skew * sr + (kurt - 1) / 4 * sr ** 2)
+    return float(nd.cdf((sr - sr0) * np.sqrt(t - 1) / np.sqrt(var_sr)))
+
+
+PBO_MAX = 0.5
+DSR_MIN = 0.9
+
+
+def overfit_flags(*, pbo: float | None = None, dsr: float | None = None) -> dict:
+    """统一的过拟合判定：PBO>0.5 或 DSR<0.9 → suspected_overfit。只做标记，调用方不得据此自动采纳。"""
+    reasons = []
+    if pbo is not None and pbo > PBO_MAX:
+        reasons.append(f"PBO={pbo:.2f}>{PBO_MAX}")
+    if dsr is not None and dsr < DSR_MIN:
+        reasons.append(f"DSR={dsr:.2f}<{DSR_MIN}")
+    return {"pbo": pbo, "dsr": dsr, "suspected_overfit": bool(reasons),
+            "label": "疑似过拟合" if reasons else "", "reasons": reasons}

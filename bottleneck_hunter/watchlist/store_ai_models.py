@@ -60,13 +60,18 @@ class _AIModelsMixin:
         outcome_date: str = "",
         score_delta: float = 0.0,
         prediction_date: str = "",
+        *,
+        prediction_values: tuple[str, ...] = (),
+        market: str = "",
+        void: bool = False,
     ) -> int:
+        """结算 pending 预测。void=True 落终态 -2（作废：不计对错、不入校准，但不再 pending）。"""
         now = _now_iso()
         odate = outcome_date or now[:10]
         with self._write_lock:
             conn = self._connect()
             try:
-                is_correct = 1 if abs(score_delta) < 2.0 else 0
+                is_correct = -2 if void else (1 if abs(score_delta) < 2.0 else 0)
                 q = """UPDATE model_accuracy SET outcome_value = ?, outcome_date = ?,
                        is_correct = ?, score_delta = ?, updated_at = ?
                        WHERE ticker = ? AND prediction_type = ? AND is_correct = -1"""
@@ -74,6 +79,12 @@ class _AIModelsMixin:
                 if prediction_date:  # C-3：按预测日逐条结算，避免把同标的多周期 pending 一次性结成同一 outcome
                     q += " AND prediction_date = ?"
                     params = params + (prediction_date,)
+                if prediction_values:
+                    q += f" AND prediction_value IN ({','.join('?' * len(prediction_values))})"
+                    params = params + tuple(prediction_values)
+                if market:
+                    q += " AND market = ?"
+                    params = params + (market,)
                 if self._user_id:
                     q += " AND user_id = ?"
                     params = params + (self._user_id,)
@@ -118,7 +129,7 @@ class _AIModelsMixin:
         五列已够渲染对错台账，无需 join vip_advisory。"""
         conn = self._connect()
         try:
-            q = "SELECT * FROM model_accuracy WHERE is_correct != -1"
+            q = "SELECT * FROM model_accuracy WHERE is_correct >= 0"
             p: tuple = ()
             if role_context:
                 q += " AND role_context = ?"
@@ -161,7 +172,7 @@ class _AIModelsMixin:
         conn = self._connect()
         try:
             q = """SELECT model_provider, model_name, role_context,
-                   COUNT(*) as total,
+                   SUM(CASE WHEN is_correct != -2 THEN 1 ELSE 0 END) as total,  -- -2=作废不计
                    SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct,
                    SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END) as incorrect,
                    SUM(CASE WHEN is_correct = -1 THEN 1 ELSE 0 END) as pending,

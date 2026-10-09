@@ -23,7 +23,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 
-from bottleneck_hunter.watchlist.evaluation import ablation
+import numpy as np
+
+from bottleneck_hunter.watchlist.evaluation import _sharpe, ablation, deflated_sharpe, overfit_flags, pbo_cscv
 from bottleneck_hunter.watchlist.judge_independence import (
     effective_number_of_judges,
     vote_similarity_matrix,
@@ -113,7 +115,21 @@ def incremental_ablation(
         "n_proven_negative": len(proven_neg),
         "any_persona_inflation": any(s.persona_inflation for s in steps),
         "total_cost_delta": round(sum(s.cost_delta for s in steps), 6),
+        "selection": _selection_overfit(arms),
     }
+
+
+def _selection_overfit(arms: list[Arm]) -> dict:
+    """「从这几个臂里挑最好的」这一步本身的过拟合体检：最优臂的 DSR（N=全部臂）+ 窗口够时 CSCV PBO。
+    只标记 suspected_overfit，不改 verdict、不自动采纳任何臂。"""
+    m = np.array([a.oos_returns for a in arms], dtype=float).T  # T×N
+    srs = _sharpe(m)
+    best = int(np.argmax(srs))
+    dsr = deflated_sharpe(m[:, best], srs) if m.shape[0] >= 3 else None
+    pbo = None
+    if m.shape[0] >= 8:
+        pbo = pbo_cscv(m, n_splits=min(16, m.shape[0] // 2))
+    return {"best_arm": arms[best].name, **overfit_flags(pbo=pbo, dsr=dsr)}
 
 
 def _one_step(prev: Arm, cur: Arm, *, confidence: float, n_resamples: int, seeds: list[int],

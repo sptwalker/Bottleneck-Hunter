@@ -409,13 +409,20 @@ def _execute_sell(store: WatchlistStore, account: dict,
         snapshot_id=snapshot_id, strategy_version=strategy_version, strict=True,
     )
 
-    # B4: 用实际盈亏结算该 ticker 的投委会投票预测，让委员历史校准权重真正生效
-    # （盈利→票判对；亏损→票判错。score_delta 借 record_outcome 的 is_correct 阈值语义：<2 判对）
+    # B4: 用实际盈亏结算该 ticker 的投委会投票预测，让委员历史校准权重真正生效。
+    # 按票的方向判：赞成票 盈→对/亏→错；否决票 反之；弃权不评（作废终态）。
+    # 此前一律「盈→对」，否决票在赚钱的交易上也被判对，校准权重被系统性污染。
+    # ponytail: 否决票只在「被否了仍成交」时才有实盘结果，近似口径；固定窗口+基准结算待做。
     try:
         won = realized_pnl > 0
-        store.record_outcome(ticker, "vote",
-                             outcome_value="win" if won else "loss",
-                             score_delta=0.0 if won else 3.0)
+        mkt = getattr(store, "_market", "") or ""
+        ov = "win" if won else "loss"
+        store.record_outcome(ticker, "vote", outcome_value=ov, score_delta=0.0 if won else 3.0,
+                             prediction_values=("approve", "approve_with_modification", "approved",
+                                                "approved_with_modifications"), market=mkt)
+        store.record_outcome(ticker, "vote", outcome_value=ov, score_delta=3.0 if won else 0.0,
+                             prediction_values=("reject", "rejected"), market=mkt)
+        store.record_outcome(ticker, "vote", outcome_value=ov, void=True, market=mkt)
     except Exception:
         logger.debug("record_outcome(vote) failed for %s", ticker)
 

@@ -1,0 +1,365 @@
+<title>QuantDinger 拆解</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;800&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+:root{
+  --ground:#F3F4F1; --paper:#FBFBF9; --ink:#1A2230; --muted:#5B6472; --rule:#D9DCD5;
+  --accent:#2F5D8A; --accent-soft:#E3EBF3;
+  --take:#2E7D4F; --take-bg:#E2F1E7; --have:#5B6472; --have-bg:#E8EAE6; --avoid:#A8432F; --avoid-bg:#F6E3DE; --warn:#8A6A12; --warn-bg:#F5EDD3;
+  --serif:"Noto Serif SC","Songti SC",serif; --sans:"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif; --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  color-scheme:dark; --ground:#12161D; --paper:#181D26; --ink:#E4E7EC; --muted:#99A1AE; --rule:#2B323E;
+  --accent:#8DB4DC; --accent-soft:#1F2C3B;
+  --take:#7CC79A; --take-bg:#1A3024; --have:#A3AAB5; --have-bg:#232933; --avoid:#E89482; --avoid-bg:#3A221D; --warn:#E0C068; --warn-bg:#352D17;}}
+:root[data-theme="dark"]{
+  color-scheme:dark; --ground:#12161D; --paper:#181D26; --ink:#E4E7EC; --muted:#99A1AE; --rule:#2B323E;
+  --accent:#8DB4DC; --accent-soft:#1F2C3B;
+  --take:#7CC79A; --take-bg:#1A3024; --have:#A3AAB5; --have-bg:#232933; --avoid:#E89482; --avoid-bg:#3A221D; --warn:#E0C068; --warn-bg:#352D17;}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font:15px/1.75 var(--sans);padding-inline:20px;padding-block:0 80px}
+.wrap{max-width:1120px;margin:0 auto;display:grid;grid-template-columns:200px minmax(0,1fr);gap:48px}
+nav{position:sticky;top:calc(env(safe-area-inset-top,0px) + 24px);align-self:start;font-size:13px;padding-top:40px}
+nav b{display:block;font:600 11px/1 var(--sans);letter-spacing:.12em;color:var(--muted);margin-bottom:12px}
+nav a{display:block;color:var(--muted);text-decoration:none;padding:3px 0 3px 10px;border-left:2px solid var(--rule)}
+nav a:hover,nav a:focus-visible{color:var(--accent);border-left-color:var(--accent);outline:none}
+main{min-width:0;padding-top:40px}
+header{padding-bottom:28px;border-bottom:1px solid var(--rule);margin-bottom:8px}
+.eyebrow{font:600 11px/1 var(--sans);letter-spacing:.14em;color:var(--accent)}
+h1{font:800 34px/1.25 var(--serif);margin:14px 0 12px;text-wrap:balance}
+h2{font:800 23px/1.35 var(--serif);margin:56px 0 14px;text-wrap:balance;scroll-margin-top:24px}
+h3{font:700 16px/1.5 var(--sans);margin:30px 0 8px}
+p,li{max-width:68ch}
+.lede{font-size:16.5px;color:var(--ink)}
+.meta{font-size:13px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 20px;margin-top:14px}
+code,.path{font:13px/1.5 var(--mono);background:var(--accent-soft);padding:1px 5px;border-radius:3px;word-break:break-word}
+pre{font:12.5px/1.6 var(--mono);background:var(--paper);border:1px solid var(--rule);padding:14px 16px;overflow-x:auto;border-radius:4px}
+.verdict{background:var(--paper);border:1px solid var(--rule);border-radius:6px;padding:20px 24px;margin:24px 0}
+.verdict p{margin:6px 0}
+.tbl{overflow-x:auto;margin:14px 0 6px}
+table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:640px}
+th{font:600 11.5px/1.4 var(--sans);letter-spacing:.06em;color:var(--muted);text-align:left;border-bottom:1.5px solid var(--ink);padding:8px 10px}
+td{border-bottom:1px solid var(--rule);padding:9px 10px;vertical-align:top}
+td:first-child{font-weight:600}
+.chip{display:inline-block;font:600 11.5px/1 var(--sans);padding:4px 8px;border-radius:3px;white-space:nowrap}
+.take{color:var(--take);background:var(--take-bg)} .have{color:var(--have);background:var(--have-bg)}
+.avoid{color:var(--avoid);background:var(--avoid-bg)} .warn{color:var(--warn);background:var(--warn-bg)}
+.rec{display:grid;grid-template-columns:64px minmax(0,1fr);gap:4px 18px;padding:18px 0;border-bottom:1px solid var(--rule)}
+.rec .pri{font:600 13px/1 var(--mono);color:var(--accent);padding-top:5px}
+.rec h3{margin:0 0 4px}
+.rec p{margin:4px 0}
+.rec .how{font-size:13.5px;color:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:13px;color:var(--muted);margin:10px 0}
+ul{padding-left:20px} li{margin:3px 0}
+.foot{margin-top:60px;font-size:12.5px;color:var(--muted);border-top:1px solid var(--rule);padding-top:16px}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:0} nav{display:none} h1{font-size:27px}}
+</style>
+
+<div class="wrap">
+<nav aria-label="目录">
+  <b>目录</b>
+  <a href="#verdict">总评</a>
+  <a href="#data">一 · 数据源</a>
+  <a href="#info">二 · 信息处理</a>
+  <a href="#quant">三 · 量化方法</a>
+  <a href="#strategy">四 · 策略与执行</a>
+  <a href="#loop">五 · 复盘与学习</a>
+  <a href="#map">六 · 对照本项目</a>
+  <a href="#recs">七 · 借鉴清单</a>
+  <a href="#avoid">八 · 反面教材</a>
+</nav>
+<main>
+<header>
+  <div class="eyebrow">外部项目研究 · BottleneckHunter</div>
+  <h1>QuantDinger 全面拆解：数据、信息处理、量化、策略与复盘闭环</h1>
+  <p class="lede">QuantDinger（OpenByteInc/QuantDinger）是一个自托管的 AI 量化平台，覆盖加密、美股、港股、A 股、外汇和期货。本报告按源码逐模块审计，结论都标注了出处。每一项都对照 BottleneckHunter 现有模块，判断是值得借鉴、本项目已有，还是应当避开。</p>
+  <div class="meta"><span>审计日期 2026-10-09</span><span>方式：clone 主分支，5 路并行只读审计</span><span>源码根 <span class="path">backend_api_python/app/</span></span></div>
+</header>
+
+<section id="verdict">
+<h2>总评</h2>
+<div class="verdict">
+  <p><b>一句话：</b>QuantDinger 的设计思想很成熟：LLM 只负责解释，方向和仓位由确定性代码决定，下单必须经过多层硬门。统计工具也比较专业，有 PBO、Deflated Sharpe、block bootstrap 和成本压力测试。但它的“学习闭环”很浅，不少看起来标准的基础设施其实没有接线。</p>
+  <p><b>对本项目最有价值的三件事：</b></p>
+  <ol>
+    <li>它的<b>证据锚定和硬门体系</b>：sha256 证据 ID、去掉无引用的论断、按数据质量给置信度封顶、按指标冲突降级为 HOLD。可以直接用来加固 L3、L4 和投委会的推理输出。</li>
+    <li>它的<b>过拟合统计工具</b>：PBO（CSCV）、Deflated Sharpe、成本压力测试。本项目 <span class="path">evaluation.py</span> 目前没有这些。</li>
+    <li>它的<b>校准反面教材</b>：持有期不固定、HOLD 太容易判对、不扣基准、在样本内调阈值、修正后的置信度回写污染。用这份清单逐项体检本项目的 <span class="path">signal_calibration</span> 和复盘链，性价比最高。</li>
+  </ol>
+  <p><b>不建议照搬：</b>Kafka/Celery 分布式架构、策略代码生成沙箱、JEV 外部服务、加密交易所多源接入。本项目不让用户写策略，也不做加密，这些属于 YAGNI。</p>
+</div>
+</section>
+
+<section id="data">
+<h2>一 · 数据源：免费源优先，多级兜底</h2>
+<h3>各市场供应商与回退链</h3>
+<div class="tbl"><table>
+<thead><tr><th>市场</th><th>行情 / K 线</th><th>基本面 / 研究</th><th>备注</th></tr></thead>
+<tbody>
+<tr><td>A 股</td><td>TwelveData → 腾讯 fqkline（前复权，仅日线和周线）→ yfinance → AkShare（只有分钟和周线）</td><td>TwelveData → AkShare 东财（估值对比、三表）</td><td>实时报价<b>只有腾讯一个源</b>；6 开头判 SH、其余判 SZ，北交所和 B 股会误判</td></tr>
+<tr><td>港股</td><td>同 A 股链路</td><td>东财 F10、南向持股、etnet 盈利预测、HKMA HIBOR</td><td>缓存 6 小时</td></tr>
+<tr><td>美股</td><td>报价 7 级：yf 批量 → Finnhub → Nasdaq → Yahoo v8 → fast_info → info → 1m 历史</td><td>SEC EDGAR、Nasdaq 机构持仓、Yahoo；按能力域定义回退链，并记录每个源的尝试结果</td><td>批量报价有领导者/跟随者合并（50ms 窗口）</td></tr>
+<tr><td>宏观 / 情绪</td><td colspan="2">FRED、BLS、BEA；TradingEconomics 日历；alternative.me 恐惧贪婪；yfinance 的 VIX、DXY、收益率；Adanos（reddit、x、polymarket）</td><td>宏观序列<b>完全不缓存</b></td></tr>
+<tr><td>新闻</td><td colspan="2">Finnhub company 和 general 新闻；不足 5 条时由 8 个搜索引擎依次补充（Tavily、SerpAPI、Google、Bing、GDELT 等）</td><td>新闻本身不打情绪分</td></tr>
+</tbody></table></div>
+
+<h3>值得借鉴的工程细节</h3>
+<ul>
+  <li><b>额度锁存</b>：TwelveData 当日额度用完后，禁用到下一个 UTC 日 00:05，避免一整天反复撞限流（<span class="path">asia_stock_kline.py:~162</span>）。</li>
+  <li><b>按状态码退避</b>：Finnhub 全局最小间隔 1.05s，429 退避 60s，403 退避 300s。</li>
+  <li><b>SWR 缓存</b>：值封装为 <code>{value, stored_at, hard_until=TTL×5}</code>，每个 key 单飞锁，4 个后台刷新 worker，计算失败时保留旧值。</li>
+  <li><b>负缓存</b>：失败的报价缓存 2s，无效代码缓存 300s，防止被打爆。</li>
+  <li><b>来源与时间元数据</b>：研究数据记录每个 provider 的 success / empty / error，并区分 <code>as_of</code> 和 <code>retrieved_at</code>。规则是“抓取时间绝不当作披露日期”。</li>
+  <li><b>交易日历守门</b>：<code>latest_completed_session</code> 只在收盘 +15 分钟后才把当天视为已完成交易日，避免用到未收盘的日线（依赖 <code>exchange_calendars</code>）。</li>
+  <li><b>丢弃未完成的 K 线</b>：重采样时去掉最后一根未收盘的 bar，从源头防止前视。</li>
+</ul>
+
+<h3>基本面时点（PIT）与股票池</h3>
+<ul>
+  <li><b>available_at 推断</b>：财报日在期末后 120 天内的，取财报日 +1；否则取期末 +91 天（保守滞后）；再否则取同步当天。回测时只加载 <code>available_at ≤ end</code> 的数据并前向填充；市值用当日收盘价乘已公开的股本重算。</li>
+  <li><b>股票池有效期</b>：成员带 <code>valid_from / valid_to</code>，剔除时关闭区间，按 <code>as_of</code> 解析；成员数不在预期区间（如 CSI300=300、SP500 在 500–510）时拒绝写库；快照生成内容哈希，便于复现。</li>
+  <li><b>残留风险（项目自己也承认）</b>：yfinance 返回重述后的财报，存在前视；开始积累数据之前的回测区间仍用当前成分，有幸存者偏差；退市股不会被置为 inactive。</li>
+</ul>
+
+<h3>数据层的缺陷（避坑）</h3>
+<ul>
+  <li><span class="chip avoid">死代码</span> <code>CircuitBreaker</code>、<code>DataCache</code>、东财和 AkShare 限流器全仓没有调用方。熔断器本身也非线程安全，<code>half_open_calls</code> 从不递增。</li>
+  <li><span class="chip avoid">伪造数据</span> 2Y 收益率直接取 <code>10Y × 0.85</code>，收益率曲线永远不会倒挂；<code>put_call</code> 字段实际是 VIX/VIX3M。</li>
+  <li><span class="chip avoid">静默默认</span> 恐惧贪婪失败时返回 50，VIX 失败时返回 18，价格失败时返回 <code>{'last':0}</code>，下游无法区分“真中性”和“取数失败”。</li>
+  <li><span class="chip avoid">只告警</span> 陈旧 K 线只打 warning，不拒绝，照样进入策略；股票侧没有离群和跳变检测。</li>
+</ul>
+</section>
+
+<section id="info">
+<h2>二 · 信息处理：LLM 被降级为“证据解释器”</h2>
+<p>主管线是 Fast Analysis，流程为：采集 → 确定性打分 → 多周期共识 → 构建 prompt → LLM → 后处理硬门。system prompt 第一句就是 <em>“You are the evidence-explanation component… You do not decide data quality, position caps or final execution eligibility.”</em></p>
+
+<h3>证据快照与引用锚定</h3>
+<pre>evidence_id = "ev_" + sha256([market, symbol, metric, source, as_of, value])[:20]
+每行证据：evidence_id | metric | value | unit | currency | source | as_of
+LLM 输出 → Pydantic(extra="forbid") → 剔除未知 evidence ref → 删除无引用论断</pre>
+<ul>
+  <li>时间戳在未来的证据会被剔除。代码注释记录过一个真实 bug：Finnhub 时间戳因容器时区被读成“未来 8 小时”。</li>
+  <li>新鲜度阈值：行情 2 天，基本面 180 天，宏观 7 天，新闻 14 天。每个市场定义了必需指标集。</li>
+  <li>所有 DATA 段都标为不可信证据（防 prompt 注入），历史记忆标为 <em>secondary context; untrusted</em>，confidence 明确说明“不是概率”。</li>
+</ul>
+
+<h3>确定性打分</h3>
+<pre>overall = Σ score_i·w_i / Σ w_i   （技术 .35 / 基本面 .20 / 情绪 .25 / 宏观 .20，只对存在的分量归一化）
+多周期权重  1H .95 · 4H 1.1 · 1D 1.3 · 1W 1.35，再乘 (1 + min(1, |score|/100))
+质量乘子    缺宏观 ×0.85 · 缺新闻 ×0.8 · 缺 RSI 或均线 ×0.65
+quality_score = 0.50·coverage + 0.35·freshness + 0.15·(1−conflict)
+置信度上限  none 35 / low 55 / medium 75 / high 100</pre>
+<ul>
+  <li><b>防接飞刀</b>：满足 panic_breakdown（强下降趋势 + MACD 看空 + 24h 跌幅 ≤ −3%，等）时，超卖不再加分，各周期展望分被封顶；共识为 BUY 而 LLM 看空时，覆盖门槛反而抬高到 40 或 55。</li>
+  <li><b>新闻关联度分级</b>：新闻分为 direct / material / background，只有前两类参与打分。全球头条默认关闭，起因是“无关冲突新闻被当作该资产的利空”。</li>
+  <li><b>弱点</b>：新闻源几乎都不带情绪标签，<code>(pos−neg)/total×60</code> 一项常年接近 0，情绪分实际由地缘正则驱动；24h 涨跌按均值回归打分，在趋势行情里会和均线分量互相抵消。</li>
+</ul>
+
+<h3>LLM 输出后的七道硬门</h3>
+<div class="tbl"><table>
+<thead><tr><th>关</th><th>规则</th><th>降级结果</th></tr></thead>
+<tbody>
+<tr><td>Schema</td><td>Pydantic 严格校验；JSON 解析失败时依次尝试剥 fence、截取 <code>{…}</code>、使用默认结构</td><td>valid=False</td></tr>
+<tr><td>证据</td><td>未知引用剔除，无引用论断删除</td><td>论断消失</td></tr>
+<tr><td>指标冲突</td><td>BUY 但 RSI&gt;70、MACD 看空或趋势下降；逆势且无确认</td><td>HOLD，置信度 −20</td></tr>
+<tr><td>价格几何</td><td>入场价在现价 ±10% 内；止损止盈方向合法；R/R&lt;1 时告警</td><td>改用指标支撑阻力位或 ±5% 兜底</td></tr>
+<tr><td>共识覆盖</td><td>|共识分| ≥ 15（震荡市 ×1.2）时，直接替换 LLM 决策</td><td>采用共识方向</td></tr>
+<tr><td>质量门</td><td>quality&lt;0.7 时强制 HOLD；等级为 none 时禁止给出方向</td><td>HOLD，置信度 ≤55</td></tr>
+<tr><td>风险预算</td><td>仓位 = 预算% ÷ 止损距离%，再受产品上限和质量上限约束</td><td>压低仓位</td></tr>
+</tbody></table></div>
+<p>另外，多模型只是<b>可选的多数投票</b>：默认关闭，串行调用，没有平票规则，只采用一个模型的叙述，<b>没有辩论</b>。这方面本项目投委会的多 persona 评审和 judge 独立性（N_eff）明显更进一步。</p>
+</section>
+
+<section id="quant">
+<h2>三 · 量化方法：工具专业，用法有偏</h2>
+<h3>回测引擎（<span class="path">strategy_v2/runtime.py</span>）</h3>
+<ul>
+  <li><b>按频率计算可见截止点</b>：<code>event_time − freq</code>，多周期引用不会泄露，例如 1h 驱动时要等当天最后一根 bar 收盘，日线才可见。</li>
+  <li><b>用开盘价盯市决定仓位</b>：明确禁止拿收盘后的权益决定开盘时的仓位，这是很隐蔽的前视。</li>
+  <li><b>成交模型</b>：下一根 bar 开盘价 ×(1±滑点)，佣金和滑点默认各 5bps；单笔不超过 bar 成交量 10%，超出部分做部分成交；停牌和涨跌停时拒单；止损遇跳空按开盘价成交，同一根 bar 多触发时优先止损。</li>
+  <li><b>未建模</b>：资金费、借券成本、无风险利率、冲击成本与成交量的关系；限价单触价即成交，偏乐观。</li>
+</ul>
+
+<h3>因子研究</h3>
+<ul>
+  <li>信号取 t 收盘，在 t+1 开盘入场、t+1+h 开盘出场；<b>按持有期非重叠采样</b>（<code>index[::h]</code>），避免重叠收益让 IC 自相关。</li>
+  <li>Rank IC，<code>ICIR = mean/std × √(年化/h)</code>；分组数自适应；换手率 = <code>0.5·Σ|Δw|</code>，往返成本扣两次；单调性取组号与组收益的 Spearman；前后半段稳定性对比。</li>
+  <li>缺陷：持有期内退市的股票被 dropna 剔除，收益偏高；中性化只做行业去均值，不做市值中性化。</li>
+</ul>
+
+<h3>策略进化：统计工具箱</h3>
+<pre>PBO (CSCV)  枚举 C(S,S/2)（超过 2000 种时用种子 1776 抽样）：取 IS 最优，看它在 OOS 的排名 ω
+            λ = ln(ω/(1−ω))，PBO = P(λ ≤ 0)
+DSR         σ̂_SR = √(1 − γ₃·SR + (γ₄−1)/4·SR²) / √(T−1)
+            SR₀ = σ̂_SR·[(1−γ)Φ⁻¹(1−1/N) + γΦ⁻¹(1−1/(N·e))]
+            DSR = Φ((SR−SR₀)·√(T−1) / √(…))
+Bootstrap   循环块，块长 = min(用户值, n^(1/3))；报告 1–99 分位数和亏损概率
+成本压力    佣金和滑点同时 ×1 / 1.5 / 2 / 3，在盲测段上重跑
+综合评级    mean(1−PBO, DSR, 1−亏损概率, sigmoid(最高成本档收益/10)) → A≥80 B≥65 C≥50 D</pre>
+<p><b>用法上的偏差</b>（照搬时要修正）：</p>
+<ul>
+  <li><span class="chip avoid">伪 WFO</span> 每个窗口不重新优化参数，选优直接看验证折，所以验证折实际属于样本内，只有末尾 15% 的盲测段是真正的样本外。</li>
+  <li><span class="chip avoid">单次回测切片</span> 训练期的持仓会带进验证期，embargo 只排除统计，不隔离状态。</li>
+  <li><span class="chip avoid">DSR 偏乐观</span> SR₀ 用单次估计的标准误代替跨试验方差 <code>√V[SR_n]</code>；N 只计已完成的试验，被剪枝、重复的不算。</li>
+  <li><span class="chip avoid">PBO 统计力弱</span> S 只有 4–10 折，4 折时只有 6 种组合（原论文建议 S=16）；被剪枝的试验不进入矩阵。</li>
+  <li>TPE 是自写简化版：被剪枝的点不进入历史，坏样本集合因此有偏；网格搜索会完整遍历笛卡尔积，高维时会卡死。</li>
+</ul>
+
+<h3>实盘与回测偏差（dry-run deviation）</h3>
+<p>以每笔实盘成交前最后一根收盘价为参考，<code>slippage_bps = (fill−ref)/ref × 方向 × 10⁴</code>，汇总均值、P90、最大值，按周期分档判定 good / warn / bad，样本少于 5 笔时判 unknown。<b>局限</b>：只比成交价，不检查信号是否一致，漏单、多单都发现不了；结果不会回灌到回测的滑点假设。</p>
+</section>
+
+<section id="strategy">
+<h2>四 · 策略与执行：意图与执行分离，fail 方向有意识地选择</h2>
+<ul>
+  <li><b>声明式意图</b>：策略只输出 <code>order_target_percent(sym, pct, reason=…)</code>，由执行层算差额。反手采用“先平后开”，实盘这一轮只发平仓腿，开仓腿等下一轮仓位同步后再发。</li>
+  <li><b>manifest 契约</b>：universe、频率、方向、杠杆上限、warmup、code_hash 在编译期固化，越权调用在编译阶段就被拒绝。</li>
+  <li><b>两级幂等</b>：意图表 <code>ON CONFLICT(run_id, idempotency_key) DO NOTHING</code>，执行表 <code>UNIQUE(idempotency_key)</code>，交易所侧用 client_order_id 回查，处理“超时但其实已成交”。</li>
+  <li><b>Fencing token</b>：lease 换主时 token 递增，worker 认领订单时原子校验，旧进程的在途单作废。</li>
+  <li><b>仓位归属</b>：<code>账户持仓 = 策略持仓 + 受保护持仓 + 未知</code>，只有账户持仓少于策略分配时才阻断开仓，<b>平仓永远不阻断</b>。</li>
+  <li><b>AI 否决是不对称的</b>：JEV 和 LLM 过滤只拦开仓和加仓；平仓、止损、紧急减仓都绕过 AI。同一信号指纹被拒后在本周期内闩锁，不再反复询问。</li>
+  <li><b>fail 方向</b>：AI 过滤 fail-open（AI 故障不影响交易）；预算、缺价、数据覆盖不全 fail-closed。每次决策都写入 <code>qd_ai_decisions</code>。</li>
+  <li><b>错误分级停机</b>：致命错误（鉴权、IP、签名）立即停机；可恢复错误（漂移、最小名义金额）只拒这一单；其余错误连续 5 次后停机。</li>
+  <li><b>整机权益熔断</b>：按 <code>total_value/starting_cash−1</code> 设止盈、止损、回撤，与单笔止损互相独立。</li>
+  <li><span class="chip avoid">未接线</span> 账户级风险快照（总杠杆、保证金、手续费预算 5%、资金费预算 2%、单标的敞口）模型完整，但只在 tests 里被调用。</li>
+  <li>模拟盘、实盘、回测共用同一份策略程序和守卫链，靠 <code>execution_mode</code> 切换账本。但虚拟账本没有成交量上限和资金费，比回测更乐观。</li>
+</ul>
+</section>
+
+<section id="loop">
+<h2>五 · 复盘与学习闭环：只有一条线真正接通</h2>
+<pre>analyze() → qd_analysis_memory（决策 + 共识分 + 指标快照）
+   ↓ 每日：validate_unvalidated_older_than(7 天, 200 条)  ← 用“验证时刻的现价”算收益
+   ↓ AICalibrationService：|thr| ∈ [10…30] 网格，在 30 天样本上最大化准确率 → qd_ai_calibration
+   ↓ _score_to_decision 读取 ±thr（进程缓存 300s）   ← 唯一的自动自适应参数
+相似记忆：同标的最近 15 条已验证记录，按 RSI/MACD/均线/波动 打相似分，取 top3 注入 prompt</pre>
+<div class="tbl"><table>
+<thead><tr><th>环节</th><th>状态</th><th>问题</th></tr></thead>
+<tbody>
+<tr><td>结果标签</td><td>已接通</td><td>持有期不固定（7 天到积压后几十天）；用现价而非 T+7 历史 K 线；<b>不扣基准</b>，学到的是 beta</td></tr>
+<tr><td>正确性判定</td><td>已接通</td><td>BUY/SELL 需 ±2%，HOLD 只要 |r|≤5%，HOLD 天然容易判对，准确率最大化会把阈值推高</td></tr>
+<tr><td>阈值校准</td><td>闭环生效</td><td>样本内网格搜索，无 holdout，样本高度自相关；默认只校准 Crypto；最新一行直接生效，无平滑，可能逐日跳变</td></tr>
+<tr><td>置信度校准</td><td>默认关闭</td><td>按桶线性缩放（非 isotonic）；修正后的值回写同一列，下一轮统计被污染</td></tr>
+<tr><td>相似记忆</td><td>已接通</td><td>判对的记录 +0.1 加分，样本偏向成功案例；docstring 写了时间衰减但没有实现</td></tr>
+<tr><td>策略复盘 / 偏差 / 进化</td><td>只出报表</td><td>LLM 生成的诊断不进入任何后续 prompt；bestParams 不会写回</td></tr>
+<tr><td>教训提取</td><td>不存在</td><td>全仓 grep <code>lesson</code> 零命中</td></tr>
+<tr><td>验证队列</td><td>有隐患</td><td>无 ORDER BY、不过滤失败行；取不到价格的行不写 validated_at，每天被重复选中，积累超过 200 条后会挤满 LIMIT，<b>闭环静默停摆</b></td></tr>
+</tbody></table></div>
+<p>值得借鉴的只有 Copilot 记忆的两个做法。一是<b>人在环确认</b>：识别出候选偏好后，用户确认才写库。二是<b>服务器持有上下文字段</b>：剥离客户端伪造的记忆，摘要中的价格数字替换为 <code>[number]</code>，防止过时报价被当成事实。</p>
+</section>
+
+<section id="map">
+<h2>六 · 对照本项目</h2>
+<div class="legend"><span class="chip take">借鉴</span>本项目缺、值得做 <span class="chip have">已有</span>本项目已覆盖或更好 <span class="chip warn">核对</span>有对应模块，建议按对方的坑体检 <span class="chip avoid">不做</span>场景不符</div>
+<div class="tbl"><table>
+<thead><tr><th>QuantDinger 能力</th><th>本项目对应</th><th>判定</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>PBO / CSCV</td><td><span class="path">evaluation.py</span> 只有 walk_forward、bootstrap_ci、ablation</td><td><span class="chip take">借鉴</span></td><td>grep 确认本项目没有 PBO 和 DSR</td></tr>
+<tr><td>Deflated Sharpe</td><td>无</td><td><span class="chip take">借鉴</span></td><td>tuning_engine 和消融选优时多重比较未做校正</td></tr>
+<tr><td>成本压力 ×1/1.5/2/3</td><td><span class="path">slippage.py</span> 只有单一成本假设</td><td><span class="chip take">借鉴</span></td><td>实现成本极低</td></tr>
+<tr><td>block bootstrap MC</td><td><span class="path">bootstrap_ci</span></td><td><span class="chip warn">核对</span></td><td>确认是块自助还是 iid；日收益有自相关时 iid 会低估区间</td></tr>
+<tr><td>sha256 证据 ID + 无引用论断剔除</td><td>L3 / L4 / 投委会输出</td><td><span class="chip take">借鉴</span></td><td>本项目 prompt 要求引用，但没有机器校验引用是否真实存在</td></tr>
+<tr><td>质量分 → 置信度封顶</td><td><span class="path">quality_gate</span></td><td><span class="chip warn">核对</span></td><td>对照 coverage / freshness / conflict 三维公式，看是否已映射到置信度上限</td></tr>
+<tr><td>新闻 direct / material / background 分级</td><td>催化剂、热点</td><td><span class="chip take">借鉴</span></td><td>防止板块级噪声新闻被当作个股催化剂</td></tr>
+<tr><td>panic_breakdown 防接飞刀</td><td>L3 战术</td><td><span class="chip take">借鉴</span></td><td>以规则封顶“超卖抄底”，作为 LLM 之外的硬约束</td></tr>
+<tr><td>不对称否决（只拦加风险）</td><td>投委会</td><td><span class="chip warn">核对</span></td><td>确认投委会否决不会阻止止损和减仓</td></tr>
+<tr><td>结果标签固定持有期 + 扣基准</td><td><span class="path">trade_reviewer</span> 已扣基准算 alpha；<span class="path">signal_calibration</span></td><td><span class="chip warn">核对</span></td><td>确认校准标签按固定 horizon 取历史收盘价，而不是“复盘时的现价”</td></tr>
+<tr><td>置信度校准</td><td><span class="path">signal_calibration</span>（Brier / ECE / isotonic PAV）</td><td><span class="chip have">已有</span></td><td>本项目更严谨。须确认校准后的值不回写原始置信度列</td></tr>
+<tr><td>多模型投票</td><td>投委会多 persona + <span class="path">judge_independence</span>（N_eff）</td><td><span class="chip have">已有</span></td><td>本项目明显领先</td></tr>
+<tr><td>教训提取</td><td><span class="path">trade_reviewer</span> 经验卡 + <span class="path">preference_learner</span></td><td><span class="chip have">已有</span></td><td>对方没有这一层</td></tr>
+<tr><td>基本面 available_at + 91 天保守滞后</td><td><span class="path">pit_gate</span>、<span class="path">event_backtest</span></td><td><span class="chip warn">核对</span></td><td>确认财报字段的可见日期规则；缺公告日时是否有保守滞后兜底</td></tr>
+<tr><td>股票池 valid_from / valid_to</td><td>观察池</td><td><span class="chip take">借鉴</span></td><td>回测时按 as_of 还原当时的观察池，消除事后入池的幸存者偏差</td></tr>
+<tr><td>dry-run 偏差</td><td>模拟成交 vs 真实价</td><td><span class="chip take">借鉴</span></td><td>并且<b>回灌</b>到 slippage 假设，补上对方没做的一步</td></tr>
+<tr><td>两级幂等 + fencing</td><td>L4 执行单、调度器</td><td><span class="chip warn">核对</span></td><td>本项目是单进程 APScheduler，重点核对“补跑 + 定时同时触发”时是否会重复生成执行单</td></tr>
+<tr><td>额度锁存 / 负缓存 / SWR</td><td><span class="path">data_provider</span>、yf_gate</td><td><span class="chip warn">核对</span></td><td>Gangtise 积分、tushare 额度可以借用“锁存到次日”的模式</td></tr>
+<tr><td>静默默认值 / 伪造数据</td><td>系统看门狗、缺数据即 fail</td><td><span class="chip have">已有</span></td><td>本项目原则正好相反，是对的</td></tr>
+<tr><td>策略代码生成沙箱 / manifest</td><td>—</td><td><span class="chip avoid">不做</span></td><td>本项目不让用户写策略</td></tr>
+<tr><td>Kafka / Celery / 多 worker</td><td>—</td><td><span class="chip avoid">不做</span></td><td>单机 SQLite 足够</td></tr>
+<tr><td>加密交易所、JEV 服务</td><td>—</td><td><span class="chip avoid">不做</span></td><td>场景不符</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="recs">
+<h2>七 · 借鉴清单（按优先级）</h2>
+<p>排序依据是“对决策质量的提升 ÷ 实现成本”。每条都写明落点和最小做法，并且已修正 QuantDinger 自身的偏差。</p>
+
+<div class="rec"><div class="pri">P0-1</div><div>
+<h3>按 QuantDinger 的校准反面教材体检本项目复盘链</h3>
+<p>逐项核对 <span class="path">signal_calibration</span>、<span class="path">model_calibrator</span>、<span class="path">trade_reviewer</span>：</p>
+<ol>
+<li>标签是否按固定 horizon 取历史收盘价；</li>
+<li>是否扣基准；</li>
+<li>HOLD / 观望是否与方向判断对称；</li>
+<li>阈值和权重的拟合是否有留出集；</li>
+<li>校准后的值是否回写原始列；</li>
+<li>验证队列遇到取价失败是否写入终态。</li>
+</ol>
+<p class="how">成本：只读审计约 1 天。这是最可能发现“静默停摆”或“自我污染”的地方。</p>
+</div></div>
+
+<div class="rec"><div class="pri">P0-2</div><div>
+<h3>给 evaluation.py 加入 PBO 和 Deflated Sharpe</h3>
+<p>两个纯函数，各约 40 行，用 numpy 和 <code>statistics.NormalDist</code>，不引入新依赖。修正对方的两个偏差：</p>
+<ul>
+<li>SR₀ 用所有候选配置 Sharpe 的<b>跨试验方差</b>；</li>
+<li>N 计入<b>所有尝试过的配置</b>。</li>
+</ul>
+<p>接入 tuning_engine 和 incremental_ablation 的选优输出。PBO&gt;0.5 或 DSR&lt;0.9 时标记“疑似过拟合”，不自动采纳。</p>
+<p class="how">配套：成本压力 ×1/1.5/2/3 重跑 event_backtest，只是一个参数循环。</p>
+</div></div>
+
+<div class="rec"><div class="pri">P0-3</div><div>
+<h3>L3、L4 和投委会的输出做证据引用的机器校验</h3>
+<p>喂给 LLM 的数据行加上短 ID（<code>sha256(ticker|metric|as_of|value)[:12]</code>）。LLM 输出时，用 Pydantic 校验引用 ID 都在本次快照内；没有有效引用的理由降级为“无据”，不计入投委会的赞成票。</p>
+<p class="how">落点：decision_engine 的结果解析处，复用现有 Pydantic 模型。这是对方防幻觉体系中最可移植的一环。</p>
+</div></div>
+
+<div class="rec"><div class="pri">P1-1</div><div>
+<h3>新闻和催化剂按关联度分级</h3>
+<p>催化剂入库时标注 <code>direct</code>（点名公司）、<code>material</code>（产业链上下游，有传导机制）、<code>background</code>（宏观或板块噪声）。只有前两类影响个股打分和 L3 战术。本项目做产业链，<code>material</code> 一级正好可以用链上的上下游关系来判定，比对方的正则更准。</p>
+</div></div>
+
+<div class="rec"><div class="pri">P1-2</div><div>
+<h3>L3 加入“防接飞刀”硬规则</h3>
+<p>满足 <code>强下降趋势 ∧ MACD 看空 ∧ 当日跌幅 ≤ −3%</code> 或 <code>跌幅 ≤ −8% ∧ 量比 ≥ 1.3</code> 时，禁止新开或加仓，除非投委会给出明确的“错杀”证据。规则位于 LLM 之后，和观察池硬过滤同层。</p>
+</div></div>
+
+<div class="rec"><div class="pri">P1-3</div><div>
+<h3>模拟成交偏差回灌滑点</h3>
+<p>按 A 股和美股分别统计 <code>(模拟成交价 − 决策时参考价)/参考价</code> 的均值和 P90，与 <span class="path">slippage.py</span> 的假设对照。偏差持续超出时，更新滑点参数并在操作日志留痕。这一步补上了对方“只出报表不回流”的缺口。</p>
+</div></div>
+
+<div class="rec"><div class="pri">P1-4</div><div>
+<h3>观察池成员加有效期</h3>
+<p>入池、出池写入 <code>valid_from / valid_to</code>（或复用操作日志重建），回测和复盘时按 as_of 还原当时的观察池，避免“事后才入池的牛股”抬高历史表现。</p>
+</div></div>
+
+<div class="rec"><div class="pri">P2</div><div>
+<h3>零散工程项</h3>
+<ul>
+<li>Gangtise 和 tushare 额度耗尽时锁存到次日（北京时间），不再逐次撞墙；</li>
+<li>数据源失败时负缓存几秒；</li>
+<li>投委会否决只作用于加风险的动作；</li>
+<li>执行单生成按 <code>(market, date, ticker, side)</code> 做唯一键幂等，防止补跑和定时同时触发；</li>
+<li>研究数据区分 <code>as_of</code> 和 <code>retrieved_at</code>。</li>
+</ul>
+<p class="how">逐项核对现状后再决定，很可能已有部分覆盖。</p>
+</div></div>
+</section>
+
+<section id="avoid">
+<h2>八 · 反面教材：别学的</h2>
+<ul>
+<li><b>“看起来标准”的基础设施没接线</b>：熔断器、缓存、限流器、账户级风控都只存在于代码或测试里。本项目“验收必用真实数据证明”的原则正是针对这类问题。</li>
+<li><b>默认值伪装成数据</b>：2Y = 10Y × 0.85、VIX 失败时返回 18、价格失败时返回 0。</li>
+<li><b>名不副实</b>：所谓 walk-forward 不重新优化；文档写了“时间衰减”但没有实现；字段叫 put_call 其实不是认沽认购比。</li>
+<li><b>闭环的准确率指标可以被刷</b>：HOLD 判定宽，阈值就被推高；样本内选阈值，再在同一批样本上报告准确率。</li>
+<li><b>记忆检索给判对的记录加分</b>：喂给 LLM 的先例偏向成功案例，会诱导模型过度自信。</li>
+<li><b>提供方自动切换</b>：同一类分析在不同时间由不同模型生成，影响记忆和校准的可比性。本项目已经记录 provider，校准时应按模型分层统计。</li>
+</ul>
+</section>
+
+<div class="foot">方法说明：对 OpenByteInc/QuantDinger 主分支做只读源码审计，分数据源、AI 分析管线、量化与回测、策略与执行、复盘学习五路并行，行号取自审计当日的工作区。本项目的对照基于对相关模块的 grep 和阅读；标为“核对”的条目尚未逐行验证，结论以实际核对为准。</div>
+</main>
+</div>

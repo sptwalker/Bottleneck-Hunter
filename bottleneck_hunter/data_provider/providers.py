@@ -264,18 +264,26 @@ class TushareProvider:
         r.raise_for_status()
         data = r.json()
         if data.get("code") != 0:
+            from bottleneck_hunter.data_provider import scheduler as _ds
+            if _ds.is_quota_message(str(data.get("msg", ""))):
+                _ds.latch_until_tomorrow("tushare")
             return None
         items = data.get("data", {}).get("items", [])
         fields = data.get("data", {}).get("fields", [])
         if not items:
             return None
         row = dict(zip(fields, items[0], strict=False))
-        end = str(row.get("end_date") or "")
-        report_date = f"{end[:4]}-{end[4:6]}-{end[6:8]}" if len(end) == 8 else end
+        # PIT：report_date 取公告日 ann_date（市场何时可见），缺才退报告期末 end_date；
+        # 此前用 end_date，季报在期末当天就「可见」，回测/复盘把一个多月后才公布的业绩提前用了。
+        def _d(v):
+            v = str(v or "")
+            return f"{v[:4]}-{v[4:6]}-{v[6:8]}" if len(v) == 8 else v
+        period_end = _d(row.get("end_date"))
+        report_date = _d(row.get("ann_date")) or period_end
         return {
             "ticker": ticker,
             "report_date": report_date,
-            "fiscal_quarter": _quarter_from_date(report_date),
+            "fiscal_quarter": _quarter_from_date(period_end),  # 财季按报告期，不按公告日
             "eps_actual": row.get("diluted_eps"),
             "eps_estimate": None,   # 免费档无一致预期
             "eps_surprise_pct": None,

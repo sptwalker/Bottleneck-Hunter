@@ -82,7 +82,7 @@ async def test_ticker_background_failure_does_not_bleed(tmp_path, monkeypatch):
 
     captured: dict[str, dict] = {}
 
-    async def fake_review(member, execution_plan, context):
+    async def fake_review(member, execution_plan, context, *_):
         captured[execution_plan.get("ticker", "?")] = dict(context)  # 快照该标的实际收到的背景
         return {"role": member["role"], "vote": "abstain", "confidence": 5}
 
@@ -154,7 +154,7 @@ if __name__ == "__main__":
 
 async def _run_committee_with_verdict(store, tmp_path, verdict, monkeypatch):
     """跑一遍 run_committee_review，投委会裁决固定为 verdict，返回执行计划终态。"""
-    async def fake_review(member, execution_plan, context):
+    async def fake_review(member, execution_plan, context, *_):
         return {"role": member["role"], "vote": "approve", "confidence": 6}
 
     async def fake_consensus(reviews, discussion, weights):
@@ -224,7 +224,7 @@ async def _run_committee_with_providers(store, providers, monkeypatch, verdict="
     """跑一遍 run_committee_review：委员 provider 按 providers 列表指定，裁决固定为 verdict。"""
     members = list(C.MEMBERS)
 
-    async def fake_review(member, execution_plan, context):
+    async def fake_review(member, execution_plan, context, *_):
         idx = members.index(member)
         return {"role": member["role"], "vote": "approve", "confidence": 6,
                 "provider": providers[idx % len(providers)], "model": f"m{idx}"}

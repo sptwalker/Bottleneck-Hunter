@@ -25,6 +25,7 @@ from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.data_provider import ai_tools
 from bottleneck_hunter.llm_clients.factory import get_llm_for_position, get_models_for_role
 from bottleneck_hunter.watchlist.budget import BudgetTracker
+from bottleneck_hunter.watchlist.evidence import CITE_INSTRUCTION, EvidenceIndex
 from bottleneck_hunter.watchlist.persona import format_persona_for_prompt, get_user_single_cap
 from bottleneck_hunter.watchlist.provenance import build_provenance
 from bottleneck_hunter.watchlist.regime_mapper import format_bounds_for_prompt, get_allocation_bounds
@@ -33,6 +34,9 @@ from bottleneck_hunter.watchlist.store import WatchlistStore
 from bottleneck_hunter.watchlist.store_base import normalize_market, normalize_ticker
 
 logger = logging.getLogger(__name__)
+
+# P0-3：喂给 L3/L4 并登记证据 ID 的行情字段
+_EV_SNAP_FIELDS = ("close", "change_pct", "rsi_14", "sma_50", "volume")
 
 PROMPTS_DIR = Path(__file__).resolve().parents[1] / "chain" / "prompts"
 
@@ -1813,6 +1817,7 @@ async def run_tactical_plans(
                 message="⚠️ L2 未选出任何标的，L3 降级为全观察池处理（结果非 L2 精选，请知悉）",
             )
 
+        l3_ev = EvidenceIndex()
         for entry in entries:
             ticker = entry["ticker"]
             snap = store.get_latest_snapshot(ticker)
@@ -1843,6 +1848,8 @@ async def run_tactical_plans(
                     "chip_signals": _chip_context(store, ticker),  # B5: 机构持仓/评级/目标价
                 }
             )
+            if snap:  # P0-3：行情字段登记证据 ID，L3 理由须引用
+                l3_ev.add_many(ticker, snap.get("date", ""), {k: snap.get(k) for k in _EV_SNAP_FIELDS})
 
         prompt_template = _load_prompt("decision_tactical")
         macro_text = (
@@ -1869,6 +1876,8 @@ async def run_tactical_plans(
             .replace("{recent_trades}", recent_trades_text)
             .replace("{user_persona}", format_persona_for_prompt(store))
         )
+        if l3_ev:
+            prompt += "\n\n" + l3_ev.render() + CITE_INSTRUCTION
 
         yield _sse("decision_progress", layer="L3", step="llm_reasoning", message="L3 LLM 推理中...")
 
@@ -1889,6 +1898,8 @@ async def run_tactical_plans(
         _normalize_result_tickers(result)  # 归一战术计划 ticker，与观察池/L2 对齐
         tactical_plans = _drop_out_of_pool(result.get("tactical_plans", []), _decision_pool(store, market),
                                            market, store, "L3")
+        for _tp in tactical_plans:
+            l3_ev.check(_tp)  # P0-3：只标「无据」不拦
 
         entry_map = {e["ticker"]: e["id"] for e in entries}
         plan_ids = []
@@ -2797,6 +2808,17 @@ async def run_execution_plans(
             .replace("{experience_cards}", experience_text)
             .replace("{layer_performance}", layer_perf_text)
         )
+        # P0-3：L4 证据 = 在场标的最新行情 + 现有持仓
+        l4_ev = EvidenceIndex()
+        for _tk in dict.fromkeys(tickers_in_play):
+            _snap = store.get_latest_snapshot(_tk)
+            if _snap:
+                l4_ev.add_many(_tk, _snap.get("date", ""), {k: _snap.get(k) for k in _EV_SNAP_FIELDS})
+        _as_of = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for p in positions or []:
+            l4_ev.add_many(p.get("ticker", ""), _as_of, {k: p.get(k) for k in ("shares", "avg_cost", "weight_pct")})
+        if l4_ev:
+            prompt += "\n\n" + l4_ev.render() + CITE_INSTRUCTION
 
         yield _sse("decision_progress", layer="L4", step="llm_reasoning", message="L4 LLM 推理中...")
 
@@ -2817,6 +2839,8 @@ async def run_execution_plans(
         _normalize_result_tickers(result)  # 归一执行计划 ticker，与观察池/持仓对齐
         exec_plans = _drop_out_of_pool(result.get("execution_plans", []), _decision_pool(store, market),
                                        market, store, "L4")
+        for _ep in exec_plans:
+            l4_ev.check(_ep)  # P0-3：只标「无据」不拦
 
         entry_map = {
             e["ticker"]: e["id"]
@@ -3390,11 +3414,21 @@ async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGene
         logger.warning("硬止损巡检读取持仓失败: %s", e)
         return
 
+    # 已有待确认/挂单中的卖出就不再重复生成（每轮巡检都会再触发一次）
+    try:
+        _open_sells = {
+            e.get("ticker") for e in store.get_pending_executions() + store.get_resting_executions()
+            if ((e.get("result_json") or {}).get("action") or "").lower() in ("sell", "reduce")
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.debug("硬止损去重读取在途卖单失败: %s", e)
+        _open_sells = set()
+
     triggered = 0
     for pos in positions:
         ticker = pos.get("ticker", "")
         shares = pos.get("shares", 0)
-        if not ticker or shares <= 0:
+        if not ticker or shares <= 0 or ticker in _open_sells:
             continue
         plan = store.get_latest_tactical_plan_for_ticker(ticker)
         if not plan:

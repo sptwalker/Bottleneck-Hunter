@@ -327,6 +327,22 @@ def _gangtise_benchmark_backfill(store: WatchlistStore, market: str, bench_code:
     return n
 
 
+# 指数码抓不到（生产 yfinance 限流+无 Gangtise 凭据时 ^GSPC 实测 0 行）→ 用跟踪 ETF 代理。
+# ETF 与指数差一个费率+分红口径，对「区间收益/β」足够；落库仍用指数码以对齐下游查询键。
+_BENCH_PROXY_ETF = {"^GSPC": "SPY", "^HSI": "2800.HK"}
+
+
+async def _proxy_etf_benchmark_backfill(store: WatchlistStore, market: str, bench_code: str) -> int:
+    from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
+
+    etf = _BENCH_PROXY_ETF[bench_code]
+    await fetch_price_batch([etf], store, days=1000, market=market)
+    rows = store.get_snapshots(etf, days=1000)
+    n = store.save_snapshots([{**r, "ticker": bench_code} for r in rows]) if rows else 0
+    logger.info("基准代理 %s→%s 落库 %d 条", etf, bench_code, n)
+    return n
+
+
 async def job_price_update(market: str = "us_stock") -> dict[str, str]:
     """全局拉取全体用户观察池并集的价格（客观免费数据，落共享层，只受全局总开关控制）。"""
     import asyncio
@@ -352,6 +368,8 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
             # 码(bench_code)以对齐下游 get_snapshots。未映射的基准码诚实缺省（不臆造端点）。
             if not store.get_snapshots(bench_code, days=5):
                 await asyncio.to_thread(_gangtise_benchmark_backfill, store, market, bench_code)
+            if not store.get_snapshots(bench_code, days=5) and bench_code in _BENCH_PROXY_ETF:
+                await _proxy_etf_benchmark_backfill(store, market, bench_code)
     except Exception as e:  # noqa: BLE001
         logger.warning("基准指数抓取失败 (%s): %s", market, e)
 

@@ -84,6 +84,11 @@ def _is_mandate_exception(ex: dict) -> bool:
 _BACKED_VERDICTS = ("approved", "approved_with_modifications")
 
 
+def _is_hard_stop(ex: dict) -> bool:
+    rj = ex.get("result_json") or {}
+    return isinstance(rj, dict) and bool(rj.get("_hard_stop"))
+
+
 def _committee_backed(store, plan_id: str) -> tuple[bool, str]:
     """该计划最近一次投委会共识是否背书成交 → (是否背书, 裁决原文)。
 
@@ -116,7 +121,7 @@ async def auto_execute_pending(store, market: str) -> AsyncGenerator[dict, None]
     _kept: list[dict] = []
     for ex in pending:
         ok, verdict = _committee_backed(store, ex.get("id") or "")
-        if ok:
+        if ok or _is_hard_stop(ex):  # 硬止损是规则风控，不需投委会背书
             _kept.append(ex)
         else:
             unbacked.append((ex, verdict))
