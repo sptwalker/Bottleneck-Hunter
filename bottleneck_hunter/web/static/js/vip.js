@@ -812,7 +812,7 @@ function renderReturnsChart(returns) {
     xAxis: { type: 'category', data: returns.map(r => r.period), axisLabel: { fontSize: 11 } },
     yAxis: { type: 'value', axisLabel: { formatter: '{value}%', fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
     tooltip: { trigger: 'axis', formatter: p => `${p[0].name}<br/>收益率: ${fmtNum(p[0].value, 2)}%` },
-    series: [{ type: 'bar', data: returns.map(r => ({ value: r.pct, itemStyle: { color: r.pct >= 0 ? '#22c55e' : '#ef4444' } })), barMaxWidth: 40 }],
+    series: [{ type: 'bar', data: returns.map(r => ({ value: r.pct, itemStyle: { color: r.pct >= 0 ? '#ef4444' : '#22c55e' } })), barMaxWidth: 40 }],
   });
 }
 
@@ -1971,7 +1971,7 @@ function renderReportCharts(root) {
         xAxis: { type: 'category', data: data.map(p => p.name), axisLabel: { fontSize: 11 } },
         yAxis: { type: 'value', axisLabel: { formatter: '{value}%', fontSize: 11 }, splitLine: { lineStyle: { type: 'dashed' } } },
         tooltip: { trigger: 'axis', formatter: p => `${p[0].name}<br/>贡献: ${fmtNum(p[0].value, 2)}%` },
-        series: [{ type: 'bar', data: data.map(p => ({ value: p.value, itemStyle: { color: p.value >= 0 ? '#22c55e' : '#ef4444' } })), barMaxWidth: 40 }],
+        series: [{ type: 'bar', data: data.map(p => ({ value: p.value, itemStyle: { color: p.value >= 0 ? '#ef4444' : '#22c55e' } })), barMaxWidth: 40 }],
       });
     }
   });
@@ -2075,7 +2075,7 @@ async function loadReviewLedger() {
         const chgCls = x.chg_pct == null ? 'st-pnl-zero' : (x.chg_pct > 0 ? 'st-pnl-pos' : (x.chg_pct < 0 ? 'st-pnl-neg' : 'st-pnl-zero'));
         const chg = x.chg_pct == null ? '待结' : fmtNum(x.chg_pct, 1) + '%';
         const badge = x.correct == null ? '<span class="st-pnl-zero">待结</span>'
-          : (x.correct ? '<span class="st-pnl-pos">✓ 对</span>' : '<span class="st-pnl-neg">✗ 错</span>');
+          : (x.correct ? '<span class="text-success">✓ 对</span>' : '<span class="text-danger">✗ 错</span>');
         return `<tr><td>${esc(x.date || '—')}</td><td>${esc(x.ticker || '—')}</td><td>${esc(x.kind || '—')}</td>` +
           `<td>${esc(x.action || '—')}</td><td class="${chgCls}">${chg}</td><td>${badge}</td></tr>`;
       }).join('') + '</tbody></table>';

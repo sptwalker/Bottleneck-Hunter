@@ -674,8 +674,11 @@
 }
 
 /* ── 盈亏色 ── */
-.st-pnl-pos { color: oklch(0.65 0.18 145); }
-.st-pnl-neg { color: oklch(0.65 0.18 25); }
+.st-pnl-pos { color: oklch(0.65 0.18 25); }   /* 盈：红（A股习惯） */
+.st-pnl-neg { color: oklch(0.65 0.18 145); }  /* 亏：绿 */
+.st-fund-in { color: var(--success); }
+.st-fund-out { color: var(--danger); }
+.st-alloc-drift { color: var(--danger); }
 .st-pnl-zero { color: var(--muted); }
 
 /* ── VIP 通用导入拖拽区 ── */

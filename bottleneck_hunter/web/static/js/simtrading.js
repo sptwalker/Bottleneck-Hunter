@@ -167,7 +167,7 @@ async function loadEquityChart(days) {
     const dates = history.map(h => h.date);
     const values = history.map(h => h.equity);
     const initial = data.initial_capital || values[0];
-    const color = values[values.length - 1] >= initial ? '#22c55e' : '#ef4444';
+    const color = values[values.length - 1] >= initial ? '#ef4444' : '#22c55e';  // 盈红亏绿
     stState.chartEquity.setOption({
       grid: { top: 20, right: 20, bottom: 30, left: 60 },
       xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 11 } },
@@ -272,8 +272,9 @@ async function renderAllocTarget(positions, cash, mkt = stState.market) {
 function allocRow(label, actual, target) {
   const drift = actual - target;
   // 容忍带 5pct，与 L2 偏离检查的 drift 告警线同口径；超带（无论超配/低配）都是要处理的偏离 → 一律标红
+  // 注意：偏离是告警不是亏损，别用 st-pnl-neg（盈亏色已反转，亏=绿）
   const inBand = Math.abs(drift) <= 5;
-  const cls = inBand ? 'st-pnl-zero' : 'st-pnl-neg';
+  const cls = inBand ? 'st-pnl-zero' : 'st-alloc-drift';
   const tag = inBand ? '在带内' : (drift > 0 ? `超配 ${fmtNum(drift, 1)}pct` : `低配 ${fmtNum(-drift, 1)}pct`);
   const w = Math.max(0, Math.min(100, actual));
   const tw = Math.max(0, Math.min(100, target));
@@ -577,7 +578,7 @@ async function loadFundHistory() {
       ops.map(o => {
         const ts = fmtBJ(o.created_at);
         const sign = o.op_type === 'deposit' ? '+' : '-';
-        const cls = o.op_type === 'deposit' ? 'st-pnl-pos' : 'st-pnl-neg';
+        const cls = o.op_type === 'deposit' ? 'st-fund-in' : 'st-fund-out';  // 出入金非盈亏，不随盈亏配色
         return `<div class="st-fund-item"><span>${ts}</span><span class="${cls}">${sign}$${fmtNum(o.amount, 2)}</span><span>${esc(o.note || '')}</span></div>`;
       }).join('');
   } catch {}
