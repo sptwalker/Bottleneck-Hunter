@@ -83,8 +83,8 @@ assert(row.includes('width:100%'), '实际 >100 钳到 100%');
 assert(row.includes('left:0%'), '目标 <0 钳到 0%');
 
 console.log('E 超带无论超配/低配都标红（低配不能显示成"好"的绿色）');
-assert(allocRow('权益', 10, 60).includes('st-pnl-neg'), '权益低配 → 红');
-assert(allocRow('现金', 90, 40).includes('st-pnl-neg'), '现金超配 → 红');
+assert(allocRow('权益', 10, 60).includes('st-alloc-drift'), '权益低配 → 红（告警色，非盈亏色）');
+assert(allocRow('现金', 90, 40).includes('st-alloc-drift'), '现金超配 → 红（告警色，非盈亏色）');
 assert(allocRow('权益', 58, 60).includes('st-pnl-zero'), '带内 → 中性');
 
 console.log('F 现金取不到 / 期间切了市场 → 不渲染假对照');
