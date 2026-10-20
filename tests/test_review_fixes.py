@@ -83,3 +83,18 @@ def test_migration_heals_stored_us_suffix(store):
 def test_finnhub_fallback_no_key():
     from bottleneck_hunter.web.streaming.reverse import _finnhub_company_profile
     assert _finnhub_company_profile("SPCX") == {}
+
+
+# ── P2-1（2026-10 体检）：投委会缩到 0 股 = 撤销，而不是留下 0 股单空转 ──
+def test_committee_zero_shares_cancels_plan(store):
+    pid = _plan(store, 50)
+    assert store.apply_committee_modifications(pid, {"shares": 0}) is True
+    p = store.get_execution_plan(pid)
+    assert p["status"] == "rejected"
+    assert "投委会取消" in (p.get("rejection_reason") or "")
+
+
+def test_committee_zero_shares_on_reduce_cancels(store):
+    pid = _plan(store, 30, action="reduce")
+    store.apply_committee_modifications(pid, {"shares": 0})
+    assert store.get_execution_plan(pid)["status"] == "rejected"

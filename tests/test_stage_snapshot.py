@@ -128,8 +128,8 @@ async def test_l3_shared_rerun_and_fail_before_delete(tmp_path, monkeypatch):
         {"tactical_plans": [{"ticker": "AAPL", "action": "buy"}, {"ticker": "MSFT", "action": "buy"}]}, [])))
     events = [event async for event in engine.run_tactical_plans(store)]
     assert not [e for e in events if e["event"] == "decision_error"], events
-    first = store.get_tactical_plans_by_date(engine._today())
-    assert len(first) == 2
+    first = store.get_tactical_plans_by_date(engine._today(), include_inactive=True)
+    assert len(first) == 2  # 历史留痕：含被后续运行 supersede 的旧行
     assert len({p["snapshot_id"] for p in first}) == 1
     events = [event async for event in engine.run_tactical_plans(store)]
     second = store.get_tactical_plans_by_date(engine._today())

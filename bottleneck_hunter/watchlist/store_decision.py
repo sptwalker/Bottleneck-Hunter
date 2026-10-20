@@ -341,6 +341,15 @@ class _DecisionMixin:
         conn = self._connect()
         try:
             rj = result_json or {}
+            # P2-2：同一 ticker 同日只保留一条 active 战术计划。否则硬止损巡检按
+            # `plan_date DESC LIMIT 1` 取到的行不确定，可能拿到 exit_plan 为空的那条 → 止损失效。
+            # 病史：2026-10-19 002815 同日有两条 active（一条 exit_plan={}）。
+            q, p = self._filtered(
+                "UPDATE tactical_plans SET status = 'cancelled', updated_at = ? "  # 表 CHECK 仅允许 active/executed/expired/cancelled
+                "WHERE ticker = ? AND plan_date = ? AND status = 'active'",
+                (_now_iso(), ticker, plan_date),
+            )
+            conn.execute(q, p)
             conn.execute(
                 f"""INSERT INTO tactical_plans
                    (id, strategic_plan_id, entry_id, ticker, plan_date, action,
@@ -366,12 +375,16 @@ class _DecisionMixin:
             conn.close()
 
 
-    def get_tactical_plans_by_date(self, plan_date: str | None = None) -> list[dict]:
+    def get_tactical_plans_by_date(self, plan_date: str | None = None,
+                                   include_inactive: bool = False) -> list[dict]:
+        """当日战术计划。默认只返回 active——同日被新计划取代的（superseded）不参与下游决策。"""
         plan_date = plan_date or _today()
         conn = self._connect()
         try:
             q, p = self._filtered(
-                "SELECT * FROM tactical_plans WHERE plan_date = ? ORDER BY confidence DESC",
+                "SELECT * FROM tactical_plans WHERE plan_date = ?"
+                + ("" if include_inactive else " AND status = 'active'")
+                + " ORDER BY confidence DESC",
                 (plan_date,),
             )
             rows = conn.execute(q, p).fetchall()
@@ -413,6 +426,22 @@ class _DecisionMixin:
                 return None
             return self._parse_json_fields(dict(row), ("entry_plan", "exit_plan", "result_json"),
                                            ("catalyst_watch",))
+        finally:
+            conn.close()
+
+
+    def get_open_buy_for_ticker(self, ticker: str) -> dict | None:
+        """该 ticker 最近一条已成交/待确认的买入执行计划（止损位的权威来源，P0-2）。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM execution_plans WHERE ticker = ? "
+                "AND action IN ('buy', 'add') AND status IN ('executed', 'confirmed', 'pending') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (ticker,),
+            )
+            row = conn.execute(q, p).fetchone()
+            return self._parse_json_fields(dict(row), ("result_json",)) if row else None
         finally:
             conn.close()
 
@@ -637,14 +666,37 @@ class _DecisionMixin:
         # 投委会只准「缩量」：放大 shares 会绕过 L4 原始约束校验（现金/占比/额度），
         # 生成超约束的待确认指令。放大 / 原计划无股数却要加量 → 一律钳回原值。防非数值崩溃。
         cur_shares = plan.get("shares") or 0
+        cancel = False
         if new_shares is not None:
             try:
                 _new, _cur = float(new_shares), float(cur_shares)
             except (TypeError, ValueError):
-                _new = _cur = 0.0
+                _new = _cur = 0.0   # 非数值（如 "all"）：按"不合法"处理，下方钳回原值
+            else:
+                # 只有"原计划本来有股数、投委会显式缩到 0"才是撤销；原计划就是 0 股的放大请求
+                # 仍按 F6 钳回 0，不改变语义。
+                cancel = _new <= 0 and _cur > 0
             if _cur <= 0 or _new > _cur:
                 logger.info("投委会改单放大被拒 %s: %s→%s，钳回原值", plan_id, cur_shares, new_shares)
                 new_shares = cur_shares
+
+        # P2-1：投委会把股数缩到 0 = 撤销这笔，不是"改成一个 0 股的单"。
+        # 病史（10-14 300458）：缩减 {"shares": 0} 后计划仍是 pending/confirmed，执行器报
+        # 「缺少关键字段（action/ticker/shares/price）」→ 回滚 → 次日重新评审再失败一次。
+        if cancel:
+            with self._write_conn() as conn:
+                q, p = self._filtered(
+                    "UPDATE execution_plans SET status = 'rejected', rejection_reason = ? "
+                    "WHERE id = ? AND status = 'pending'",
+                    (f"[投委会取消] 投委会将股数缩减至 0：{json.dumps(modifications, ensure_ascii=False)}",
+                     plan_id),
+                )
+                cur = conn.execute(q, p)
+                if cur.rowcount > 0:
+                    self._log_exec_status(conn, plan_id, "pending", "rejected",
+                                          reason="投委会缩减至 0，计划撤销", actor="committee")
+                    return True
+            return False
 
         if new_shares is not None:
             rj["shares"] = new_shares

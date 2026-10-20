@@ -1306,6 +1306,22 @@ async def run_strategic_plan(
                       "diff_pct": _incons["diff_pct"]},
             )
         _sel = result.get("stock_selection", {})
+
+        # P1-2 名单稳定性：见 _stabilize_selection
+        try:
+            from datetime import timedelta as _td
+            _prev = store.get_latest_strategic_plan()
+            _prev_sel = ((_prev or {}).get("result_json", {}) or {}).get("stock_selection", {}) or {}
+            _prev_day = str((_prev or {}).get("created_at", ""))[:10]
+            _yday = str(datetime.now(ZoneInfo("Asia/Shanghai")).date() - _td(days=1))
+            _deferred = _stabilize_selection(_sel, _prev_sel, is_daily=_prev_day == _yday)
+            if _deferred:
+                logger.info("L2 名单稳定性：%s 为新增标的，待明日确认后再纳入（本次剔除）", _deferred)
+                yield _sse("decision_info", layer="L2", deferred_tickers=sorted(_deferred),
+                           message=f"L2 新增 {len(_deferred)} 只待确认：{', '.join(sorted(_deferred))}")
+        except Exception as e:  # noqa: BLE001 —— 稳定性是保护措施，读历史失败不得阻断 L2
+            logger.debug("L2 名单稳定性检查跳过: %s", e)
+
         _l2_tk = [h.get("ticker", "") for h in (_sel.get("core_holdings", []) + _sel.get("tactical_holdings", []))]
         result["_provenance"] = _decision_provenance(["decision_strategic"], [(provider, model)], market, "L2", _l2_tk)
         binding = save_stage_snapshot(
@@ -1504,9 +1520,16 @@ async def run_deviation_check(
 # 缺口 30pct、步长 1/3 → 每轮最多把权益抬 10pct，约 3 轮收敛到下限带内。
 _GAP_STEP_FRACTION = float(_os.getenv("BH_GAP_STEP_FRACTION", "0.3333"))
 
+# tactical 目标权重的参与系数：缺口驱动器原先只认 core_holdings，A股 L2 core 只有一只 8.5%，
+# 于是「36% 目标」的确定性落地通道最多只覆盖 8.5%，其余 27.5% 全靠 L3 的 LLM 逐票 opt-in——
+# 弱市里 L3 几乎只给 hold（实测 40 天 hold 419 / buy 113），组合因此长期停在 2.7%。
+# 纳入 tactical 时按系数打折：它们本就是「条件式建仓」（L2 写着"回踩 22.5-23.8 才补"），
+# 直接按满权重追会把回调要求在驱动器里抹掉；折半是"补一半目标、仍等 L4 的限价与合规"。
+_GAP_TACTICAL_FACTOR = float(_os.getenv("BH_GAP_TACTICAL_FACTOR", "0.5"))
+
 
 def _plan_gap_fills(account: dict, positions: list[dict], bounds: dict, core_holdings: list[dict],
-                    market: str) -> list[dict]:
+                    market: str, tactical_holdings: list[dict] | None = None) -> list[dict]:
     """P0-2 核心（纯函数，无 DB/LLM）：算"缺口该补哪些票、各补多少钱"。
 
     三条安全旋钮：① 仅 equity_pct < equity_min 时触发（收敛后自然停）；② 单轮最多补
@@ -1544,14 +1567,23 @@ def _plan_gap_fills(account: dict, positions: list[dict], bounds: dict, core_hol
             k = normalize_ticker(p["ticker"], market)
             cur_by_ticker[k] = cur_by_ticker.get(k, 0.0) + float(p.get("market_value") or 0)
     wants = []
-    for s in core_holdings or []:
-        tk = (s or {}).get("ticker", "")
-        tw = float((s or {}).get("target_weight_pct") or 0)
+
+    def _want(entry: dict, factor: float) -> None:
+        tk = (entry or {}).get("ticker", "")
+        tw = float((entry or {}).get("target_weight_pct") or 0)
         if not tk or tw <= 0:
-            continue
+            return
+        eff_tw = tw * factor  # 本轮参与缺口补齐的有效目标（tactical 打折，core 系数 1.0）
         cur_w = cur_by_ticker.get(normalize_ticker(tk, market), 0.0) / equity * 100
-        if tw - cur_w > 0.5:  # 差距 <0.5pct 视为已达标，不产零头单
-            wants.append((tw - cur_w, tk, tw, cur_w))
+        if eff_tw - cur_w > 0.5:  # 差距 <0.5pct 视为已达标，不产零头单
+            # 水位仍写 L2 原始目标：L4 判「离目标还差多少」用的是绝对承诺，不是本轮的折扣后目标，
+            # 否则每轮都以为"只差折半值"，收敛点会被永久压低。
+            wants.append((eff_tw - cur_w, tk, tw, cur_w, eff_tw))
+
+    for entry in core_holdings or []:
+        _want(entry, 1.0)
+    for entry in tactical_holdings or []:
+        _want(entry, _GAP_TACTICAL_FACTOR)
     if not wants:
         return []
     wants.sort(reverse=True)
@@ -1567,11 +1599,11 @@ def _plan_gap_fills(account: dict, positions: list[dict], bounds: dict, core_hol
 
     total_short = sum(w[0] for w in wants)
     fills, left, budget_left = [], cash, budget
-    for short_pct, tk, tw, cur_w in wants:
+    for short_pct, tk, tw, cur_w, eff_tw in wants:
         if _collapse:
-            amount = min(budget_left, (tw - cur_w) / 100 * equity, left)
+            amount = min(budget_left, (eff_tw - cur_w) / 100 * equity, left)
         else:
-            amount = min(budget * (short_pct / total_short), (tw - cur_w) / 100 * equity, left)
+            amount = min(budget * (short_pct / total_short), (eff_tw - cur_w) / 100 * equity, left)
         if amount < _frag:
             continue
         fills.append({
@@ -1612,11 +1644,14 @@ def _generate_gap_driven_plans(store, market: str, strategic: dict) -> list[dict
                                    mj.get("regime_confidence", 5))
     account = store.get_sim_account()
     positions = store.get_sim_positions(account.get("id"))
-    core = (strategic.get("result_json", {}).get("stock_selection", {}) or {}).get("core_holdings", [])
+    _sel = strategic.get("result_json", {}).get("stock_selection", {}) or {}
     # 存量 L2 计划可能是过滤上线前生成的，含池外票 → 读时再滤一遍
-    core = _drop_out_of_pool(core if isinstance(core, list) else [], _decision_pool(store, market),
-                             market, store, "缺口驱动")
-    fills = _plan_gap_fills(account, positions, bounds, core, market)
+    _pool = _decision_pool(store, market)
+    core = _drop_out_of_pool(_sel.get("core_holdings", []) if isinstance(_sel, dict) else [],
+                             _pool, market, store, "缺口驱动")
+    tactical = _drop_out_of_pool(_sel.get("tactical_holdings", []) if isinstance(_sel, dict) else [],
+                                 _pool, market, store, "缺口驱动")
+    fills = _plan_gap_fills(account, positions, bounds, core, market, tactical_holdings=tactical)
     if not fills:
         return []
     gap = compute_underweight_gap(account, positions, bounds)  # fills 非空 ⇒ 必然 underweight
@@ -2476,6 +2511,36 @@ def _allocation_inconsistency(result: dict, tolerance_pct: float = 5.0) -> dict 
     }
 
 
+def _stabilize_selection(sel: dict, prev_sel: dict, *, is_daily: bool) -> list[str]:
+    """P1-2：L2 选股名单稳定性——新票必须昨日也在名单里，才允许今天进入。
+
+    病史：L2 目标权益 10-05 48% → 10-16 27% → 10-17 36%，名单 9→6→5→9 只来回抖；
+    10-16 一次性清仓 6 只，其中 002006/002025 次日又被选回并重新挂买单——白付成本与滑点。
+    只作用于**新增**（存量成员不受影响），因此"不在名单 → 清仓"天然延后一天；
+    昨日没有计划（is_daily=False）时不启用，避免首日或断档后把整份名单清空。
+    就地改写 sel 的两个列表，返回被延后的 ticker。
+    """
+    if not is_daily or not isinstance(sel, dict):
+        return []
+    prev_tk = {
+        (h or {}).get("ticker")
+        for key in ("core_holdings", "tactical_holdings")
+        for h in ((prev_sel or {}).get(key) or [])
+        if (h or {}).get("ticker")
+    }
+    deferred: list[str] = []
+    for key in ("core_holdings", "tactical_holdings"):
+        kept = []
+        for h in sel.get(key) or []:
+            tk = (h or {}).get("ticker", "")
+            if tk and tk not in prev_tk:
+                deferred.append(tk)
+                continue
+            kept.append(h)
+        sel[key] = kept
+    return deferred
+
+
 def _l2_target_weights(strategic: dict, market: str) -> dict[str, float]:
     """{归一 ticker: L2 目标权重%}——判定「是否真的越过了目标授权」的基准线。"""
     core = ((strategic or {}).get("result_json", {}) or {}).get("stock_selection", {}) or {}
@@ -2526,6 +2591,60 @@ def _gap_fill_shares(planned_amount: float, price: float, equity: float,
     # 正是要放的）与波动率天花板（缺口驱动的金额已由 L3 封顶）。金额先落整——浮点残差会把「刚好
     # 补满」算成 5e-11 的尾巴，被 _round_lot 的 int() 截成 0 股而整单作废。
     return _round_lot(amount / price, market)
+
+
+# 买入计划默认止损幅度（按市场分档）：A股创业板/科创板日内 ±20%、波幅更大，7% 的止损在弱市
+# 等于"隔天必被打掉"（实测 300672 10-15 以 151.88 买入、10-16 以 134.96 止损，-11%）。美股沿用 8%。
+_DEFAULT_STOP_PCT = {"a_stock": 10.0, "us_stock": 8.0}
+
+
+def _attach_stop_loss(store: WatchlistStore, ep: dict, tactical_id: str, price: float, market: str) -> dict:
+    """P0-2：给买入/加仓执行计划挂上止损位，来源按可信度排序。
+
+    病史：L3 的 exit_plan 一直有 stop_loss，但 L4 的输出结构（decision_execution.md 的 JSON 示例）
+    里根本没有这个字段，于是 79 张 A股买/加单 **0 张**带止损，投委会每轮以"无止损机制"为由否决。
+    这里在落库前补上，写入 `result_json.stop_loss`，硬止损巡检直接读它（见 _hard_stop_loss_sweep），
+    不需要再去翻 L3 计划。
+
+    优先级：L3 战术计划 exit_plan.stop_loss.price → L2 Bear 场景价 → 现价 × (1-默认幅度)。
+    只接受严格低于现价的价格：高于现价等于"一买就止损"，宁可退回默认值。
+    """
+    if ep.get("action") not in ("buy", "add"):
+        return ep
+    stop, source = None, ""
+    try:
+        tp = store.get_latest_tactical_plan_for_ticker(ep.get("ticker", ""))
+    except Exception:  # noqa: BLE001
+        tp = None
+    if tp:
+        _sl = (tp.get("exit_plan") or {}).get("stop_loss") or {}
+        # LLM 偶尔把 stop_loss 写成裸数字（"stop_loss": 90）或字符串 → 统一按价格读
+        if isinstance(_sl, (int, float, str)):
+            _sl = {"price": _sl}
+        if isinstance(_sl, dict):
+            try:
+                stop = float(_sl.get("price") or 0) or None
+            except (TypeError, ValueError):
+                stop = None
+            source = "L3 exit_plan"
+    if not stop:
+        try:
+            _eid = (tp or {}).get("entry_id") or ep.get("entry_id") or ""
+            _sv = store.get_latest_valuation(_eid) if _eid else {}
+            stop = float((_sv or {}).get("bear_price") or 0) or None
+            source = "L2 Bear 场景"
+        except Exception:  # noqa: BLE001
+            stop = None
+    if stop and price > 0 and stop >= price:
+        logger.info("止损位 %s（%s）不低于现价 %.2f，退回默认幅度", stop, source or "未知", price)
+        stop = None
+    if not stop and price > 0:
+        stop = round(price * (1 - _DEFAULT_STOP_PCT.get(market, 8.0) / 100), 2)
+        source = f"默认 {_DEFAULT_STOP_PCT.get(market, 8.0):.0f}%"
+    if stop and price > 0:
+        ep["stop_loss"] = {"price": round(stop, 2), "pct": round((stop / price - 1) * 100, 1),
+                           "type": "hard", "source": source}
+    return ep
 
 
 def _is_executable_plan(ep: dict) -> bool:
@@ -3325,6 +3444,9 @@ async def run_execution_plans(
                         _oplog_mandate_exception(store, ticker, market, _l2_w, _post_w, ep)
 
             _clamp_limit_price(ep, float((store.get_latest_snapshot(ticker) or {}).get("close") or 0))
+            # P0-2：买入/加仓必须带止损（投委会以"无止损"为主要否决理由；硬止损巡检也读这一字段）
+            _attach_stop_loss(store, ep, tactical_id,
+                              float(ep.get("target_price") or ep.get("estimated_price") or 0), market)
             ep["_provenance"] = _decision_provenance(
                 ["decision_execution"], [(provider, model)], market, "L4", [ticker]
             )
@@ -3430,12 +3552,17 @@ async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGene
         shares = pos.get("shares", 0)
         if not ticker or shares <= 0 or ticker in _open_sells:
             continue
+        # P0-2：买入时挂在执行计划上的止损优先（L4 按 L3/L2 Bear/默认幅度算好并落库），
+        # L3 计划的 exit_plan 作为兜底——存量持仓/旧计划仍走原路径。
+        _open_buy = store.get_open_buy_for_ticker(ticker)
+        stop_price = ((_open_buy or {}).get("result_json") or {}).get("stop_loss", {}).get("price")
         plan = store.get_latest_tactical_plan_for_ticker(ticker)
-        if not plan:
-            continue
-        exit_plan = plan.get("exit_plan") or {}
-        stop = exit_plan.get("stop_loss") or {}
-        stop_price = stop.get("price")
+        if not stop_price:
+            if not plan:
+                continue
+            exit_plan = plan.get("exit_plan") or {}
+            stop = exit_plan.get("stop_loss") or {}
+            stop_price = stop.get("price")
         if not stop_price:
             continue
         snap = store.get_latest_snapshot(ticker)
@@ -3455,7 +3582,7 @@ async def _hard_stop_loss_sweep(store: WatchlistStore, market: str) -> AsyncGene
                 },
             )
             eid = store.create_execution_plan(
-                tactical_plan_id=plan.get("id", ""),
+                tactical_plan_id=(plan or {}).get("id", ""),
                 entry_id=pos.get("entry_id", ""),
                 ticker=ticker,
                 result_json={

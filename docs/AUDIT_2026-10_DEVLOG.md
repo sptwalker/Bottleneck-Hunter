@@ -60,3 +60,31 @@
 - `tests/test_audit_2026_10.py`：11 项。
 - 定向用例：auto_execute / committee / decision / snapshot 共 70 项；advice / accuracy / vote 共 139 项；evaluation / ablation / backtest 共 48 项。
 - 全量串行 pytest：2602 passed / 5 skipped；唯一失败 test_price_update_filters_by_market 为代理 ETF 回填引起的预期行为变化，已更新断言（7 passed）。
+
+---
+
+# 追加：A股仓位长期偏低（2026-10-20）
+
+## 现场
+A股决策账户总资产 469.7 万，持仓 12.6 万（2.69%），L2 目标权益 36%（约 169 万）；近 40 天已实现 -30.65 万。
+美股同口径持仓 20.8%。根因是「扩张通道窄 + 买入被系统性否决 + 名单抖动」三者叠加。
+
+## 逐项改动与验收
+
+| 项 | 改动 | 验收 |
+|---|---|---|
+| P0-1 | `_plan_gap_fills` 纳入 `tactical_holdings`，按 `BH_GAP_TACTICAL_FACTOR`（默认 0.5）打折；水位仍写 L2 原始目标，避免收敛点被压低 | `test_gap_driver.py` 新增 2 项：tactical 进入通道、已达目标不产单 |
+| P0-2 | 新增 `_attach_stop_loss`：买入/加仓落库前挂止损，来源 L3 exit_plan → L2 Bear 场景 → 默认幅度（A股 10%、美股 8%）；高于现价则退回默认。硬止损巡检优先读执行计划上的止损 | 新增 4 项：L3 优先、默认幅度/卖单跳过、拒绝高于现价的止损、无 L3 计划时巡检仍触发 |
+| P1-1 | `committee_value.md` 增加「估值口径」：成长池按历史分位与同业中位数相对判断，绝对 PE 单独不构成否决；否决须同时满足分位 ≥90% 且同业显著更低 | `test_committee_value_growth_pool.py` 2 项 |
+| P1-2 | 新增 `_stabilize_selection`：新进 L2 名单的标的须昨日亦在名单才纳入（存量不受影响、断档日不启用），清仓因此天然延后一天 | `test_l2_selection_stability.py` 5 项 |
+| P2-1 | `apply_committee_modifications` 遇「原股数 >0、投委会缩到 0」直接置 `rejected`（`[投委会取消]`），不再留下 0 股单空转 | `test_review_fixes.py` 新增 2 项 |
+| P2-2 | `create_tactical_plan` 先取消同 ticker 同日 active 计划；`get_tactical_plans_by_date` 默认只返回 active（`include_inactive=True` 保留留痕）；巡检用 `ORDER BY plan_date DESC LIMIT 1` 时不再取到空 exit_plan | `test_gap_driver.py` 新增 1 项 |
+
+## 兼容性处理
+- `get_tactical_plans_by_date` 新增可选参数，默认行为收紧为 active；阶段快照测试改用 `include_inactive=True` 校验历史留痕。
+- 止血：LLM 把 `stop_loss` 写成裸数字/字符串时按价格解析，不因类型异常中断整个 L4 批次。
+- 硬止损巡检在止损只来自执行计划（无 L3 计划）时不再因 `plan=None` 崩溃。
+
+## 验证
+- 相关模块：180 passed。
+- 全量串行 pytest：2619 passed / 5 skipped。

@@ -223,3 +223,117 @@ def test_wrapper_drops_core_out_of_pool(monkeypatch):
         {"id": "sp1", "created_at": _now(), "result_json": {"stock_selection": {"core_holdings": CORE}}},
     )
     assert ids == ["plan-AAPL"]  # MSFT 不在池 → 剔除
+
+
+# ── P0-1（2026-10 体检）：tactical 持仓也参与缺口补齐 ──
+
+def test_tactical_holdings_participate_half_weight():
+    """核心仅 1 只、tactical 多只时，确定性通道要能覆盖到 tactical，且按系数打折、
+    水位仍报 L2 原始目标（L4 判"离目标多远"不能拿折后值当承诺）。"""
+    from bottleneck_hunter.watchlist.decision_engine import _GAP_TACTICAL_FACTOR
+
+    account = {"total_equity": 100000, "cash_balance": 100000}
+    core = [{"ticker": "AAA", "target_weight_pct": 8.0}]
+    tactical = [{"ticker": "BBB", "target_weight_pct": 10.0}, {"ticker": "CCC", "target_weight_pct": 6.0}]
+
+    fills = _plan_gap_fills(account, [], BOUNDS, core, "us_stock", tactical_holdings=tactical)
+    by = {f["ticker"]: f for f in fills}
+    assert set(by) == {"AAA", "BBB", "CCC"}          # 三只都进入确定性通道
+    assert by["BBB"]["target_weight_pct"] == 10.0    # 水位 = L2 原始目标，不是折后 5%
+    assert by["BBB"]["amount"] <= 10.0 * _GAP_TACTICAL_FACTOR / 100 * 100000 + 1e-6
+    # 不打折时会补满 10%：对比证明打折生效
+    full = _plan_gap_fills(account, [], BOUNDS, core + tactical, "us_stock")
+    assert {f["ticker"]: f for f in full}["BBB"]["amount"] > by["BBB"]["amount"]
+
+
+def test_tactical_not_invented_when_at_target():
+    """tactical 已达（折后）目标 → 不产单。"""
+    account = {"total_equity": 100000, "cash_balance": 60000}
+    held = [{"ticker": "BBB", "market_value": 5200}]  # 5.2% > 折后目标 10%×0.5
+    fills = _plan_gap_fills(account, held, BOUNDS, [], "us_stock",
+                            tactical_holdings=[{"ticker": "BBB", "target_weight_pct": 10.0}])
+    assert fills == []
+
+
+# ── P0-2（2026-10 体检）：买入计划必须带止损，硬止损巡检优先读它 ──
+
+def _mk_store(tmp_path):
+    return WatchlistStore(str(tmp_path / "stop.db")).for_user("u1").for_market("us_stock")
+
+
+def test_attach_stop_loss_prefers_l3_exit_plan(tmp_path):
+    from bottleneck_hunter.watchlist.decision_engine import _attach_stop_loss
+
+    store = _mk_store(tmp_path)
+    store.create_tactical_plan("", "", "AAA", "2026-10-19",
+                               {"ticker": "AAA", "action": "buy",
+                                "exit_plan": {"stop_loss": {"price": 90.0}}}, strict=False)
+    ep = _attach_stop_loss(store, {"ticker": "AAA", "action": "buy"}, "", 100.0, "us_stock")
+    assert ep["stop_loss"]["price"] == 90.0 and ep["stop_loss"]["source"] == "L3 exit_plan"
+
+
+def test_attach_stop_loss_defaults_and_skips_sells(tmp_path):
+    from bottleneck_hunter.watchlist.decision_engine import _attach_stop_loss
+
+    store = _mk_store(tmp_path)
+    ep = _attach_stop_loss(store, {"ticker": "BBB", "action": "add"}, "", 100.0, "a_stock")
+    assert ep["stop_loss"]["pct"] == -10.0  # A股默认幅度
+    sell = _attach_stop_loss(store, {"ticker": "BBB", "action": "sell"}, "", 100.0, "a_stock")
+    assert "stop_loss" not in sell
+
+
+def test_attach_stop_loss_rejects_stop_above_price(tmp_path):
+    from bottleneck_hunter.watchlist.decision_engine import _attach_stop_loss
+
+    store = _mk_store(tmp_path)
+    store.create_tactical_plan("", "", "CCC", "2026-10-19",
+                               {"ticker": "CCC", "action": "buy",
+                                "exit_plan": {"stop_loss": {"price": 120.0}}}, strict=False)
+    ep = _attach_stop_loss(store, {"ticker": "CCC", "action": "buy"}, "", 100.0, "us_stock")
+    assert ep["stop_loss"]["price"] < 100.0  # 高于现价的止损 → 退回默认 8%
+    assert ep["stop_loss"]["source"].startswith("默认")
+
+
+def test_hard_stop_sweep_uses_execution_plan_stop(tmp_path):
+    """止损挂在执行计划（无 L3 exit_plan）时，巡检仍要触发清仓卖单。"""
+    import asyncio
+
+    from bottleneck_hunter.watchlist.decision_engine import _hard_stop_loss_sweep
+
+    store = _mk_store(tmp_path)
+    acct = store.get_sim_account()
+    store.create_sim_position(acct["id"], "AAA", 100, 100.0)
+    store.save_snapshots([{"ticker": "AAA", "date": "2026-10-19", "close": 85.0,
+                           "market": "us_stock", "data_quality": "ok", "quality_notes": ""}])
+    store.create_execution_plan("", "", "AAA",
+                                {"action": "buy", "shares": 100, "stop_loss": {"price": 90.0}},
+                                status="executed", strict=False)
+    plan = store.get_latest_tactical_plan_for_ticker("AAA")
+    assert plan is None  # 无 L3 计划，止损只能来自执行计划
+
+    async def _run():
+        return [e async for e in _hard_stop_loss_sweep(store, "us_stock")]
+
+    asyncio.run(_run())
+    sells = [e for e in store.get_pending_executions() if (e.get("result_json") or {}).get("_hard_stop")]
+    if (store.get_sim_positions(acct["id"]) or []):
+        assert sells and sells[0]["ticker"] == "AAA"
+
+
+# ── P2-2（2026-10 体检）：同一 ticker 同日只保留一条 active 战术计划 ──
+
+def test_same_day_duplicate_tactical_superseded(tmp_path):
+    store = _mk_store(tmp_path)
+    a = store.create_tactical_plan("", "", "AAA", "2026-10-19",
+                                   {"ticker": "AAA", "action": "add", "exit_plan": {}}, strict=False)
+    b = store.create_tactical_plan("", "", "AAA", "2026-10-19",
+                                   {"ticker": "AAA", "action": "buy",
+                                    "exit_plan": {"stop_loss": {"price": 90.0}}}, strict=False)
+    active = store.get_tactical_plans_by_date("2026-10-19")
+    assert [p["id"] for p in active] == [b]                 # 只留最新一条
+    assert [p["status"] for p in store.get_tactical_plans_by_date("2026-10-19", include_inactive=True)
+            if p["id"] == a] == ["cancelled"]
+    latest = store.get_latest_tactical_plan_for_ticker("AAA")
+    assert latest["id"] == b and latest["exit_plan"]["stop_loss"]["price"] == 90.0
+    # 留痕可查
+    assert {p["id"] for p in store.get_tactical_plans_by_date("2026-10-19", include_inactive=True)} == {a, b}
