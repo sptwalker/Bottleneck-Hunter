@@ -79,30 +79,65 @@ def _load_prompt(name: str) -> str:
 _FALLBACK_PROVIDERS = ["deepseek", "qwen", "glm", "kimi"]
 
 
+def _provider_downgrade_reason(provider: str) -> str:
+    """委员 chain 集体落到同一 provider 时，说明各家的指定 provider 为何不可用（供拒因/日志）。"""
+    try:
+        from bottleneck_hunter.auth.current_user import get_current_user_id
+        from bottleneck_hunter.llm_clients import provider_gate
+
+        uid = get_current_user_id()
+        parts = []
+        for m in MEMBERS:
+            hint = (m.get("provider_hint") or "").lower().strip()
+            if not hint or hint == provider:
+                continue
+            info = provider_gate.disabled_info(uid, hint)
+            if not info:
+                continue  # 只有确实处于禁用态的才写进拒因，正常/未知不凭空指控
+            status = (info.get("status") or "").replace("_", " ")
+            parts.append(f"{hint}={status or '不可用'}")
+        if parts:
+            return "指定 provider 不可用（" + "、".join(parts) + "），已降级至 " + provider
+    except Exception:  # noqa: BLE001 —— 拒因是诊断信息，取不到不能影响拦截本身
+        pass
+    return ""
+
+
 def _build_llm_chain(member: dict) -> list[tuple]:
     """构建该委员的 LLM 调用链：主模型 + 一个不同 provider 的备用模型。
 
     返回 [(llm, provider, model), ...]，供失败降级依次尝试。
     """
-    chain: list[tuple] = []
-    seen: set[str] = set()
-    # 委员链自管重试降级，取裸模型（勿再套 FallbackChatModel，避免双重重试/破坏多样性）。
-    # max_retries=0：SDK 不再对同一慢/失败模型内部 3× 重试（那会把单模型等待放大到
-    # (2+1)×timeout=180s，正是 Loki 归因里"单个失败模型拖 6.5 分钟"的根因）；重试/降级由
-    # _invoke_with_retry 显式掌控，慢模型单次超时即切下一个备用，不白等。
-    llm, provider, model = get_llm_for_position(
-        position=member.get("config_key"), provider_hint=member["provider_hint"], with_fallback=False, max_retries=0
-    )
-    if llm:
-        chain.append((llm, provider, model))
-        seen.add(provider)
-    # 备用：选一个与主模型不同、且**未熔断**的可用 provider（避免把已知失效的 provider 选进链白耗一轮）。
-    # 候选池 = 用户全部已注册 provider + 应急链兜底，而非只试硬编码 4 家（否则用户配的其它模型拿不到备用多样性）。
     from bottleneck_hunter.auth.current_user import get_current_user_id
-    from bottleneck_hunter.llm_clients.factory import list_custom_provider_ids
     from bottleneck_hunter.llm_clients.health import health
 
+    chain: list[tuple] = []
+    seen: set[str] = set()
     uid = get_current_user_id()
+
+    def _add(hint: str | None = None, position: str | None = None) -> None:
+        llm, provider, model = get_llm_for_position(
+            position=position, provider_hint=hint, with_fallback=False, max_retries=0
+        )
+        if llm and provider not in seen:
+            chain.append((llm, provider, model))
+            seen.add(provider)
+
+    # P1-5：**先按委员指定 provider 取**，让四位委员天然落在四个不同家上。
+    # 病史（10-20 起）：角色矩阵里的 qwen/kimi/glm 全部失效后，get_models_for_role 一律回落
+    # 到智能调度 top-1（deepseek），四位委员变成同一模型的四次调用 → 独立性守卫把 13 笔
+    # 已批准的买入全部拦下（"交叉验证失效"），A股买入再次冻结。指定 provider 只要还有 key
+    # 且不在冷却期就直接用它；真正不可用时才退回角色配置/调度，链尾仍有异家备用。
+    hint = (member.get("provider_hint") or "").lower().strip()
+    if hint and not health.is_open(uid, hint):
+        _add(hint=hint)
+    # 角色配置 / 智能调度（指定 provider 不可用时的第一顺位）
+    if not chain:
+        _add(position=member.get("config_key"))
+    # 备用：选一个与主模型不同、且**未熔断**的可用 provider（避免把已知失效的 provider 选进链白耗一轮）。
+    # 候选池 = 用户全部已注册 provider + 应急链兜底，而非只试硬编码 4 家（否则用户配的其它模型拿不到备用多样性）。
+    from bottleneck_hunter.llm_clients.factory import list_custom_provider_ids
+
     try:
         _universe = list_custom_provider_ids()
     except Exception:
@@ -985,6 +1020,12 @@ async def run_committee_review(
                     f"{len(providers_used)} 位委员集中于 {len(distinct_providers)} 个 provider"
                     f"（{next(iter(distinct_providers))}）"
                 )
+                # P1-5：把"为什么只剩一家"写进拒因。生产 10-20~10-28 有 13 笔已批准买入被这道闸
+                # 拦下，拒因只写"独立性不足"，运维看不出是 qwen/kimi/glm 全部欠费导致的降级——
+                # 于是这个闸看起来像 bug，实际是账号问题。这里附上各委员指定 provider 的禁用状态。
+                _why = _provider_downgrade_reason(providers_used[0]) if providers_used else ""
+                if _why:
+                    independence_reason += f"；{_why}"
             logger.warning(
                 "投委会独立性降级：%d 位委员均使用 provider=%s，交叉验证失去多样性",
                 len(providers_used),

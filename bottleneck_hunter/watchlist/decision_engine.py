@@ -2608,6 +2608,11 @@ def _attach_stop_loss(store: WatchlistStore, ep: dict, tactical_id: str, price: 
 
     优先级：L3 战术计划 exit_plan.stop_loss.price → L2 Bear 场景价 → 现价 × (1-默认幅度)。
     只接受严格低于现价的价格：高于现价等于"一买就止损"，宁可退回默认值。
+
+    P1-3（2026-10 复核）：候选止损若**离现价超过单笔亏损上限**，收紧到上限。
+    病史：688383 10-20 以 92.19 买入、止损 78.0（-15.4%，取自 L2 Bear 场景），而 L2 策略原文写的是
+    「自成本回撤 7%」。同一份策略里的两套风险口径打架，实际承受的是更松的那套；002025 同样
+    -15.3%。这里以更近的为准：`stop = max(候选止损, 现价×(1−上限))`，并记下被收紧的原值。
     """
     if ep.get("action") not in ("buy", "add"):
         return ep
@@ -2638,12 +2643,22 @@ def _attach_stop_loss(store: WatchlistStore, ep: dict, tactical_id: str, price: 
     if stop and price > 0 and stop >= price:
         logger.info("止损位 %s（%s）不低于现价 %.2f，退回默认幅度", stop, source or "未知", price)
         stop = None
+    capped_from = None
+    if stop and price > 0:
+        max_pct = _DEFAULT_STOP_PCT.get(market, 8.0)
+        floor_price = round(price * (1 - max_pct / 100), 2)
+        if stop < floor_price:  # 比上限更松 → 收紧
+            capped_from = round(stop, 2)
+            stop = floor_price
+            logger.info("止损位 %s（%s）距现价超过 %.0f%%，收紧至 %.2f", capped_from, source, max_pct, stop)
     if not stop and price > 0:
         stop = round(price * (1 - _DEFAULT_STOP_PCT.get(market, 8.0) / 100), 2)
         source = f"默认 {_DEFAULT_STOP_PCT.get(market, 8.0):.0f}%"
     if stop and price > 0:
         ep["stop_loss"] = {"price": round(stop, 2), "pct": round((stop / price - 1) * 100, 1),
                            "type": "hard", "source": source}
+        if capped_from is not None:
+            ep["stop_loss"]["capped_from"] = capped_from
     return ep
 
 

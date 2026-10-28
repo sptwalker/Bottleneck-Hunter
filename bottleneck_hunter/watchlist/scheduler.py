@@ -393,11 +393,58 @@ async def job_price_update(market: str = "us_stock") -> dict[str, str]:
         logger.info("Price update (%s/global) done: %d/%d 并集票(全体共享一次)", market, ok_count, len(tickers))
         _oplog("", "行情自动更新(全局)", market=market, result=("fail" if status == "error" else status),
                detail=f"并集 {len(tickers)} 票，成功 {ok_count}" + (f"，失败 {fail_count}" if fail_count else ""))
+        # P1-4：决策账户每日盯市。此前只有 VIP 账户在 job_vip_project 里重估，决策中心 sim 持仓的
+        # market_value/weight 停在最后一次成交那天（实测 10-23 之后 5 个交易日未更新），
+        # L2 缺口与 L4 定股都在拿陈旧市值算仓位，等于用旧价格做新决策。
+        try:
+            await _remark_decision_positions(market)
+        except Exception as e:  # noqa: BLE001 —— 盯市失败不得影响行情任务本身
+            logger.warning("决策账户盯市失败 (%s): %s", market, e)
         return results
     except Exception as e:
         logger.error("Price update (%s/global) failed: %s", market, e)
         _oplog("", "行情自动更新(全局)", market=market, error=str(e))
         return {}
+
+
+async def _remark_decision_positions(market: str) -> int:
+    """P1-4：按最新收盘价重估各用户「决策中心」模拟账户持仓，并重算权益。
+
+    只碰 account_ref='' 的决策账户（VIP 子账户由 job_vip_project 自己重估，互不干扰）。
+    价格已由 job_price_update 落库，这里只读快照，不再联网。
+    """
+    from bottleneck_hunter.watchlist.trade_executor import _recalc_account
+
+    touched = 0
+    for _uid, store, _budget in _iter_users("decision_remark"):
+        wl = store.for_market(market)
+        try:
+            account = wl.get_sim_account("")
+            if not account:
+                continue
+            positions = [p for p in wl.get_sim_positions(account["id"]) if p.get("shares", 0) > 0]
+            changed = False
+            for p in positions:
+                snap = wl.get_latest_snapshot(p["ticker"]) or {}
+                px = snap.get("close")
+                if not px or float(px) <= 0:
+                    continue
+                if abs(float(px) - float(p.get("current_price") or 0)) < 1e-9:
+                    continue
+                wl.update_sim_position(
+                    p["id"], current_price=float(px),
+                    market_value=round(float(p["shares"]) * float(px), 2),
+                    unrealized_pnl=round(float(p["shares"]) * (float(px) - float(p.get("avg_cost") or 0)), 2),
+                )
+                changed = True
+            if changed:
+                _recalc_account(wl, account["id"])
+                touched += 1
+        except Exception as e:  # noqa: BLE001 —— 单用户失败不影响其他用户
+            logger.warning("决策账户盯市失败 (user=%s): %s", str(_uid)[:8], e)
+    if touched:
+        logger.info("决策账户盯市 (%s): %d 个账户已按最新收盘价重估", market, touched)
+    return touched
 
 
 async def job_vip_project(market: str = "us_stock") -> None:

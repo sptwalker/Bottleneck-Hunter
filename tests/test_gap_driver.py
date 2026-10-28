@@ -267,9 +267,10 @@ def test_attach_stop_loss_prefers_l3_exit_plan(tmp_path):
     store = _mk_store(tmp_path)
     store.create_tactical_plan("", "", "AAA", "2026-10-19",
                                {"ticker": "AAA", "action": "buy",
-                                "exit_plan": {"stop_loss": {"price": 90.0}}}, strict=False)
+                                "exit_plan": {"stop_loss": {"price": 95.0}}}, strict=False)
     ep = _attach_stop_loss(store, {"ticker": "AAA", "action": "buy"}, "", 100.0, "us_stock")
-    assert ep["stop_loss"]["price"] == 90.0 and ep["stop_loss"]["source"] == "L3 exit_plan"
+    # 95 在默认 8% 上限之内（100×0.92=92），原样采用；更松的 90 会被收紧（见 cap 测试）
+    assert ep["stop_loss"]["price"] == 95.0 and ep["stop_loss"]["source"] == "L3 exit_plan"
 
 
 def test_attach_stop_loss_defaults_and_skips_sells(tmp_path):
@@ -337,3 +338,32 @@ def test_same_day_duplicate_tactical_superseded(tmp_path):
     assert latest["id"] == b and latest["exit_plan"]["stop_loss"]["price"] == 90.0
     # 留痕可查
     assert {p["id"] for p in store.get_tactical_plans_by_date("2026-10-19", include_inactive=True)} == {a, b}
+
+
+def test_attach_stop_loss_caps_too_wide_stop(tmp_path):
+    """P1-3：候选止损比单笔亏损上限还松 → 收紧到上限并记录原值。
+
+    病史：688383 以 92.19 买入、止损 78.0（-15.4%，取自 L2 Bear），而 L2 原文写"自成本回撤 7%"。
+    """
+    from bottleneck_hunter.watchlist.decision_engine import _attach_stop_loss
+
+    store = _mk_store(tmp_path)
+    store.create_tactical_plan("", "", "DDD", "2026-10-20",
+                               {"ticker": "DDD", "action": "buy",
+                                "exit_plan": {"stop_loss": {"price": 78.0}}}, strict=False)
+    ep = _attach_stop_loss(store, {"ticker": "DDD", "action": "buy"}, "", 92.19, "a_stock")
+    assert ep["stop_loss"]["price"] == 82.97          # 92.19 × (1-10%)
+    assert ep["stop_loss"]["pct"] == -10.0
+    assert ep["stop_loss"]["capped_from"] == 78.0
+
+
+def test_attach_stop_loss_keeps_tighter_stop(tmp_path):
+    """比上限更紧的止损保持原样，不被放宽。"""
+    from bottleneck_hunter.watchlist.decision_engine import _attach_stop_loss
+
+    store = _mk_store(tmp_path)
+    store.create_tactical_plan("", "", "EEE", "2026-10-20",
+                               {"ticker": "EEE", "action": "buy",
+                                "exit_plan": {"stop_loss": {"price": 88.0}}}, strict=False)
+    ep = _attach_stop_loss(store, {"ticker": "EEE", "action": "buy"}, "", 92.19, "a_stock")
+    assert ep["stop_loss"]["price"] == 88.0 and "capped_from" not in ep["stop_loss"]
