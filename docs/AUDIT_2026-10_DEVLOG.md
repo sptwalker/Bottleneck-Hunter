@@ -133,3 +133,36 @@ A股决策账户总资产 469.7 万，持仓 12.6 万（2.69%），L2 目标权�
 
 - **qwen / kimi / glm 三家的余额**：在 AI 配置中心充值后「测试并恢复」，四委员才能恢复异家交叉验证。
   在此之前 P1-5 只能保证"指定 provider 健在时优先用它"，不能凭空变出额度。
+
+---
+
+# 追加三：决策运行台账（2026-10-29）
+
+## 背景
+qwen / kimi / glm 已充值并在生产确认恢复（`provider_gate.disabled_info` 三家均返回 None；
+openrouter 仍是模型级 404，与欠费无关）。多模型交叉验证恢复后，需要一条**跨层、跨日**的
+主线来回答「这一轮决策一个周期后到底怎么样」——现有表都是按单票（sim_trades、
+execution_plans）或按单层（layer_performance、committee_reviews）存。
+
+## 新增
+- **表 `decision_runs`**：每轮 L1→L4+投委会 一行，记录
+  - 输入：`l1_id` / `l2_id` / `l2_equity_pct` / 决策前实际 `equity_pct_before`
+  - 产出：L3/L4 条数、投委会通过/否决/独立性拦截数、当日成交数
+  - 参与模型：`provider_count` / `providers`（用于核对交叉验证是否真的"交叉"）
+  - 事后：`outcome_due_date`（T+5）、`outcome_status`、`equity_pct_after`、`equity_change_pct`
+- **写入**：`record_decision_run()`，挂在 `run_daily_decision` 与 `run_full_refresh` 的两处
+  `*_done` 之前；失败只告警，不影响决策本身。
+- **回填**：`settle_decision_runs()` + 每日定时任务 `decision_run_settle`（双市场、多用户），
+  到期记录按当前权益占比结算，并把变化写成 `notes`。
+- **查询**：`GET /api/decision/runs`（列表，支持 market / limit / outcome_status）、
+  `GET /api/decision/runs/{run_id}`（单条，按用户与市场隔离）。
+
+## 为什么主指标是「权益占比变化」而不是收益率
+本项目长期的问题是**仓位到不了目标**（2026-10 前长期 2.7%~3.9% vs 目标 36%）。
+按单票收益率复盘会被个别票的运气带偏；权益占比变化直接回答「这一轮方法论有没有把组合带到
+目标附近」，与 L2 的 `equity_pct` 同一口径，可跨周比较。
+
+## 验收
+- `tests/test_decision_runs.py`：6 项（写入/读取、列表过滤、到期判定、结算回填、上下文采集）。
+- 全量串行 pytest：2632 passed / 6 skipped（另修掉一条既有测试的写死日期：
+  `test_financial_data` 的研报日期用固定 2026-05-01，随时间掉出「近 6 月」窗口，改为相对日期）。

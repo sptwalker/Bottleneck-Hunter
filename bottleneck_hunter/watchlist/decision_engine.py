@@ -1038,6 +1038,127 @@ def _gap_deviation(store: WatchlistStore, market: str) -> dict:
     return compute_underweight_gap(account, store.get_sim_positions(account.get("id")), bounds)
 
 
+def _equity_pct(store: WatchlistStore, account: dict | None = None, positions: list | None = None) -> float | None:
+    """当前实际权益占比（持仓市值 / 总权益）×100；读不到返回 None。"""
+    try:
+        acct = account or store.get_sim_account()
+        pos = positions if positions is not None else store.get_sim_positions(acct.get("id"))
+        total = float(acct.get("total_equity") or acct.get("current_capital") or 0)
+        if total <= 0:
+            return None
+        mv = sum(float(p.get("market_value") or 0) for p in (pos or []))
+        return round(mv / total * 100, 2)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def record_decision_run(store: WatchlistStore, market: str, *, trigger: str = "daily",
+                        l4_plan_count: int | None = None) -> str:
+    """把本轮决策写成 decision_runs 一行（输入/产出/参与模型），并预约 T+5 回填结果。
+
+    与既有表的区别：operation_log 是一句白话流水、各层表是按票存；这里要能在几天后回答
+    「那天这轮建议后来赚了还是亏了」，所以带上 equity_pct_before 与 outcome_due_date。
+    """
+    from datetime import timedelta as _td
+
+    market_store = store.for_market(market)
+    strategic = market_store.get_latest_strategic_plan() or {}
+    macro = market_store.get_latest_macro_strategy() or {}
+    sel = (strategic.get("result_json") or {}).get("stock_selection") or {}
+    alloc = (strategic.get("result_json") or {}).get("target_allocation") or {}
+
+    # 本轮涉及的执行计划 + 投委会结论
+    try:
+        plans = market_store.get_tactical_plans_by_date(_today())
+        execs = market_store.get_pending_executions()
+    except Exception:  # noqa: BLE001
+        plans, execs = [], []
+    approved = rejected = blocked = 0
+    providers: set[str] = set()
+    try:
+        for ex in execs:
+            cons = market_store.get_committee_consensus(ex.get("id") or "") or {}
+            verdict = cons.get("final_verdict") or ""
+            if verdict in ("approved", "approved_with_modifications"):
+                approved += 1
+            elif verdict == "rejected":
+                rejected += 1
+            reason = (ex.get("rejection_reason") or "")
+            if "独立性" in reason:
+                blocked += 1
+        # 参与模型：取当日委员评审（最直接反映"交叉验证是否真的交叉"）
+        conn = market_store._connect()
+        try:
+            q, p = market_store._filtered(
+                "SELECT DISTINCT model_provider FROM committee_reviews WHERE created_at >= ?",
+                (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
+            )
+            providers = {r[0] for r in conn.execute(q, p).fetchall() if r[0]}
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("决策运行统计失败: %s", e)
+
+    acct = market_store.get_sim_account()
+    positions = market_store.get_sim_positions(acct.get("id"))
+    today = _today()
+    due = (datetime.now(ZoneInfo("Asia/Shanghai")).date() + _td(days=5)).isoformat()
+    return market_store.create_decision_run(
+        market=market, run_date=today, trigger=trigger,
+        payload={
+            "l1_id": macro.get("id", ""),
+            "l2_id": strategic.get("id", ""),
+            "l2_equity_pct": alloc.get("equity_pct"),
+            "equity_pct_before": _equity_pct(market_store, acct, positions),
+            "l3_count": len(plans or []),
+            "l4_count": int(l4_plan_count or 0),
+            "committee_total": approved + rejected + blocked,
+            "committee_approved": approved,
+            "committee_rejected": rejected,
+            "committee_blocked_independence": blocked,
+            "executed_count": sum(1 for t in market_store.get_sim_trades(limit=200)
+                                  if (t.get("created_at") or "")[:10] == today),
+            "provider_count": len(providers),
+            "providers": ",".join(sorted(providers)),
+            "outcome_due_date": due,
+            "meta_json": {
+                "target_weights": {h.get("ticker"): h.get("target_weight_pct")
+                                   for k in ("core_holdings", "tactical_holdings") for h in (sel.get(k) or [])},
+                "regime": (macro.get("result_json") or {}).get("regime", ""),
+            },
+        },
+    )
+
+
+def settle_decision_runs(store: WatchlistStore, *, as_of: str | None = None) -> int:
+    """回填到期运行记录的结果：权益占比变化 + 已实现盈亏。返回结算条数。
+
+    这是"方便未来继续跟踪分析"的关键——不留结果，台账只是一堆数字；
+    结果以「权益占比变化」为主指标（仓位管理是本项目的核心命题），
+    避免被单票运气带偏。
+    """
+    as_of = as_of or _today()
+    settled = 0
+    for run in store.get_pending_decision_runs(as_of):
+        try:
+            mstore = store.for_market(run.get("market") or "us_stock")
+            acct = mstore.get_sim_account()
+            now_pct = _equity_pct(mstore, acct)
+            before = run.get("equity_pct_before")
+            change = round(now_pct - float(before), 2) if (now_pct is not None and before is not None) else None
+            mstore.update_decision_run(
+                run["id"], outcome_status="settled", equity_pct_after=now_pct,
+                equity_change_pct=change,
+                notes=f"T+5 结算：权益占比 {before}% → {now_pct}%",
+            )
+            settled += 1
+        except Exception as e:  # noqa: BLE001 —— 单条失败不影响其余
+            logger.warning("决策运行结算失败 %s: %s", run.get("id"), e)
+    if settled:
+        logger.info("决策运行台账：结算 %d 条到期记录（as_of=%s）", settled, as_of)
+    return settled
+
+
 def _l4_plan_count(evt: dict, prev: int | None) -> int | None:
     """从 `decision_done` 里取"跑了但没产出"的确证数；只在事件**带 `plan_count`** 时取值。
 
@@ -3958,6 +4079,14 @@ async def run_daily_decision(
         logger.exception("综合评分更新失败")
         yield _sse("decision_error", layer="composite", error=str(e))
 
+    # Step 7: 决策运行台账（2026-10）。跨层跨夜的主线：这轮看到了什么、产出了什么、
+    # 谁在评审、几天后结果如何。失败不得影响决策本身。
+    try:
+        run_id = record_decision_run(store, market, trigger="daily", l4_plan_count=l4_plan_count)
+        yield _sse("decision_run_recorded", run_id=run_id, market=market)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("决策运行记录失败 (%s): %s", market, e)
+
     yield _sse("daily_done", message="日常决策流程完成")
 
 
@@ -4039,6 +4168,12 @@ async def run_full_refresh(
     except Exception as e:
         logger.exception("综合评分更新失败")
         yield _sse("decision_error", layer="composite", error=str(e))
+    try:
+        run_id = record_decision_run(store, market, trigger="refresh")
+        yield _sse("decision_run_recorded", run_id=run_id, market=market)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("决策运行记录失败 (%s): %s", market, e)
+
     yield _sse("refresh_done", message="全量决策刷新完成")
 
 

@@ -102,9 +102,13 @@ class TestFetchAstock:
         })
         mock_ak.stock_financial_abstract_ths.return_value = df_fin
 
+        # 相对日期：研报计数按「近 6 个月」窗口过滤，写死日期会随时间推移掉出窗口（2026-10 实测已过期）
+        from datetime import datetime, timedelta
+        _recent = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        _old = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
         df_rpt = pd.DataFrame({
             "title": [f"研报{i}" for i in range(28)],
-            "日期": ["2026-05-01"] * 10 + ["2025-08-01"] * 18,
+            "日期": [_recent] * 10 + [_old] * 18,
             "机构名称": [f"券商{i % 8}" for i in range(28)],
             "机构评级": ["买入"] * 28,
         })

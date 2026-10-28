@@ -1026,6 +1026,28 @@ async def job_weekly_strategy(market: str = "us_stock") -> None:
         raise RuntimeError(f"每周策略未完成：{market} L1/L2 决策链无可用 LLM（用户 {', '.join(fatal_users)}）")
 
 
+async def job_settle_decision_runs() -> None:
+    """决策运行台账：给到期（T+5）的记录回填结果（多用户、双市场）。
+
+    与 job_auto_review 的区别：那个按「每笔卖出」复盘，这个按「每轮决策」复盘——
+    回答的是"那天的方法论有没有把仓位带到目标附近"，而不是单票对错。
+    """
+    from bottleneck_hunter.watchlist.decision_engine import settle_decision_runs
+
+    total = 0
+    for uid, store, _budget in _iter_users("decision_run_settle"):
+        for market in ("a_stock", "us_stock"):
+            try:
+                n = settle_decision_runs(store.for_market(market))
+                if n:
+                    _oplog(uid, "决策运行结算", market=market, detail=f"回填 {n} 条到期决策记录")
+                total += n
+            except Exception as e:  # noqa: BLE001 —— 单市场失败不影响另一个
+                logger.warning("决策运行结算失败 (%s/user=%s): %s", market, str(uid)[:8], e)
+    if total:
+        logger.info("决策运行台账：本次回填 %d 条", total)
+
+
 async def job_auto_review(market: str = "us_stock") -> None:
     """自动复盘：批量复盘未复盘的卖出交易（多用户）。"""
     for uid, store, budget in _iter_users("auto_review"):
@@ -1968,6 +1990,7 @@ _JOB_SPECS = [
     ("cn_auto_review",         job_auto_review,         {"market": "a_stock"},  _TZ_CN,         "daily",    "A-stock auto review unreviewed sells"),
     ("cn_vip_advice_review",   job_vip_advice_review,   {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly VIP advice review (再评即结)"),
     ("cn_vip_strategy_review", job_vip_strategy_review, {"market": "a_stock"},  _TZ_CN,         "monthly",  "A-stock monthly VIP strategy review"),
+    ("decision_run_settle",    job_settle_decision_runs, {},                    _TZ_CN,         "daily",    "Settle T+5 decision-run outcomes"),
     ("us_institutional_update", job_institutional_update, {},                   _TZ_CN        , "weekly",   "Weekly institutional holders & analyst ratings"),
     ("us_earnings_update",     job_earnings_update,     {"market": "us_stock"}, _TZ_CN        , "weekly",   "Weekly earnings update (FMP, incl. consensus)"),
     ("cn_earnings_update",     job_earnings_update,     {"market": "a_stock"},  _TZ_CN,         "weekly",   "A-stock weekly earnings update (Tushare)"),
@@ -2026,6 +2049,7 @@ def list_job_categories() -> dict[str, str]:
         "us_vip_strategy_review": "vip_project", "cn_vip_strategy_review": "vip_project",
         "us_weekly_strategy": "weekly_strategy", "cn_weekly_strategy": "weekly_strategy",
         "us_auto_review": "auto_review", "cn_auto_review": "auto_review",
+        "decision_run_settle": "auto_review",  # 决策运行台账结算：随自动复盘开关
         "stale_refresh": "daily_decision",  # 情报/策略 LLM 兜底，随自动决策开关
         "resting_limit_poll": "daily_decision",  # 挂单撮合，随自动决策开关
         "mail_ingest_poll": "",  # 系统级银行邮件轮询，仅受管理员全局总开关
@@ -2079,6 +2103,7 @@ def list_job_labels() -> dict[str, dict]:
         "mail_ingest_poll":    {"label": "银行邮件自动解读",       "desc": "拉取转发邮件，附件入库+正文进待确认队列", "tz": "轮询", "freq": "每小时"},
         "gangtise_catalyst":   {"label": "Gangtise 催化剂补给",    "desc": "财报日历+公告 → 观察池标的催化剂（幂等）", "tz": "轮询", "freq": "每日"},
         "forum_ai_round":      {"label": "论坛 AI 自主发言",       "desc": "各板 opt-in 开启后，AI 角色低频自主发帖/回帖（每轮≤3）", "tz": "轮询", "freq": "每隔N小时"},
+        "decision_run_settle": {"label": "决策运行结算",           "desc": "T+5 回填每轮决策的权益占比变化", "tz": "北京", "freq": "每日"},
         "us_full_refresh":     {"label": "美股·周期性全量刷新",    "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "cn_full_refresh":     {"label": "A股·周期性全量刷新",     "desc": "数据+宏观+完整决策+复盘一条龙", "tz": "北京", "freq": "每周"},
         "system_watchdog":     {"label": "系统守卫巡检",           "desc": "每日巡检周期任务是否静默失败，超期即主动补跑并报告", "tz": "北京", "freq": "每日"},

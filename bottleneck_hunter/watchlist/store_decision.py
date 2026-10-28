@@ -989,3 +989,95 @@ class _DecisionMixin:
         finally:
             conn.close()
 
+
+
+# ─────────────────────────────────────────────────────────
+# 决策运行台账（2026-10）：跨层、跨日的一条主线，供事后复盘
+# ─────────────────────────────────────────────────────────
+
+
+class _DecisionRunMixin:
+    def create_decision_run(self, *, market: str, run_date: str, trigger: str = "daily",
+                            payload: dict | None = None) -> str:
+        """记录一轮决策的输入/产出/参与模型。T+N 的回填见 settle_decision_run。"""
+        rid = uuid.uuid4().hex[:12]
+        now = _now_iso()
+        d = payload or {}
+        cols, vals = [], []
+        for key in ("l1_id", "l2_id", "l2_equity_pct", "equity_pct_before", "l3_count", "l4_count",
+                    "committee_total", "committee_approved", "committee_rejected",
+                    "committee_blocked_independence", "executed_count", "provider_count",
+                    "providers", "outcome_due_date", "notes", "meta_json"):
+            if key in d and d[key] is not None:
+                cols.append(key)
+                vals.append(json.dumps(d[key], ensure_ascii=False) if key == "meta_json" else d[key])
+        with self._write_conn() as conn:
+            q = (f"INSERT INTO decision_runs (id, run_date, trigger, market, user_id, created_at, updated_at"
+                 f"{', ' + ', '.join(cols) if cols else ''}) "
+                 f"VALUES (?,?,?,?,?,?,?{', ' + ', '.join('?' * len(cols)) if cols else ''})")
+            conn.execute(q, (rid, run_date, trigger, market, self._user_id or "", now, now, *vals))
+        return rid
+
+    def update_decision_run(self, run_id: str, **fields) -> bool:
+        allowed = {"l2_id", "l2_equity_pct", "l3_count", "l4_count", "committee_total",
+                   "committee_approved", "committee_rejected", "committee_blocked_independence",
+                   "executed_count", "provider_count", "providers", "outcome_due_date",
+                   "outcome_status", "equity_pct_after", "equity_change_pct", "notes", "meta_json"}
+        parts, vals = [], []
+        for k, v in fields.items():
+            if k in allowed:
+                parts.append(f"{k} = ?")
+                vals.append(json.dumps(v, ensure_ascii=False) if k == "meta_json" and not isinstance(v, str) else v)
+        if not parts:
+            return False
+        parts.append("updated_at = ?")
+        with self._write_conn() as conn:
+            q, p = self._filtered(
+                f"UPDATE decision_runs SET {', '.join(parts)} WHERE id = ?", tuple(vals) + (_now_iso(), run_id)
+            )
+            return conn.execute(q, p).rowcount > 0
+
+    def get_decision_run(self, run_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            q, p = self._filtered("SELECT * FROM decision_runs WHERE id = ?", (run_id,))
+            row = conn.execute(q, p).fetchone()
+            return self._parse_json_fields(dict(row), ("meta_json",)) if row else None
+        finally:
+            conn.close()
+
+    def list_decision_runs(self, *, market: str = "", limit: int = 60,
+                           outcome_status: str = "") -> list[dict]:
+        conn = self._connect()
+        try:
+            sql = "SELECT * FROM decision_runs"
+            params: tuple = ()
+            conds = []
+            if market:
+                conds.append("market = ?")
+                params += (market,)
+            if outcome_status:
+                conds.append("outcome_status = ?")
+                params += (outcome_status,)
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY run_date DESC, created_at DESC LIMIT ?"
+            params += (limit,)
+            q, p = self._filtered(sql, params) if not market else (sql, params)
+            return [self._parse_json_fields(dict(r), ("meta_json",))
+                    for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()
+
+    def get_pending_decision_runs(self, as_of: str) -> list[dict]:
+        """到期未回填的运行记录（outcome_due_date <= as_of）。"""
+        conn = self._connect()
+        try:
+            q, p = self._filtered(
+                "SELECT * FROM decision_runs WHERE outcome_status = 'pending' "
+                "AND outcome_due_date != '' AND outcome_due_date <= ? ORDER BY run_date",
+                (as_of,),
+            )
+            return [self._parse_json_fields(dict(r), ("meta_json",)) for r in conn.execute(q, p).fetchall()]
+        finally:
+            conn.close()

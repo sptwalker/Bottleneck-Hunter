@@ -626,6 +626,43 @@ CREATE TABLE IF NOT EXISTS layer_performance (
     market          TEXT DEFAULT 'us_stock'
 );
 
+-- ══ 决策运行台账（2026-10）：每轮 L1→L4+投委会 一行，记「输入/产出/参与模型」，
+--    并在 T+5 回填「这轮建议后来怎么样了」。现有表都按单笔/单层存，缺这条跨层、跨日的主线。══
+CREATE TABLE IF NOT EXISTS decision_runs (
+    id                  TEXT PRIMARY KEY,
+    run_date            TEXT NOT NULL,            -- 北京日期
+    trigger             TEXT DEFAULT 'daily',     -- daily | refresh | manual
+    market              TEXT NOT NULL DEFAULT 'us_stock',
+    user_id             TEXT DEFAULT '',
+    -- 输入快照（这轮决策看到的世界）
+    l1_id               TEXT DEFAULT '',
+    l2_id               TEXT DEFAULT '',
+    l2_equity_pct       REAL,                     -- L2 目标权益%
+    equity_pct_before   REAL,                     -- 决策前实际权益%（按当时市值）
+    -- 产出（这轮决策做了什么）
+    l3_count            INTEGER DEFAULT 0,
+    l4_count            INTEGER DEFAULT 0,
+    committee_total     INTEGER DEFAULT 0,
+    committee_approved  INTEGER DEFAULT 0,
+    committee_rejected  INTEGER DEFAULT 0,
+    committee_blocked_independence INTEGER DEFAULT 0,
+    executed_count      INTEGER DEFAULT 0,
+    -- 参与模型（交叉验证是否真的"交叉"）
+    provider_count      INTEGER DEFAULT 0,
+    providers           TEXT DEFAULT '',          -- 逗号分隔
+    -- 事后结果（T+N 回填）
+    outcome_due_date    TEXT DEFAULT '',
+    outcome_status      TEXT DEFAULT 'pending',   -- pending | settled | void
+    equity_pct_after    REAL,
+    equity_change_pct   REAL,                     -- 权益变化（百分点）
+    notes               TEXT DEFAULT '',
+    meta_json           TEXT DEFAULT '',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decision_runs_date ON decision_runs(user_id, market, run_date DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_runs_pending ON decision_runs(outcome_status, outcome_due_date);
+
 -- ══ VIP 私人财务顾问：规范组合模型（D1）+ 报告（D6）见 docs/VIP_ADVISOR_TECH_SPEC.md §2.2/§2.5 ══
 CREATE TABLE IF NOT EXISTS instruments (
     id              TEXT PRIMARY KEY,

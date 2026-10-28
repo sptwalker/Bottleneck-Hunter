@@ -18,7 +18,7 @@ from bottleneck_hunter.watchlist.store_ai_models import _AIModelsMixin
 from bottleneck_hunter.watchlist.store_base import _DEFAULT_DB, _get_db_lock
 from bottleneck_hunter.watchlist.store_budget import _BudgetMixin
 from bottleneck_hunter.watchlist.store_committee import _CommitteeMixin
-from bottleneck_hunter.watchlist.store_decision import _DecisionMixin
+from bottleneck_hunter.watchlist.store_decision import _DecisionMixin, _DecisionRunMixin
 from bottleneck_hunter.watchlist.store_forum import _ForumMixin
 from bottleneck_hunter.watchlist.store_i18n import _I18nMixin
 from bottleneck_hunter.watchlist.store_intel import _IntelMixin
@@ -75,6 +75,7 @@ class WatchlistStore(
     _BudgetMixin,
     _IntelMixin,
     _DecisionMixin,
+    _DecisionRunMixin,
     _CommitteeMixin,
     _SimTradingMixin,
     _VipProjectionMixin,

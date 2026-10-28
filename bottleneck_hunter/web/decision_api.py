@@ -421,6 +421,28 @@ async def get_latest_strategic(market: str = "us_stock", user: dict = Depends(ge
     return {"plan": plan}
 
 
+@router.get("/runs")
+async def list_decision_runs(market: str = "us_stock", limit: int = 30,
+                             outcome_status: str = "", user: dict = Depends(get_current_user)):
+    """决策运行台账：每轮 L1→L4+投委会 的输入/产出/参与模型 + T+5 结果。
+
+    与 /tactical/latest 的区别：这里按「轮」看，能回答"那天的方法论把仓位带到哪了"。
+    """
+    store = _user_store(user).for_market(market)
+    rows = store.list_decision_runs(market=market, limit=max(1, min(limit, 200)),
+                                    outcome_status=outcome_status)
+    return {"runs": rows}
+
+
+@router.get("/runs/{run_id}")
+async def get_decision_run(run_id: str, market: str = "us_stock", user: dict = Depends(get_current_user)):
+    store = _user_store(user).for_market(market)
+    run = store.get_decision_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="决策记录不存在")
+    return {"run": run}
+
+
 @router.get("/strategic/history")
 async def get_strategic_history(limit: int = 10, market: str = "us_stock", user: dict = Depends(get_current_user)):
     store = _user_store(user).for_market(market)
