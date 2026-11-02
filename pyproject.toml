@@ -19,6 +19,7 @@ dependencies = [
     "yfinance>=0.2.0",
     "akshare>=1.14.0",
     "baostock>=0.8.8",
+    "tzdata>=2024.1",
     "pandas>=2.0",
     "rich>=13.0",
     "questionary>=2.0",

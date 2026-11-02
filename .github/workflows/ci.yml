@@ -39,12 +39,38 @@ jobs:
         run: python scripts/check_mojibake.py
 
       # CLAUDE.md / AGENTS.md 的路径引用必须存在——它是每次会话最被信任的输入。
-      # 需要 pytest：这个 job 不装项目依赖（保持轻量），但必须显式装 pytest，
-      # 否则 `python -m pytest` 直接 No module named pytest（首跑即踩）。
+      # 这里**不跑 pytest**：本 job 刻意不装项目依赖以保持轻量，而 tests/conftest.py
+      # 会在收集阶段 import bottleneck_hunter.watchlist.news_pipeline，
+      # 缺依赖时所有测试直接 ERROR（不是断言失败，日志里看不出原因）。
+      # 改为直接调用校验函数——同样的判据，零依赖。完整测试由 tests job 覆盖。
       - name: Agent instruction references
         run: |
-          python -m pip install --quiet pytest
-          python -m pytest tests/test_agents_md_references.py -q
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "tests")
+          import importlib.util
+
+          spec = importlib.util.spec_from_file_location(
+              "agents_refs", Path("tests/test_agents_md_references.py")
+          )
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          missing = {}
+          for name in mod.DOCUMENTS:
+              doc = mod.REPO_ROOT / name
+              assert doc.is_file(), f"{name} missing"
+              gaps = mod.missing_references(doc)
+              if gaps:
+                  missing[name] = gaps
+          if missing:
+              for name, gaps in missing.items():
+                  for g in gaps:
+                      print(f"::error file={name}::{g} 不存在")
+              sys.exit(1)
+          print(f"agent instruction references OK ({', '.join(mod.DOCUMENTS)})")
+          PY
 
   lint:
     name: Ruff
