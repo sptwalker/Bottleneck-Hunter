@@ -21,11 +21,18 @@ P1-2 `judge_independence.effective_number_of_judges` 已能算有效独立评委
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 
-from bottleneck_hunter.watchlist.evaluation import _sharpe, ablation, deflated_sharpe, overfit_flags, pbo_cscv
+from bottleneck_hunter.watchlist.evaluation import (
+    _sharpe,
+    ablation,
+    benjamini_hochberg,
+    deflated_sharpe,
+    overfit_flags,
+    pbo_cscv,
+)
 from bottleneck_hunter.watchlist.judge_independence import (
     effective_number_of_judges,
     vote_similarity_matrix,
@@ -61,6 +68,12 @@ class IncrementStep:
     n_effective_added: float
     cost_delta: float
     note: str = ""
+    # 多重检验校正后的结果。p_value 是单次比较的 bootstrap 双侧 p；
+    # q_value 是整族检验下 BH 校正后的值；fdr_significant 才是"整族视角下显著"。
+    # 二者可不同：单级看显著、但整族里是众多比较之一时可能不再显著。
+    p_value: float = 1.0
+    q_value: float = 1.0
+    fdr_significant: bool = False
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -81,12 +94,19 @@ def incremental_ablation(
     stability_threshold: float = 0.8,
     null_width: float = 0.01,
     redundancy_threshold: float = 0.5,
+    fdr_alpha: float = 0.05,
 ) -> dict:
     """对有序配置阶梯逐级做增量消融，返回逐步结论 + 总体裁决。
 
     arms：至少 2 个臂，按阶梯顺序排列；所有臂的 `oos_returns` 必须等长（同一组样本外窗口）。
     null_width：判定「明确无增量」的增量区间宽度上限（收益单位，校准旋钮）。
     redundancy_threshold：`1 - N_eff/人数` 超过它即判 persona 冗余膨胀（校准旋钮）。
+    fdr_alpha：多重检验校正的 FDR 水平；q_value <= fdr_alpha 判 `fdr_significant`。
+
+    注意 verdict 与 fdr_significant 是两个口径，**不要互相替代**：
+    verdict 回答「这一级的增量是否可信」（含跨种子稳定性与区间宽度），
+    fdr_significant 回答「在整族比较下这一级是否仍然显著」。前者是逐级判断，
+    后者是整族校正——级数越多，后者越严格。
     """
     arms = list(arms)
     if len(arms) < 2:
@@ -105,6 +125,14 @@ def incremental_ablation(
                                seeds=list(seeds), stability_threshold=stability_threshold,
                                null_width=null_width, redundancy_threshold=redundancy_threshold))
 
+    # 多重检验校正：阶梯上每级各算一次显著性，N 级下「至少一次假阳性」的概率远高于单次 alpha。
+    # BH-FDR 在整族检验下控制错误发现率——判据从「p < alpha」换成「q < alpha」。
+    q_values = benjamini_hochberg([s.p_value for s in steps], alpha=fdr_alpha) if steps else []
+    steps = [
+        replace(s, q_value=round(q, 6), fdr_significant=bool(q <= fdr_alpha))
+        for s, q in zip(steps, q_values, strict=True)
+    ] if steps else []
+
     proven_pos = [s for s in steps if s.verdict == "proven_positive"]
     proven_neg = [s for s in steps if s.verdict == "proven_negative"]
     return {
@@ -116,6 +144,12 @@ def incremental_ablation(
         "any_persona_inflation": any(s.persona_inflation for s in steps),
         "total_cost_delta": round(sum(s.cost_delta for s in steps), 6),
         "selection": _selection_overfit(arms),
+        "multiple_testing": {
+            "method": "benjamini_hochberg",
+            "n_tests": len(steps),
+            "alpha": fdr_alpha,
+            "n_fdr_significant": sum(1 for s in steps if s.fdr_significant),
+        },
     }
 
 
@@ -174,6 +208,7 @@ def _one_step(prev: Arm, cur: Arm, *, confidence: float, n_resamples: int, seeds
         persona_inflation=persona_inflation,
         n_components_added=added, n_effective_added=round(eff_added, 6),
         cost_delta=round(cur.cost_usd - prev.cost_usd, 6), note=note,
+        p_value=round(float(point.p_value), 6),
     )
 
 

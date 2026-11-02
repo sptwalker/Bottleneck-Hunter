@@ -57,6 +57,48 @@ class AblationResult:
     ci: CI
     significant: bool  # 差值区间不跨 0
     direction: str  # 'positive' | 'negative' | 'inconclusive'
+    p_value: float = 1.0  # 双侧 bootstrap p 值（供多重检验校正用）
+
+
+def benjamini_hochberg(pvalues: Sequence[float], *, alpha: float = 0.05) -> list[float]:
+    """Benjamini-Hochberg q 值（FDR 校正），返回与输入同序。
+
+    为什么需要：阶梯消融里每级各算一次显著性，5 级比较下「至少一次假阳性」的概率
+    远高于单次 alpha。BH 把「每个检验单独看」换成「在整族检验下控制错误发现率」。
+
+    实现要点（step-up）：
+      1. 升序排列 p，第 i 位（1-based）的原始 q = p_i * n / i
+      2. 从大到小做 running-min，保证 q 单调不降——否则会出现「p 更小却 q 更大」的自相矛盾
+      3. 按原始顺序还原
+
+    边界：空输入返回空；非法 p（<0、>1、NaN）抛 ValueError，绝不静默截断——
+    静默修正会让调用方以为数据是干净的。
+    """
+    n = len(pvalues)
+    if n == 0:
+        return []
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError("alpha 必须落在 (0, 1]")
+
+    indexed = []
+    for i, p in enumerate(pvalues):
+        try:
+            value = float(p)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"p 值必须可转 float: {p!r}") from exc
+        if not np.isfinite(value) or value < 0.0 or value > 1.0:
+            raise ValueError(f"p 值必须落在 [0, 1]: {value}")
+        indexed.append((value, i))
+
+    indexed.sort(key=lambda item: item[0])
+    q_values = [0.0] * n
+    running_min = 1.0
+    for rank in range(n, 0, -1):
+        value, original_index = indexed[rank - 1]
+        q = min(1.0, value * n / rank)
+        running_min = min(running_min, q)
+        q_values[original_index] = running_min
+    return q_values
 
 
 def walk_forward_splits(
@@ -151,7 +193,27 @@ def ablation(
     direction = "inconclusive"
     if significant:
         direction = "positive" if point > 0 else "negative"
-    return AblationResult(delta=point, ci=ci, significant=significant, direction=direction)
+    return AblationResult(
+        delta=point, ci=ci, significant=significant, direction=direction,
+        p_value=_bootstrap_two_sided_p(stats),
+    )
+
+
+def _bootstrap_two_sided_p(stats: np.ndarray) -> float:
+    """bootstrap 双侧 p 值：重采样分布中「与 0 反向或跨 0」的比例。
+
+    用法是多重检验校正的输入（BH-FDR），不是替代 CI 做单次判定——
+    单次结论仍以 CI 是否跨 0 为准，二者口径不同，不要混用。
+    加 1 的平滑项避免 n_resamples 次全同号时 p 恰为 0（0 会让 BH 的 q 恒为 0）。
+    """
+    total = int(stats.size)
+    if total == 0:
+        return 1.0
+    non_positive = int(np.count_nonzero(stats <= 0))
+    non_negative = int(np.count_nonzero(stats >= 0))
+    # 双侧：取更"意外"的那一侧，再乘 2
+    tail = min(non_positive, non_negative)
+    return float(min(1.0, (tail + 1) / (total + 1) * 2.0))
 
 
 def summarize_oos(
@@ -226,6 +288,15 @@ def pbo_cscv(perf: Sequence[Sequence[float]], *, n_splits: int = 16) -> float:
     把 T 行切成 S 块，取所有 C(S, S/2) 种「半数做样本内 / 另一半做样本外」组合；
     每种组合下选样本内夏普最优的配置，看它在样本外的排名分位 ω，λ=ln(ω/(1-ω))。
     PBO = P(λ ≤ 0)＝样本内最优在样本外跌到中位数以下的频率。>0.5 ≈ 选优过程比抛硬币还差。
+
+    **口径边界（勿误读）**：
+      - 这里用的是**完整 CSCV**：按时间切成 S 个互斥子区间并枚举全部对半组合，
+        不是"按 walk-forward fold 切"的简化版。
+      - PBO 度量的是「**选优这一步**的可信度」，不是「策略本身能不能赚钱」。
+        PBO 低但策略烂、PBO 高但策略稳，都可能出现。
+      - 样本量下限是硬约束：T < 2S 时无法切块会抛错，不会退化成猜一个数。
+      - 排名并列时按「严格小于」计数（`:306`），并列者不算赢——偏保守，
+        即 PBO 略偏乐观（低估过拟合）。这是已知取舍，不要据此宣称"已排除过拟合"。
     """
     m = np.asarray(perf, dtype=float)
     if m.ndim != 2 or m.shape[1] < 2:

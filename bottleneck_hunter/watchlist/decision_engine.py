@@ -1131,11 +1131,15 @@ def record_decision_run(store: WatchlistStore, market: str, *, trigger: str = "d
 
 
 def settle_decision_runs(store: WatchlistStore, *, as_of: str | None = None) -> int:
-    """回填到期运行记录的结果：权益占比变化 + 已实现盈亏。返回结算条数。
+    """回填到期运行记录的结果：权益占比变化 + 对账偏差。返回结算条数。
 
     这是"方便未来继续跟踪分析"的关键——不留结果，台账只是一堆数字；
     结果以「权益占比变化」为主指标（仓位管理是本项目的核心命题），
     避免被单票运气带偏。
+
+    `drift_pct` 与 `equity_change_pct` 的区别：后者只说"变了多少"，前者回答
+    "**该不该变、变了多少才对**"——用 L2 目标权益占比作参照，算本轮结束时
+    离目标的距离相对决策当时是收窄了还是扩大了。
     """
     as_of = as_of or _today()
     settled = 0
@@ -1146,10 +1150,14 @@ def settle_decision_runs(store: WatchlistStore, *, as_of: str | None = None) -> 
             now_pct = _equity_pct(mstore, acct)
             before = run.get("equity_pct_before")
             change = round(now_pct - float(before), 2) if (now_pct is not None and before is not None) else None
+            drift = _equity_drift(run, now_pct)
+            note = f"T+5 结算：权益占比 {before}% → {now_pct}%"
+            if drift is not None:
+                direction = "偏离目标" if drift > 0 else "向目标收窄"
+                note += f"，对账偏差 {drift:+.2f}pp（{direction}）"
             mstore.update_decision_run(
                 run["id"], outcome_status="settled", equity_pct_after=now_pct,
-                equity_change_pct=change,
-                notes=f"T+5 结算：权益占比 {before}% → {now_pct}%",
+                equity_change_pct=change, drift_pct=drift, notes=note,
             )
             settled += 1
         except Exception as e:  # noqa: BLE001 —— 单条失败不影响其余
@@ -1157,6 +1165,24 @@ def settle_decision_runs(store: WatchlistStore, *, as_of: str | None = None) -> 
     if settled:
         logger.info("决策运行台账：结算 %d 条到期记录（as_of=%s）", settled, as_of)
     return settled
+
+
+def _equity_drift(run: dict, now_pct: float | None) -> float | None:
+    """对账偏差：本轮结束时离 L2 目标的距离 − 决策当时的距离（百分点）。
+
+    >0 表示比决策当时**更远离**目标（该收窄的没收窄，或反向扩张）；
+    <0 表示向目标靠近。缺 L2 目标或读数时返回 None——不把"算不出"写成 0，
+    否则零偏差与"没数据"会被混为一谈。
+    """
+    target = run.get("l2_equity_pct")
+    before = run.get("equity_pct_before")
+    if target is None or before is None or now_pct is None:
+        return None
+    try:
+        target_f, before_f, now_f = float(target), float(before), float(now_pct)
+    except (TypeError, ValueError):
+        return None
+    return round(abs(now_f - target_f) - abs(before_f - target_f), 2)
 
 
 def _l4_plan_count(evt: dict, prev: int | None) -> int | None:

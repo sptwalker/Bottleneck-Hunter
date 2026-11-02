@@ -1022,7 +1022,8 @@ class _DecisionRunMixin:
         allowed = {"l2_id", "l2_equity_pct", "l3_count", "l4_count", "committee_total",
                    "committee_approved", "committee_rejected", "committee_blocked_independence",
                    "executed_count", "provider_count", "providers", "outcome_due_date",
-                   "outcome_status", "equity_pct_after", "equity_change_pct", "notes", "meta_json"}
+                   "outcome_status", "equity_pct_after", "equity_change_pct", "drift_pct",
+                   "notes", "meta_json"}
         parts, vals = [], []
         for k, v in fields.items():
             if k in allowed:

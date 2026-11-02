@@ -655,6 +655,10 @@ CREATE TABLE IF NOT EXISTS decision_runs (
     outcome_status      TEXT DEFAULT 'pending',   -- pending | settled | void
     equity_pct_after    REAL,
     equity_change_pct   REAL,                     -- 权益变化（百分点）
+    -- 对账：本轮「本该朝 L2 目标收窄多少」vs「实际收窄多少」的偏差（百分点，正=更远离目标）。
+    -- 与 equity_change_pct 的区别：后者只说"变了多少"，不知道"该不该变"。
+    -- 判据：有执行单却没朝目标收窄，或没执行单却大幅偏离 → 都是口径漂移，需人看。
+    drift_pct           REAL,
     notes               TEXT DEFAULT '',
     meta_json           TEXT DEFAULT '',
     created_at          TEXT NOT NULL,
@@ -1671,6 +1675,9 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL,
         PRIMARY KEY (user_id, role_key)
     )""",
+    # 决策台账对账：drift_pct 记录「本轮本该收窄多少 vs 实际收窄多少」的偏差。
+    # equity_change_pct 只说变了多少，不知道 L2 目标是多少；drift 才能断言"该动的没动"。
+    "ALTER TABLE decision_runs ADD COLUMN drift_pct REAL",
 ]
 
 

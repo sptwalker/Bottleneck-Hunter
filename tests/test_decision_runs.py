@@ -101,3 +101,64 @@ def test_record_decision_run_captures_context(store):
     assert run["outcome_status"] == "pending"
     assert len(run["outcome_due_date"]) == 10      # T+5 预约
     assert run["meta_json"]["target_weights"] == {"002815.SZ": 8.5}
+
+
+def test_settle_computes_drift_toward_target(store):
+    """有 L2 目标时，结算要给 drift：向目标收窄为负，远离为正。"""
+    from bottleneck_hunter.watchlist.decision_engine import settle_decision_runs
+
+    acct = store.get_sim_account()
+    store.create_sim_position(acct["id"], "002815.SZ", 1000, 10.0)  # 市值 1 万 = 10%
+    store.update_sim_account(cash_balance=90000, total_equity=100000, current_capital=100000)
+    rid = store.create_decision_run(
+        market="a_stock", run_date="2026-10-20",
+        payload={"equity_pct_before": 5.0, "l2_equity_pct": 10.0, "outcome_due_date": "2026-10-25"},
+    )
+
+    settle_decision_runs(store, as_of="2026-10-29")
+    run = store.get_decision_run(rid)
+    # 决策时距目标 |5-10|=5，结算时距目标 |10-10|=0 → 偏差 = 0-5 = -5（向目标收窄）
+    assert run["drift_pct"] == -5.0
+
+
+def test_settle_drift_positive_when_moving_away(store):
+    """反向扩张：离目标更远 → drift 为正。"""
+    from bottleneck_hunter.watchlist.decision_engine import settle_decision_runs
+
+    acct = store.get_sim_account()
+    store.create_sim_position(acct["id"], "002815.SZ", 3000, 10.0)  # 3 万 = 30%
+    store.update_sim_account(cash_balance=70000, total_equity=100000, current_capital=100000)
+    rid = store.create_decision_run(
+        market="a_stock", run_date="2026-10-20",
+        payload={"equity_pct_before": 10.0, "l2_equity_pct": 10.0, "outcome_due_date": "2026-10-25"},
+    )
+
+    settle_decision_runs(store, as_of="2026-10-29")
+    # 决策时距目标 0，结算时 |30-10|=20 → 偏差 +20
+    assert store.get_decision_run(rid)["drift_pct"] == 20.0
+
+
+def test_drift_is_none_without_target(store):
+    """无 L2 目标时 drift 必须为 None，不能填 0——否则"没数据"与"零偏差"混为一谈。"""
+    from bottleneck_hunter.watchlist.decision_engine import settle_decision_runs
+
+    acct = store.get_sim_account()
+    store.create_sim_position(acct["id"], "002815.SZ", 1000, 10.0)
+    store.update_sim_account(cash_balance=90000, total_equity=100000, current_capital=100000)
+    rid = store.create_decision_run(
+        market="a_stock", run_date="2026-10-20",
+        payload={"equity_pct_before": 1.0, "outcome_due_date": "2026-10-25"},
+    )
+
+    settle_decision_runs(store, as_of="2026-10-29")
+    assert store.get_decision_run(rid)["drift_pct"] is None
+
+
+def test_equity_drift_helper_edges():
+    """纯函数边界：缺任一输入都返回 None，坏值不抛。"""
+    from bottleneck_hunter.watchlist.decision_engine import _equity_drift
+
+    assert _equity_drift({"l2_equity_pct": None, "equity_pct_before": 5}, 10) is None
+    assert _equity_drift({"l2_equity_pct": 10, "equity_pct_before": None}, 10) is None
+    assert _equity_drift({"l2_equity_pct": 10, "equity_pct_before": 5}, None) is None
+    assert _equity_drift({"l2_equity_pct": "bad", "equity_pct_before": 5}, 10) is None
