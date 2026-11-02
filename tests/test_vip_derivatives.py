@@ -118,7 +118,11 @@ def test_save_derivative_term_dedup_stable_id(tmp_path):
     assert rows2[0].terms["afp"] == 2 and rows2[0].terms["maturity"] == "2026-12-14"
 
 
+@pytest.mark.skipif(not ACC_MU.exists(), reason="真实样本不存在")
 def test_classify_pdf():
+    # 之前无条件调用 classify_pdf(ACC_MU)，但 ACC_MU 是 Windows 绝对路径：
+    # Linux CI 上文件不存在 → pymupdf.FileNotFoundError，而非断言失败。
+    # 本用例只在有真实样本时才验证分类（与文件内其他 real_sample 用例一致）。
     assert d.classify_pdf(str(ACC_MU)) in ("accumulator", "decumulator", "fund_report", "mli", "other")
     if NOMURA_ACC.exists():
         assert d.classify_pdf(str(NOMURA_ACC)) == "accumulator"

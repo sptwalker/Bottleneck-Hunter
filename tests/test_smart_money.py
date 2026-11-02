@@ -55,6 +55,27 @@ class TestExtractAstockCode:
 
 
 class TestTrackAstock:
+    """mock 必须盖住**全部**数据源，否则测试会真联网。
+
+    _track_astock 的取数优先级是 efinance → akshare → Gangtise：
+    早期版本只 mock 了 ak，靠 CI 里「efinance 未安装」走到跳过分支才恰好通过。
+    CI 装上 .[datasources]（与生产对齐）后 efinance 真实联网取到数据，
+    分数变成 6.5 而非 5.0 —— 测试一直是靠一个缺失的依赖维持绿灯。
+    这里显式 patch 一级源与三级兜底，使用例与网络彻底隔离。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_network(self):
+        """屏蔽 efinance 一级源与 Gangtise 三级兜底（ak 由各用例自行 mock）。"""
+        with patch(
+            "bottleneck_hunter.data_provider.efinance_astock._fetch_history_bill_sync",
+            return_value=None,
+        ), patch(
+            "bottleneck_hunter.data_provider.data_source_catalog.resolve_gangtise_credentials",
+            return_value=None,
+        ):
+            yield
+
     @patch("bottleneck_hunter.chain.smart_money.ak")
     def test_bullish_signal(self, mock_ak):
         flow_df = pd.DataFrame({"日期": ["2025-01-01"] * 5, "主力净流入-净额": [1000000] * 5})
