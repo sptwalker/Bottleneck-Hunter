@@ -11,13 +11,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import uuid
 from datetime import date, datetime, timezone
-
-import asyncio
 
 from bottleneck_hunter.chain.json_utils import extract_json_object
 from bottleneck_hunter.vip import compliance, derivatives, number_guard, portfolio

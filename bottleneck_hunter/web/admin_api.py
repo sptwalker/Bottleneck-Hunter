@@ -666,7 +666,10 @@ def _gangtise_admin_sub() -> str:
 async def get_gangtise_config(user: dict = Depends(_require_admin)):
     """返回 Gangtise 配置：ak 明文回显、sk 仅提示是否已设置、两开关状态。"""
     from bottleneck_hunter.data_provider.data_source_catalog import (
-        GANGTISE_ENABLED_KEY, GANGTISE_SHARED_KEY, GANGTISE_SOURCE_ID, _config_on,
+        GANGTISE_ENABLED_KEY,
+        GANGTISE_SHARED_KEY,
+        GANGTISE_SOURCE_ID,
+        _config_on,
     )
     store = _auth()
     admin_sub = _gangtise_admin_sub()
@@ -686,7 +689,9 @@ async def update_gangtise_config(req: UpdateGangtiseConfigRequest, user: dict = 
     """保存 ak/sk（sk AES 加密）+ 两开关。sk 留空=保持原值；ak 单改不动 sk。"""
     from bottleneck_hunter.auth.crypto import encrypt
     from bottleneck_hunter.data_provider.data_source_catalog import (
-        GANGTISE_ENABLED_KEY, GANGTISE_SHARED_KEY, GANGTISE_SOURCE_ID,
+        GANGTISE_ENABLED_KEY,
+        GANGTISE_SHARED_KEY,
+        GANGTISE_SOURCE_ID,
     )
     store = _auth()
     admin_sub = _gangtise_admin_sub()
@@ -710,8 +715,8 @@ async def update_gangtise_config(req: UpdateGangtiseConfigRequest, user: dict = 
 @router.post("/gangtise-test")
 async def test_gangtise(user: dict = Depends(_require_admin)):
     """用已保存的 ak/sk 换取 token 验证连通（不打业务接口，只测认证）。"""
-    from bottleneck_hunter.data_provider.data_source_catalog import GANGTISE_SOURCE_ID, probe_source
     from bottleneck_hunter.auth.crypto import decrypt
+    from bottleneck_hunter.data_provider.data_source_catalog import GANGTISE_SOURCE_ID, probe_source
     store = _auth()
     admin_sub = _gangtise_admin_sub()
     ak = store.get_data_source_base_url(admin_sub, GANGTISE_SOURCE_ID) if admin_sub else ""

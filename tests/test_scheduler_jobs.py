@@ -92,7 +92,7 @@ class TestDrainSSE:
         """空生成器不报错。"""
         async def gen():
             return
-            yield  # noqa: make it a generator
+            yield  # make it a generator
 
         await scheduler._drain_sse(gen())
 
@@ -274,6 +274,7 @@ class TestJobLlmKeyHealth:
     def _patch(is_disabled_seq, ping, model="m1", key="sk-x"):
         """统一 patch provider_gate / factory / user_api / _ping_provider。返回 ExitStack。"""
         import contextlib
+
         from bottleneck_hunter.llm_clients import provider_gate
         gate_disabled = MagicMock(side_effect=is_disabled_seq)
         gate_record = MagicMock()

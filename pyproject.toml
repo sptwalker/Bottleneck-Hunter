@@ -64,6 +64,13 @@ include = ["bottleneck_hunter*"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+exclude = [
+  ".agents",
+  ".codex",
+  ".claude",
+  "data",
+  "logs",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

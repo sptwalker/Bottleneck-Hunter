@@ -1,7 +1,9 @@
 import pytest
+
 from bottleneck_hunter.watchlist import committee
 from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
+
 
 @pytest.mark.asyncio
 async def test_parent_binding_checked_before_external_work(tmp_path, monkeypatch):

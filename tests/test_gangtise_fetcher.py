@@ -9,8 +9,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from bottleneck_hunter.data_provider import gangtise_client as gc
 from bottleneck_hunter.data_provider import data_source_catalog as dsc
+from bottleneck_hunter.data_provider import gangtise_client as gc
 from bottleneck_hunter.data_provider.base import StandardQuote
 from bottleneck_hunter.data_provider.cleaning import clean_ohlc
 from bottleneck_hunter.data_provider.fetchers.gangtise_fetcher import GangtiseFetcher

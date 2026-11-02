@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Syntax / docs / encoding
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 语法：整个包必须能编译。这是最低成本的"语法错误不合并"门。
+      - name: Compile check
+        run: |
+          python -m compileall -q bottleneck_hunter scripts
+          python -m py_compile bottleneck_hunter/cli.py
+
+      # 文档：相对链接必须能解析、代码围栏必须配平。
+      - name: Documentation links
+        run: python scripts/check_docs.py
+
+      # 编码：U+FFFD / 私用区 / GBK 乱码指纹。中文项目刚需。
+      - name: Encoding pollution
+        run: python scripts/check_mojibake.py
+
+      # CLAUDE.md / AGENTS.md 的路径引用必须存在——它是每次会话最被信任的输入。
+      - name: Agent instruction references
+        run: python -m pytest tests/test_agents_md_references.py -q
+
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      # 阻断级：真正的错误（未定义名、语法、死代码路径）
+      - name: Ruff (blocking)
+        run: ruff check . --select E9,F63,F7,F82
+      # 报告级：现有代码尚有大量风格问题，先出统计不阻断，避免一次格式化淹没真改动
+      - name: Ruff (report only)
+        run: ruff check . --statistics || true
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest pytest-asyncio pytest-timeout
+
+      # 不跑 slow：那些是真实网络/外部依赖（akshare、yfinance 等），CI 里不稳定也无意义
+      - name: Pytest
+        run: python -m pytest tests/ -q -m "not slow" --timeout=300

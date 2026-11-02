@@ -346,6 +346,7 @@ async def _proxy_etf_benchmark_backfill(store: WatchlistStore, market: str, benc
 async def job_price_update(market: str = "us_stock") -> dict[str, str]:
     """全局拉取全体用户观察池并集的价格（客观免费数据，落共享层，只受全局总开关控制）。"""
     import asyncio
+
     from bottleneck_hunter.watchlist.price_pipeline import fetch_price_batch
 
     store = _global_store()
@@ -906,6 +907,8 @@ def _gangtise_catalyst_run() -> dict:
     from bottleneck_hunter.watchlist.schedule_config import is_global_enabled
     if not _wl_store or not is_global_enabled(_auth_store):
         return {"created": 0, "skipped": "disabled"}
+
+    from datetime import timedelta
 
     from bottleneck_hunter.data_provider.data_source_catalog import resolve_gangtise_credentials
     from bottleneck_hunter.data_provider.gangtise_client import (

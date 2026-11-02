@@ -464,6 +464,7 @@ def _docx_tables(raw: bytes) -> list[list[list[str]]]:
     ponytail: 折叠连续相等即可去除合并列冗余(招银 basket 表每列跨 6~8 格)；相邻两列文本恰好全等的概率
     在价位/标签场景可忽略(strike=74.43%×initial 必不等于 initial)。要精确 grid 再上 gridSpan 解析。"""
     import io
+
     from docx import Document
     tables: list[list[list[str]]] = []
     for t in Document(io.BytesIO(raw)).tables:

@@ -2156,6 +2156,7 @@ def render_period_narrative(wl_store, account_ref: str) -> str:
     """
     import html as _html
     import json as _json
+
     from bottleneck_hunter.vip.attribution import _LABEL, detect_position_events
     txns = list_transactions(wl_store, account_ref=account_ref, limit=10000)
     vseries = value_series(wl_store, account_ref=account_ref)

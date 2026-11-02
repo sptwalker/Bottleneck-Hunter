@@ -2,8 +2,14 @@
 """回归：产业链图谱美股候选必须过行情校验（FMP 优先，无 key 退 yfinance），OTC 冷门/错配码在源头剔除。
 真实数据活体：RNECY(瑞萨 ADR)/HAM 取不到报价必被剔，NVDA 必留。"""
 import asyncio
+
 from bottleneck_hunter.chain.models import (
-    BottleneckReport, BottleneckScore, ChainGraph, IndustryNode, LayerType, MarketRegion,
+    BottleneckReport,
+    BottleneckScore,
+    ChainGraph,
+    IndustryNode,
+    LayerType,
+    MarketRegion,
 )
 from bottleneck_hunter.chain.supplier_search import SupplierSearcher
 

@@ -1,5 +1,7 @@
 import json
+
 from bottleneck_hunter.watchlist.stage_snapshot import save_stage_snapshot
+
 
 def test_redacts_nested_without_mutation(tmp_path):
     from bottleneck_hunter.watchlist.store import WatchlistStore

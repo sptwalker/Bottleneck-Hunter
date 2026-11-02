@@ -284,7 +284,10 @@ async def upload_focus_report(file: UploadFile = File(...),
     ticker 空＝全球宏观背景研报（借哨兵键 + __macro__ 分区，跨市场全局、按 user 隔离，注入两位分析师每轮上下文）。
     """
     from bottleneck_hunter.watchlist.macro_consultation import (
-        MACRO_REPORT_KEY, MACRO_REPORT_MARKET, extract_report_text)
+        MACRO_REPORT_KEY,
+        MACRO_REPORT_MARKET,
+        extract_report_text,
+    )
     tk = (ticker or "").strip().upper()
     is_macro = not tk
     raw = await file.read()
