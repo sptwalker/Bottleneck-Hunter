@@ -367,7 +367,7 @@
 仅 3 条低 severity 建模备注，均为刻意的、已加注释的设计选择，**非 bug**：
 
 1. **`pit_gate.py`**：全局 `_MIGRATION` 迁移旁路是「建议性」标记，门禁函数从不查询它——调用方通过「不调用」退出（安全叶子层范式），且仅供离线迁移、不可重入。
-2. **`event_backtest.py`**：`avg_cost`（[event_backtest.py:147](bottleneck_hunter/watchlist/event_backtest.py#L147)）不含买入佣金，故单笔 `realized_pnl` 轻微高估；但净值曲线（现金 + MTM）完整计入所有成本，内部自洽。
+2. **`event_backtest.py`**：`avg_cost`（[event_backtest.py:147](../bottleneck_hunter/watchlist/event_backtest.py#L147)）不含买入佣金，故单笔 `realized_pnl` 轻微高估；但净值曲线（现金 + MTM）完整计入所有成本，内部自洽。
 3. **`llm_audit.py`**：`estimate_tokens` 是无 tokenizer 依赖的粗启发式，已在边界注明「仅兜底、非计费真值」，真实 token 应优先取 provider usage 回包。
 
 （子代理在本会话不可用，审查在主进程内逐模块完成。）
@@ -388,7 +388,7 @@
 
 门禁项迁移演练取「规范基础表模式」（新部署真正应用的 DDL），跑两遍干净且幂等 → pass。
 
-另附**诊断项（非门禁）**：全量 `MIGRATIONS` 裸重放（以基础表模式为 `setup`）→ applied=**210/224**，14 条失败**全部**为 `duplicate column`（`dup_only=True`）。这 14 条是「基础表 `CREATE_TABLES` 与历史增量 `ALTER` 同时含该列」的模式合并产物，**非本方案迁移**——本方案新增的 P0-3 `snapshot_id`/`strategy_version` 迁移在 210 条成功应用之列。生产 `_init_db`（[store.py:255](bottleneck_hunter/watchlist/store.py#L255)）对每条迁移套 `duplicate column/already exists` 例外守卫，故整条 bootstrap 在生产幂等自洽；裸重放无此守卫，仅用于暴露该事实、不作门禁裁决——既不把生产靠守卫吸收的历史产物冒充 pass（false-green），也不因一个生产按设计已处理的非问题阻断发布（false-red）。
+另附**诊断项（非门禁）**：全量 `MIGRATIONS` 裸重放（以基础表模式为 `setup`）→ applied=**210/224**，14 条失败**全部**为 `duplicate column`（`dup_only=True`）。这 14 条是「基础表 `CREATE_TABLES` 与历史增量 `ALTER` 同时含该列」的模式合并产物，**非本方案迁移**——本方案新增的 P0-3 `snapshot_id`/`strategy_version` 迁移在 210 条成功应用之列。生产 `_init_db`（[store.py:255](../bottleneck_hunter/watchlist/store.py#L255)）对每条迁移套 `duplicate column/already exists` 例外守卫，故整条 bootstrap 在生产幂等自洽；裸重放无此守卫，仅用于暴露该事实、不作门禁裁决——既不把生产靠守卫吸收的历史产物冒充 pass（false-green），也不因一个生产按设计已处理的非问题阻断发布（false-red）。
 
 ### 结论
 

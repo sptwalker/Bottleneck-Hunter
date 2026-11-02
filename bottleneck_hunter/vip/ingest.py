@@ -990,8 +990,10 @@ def _clean_nomura_lines(pages: list[str]) -> list[str]:
     lines = [re.sub(r"\s+", " ", x).strip() for pg in pages for x in pg.splitlines() if x.strip()]
     out = []
     for s in lines:
-        # fitz 对 PDF 中的 en-dash / Unicode 连字符常解成各种字符，统一规整后再匹配
-        s = s.replace("−", "-").replace("–", "-").replace("—", "-").replace("��", "-")
+        # fitz 对 PDF 中的 en-dash / Unicode 连字符常解成各种字符，统一规整后再匹配。
+        # 覆盖整个破折号族（U+2010-2015 连字符/破折号、U+2212 减号、U+FE58/FE63/FF0D 兼容与全角形式），
+        # 而非逐个枚举——枚举会漏掉 PDF 里新出现的变体。
+        s = re.sub("[‐-―−﹘﹣－]", "-", s)
         if s in {"BANK COPY", "Page", "Reference currency", "USD", "HKD", "Cash", "Equities", "Derivatives", "Structured Products"}:
             out.append(s)
             continue

@@ -196,11 +196,11 @@ VIP 顾问（[vip/advisory.py 评审](../bottleneck_hunter/vip/advice_review.py#
 
 ### 9.3 VIP 专属约束（不可违反既有约定）
 
-- **决策账户与 VIP 解耦**：决策中心 `sim_account('')` 不经 VIP 解析（[decoupled 约定](../MEMORY.md)）；
+- **决策账户与 VIP 解耦**：决策中心 `sim_account('')` 不经 VIP 解析（decoupled 约定，见 memory: project_dc_sim_account_decoupled_from_vip）；
   本补强只碰 VIP 账户（`account_ref != ''`），**不动决策中心 sim_account**。
 - **归属分离**：取数走 admin 授权全局 key；催化剂/建议落 `for_user(vip_sub)`，严格隔离。
 - **管理员专用**：VIP 顾问本就 admin-only，接入不改变权限面。
-- **压测口径不混**：beta/催化剂补强**不触碰** [VIP 压测的 pnl 口径](../MEMORY.md)（payoff 引擎 pnl 非裸市值）与 FCN 跨源去重（lot_key）。
+- **压测口径不混**：beta/催化剂补强**不触碰** VIP 压测的 pnl 口径（memory: project_vip_stress_pnl_not_marketvalue）（payoff 引擎 pnl 非裸市值）与 FCN 跨源去重（lot_key）。
 - **美股一致预期仍不可得**：VIP 美股持仓的 `consensus_eps/pe` 同样留空（接口 A股-only），不假装。
 
 ### 9.4 VIP 验收

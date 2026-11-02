@@ -17,9 +17,9 @@ BottleneckHunter 是一个 AI 驱动的产业链瓶颈选股系统，已从一�
 
 - Python 3.10+
 - LangGraph / LangChain — 工作流编排
-- Pydantic v2 — 数据模型（产业链模型在 `chain/models.py`）
+- Pydantic v2 — 数据模型（产业链模型在 `bottleneck_hunter/chain/models.py`）
 - FastAPI + APScheduler — Web 服务与内置定时调度
-- SQLite — 决策中心持久化（表结构在 `watchlist/store_schema.py`）
+- SQLite — 决策中心持久化（表结构在 `bottleneck_hunter/watchlist/store_schema.py`）
 - Rich / Questionary / Typer — CLI
 - yfinance / akshare / tushare 等 — 多市场数据（`data_provider/`）
 - JWT (HttpOnly cookie) — 多用户认证与 Key 隔离
