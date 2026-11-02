@@ -39,8 +39,12 @@ jobs:
         run: python scripts/check_mojibake.py
 
       # CLAUDE.md / AGENTS.md 的路径引用必须存在——它是每次会话最被信任的输入。
+      # 需要 pytest：这个 job 不装项目依赖（保持轻量），但必须显式装 pytest，
+      # 否则 `python -m pytest` 直接 No module named pytest（首跑即踩）。
       - name: Agent instruction references
-        run: python -m pytest tests/test_agents_md_references.py -q
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest tests/test_agents_md_references.py -q
 
   lint:
     name: Ruff
@@ -75,5 +79,6 @@ jobs:
           pip install pytest pytest-asyncio pytest-timeout
 
       # 不跑 slow：那些是真实网络/外部依赖（akshare、yfinance 等），CI 里不稳定也无意义
+      # -rf 让失败用例在尾部汇总列出；--tb=short 保证日志里看得到断言而不是被截断
       - name: Pytest
-        run: python -m pytest tests/ -q -m "not slow" --timeout=300
+        run: python -m pytest tests/ -q -rf --tb=short -m "not slow" --timeout=300

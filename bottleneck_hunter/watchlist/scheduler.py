@@ -2020,7 +2020,14 @@ def _make_trigger(spec, schedule):
     job_id, _func, _kw, tz, kind, _name = spec
     s = schedule.get(job_id, {}) or {}
     if kind == "interval":
-        return IntervalTrigger(hours=int(s.get("interval_hours", 6) or 6))
+        # 显式传时区：IntervalTrigger 不传时继承宿主机本地时区，UTC 环境下
+        # trigger.timezone 会变成 "UTC"，违反「调度统一 Asia/Shanghai」的约定。
+        # 对 interval 而言 timezone 不改变节奏（纯 UTC 间隔），但决定 tz 属性口径，
+        # 且保证任何宿主时区下行为一致。
+        return IntervalTrigger(
+            hours=int(s.get("interval_hours", 6) or 6),
+            timezone=tz or _TZ_CN,
+        )
     hour = int(s.get("hour", 0))
     minute = int(s.get("minute", 0))
     if kind == "monthly":
