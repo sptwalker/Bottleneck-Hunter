@@ -101,10 +101,35 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          # 与生产 Dockerfile 保持一致：装 .[datasources]（finnhub/efinance/pytdx）。
+          # 只装 `-e .` 会让依赖 finnhub 的代码路径在 CI 里 ModuleNotFoundError，
+          # 而生产镜像里是有的 —— CI 与生产不一致就等于没在测生产。
+          pip install -e ".[datasources]"
           pip install pytest pytest-asyncio pytest-timeout
 
       # 不跑 slow：那些是真实网络/外部依赖（akshare、yfinance 等），CI 里不稳定也无意义
       # -rf 让失败用例在尾部汇总列出；--tb=short 保证日志里看得到断言而不是被截断
       - name: Pytest
-        run: python -m pytest tests/ -q -rf --tb=short -m "not slow" --timeout=300
+        id: pytest
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q -rf --tb=short -m "not slow" --timeout=300 2>&1 | tee pytest.log
+
+      # 失败时把每个 FAILED/ERROR 用例名提升为 check-run annotation。
+      # 理由：job 日志需要 admin 权限才能下载，annotation 是公开可读的
+      # （GET /commits/{sha}/check-runs → annotations），外部协作者也能直接看到失败点。
+      - name: Annotate failures
+        if: failure()
+        run: |
+          python - <<'PY'
+          import pathlib, re
+          log = pathlib.Path("pytest.log")
+          if not log.exists():
+              print("::error::pytest.log missing")
+              raise SystemExit(0)
+          lines = [l for l in log.read_text(errors="replace").splitlines()
+                   if re.match(r"^(FAILED|ERROR)\s", l)]
+          for line in lines[:200]:
+              print(f"::error::{line[:220]}")
+          print(f"::error::{len(lines)} failing/erroring test(s)")
+          PY
