@@ -181,9 +181,32 @@ Prometheus/Grafana、多进程角色拆分 —— 单机自部署下收益远低
 
 ---
 
-## 遗留与下一步
+## 提交与 CI 真机验证
 
-**已完成但未提交** —— 所有改动在工作区，`git status` 可查，等你决定是否提交。
+全部改动已提交推送，CI 第 5 次运行（`c66c858`）**三个 job 全绿**：
+`Tests` / `Syntax / docs / encoding` / `Ruff` 均 success，耗时 8 分 33 秒。
+
+前 4 次失败逐轮定位，每条都是**真实缺陷**，没有一条是「重跑一次就好了」：
+
+| 轮次 | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | quality job 失败 | 该 job 从不装 pytest，却试图跑 pytest | 重写该步，直接调 `missing_references()`，零依赖 |
+| 2 | quality job 仍失败 | `tests/conftest.py` 在收集阶段 import `news_pipeline`，缺依赖时**所有**用例 ERROR（不是断言失败，日志里看不出原因） | 同上——绕开 pytest 收集 |
+| 3 | tests job 失败，日志取不到 | 公开仓库的 job 日志需 admin 权限，403 | **加 annotation 步骤**：失败用例名提升为 check-run annotation（`GET /commits/{sha}/check-runs` 公开可读） |
+| 4 | `test_timezone_schedule` | `IntervalTrigger` 继承宿主时区；CI 是 UTC，生产 Dockerfile 有 `ENV TZ=Asia/Shanghai`，代码暗依赖宿主 TZ | 显式传 `timezone=tz or _TZ_CN`，节拍实测 0 秒偏差 |
+| 4 | `test_classify_pdf` | 样本是 Windows 绝对路径，Linux 上不存在 → `FileNotFoundError` 而非断言失败 | 补同文件其他真实样本用例都有的 `skipif(not exists())` |
+| 4 | `TestTrackAstock` 两例 | **靠缺失依赖维持的绿灯**：用例只 mock 了 `ak`，旧 CI 不装 efinance 恰好走到跳过分支；CI 对齐生产（`.[datasources]`）后 efinance 真联网，返回 6.5 而非 5.0 | autouse fixture 屏蔽一级源 efinance 与三级兜底 Gangtise |
+
+另有 `tzdata>=2024.1` 补入依赖：容器里无 tzdata 时 `zoneinfo` 直接 `ZoneInfoNotFoundError`（已在纯净 venv 复现）。
+
+**关键教训**：本地镜像 CI 环境（纯净 venv + `-e .[datasources]` + TZ=UTC）能跑出 2674 passed，
+却复现不出最后三例——因为**本机有真实的样本文件、有 efinance**。
+CI 与开发的差异不在依赖版本，而在「哪些东西恰好存在」。
+annotation 机制是这轮唯一真正打破僵局的手段：日志拿不到时，先让失败点自己浮到公开接口上。
+
+---
+
+## 遗留与下一步
 
 **刻意未做**：
 - ruff 风格类问题（E501/E701/E702 等 664 项）—— 噪声大于收益
@@ -191,5 +214,6 @@ Prometheus/Grafana、多进程角色拆分 —— 单机自部署下收益远低
 - P4-3 因子研究 —— 方法论不对口，且 QD 实现对 A 股残缺
 
 **建议的后续（按收益排序）**：
-1. 推 CI 到远端跑一次真机验证（本地只模拟了各步，runner 上的依赖安装是唯一未验证环节）
-2. 若日后要做因子研究，先解决 A 股历史基本面的 point-in-time 可得性，再谈 IC
+1. 若日后要做因子研究，先解决 A 股历史基本面的 point-in-time 可得性，再谈 IC
+2. 把「CI 装 `.[datasources]`、TZ 显式化」这两条经验固化进新用例的 checklist：
+   凡涉及真实数据源或时区的用例，必须显式屏蔽而不是依赖环境恰好缺失
