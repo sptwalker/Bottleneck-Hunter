@@ -26,11 +26,14 @@ except AttributeError:
     pass
 
 _log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+from bottleneck_hunter.web.log_context import LOG_FORMAT, install_log_context  # noqa: E402
+
 logging.basicConfig(
     level=_log_level,
-    format="%(asctime)s %(levelname)s %(name)s | %(message)s",
+    format=LOG_FORMAT,
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+install_log_context("api")
 
 from bottleneck_hunter.auth.jwt_utils import get_cookie_name, verify_token
 from bottleneck_hunter.auth.migration import run_migration
@@ -352,12 +355,15 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=400, content={"detail": str(exc), "code": "missing_user_key"})
 
     # 中间件注册顺序：最后注册的最先执行
-    # AuthMiddleware → NoCacheStaticMiddleware → OpLogMiddleware → FastAPI
+    # RequestIdMiddleware → AuthMiddleware → NoCacheStaticMiddleware → OpLogMiddleware → FastAPI
     # OpLogMiddleware 放最内层：AuthMiddleware 已在 scope.state 注入 user，它才能按用户记操作日志
+    # RequestIdMiddleware 放最外层：它要在所有中间件与路由的日志之前设置 request_id
     from bottleneck_hunter.web.oplog import OpLogMiddleware
+    from bottleneck_hunter.web.request_id import RequestIdMiddleware
     app.add_middleware(OpLogMiddleware)
     app.add_middleware(NoCacheStaticMiddleware)
     app.add_middleware(AuthMiddleware)
+    app.add_middleware(RequestIdMiddleware)
 
     app.include_router(auth_router)  # /api/auth/*
     app.include_router(router, prefix="/api")
