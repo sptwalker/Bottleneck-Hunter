@@ -222,11 +222,18 @@ def summarize_oos(
     periods_per_year: int = TRADING_DAYS_PER_YEAR,
     confidence: float = 0.95,
     seed: int = 0,
+    windows_are_independent: bool = False,
 ) -> dict:
     """把逐期样本外收益聚合成标准指标 + bootstrap 区间。
 
     period_returns：每个样本外窗口（或每期）的简单收益率（如 0.012 = +1.2%）。
     返回均值、年化、夏普（无风险=0 的简化口径）及均值的置信区间。
+
+    **调用方约定（2026-11 复核后写死）——每个窗口必须从空仓开始、窗口结束强制平仓。**
+    若把窗口首尾直接拼起来算收益，跨窗持仓会被"期初买入、期末卖出"重复计一次，
+    easy_tdx 的更新日志记录过这类虚增（组合收益曾显示 +126% 而真实约 +13%）。
+    本函数只做聚合、无从判断调用方是否遵守；`windows_are_independent` 参数用于显式声明，
+    未声明时在返回值里置 ``assumption_unverified=True``，让报告读者知道这个前提未经验证。
     """
     arr = np.asarray(period_returns, dtype=float)
     if arr.size == 0:
@@ -237,6 +244,8 @@ def summarize_oos(
     ci = bootstrap_ci(arr, statistic=np.mean, confidence=confidence, seed=seed)
     return {
         "n_periods": int(arr.size),
+        "windows_are_independent": bool(windows_are_independent),
+        "assumption_unverified": not windows_are_independent,
         "mean_return": mean,
         "annualized_return": float((1.0 + mean) ** periods_per_year - 1.0),
         "volatility": std,

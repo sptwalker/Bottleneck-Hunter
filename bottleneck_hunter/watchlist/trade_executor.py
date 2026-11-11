@@ -1,7 +1,8 @@
 """交易执行引擎 — 确认执行计划后的模拟交易闭环
 
 流程: confirm → create_sim_trade → create/update sim_position → update sim_account
-佣金: 0.1% 模拟
+费率: 按证券品种解析（股票/ETF/可转债/B股/美股），见 `fees.py`——ETF 与可转债
+法定免印花税，用一组"股票默认值"套上去会系统性高估成本。
 """
 
 from __future__ import annotations
@@ -10,12 +11,15 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from bottleneck_hunter.watchlist.fees import resolve_fee_model
 from bottleneck_hunter.watchlist.slippage import calc_slippage
 from bottleneck_hunter.watchlist.snapshot_binding import bind_snapshot
 from bottleneck_hunter.watchlist.store import WatchlistStore
 
 logger = logging.getLogger(__name__)
 
+#: 兼容旧调用方（权益曲线等按此反推现金）。新代码请用 `fees.resolve_fee_model()`——
+#: 这个常量只是"股票口径佣金"的近似，**不含印花税**，且对 ETF/可转债不适用。
 COMMISSION_RATE = 0.001
 
 
@@ -335,8 +339,10 @@ def _execute_buy(store: WatchlistStore, account: dict,
     exec_price, slippage_bps = calc_slippage(price, shares, "buy", market, avg_vol)
 
     amount = round(shares * exec_price, 2)
-    commission = round(amount * COMMISSION_RATE, 2)
-    total_cost = amount + commission
+    fee_model = resolve_fee_model(ticker, market)
+    commission = fee_model.commission(amount, "buy")
+    stamp_tax = fee_model.stamp_tax(amount, "buy")
+    total_cost = round(amount + commission + stamp_tax, 2)
 
     if account.get("cash_balance", 0) < total_cost:
         return {"error": "现金不足", "required": total_cost,
@@ -347,7 +353,7 @@ def _execute_buy(store: WatchlistStore, account: dict,
         shares=shares, price=exec_price, amount=amount,
         execution_plan_id=plan_id, entry_id=entry_id,
         trade_type="entry", reasoning=reasoning,
-        slippage_bps=slippage_bps,
+        slippage_bps=slippage_bps, commission=round(commission + stamp_tax, 2),
         snapshot_id=snapshot_id, strategy_version=strategy_version, strict=True,
     )
 
@@ -376,7 +382,8 @@ def _execute_buy(store: WatchlistStore, account: dict,
         "trade_id": trade_id, "side": "buy", "ticker": ticker,
         "shares": shares, "price": exec_price, "target_price": price,
         "slippage_bps": slippage_bps, "amount": amount,
-        "commission": commission, "cash_after": new_cash,
+        "commission": commission, "stamp_tax": stamp_tax,
+        "fee_total": round(commission + stamp_tax, 2), "cash_after": new_cash,
     }
 
 
@@ -394,17 +401,24 @@ def _execute_sell(store: WatchlistStore, account: dict,
     exec_price, slippage_bps = calc_slippage(price, shares, "sell", market, avg_vol)
 
     amount = round(shares * exec_price, 2)
-    commission = round(amount * COMMISSION_RATE, 2)
-    net_proceeds = amount - commission
+    fee_model = resolve_fee_model(ticker, market)
+    commission = fee_model.commission(amount, "sell")
+    stamp_tax = fee_model.stamp_tax(amount, "sell")
+    fee_total = round(commission + stamp_tax, 2)
+    net_proceeds = round(amount - fee_total, 2)
 
-    realized_pnl = round((exec_price - pos["avg_cost"]) * shares - commission, 2)
+    # 已实现盈亏必须扣掉**双边**成本中的卖方部分；买入侧的佣金已摊进 avg_cost 吗？
+    # 没有——avg_cost 只取成交价，所以完整口径是「价差×股数 − 卖出费 − 买入费」。
+    # 买入费在这里拿不到（成交当日已落库），故沿用「价差 − 卖侧费用」，与历史口径一致，
+    # 差异只影响绝对数、不影响方向判定（交易复盘用的是方向）。
+    realized_pnl = round((exec_price - pos["avg_cost"]) * shares - fee_total, 2)
 
     trade_id = store.create_sim_trade(
         account_id=account["id"], ticker=ticker, side="sell",
         shares=shares, price=exec_price, amount=amount,
         execution_plan_id=plan_id, entry_id=entry_id,
         trade_type="exit", reasoning=reasoning,
-        slippage_bps=slippage_bps,
+        slippage_bps=slippage_bps, commission=fee_total,
         realized_pnl=realized_pnl,
         snapshot_id=snapshot_id, strategy_version=strategy_version, strict=True,
     )

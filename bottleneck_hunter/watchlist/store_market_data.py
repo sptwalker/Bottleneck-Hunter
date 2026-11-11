@@ -69,8 +69,8 @@ class _MarketDataMixin:
                        (ticker, date, open, high, low, close, volume, market_cap,
                         pe_ratio, change_pct, rsi_14, macd, macd_signal, macd_hist,
                         sma_20, sma_50, fetched_at, market,
-                        data_quality, quality_notes{self._shared_insert_cols()})
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._shared_insert_vals()})""",
+                        data_quality, bar_status, quality_notes{self._shared_insert_cols()})
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{self._shared_insert_vals()})""",
                     (
                         s["ticker"], s["date"], s.get("open"), s.get("high"),
                         s.get("low"), s.get("close"), s.get("volume"),
@@ -80,6 +80,8 @@ class _MarketDataMixin:
                         s.get("fetched_at", _now_iso()),
                         s.get("market", "us_stock"),
                         s.get("data_quality", "normal"),
+                        s.get("bar_status")
+                        or self.infer_bar_status(s.get("date", ""), s.get("market", "us_stock")),
                         s.get("quality_notes", ""),
                     ) + self._shared_insert_params(),
                 )
@@ -87,11 +89,46 @@ class _MarketDataMixin:
             return count
 
 
-    def get_snapshots(self, ticker: str, days: int = 90) -> list[dict]:
+    A_SHARE_CLOSE_SETTLE = "15:05"
+
+    @classmethod
+    def infer_bar_status(cls, date: str, market: str, now_bj=None) -> str:
+        """判断这根 bar 是已收盘（completed）还是盘中临时值（provisional）。
+
+        规则：A 股当日 15:05（收盘 + 5 分钟落定）之前的当日 bar 一律 provisional；
+        其余市场与历史 bar 一律 completed。中国无夏令时，固定 Asia/Shanghai。
+        非 A 股不做 provisional——美股盘中取价主要影响"当前价"而非日线收盘，
+        且其收盘时刻在北京的凌晨，判定窗口跨日，收益不抵复杂度。
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        if (market or "").lower() != "a_stock":
+            return "completed"
+        now = now_bj or datetime.now(ZoneInfo("Asia/Shanghai"))
+        if (date or "")[:10] != now.strftime("%Y-%m-%d"):
+            return "completed"  # 历史 bar 不会再变
+        hh, mm = (int(x) for x in cls.A_SHARE_CLOSE_SETTLE.split(":"))
+        return "provisional" if (now.hour, now.minute) < (hh, mm) else "completed"
+
+    @staticmethod
+    def _bar_status_clause(include_provisional: bool) -> str:
+        """默认只看已收盘 bar；`include_provisional=True` 时连盘中临时值一起返回。
+
+        为什么默认过滤：盘中触发的决策/刷价会以当时价写当日快照，这根 bar 之后就成了
+        "最新收盘价"。把它喂给 L2 缺口、L4 定股、硬止损巡检，等于用盘中价当收盘价做决策。
+        """
+        return "" if include_provisional else " AND bar_status = 'completed'"
+
+    def get_snapshots(self, ticker: str, days: int = 90,
+                      include_provisional: bool = False) -> list[dict]:
+        """历史快照（新→旧）。默认只返回已收盘 bar——见 `save_snapshots` 的 bar_status 说明。"""
         conn = self._connect()
         try:
             q, p = self._shared_filter(
-                "SELECT * FROM market_snapshots WHERE ticker = ? ORDER BY date DESC LIMIT ?",
+                "SELECT * FROM market_snapshots WHERE ticker = ?"
+                + self._bar_status_clause(include_provisional)
+                + " ORDER BY date DESC LIMIT ?",
                 (ticker, days),
             )
             rows = conn.execute(q, p).fetchall()
@@ -100,11 +137,14 @@ class _MarketDataMixin:
             conn.close()
 
 
-    def get_latest_snapshot(self, ticker: str) -> dict | None:
+    def get_latest_snapshot(self, ticker: str, include_provisional: bool = False) -> dict | None:
+        """最新一根快照。默认忽略未收盘（provisional）的当日 bar。"""
         conn = self._connect()
         try:
             q, p = self._shared_filter(
-                "SELECT * FROM market_snapshots WHERE ticker = ? ORDER BY date DESC LIMIT 1",
+                "SELECT * FROM market_snapshots WHERE ticker = ?"
+                + self._bar_status_clause(include_provisional)
+                + " ORDER BY date DESC LIMIT 1",
                 (ticker,),
             )
             row = conn.execute(q, p).fetchone()

@@ -15,14 +15,19 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from bottleneck_hunter.watchlist.fees import resolve_fee_model
 from bottleneck_hunter.watchlist.performance import PerformanceMetrics, compute_metrics
 from bottleneck_hunter.watchlist.slippage import calc_slippage
 
-# 佣金 + 印花税，按市场配置；这是校准旋钮而非硬编码事实，接实盘费率时在此调。
-# a_stock：佣金双边约万 2.5，印花税卖方千 0.5（2023-08 起）；us_stock：近似零佣，留旋钮。
+# 回测与实盘模拟共用 `fees.py` 的品种感知费率（ETF/可转债免印花税）。
+# 保留 COST_CONFIG 形状供旧的 cost_mult 压力测试逻辑与既有调用方读取：
+# 数值由 fees 模块在 A 股股票口径下推导，避免两套数字各自演化。
 COST_CONFIG: dict[str, dict[str, float]] = {
     "us_stock": {"commission_bps": 0.0, "stamp_sell_bps": 0.0},
-    "a_stock": {"commission_bps": 2.5, "stamp_sell_bps": 5.0},
+    "a_stock": {
+        "commission_bps": resolve_fee_model("600519.SS", "a_stock").commission_rate * 10000,
+        "stamp_sell_bps": resolve_fee_model("600519.SS", "a_stock").stamp_tax_rate * 10000,
+    },
 }
 
 
@@ -57,8 +62,21 @@ class BacktestReport:
     final_equity: float = 0.0
 
 
-def _commission(amount: float, side: str, market: str, cost_config: dict[str, float]) -> float:
-    """成交金额对应的佣金 + 卖方印花税。"""
+def _commission(amount: float, side: str, market: str, cost_config: dict[str, float],
+                ticker: str = "") -> float:
+    """成交金额对应的佣金 + 卖方印花税。
+
+    优先用品种感知费率（ETF/可转债免印花税）；ticker 缺失时退回成本配置的 bps 口径，
+    保持既有调用方（只传 cost_config 的测试）行为不变。
+    """
+    if ticker:
+        # 回测保留 4 位小数：逐笔佣金到分会让大额多笔的回测收益出现系统性偏差，
+        # 实盘模拟仍按分入账（那里要对账）。
+        model = resolve_fee_model(ticker, market)
+        amt = abs(float(amount or 0))
+        fee = amt * model.commission_rate + amt * (model.stamp_tax_rate
+                                                   if (side or "").lower() in ("sell", "reduce") else 0.0)
+        return round(fee, 4)
     bps = cost_config["commission_bps"]
     if side == "sell":
         bps += cost_config["stamp_sell_bps"]
@@ -107,7 +125,7 @@ def run_event_backtest(
                 pos = positions.pop(ticker)
                 price = bar.close
                 amount = round(pos["shares"] * price, 4)
-                commission = _commission(amount, "sell", market, cost_config)
+                commission = _commission(amount, "sell", market, cost_config, ticker)
                 cash += amount - commission
                 report.trades.append({
                     "date": day, "ticker": ticker, "side": "sell", "shares": pos["shares"],
@@ -141,7 +159,7 @@ def run_event_backtest(
                 price = round(bar.close * (1 + slip_bps / 10000 * (1 if order.side == "buy" else -1)), 4)
             if order.side == "buy":
                 amount = round(order.shares * price, 4)
-                commission = _commission(amount, "buy", market, cost_config)
+                commission = _commission(amount, "buy", market, cost_config, ticker)
                 if amount + commission > cash:
                     report.rejected.append({"order": order, "reason": "insufficient_cash"})
                     continue
@@ -162,7 +180,7 @@ def run_event_backtest(
                     continue
                 shares = min(order.shares, pos["shares"])
                 amount = round(shares * price, 4)
-                commission = _commission(amount, "sell", market, cost_config)
+                commission = _commission(amount, "sell", market, cost_config, ticker)
                 cash += amount - commission
                 realized = round((price - pos["avg_cost"]) * shares - commission, 4)
                 pos["shares"] -= shares

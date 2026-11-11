@@ -37,6 +37,11 @@ class _MemStore:
 
 
 def _hub(*providers):
+    # 源健康分是进程级状态（scheduler._health），跨测试会残留：前一个用例把 p0 打进冷却，
+    # 后一个用例的 p0 请求会被整段跳过、连调用都发不出去。每个用例新建 hub 即重置。
+    from bottleneck_hunter.data_provider import scheduler as _sch
+
+    _sch._reset_for_test()
     store = _MemStore()
     hubmod.set_stats_store(store)
     h = DataHub()

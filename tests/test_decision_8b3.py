@@ -296,7 +296,11 @@ class TestDecisionAPITrade:
         h365 = c.get("/api/trading/account/equity-history?days=365").json()["history"]
         assert [p["date"] for p in h30] == [d(1), d(0)]
         assert len(h365) > len(h30) and h365[0]["date"] == d(150)
-        assert h365[0]["equity"] == round(init - 1000 - 1.0 + 10 * 250, 2)  # 买入含 0.1% 佣金，按收盘 250 盯市
+        # 这行成交的 created_at 被改成 200 天前 → 落在旧费率口径窗口内（0.1%、无印花税），
+        # 权益曲线必须按当时实际扣的现金重建，不能用今天的品种费率重算历史成交。
+        # 品种感知费率（美股零佣 / ETF 免印花税）只对生效日之后的成交生效，见 trading_api
+        # 的 FEE_MODEL_EFFECTIVE_DATE。
+        assert h365[0]["equity"] == round(init - 1000 - 1.0 + 10 * 250, 2)
 
     def test_equity_history_after_trade(self, client, store):
         c, s = client

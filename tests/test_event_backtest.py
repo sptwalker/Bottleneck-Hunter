@@ -93,13 +93,26 @@ def test_sell_without_position_is_rejected():
 # —— 成本：A股卖方印花税叠加佣金 ——
 
 def test_a_stock_stamp_duty_on_sell():
-    bars = {"AAA": _series((D1, 100.0, {}), (D2, 110.0, {}), (D3, 120.0, {}))}
-    orders = [Order(D1, "AAA", "buy", 100), Order(D2, "AAA", "sell", 100)]
+    # 用真实 6 位代码：品种判定看代码前缀，占位符 "AAA" 会被判成 OTHER（免印花税），
+    # 那恰好会把这个测试变成永远通过的空断言。
+    bars = {"600519.SS": _series((D1, 100.0, {}), (D2, 110.0, {}), (D3, 120.0, {}))}
+    orders = [Order(D1, "600519.SS", "buy", 100), Order(D2, "600519.SS", "sell", 100)]
     report = run_event_backtest(bars, orders, initial_cash=1_000_000.0, market="a_stock")
     buy, sell = report.trades
-    # 买方仅佣金万 2.5；卖方佣金万 2.5 + 印花税万 5 = 万 7.5（佣金按 4 位小数入账）
-    assert buy["commission"] == pytest.approx(buy["amount"] * 2.5 / 10000, abs=1e-4)
-    assert sell["commission"] == pytest.approx(sell["amount"] * 7.5 / 10000, abs=1e-4)
+    # 费率统一由 fees.resolve_fee_model 解析：A股股票佣金万 3、卖方印花税万 5 = 万 8。
+    # 此前回测用万 2.5、实盘模拟用 0.1% 且无印花税，三处口径互相矛盾（2026-11 复核）。
+    assert buy["commission"] == pytest.approx(buy["amount"] * 3 / 10000, abs=1e-4)
+    assert sell["commission"] == pytest.approx(sell["amount"] * 8 / 10000, abs=1e-4)
+
+
+def test_etf_has_no_stamp_duty_in_backtest():
+    """ETF 法定免印花税——用股票的 bps 一口气套上去会高估成本。"""
+    bars = {"510880.SS": _series((D1, 3.0, {}), (D2, 3.1, {}), (D3, 3.2, {}))}
+    orders = [Order(D1, "510880.SS", "buy", 1000), Order(D2, "510880.SS", "sell", 1000)]
+    report = run_event_backtest(bars, orders, initial_cash=1_000_000.0, market="a_stock")
+    buy, sell = report.trades
+    assert sell["commission"] == pytest.approx(sell["amount"] * 3 / 10000, abs=1e-4)
+    assert sell["commission"] < sell["amount"] * 8 / 10000
 
 
 # —— 可复现：相同输入必得相同结果 ——

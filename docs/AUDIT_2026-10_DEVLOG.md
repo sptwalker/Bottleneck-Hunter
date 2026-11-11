@@ -166,3 +166,52 @@ execution_plans）或按单层（layer_performance、committee_reviews）存。
 - `tests/test_decision_runs.py`：6 项（写入/读取、列表过滤、到期判定、结算回填、上下文采集）。
 - 全量串行 pytest：2632 passed / 6 skipped（另修掉一条既有测试的写死日期：
   `test_financial_data` 的研报日期用固定 2026-05-01，随时间掉出「近 6 月」窗口，改为相对日期）。
+
+---
+
+# 追加四：easy_tdx 研究报告落地（2026-11-12）
+
+依据 `docs/EASY_TDX_RESEARCH_2026-11.html` 的 P0/P1 建议，按优先级实现。
+
+## P0 — 统一费率模型（`watchlist/fees.py`）
+
+**病史**：费率三处各写各的——实盘模拟 `COMMISSION_RATE=0.001` 双边且**无印花税**；
+`event_backtest.COST_CONFIG` 佣金 2.5bp + 卖方印花税 5bp（合理）但**无生产调用方**；
+权益曲线又按 0.1% 反推现金。`sim_trades.commission` 列恒为 0（建仓函数根本没这个参数）。
+
+**改动**：
+- 新增 `fees.py`：按证券代码前缀判品种（股票/ETF/可转债/B股/指数/美股），
+  印花税只对股票卖方收取（ETF、可转债法定免征），佣金取保守默认、支持最低佣金。
+- `trade_executor` 买卖两侧改用 `resolve_fee_model`，并把 `commission` 真正写进 `sim_trades`
+  （`create_sim_trade` 新增参数，此前该列恒为 0）。
+- `event_backtest._commission` 接同一份费率，保留 4 位小数精度（逐笔到分会让多笔回测系统性偏差）；
+  `COST_CONFIG` 改为从 fees 推导，避免两套数字各自演化。
+- `trading_api` 的权益曲线：已成交流水直接采信存储的 commission，历史行才回退到按品种重算——
+  用今天的费率重算旧成交会让曲线与账户现金对不上。
+
+## P1 — 未收盘 bar 语义
+
+`market_snapshots` 新增 `bar_status`（completed/provisional）。A股当日 15:05 前写入的 bar
+自动标 provisional；`get_latest_snapshot` / `get_snapshots` **默认只返回 completed**，
+`include_provisional=True` 才可见。历史 bar 与美股一律 completed（美股收盘在北京凌晨，窗口跨日，
+收益不抵复杂度）。修的是"盘中价被当成收盘价喂给 L2 缺口、L4 定股、硬止损巡检"这一类偏差。
+
+## P1 — 数据源健康分
+
+`scheduler` 新增进程级健康分（借鉴 easy_tdx `_health.py`）：失败 ×0.5、成功 +0.2、连续 3 次失败
+冷却 120 秒。`order()` 的排序键从 `recent_load` 改为 `recent_load / score`，并剔除冷却中的源。
+DataHub 在成功/空返回/异常三处分别记账——空返回不算熔断（可能确实无此标的），但会衰减分数，
+让它慢慢沉底而不是每轮都被优先选中再空转。与既有的额度闩锁（`is_over_quota`）正交。
+
+## P1 — 消融跨窗语义
+
+`summarize_oos` 增加 `windows_are_independent` 显式声明，默认在返回值里置
+`assumption_unverified=True`：每个窗口必须空仓起步、窗口结束强制平仓，否则跨窗持仓会被
+"期初买入期末卖出"重复计一次（easy_tdx 记录过组合收益虚增 +126% vs 真实 +13%）。
+本函数只做聚合、无从判断调用方是否遵守，因此把它变成报告里可见的前提声明而不是隐含假设。
+
+## 验收
+- 新增测试：`test_fees.py`(5)、`test_bar_status.py`(5)、`test_scheduler.py::TestSourceHealth`(4)、
+  `test_event_backtest` 新增 ETF 免印花税 1 项。
+- 受影响的既有断言已按新口径更新（回测佣金万 2.5→万 3、美股零佣、股票最低佣金 5 元）。
+- 全量串行 pytest：2690 passed / 6 skipped。

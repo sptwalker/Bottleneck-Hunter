@@ -32,6 +32,11 @@ async def _release_after(gk, gen):
 
 router = APIRouter(tags=["trading"])
 
+#: 品种感知费率的生效日（北京）。之前的成交按旧规则（0.1%、无印花税）重算现金——
+#: 否则权益曲线重建出的现金与账户实际余额对不上。改动费率口径时同步改这里。
+FEE_MODEL_EFFECTIVE_DATE = "2026-11-12"
+LEGACY_COMMISSION_RATE = 0.001
+
 _store: WatchlistStore | None = None
 
 
@@ -73,7 +78,7 @@ async def get_equity_history(days: int = 30, market: str = "us_stock", user: dic
     只在交易日出点、按 days 自然日窗口截取，所以切换 30/90/180/365 天会真正改变曲线范围。"""
     from datetime import date, timedelta
 
-    from bottleneck_hunter.watchlist.trade_executor import COMMISSION_RATE
+    from bottleneck_hunter.watchlist.fees import resolve_fee_model
 
     store = _user_store(user).for_market(market)
     account = store.get_sim_account()
@@ -86,7 +91,17 @@ async def get_equity_history(days: int = 30, market: str = "us_stock", user: dic
     events = []
     for t in trades:
         amt = t.get("amount") or 0
-        fee = round(amt * COMMISSION_RATE, 2)
+        # 费率口径按成交时间切分——曲线要重建真实现金，不能拿今天的费率重算旧成交：
+        #   · 2026-11-12 起：按品种解析（ETF/可转债免印花税），与 trade_executor 扣款一致；
+        #   · 之前：旧规则统一 0.1% 佣金、无印花税（当时账户现金就是这么扣的）。
+        # 行内已存 commission 的（>= 本次改动后的新成交）直接采信，最准。
+        stored_fee = t.get("commission")
+        if stored_fee not in (None, "", 0, 0.0):
+            fee = round(float(stored_fee), 2)
+        elif (t.get("created_at") or "")[:10] >= FEE_MODEL_EFFECTIVE_DATE:
+            fee = resolve_fee_model(t.get("ticker", ""), market).total(amt, t.get("side") or "buy")
+        else:
+            fee = round(amt * LEGACY_COMMISSION_RATE, 2)
         sign = -1 if t.get("side") == "buy" else 1
         events.append(((t.get("created_at") or "")[:10], sign * amt - fee, t["ticker"],
                        -sign * (t.get("shares") or 0), t.get("price") or 0))

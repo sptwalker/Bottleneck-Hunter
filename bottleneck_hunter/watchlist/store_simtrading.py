@@ -414,6 +414,7 @@ class _SimTradingMixin:
         reasoning: str = "",
         slippage_bps: float = 0.0,
         realized_pnl: float | None = None,
+        commission: float = 0.0,
         *,
         snapshot_id: str | None = None,
         strategy_version: str | None = None,
@@ -430,9 +431,10 @@ class _SimTradingMixin:
             conn.execute(
                 f"""INSERT INTO sim_trades
                    (id, account_id, execution_plan_id, entry_id, ticker, side,
-                    shares, price, amount, trade_type, reasoning, slippage_bps, realized_pnl, created_at
+                    shares, price, amount, trade_type, reasoning, slippage_bps,
+                    commission, realized_pnl, created_at
                     {cols}{self._user_insert_cols()}{self._market_insert_cols()})
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?{vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?{vals}{self._user_insert_vals()}{self._market_insert_vals()})""",
                 (
                     tid,
                     account_id,
@@ -446,6 +448,7 @@ class _SimTradingMixin:
                     trade_type,
                     reasoning,
                     slippage_bps,
+                    commission,
                     realized_pnl,
                     _now_iso(),
                 )

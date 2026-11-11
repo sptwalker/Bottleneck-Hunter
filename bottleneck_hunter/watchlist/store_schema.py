@@ -1069,6 +1069,10 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE experience_cards ADD COLUMN last_applied_at TEXT",
     # Phase 19F: market_snapshots 数据质量标记
     "ALTER TABLE market_snapshots ADD COLUMN data_quality TEXT DEFAULT 'normal'",
+    # 2026-11：未收盘 bar 语义。盘中触发的决策会用当时的价写当日快照，之后这根 bar 就成了
+    # "最新收盘价"，被 L2 缺口、L4 定股、硬止损巡检一起消费——等于把盘中价当收盘价用。
+    # provisional = 该收盘日尚未结束，值可能变；查询/回测默认忽略，收盘后下一次写入转 completed。
+    "ALTER TABLE market_snapshots ADD COLUMN bar_status TEXT DEFAULT 'completed'",
     "ALTER TABLE market_snapshots ADD COLUMN quality_notes TEXT DEFAULT ''",
     # Phase 20A: 投资论点追踪系统
     """CREATE TABLE IF NOT EXISTS investment_theses (

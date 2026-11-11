@@ -253,3 +253,52 @@ class TestManualRefreshMarketScope:
                     steps.append(_json.loads(ev["data"])["step"])
         assert "sec" in steps and msec.called   # 美股仍查 SEC
         assert "notice" not in steps            # 美股不查 A股公告
+
+
+# ── 数据源健康分（2026-11）：连续失败进冷却，"低延迟但返回空"的源不再反复被选中 ──
+
+class TestSourceHealth:
+    def test_failure_lowers_score_and_demotes_in_order(self):
+        """失败只影响排序、不跳过——连续异常的跳过归 DataHub 熔断器，
+        两套机制并存时弱的会被强的吃掉（曾在第 3 次失败就让熔断器永远到不了阈值）。"""
+        from bottleneck_hunter.data_provider import scheduler as sch
+
+        sch._reset_for_test()
+        assert sch.order([("a", 1), ("b", 1)]) == ["a", "b"]
+        for _ in range(3):
+            sch.record_source_failure("a")
+        assert sch.source_score("a") == 0.125
+        # 仍在候选里（不跳过），但已沉到 b 之后
+        assert sch.order([("a", 1), ("b", 1)]) == ["b", "a"]
+        sch._reset_for_test()
+
+    def test_success_recovers_score(self):
+        from bottleneck_hunter.data_provider import scheduler as sch
+
+        sch._reset_for_test()
+        sch.record_source_failure("a")
+        assert sch.source_score("a") == 0.5
+        sch.record_source_success("a")
+        assert sch.source_score("a") == 0.7
+        sch._reset_for_test()
+
+    def test_score_is_bounded(self):
+        from bottleneck_hunter.data_provider import scheduler as sch
+
+        sch._reset_for_test()
+        for _ in range(20):
+            sch.record_source_failure("s")
+        assert sch.source_score("s") == sch._SCORE_FLOOR
+        for _ in range(20):
+            sch.record_source_success("s")
+        assert sch.source_score("s") == 1.0
+        sch._reset_for_test()
+
+    def test_quota_latch_still_skips(self):
+        """额度闩锁与健康分正交：前者是真跳过，后者只调排序。"""
+        from bottleneck_hunter.data_provider import scheduler as sch
+
+        sch._reset_for_test()
+        sch.latch_until_tomorrow("q")
+        assert sch.order([("q", 1), ("b", 1)]) == ["b"]
+        sch._reset_for_test()

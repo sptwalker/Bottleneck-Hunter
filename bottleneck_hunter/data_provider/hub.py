@@ -165,15 +165,21 @@ class DataHub:
                 dt = (time.time() - t0) * 1000
                 if data:
                     st.record_success()
+                    # 健康分与熔断是两层：熔断管"连续异常"，健康分管"偶发空返回/慢"——
+                    # 只有前者会让源被反复选中又反复空转（见 scheduler.order 的排序键）。
+                    scheduler.record_source_success(src)
                     n = len(data) if isinstance(data, (list, dict)) else 1
                     _record(src, capability, market, True, dt, n)
                     return data
-                # 返回空视为无数据，不计熔断，试下一个
+                # 返回空 = 该源这次没给数据：不计熔断（可能确实无此标的），但记一次健康分衰减，
+                # 让它慢慢沉底而不是每轮都被优先选中。
+                scheduler.record_source_failure(src)
                 _record(src, capability, market, True, dt, 0)
             except _NON_RETRIABLE as e:
                 _record(src, capability, market, False, (time.time() - t0) * 1000, 0, str(e))
             except Exception as e:  # noqa: BLE001
                 st.record_failure()
+                scheduler.record_source_failure(src)
                 _record(src, capability, market, False, (time.time() - t0) * 1000, 0, str(e))
         return None
 

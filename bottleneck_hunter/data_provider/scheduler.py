@@ -142,10 +142,42 @@ def cap_prio(provider, cap: str) -> int:
     return getattr(provider, "cap_priority", {}).get(cap, provider.priority)
 
 
+#: 源健康分（2026-11 借鉴 easy_tdx `_health.py`）。进程级、按源名，不区分能力。
+#: 动机：纯 priority + 负载排序会让"返回空/偶发慢"的源反复被优先选中——
+#: 这类源**不触发熔断**（空返回可能确实无此标的），于是没有任何机制让它沉底。
+#:
+#: 分工（刻意不重叠）：**熔断**归 DataHub 的 `_ProviderState`（连续异常 → 跳过），
+#: **排序**归这里的分数（越差越靠后）。此前试过在此再加一层"连续 3 次失败进冷却"，
+#: 结果是它在第 3 次就把源整段跳过，Hub 的 fail_count 永远到不了阈值 5、熔断器失效——
+#: 同一个问题两套机制，强的那个吃掉弱的。故这里只管分数，不做跳过。
+_FAILURE_DECAY = 0.5
+_SUCCESS_RECOVER = 0.2
+_SCORE_FLOOR = 1e-3
+_health: dict[str, float] = {}
+
+
+def record_source_failure(name: str) -> float:
+    """记一次失败（异常或空返回）：score 乘性衰减。返回衰减后的分数。"""
+    _health[name] = max(_SCORE_FLOOR, _health.get(name, 1.0) * _FAILURE_DECAY)
+    return _health[name]
+
+
+def record_source_success(name: str) -> None:
+    """记一次成功：分数加性恢复（上限 1.0）。"""
+    _health[name] = min(1.0, _health.get(name, 1.0) + _SUCCESS_RECOVER)
+
+
+def source_score(name: str) -> float:
+    """当前健康分（0~1，初始 1.0）。越低越该排后面。"""
+    return float(_health.get(name, 1.0))
+
+
 def order(cands: list[tuple[str, int]]) -> list[str]:
     """入参 [(源名, 该能力priority)] → 排好序的源名列表。
 
-    丢弃超额源 → priority 升序分档 → 档内 recent_load 升序（均衡轮换）。
+    丢弃超额源 → priority 升序分档 → 档内「健康分降序、负载升序」。
+    健康分让"常返回空/偶发超时"的源自动沉底，而不是每次都被优先选中再空转；
+    真正的连续异常由 DataHub 的熔断器负责跳过，此处不重复拦截。
     """
     live = []
     for name, prio in cands:
@@ -153,7 +185,9 @@ def order(cands: list[tuple[str, int]]) -> list[str]:
             logger.debug("数据源 %s 达免费额度上限，本次跳过换源", name)
             continue
         live.append((name, prio))
-    live.sort(key=lambda np: (np[1], recent_load(np[0])))
+    # 健康分排在负载之前：用 load / score 比值的写法在两边负载都为 0 时恒等 0，
+    # 分数完全不起作用（只有已经大量调用时才生效）——那种写法等于没写。
+    live.sort(key=lambda np: (np[1], -source_score(np[0]), recent_load(np[0])))
     return [name for name, _ in live]
 
 
@@ -162,4 +196,5 @@ def _reset_for_test() -> None:
     global _daily_cache
     _recent.clear()
     _latched_until.clear()
+    _health.clear()
     _daily_cache = (0.0, {})
